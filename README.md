@@ -16,8 +16,9 @@
 
 ## What it does
 
-- **Agents keep working when you walk away.** Start a Claude Code or Codex agent in a project folder; it survives
-  closing the terminal, closing the window and restarting the machine.
+- **Agents keep working when you walk away.** Start a Claude Code or Codex agent in a project folder; it keeps
+  working after you close the terminal or the window, and its conversation survives a reboot (a turn that was running
+  at that moment is interrupted).
 - **One Inbox for every question.** Whenever any agent wants to run a command or edit a file it asks about, the
   question lands in one list. Answer from the window or from the terminal.
 - **Your own CLIs and subscriptions.** Pult starts the `claude` and `codex` you already installed and logged into.
