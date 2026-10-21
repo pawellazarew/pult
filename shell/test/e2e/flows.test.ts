@@ -258,7 +258,8 @@ describe('окно: рабочие сценарии', () => {
     await editor.press('Enter')
     assert.ok(await waitFor(async () => (await users()).length === 2, 10_000), 'исправленная реплика не ушла')
     assert.deepEqual(await users(), ['Первая', 'Вторая, исправленная\nещё строка'])
-    assert.equal(await editor.count(), 0, 'правка закрыта')
+    // Журнал демона опережает перерисовку окна: ждём, а не проверяем мгновенно (на раннере CI окно отстаёт).
+    assert.ok(await waitFor(async () => (await editor.count()) === 0, 5000), 'правка закрыта')
     assert.ok(await waitFor(async () => (await statusOf('qedit')) === 'idle', 15_000))
 
     // Esc — правка брошена (а не «Стоп» хода), уходит прежний текст.
