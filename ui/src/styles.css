@@ -680,7 +680,9 @@ button { font: inherit; color: inherit; }
 .external-meta span { font-size: 11px; }
 .external-message { padding: 14px 0; border-bottom: 1px solid var(--hair); font-size: 13px; overflow-wrap: anywhere; }
 .external-message > .lbl { display: block; margin-bottom: 7px; }
-.question-field { border: 0; margin: 0; padding: 8px 0; min-width: 0; }
+.question-field { border: 0; margin: 0; padding: 8px 10px; min-width: 0; }
+/* Поля карточки держат свой отступ 10px сами; внутри fieldset он уже есть — не удваивать. */
+.question-field .perm-reason { margin: 5px 0 0; }
 .question-option { display: block; padding: 4px 0; font-size: 13px; }
 .question-option input { accent-color: var(--accent); }
 .question-option .perm-opts { display: block; margin-left: 24px; }

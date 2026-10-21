@@ -429,7 +429,10 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
   }
   const settingsReply = (): Record<string, unknown> => ({ newSession: config.newSession, lastUsed: readLastUsed() })
   const projects = createProjectStore(join(paths.home, 'projects.json'))
-  const catalog = createProviderCatalog({ bins: { claude: claudeBin, codex: codexBin }, cwd: paths.home, env: childEnv, codexEnv, testMode: opts.testMode })
+  // `PULT_TEST_PROVIDERS=run` (только вместе с PULT_TEST=1): проверка входа идёт по-настоящему — в фальшивые CLI
+  // из PULT_CLAUDE_BIN / PULT_CODEX_BIN. Нужна кадрам README (shell/test/readme): шапка «готов», а не «ошибка».
+  const catalog = createProviderCatalog({ bins: { claude: claudeBin, codex: codexBin }, cwd: paths.home, env: childEnv, codexEnv,
+    testMode: opts.testMode && process.env['PULT_TEST_PROVIDERS'] !== 'run' })
   const external = createExternalSessions({
     claudeRoot: opts.testMode ? join(paths.home, 'claude-projects') : join(homedir(), '.claude', 'projects'),
     codexRequest: async (method, params) => {

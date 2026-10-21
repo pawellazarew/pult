@@ -40,7 +40,7 @@
 
 import { spawn } from 'node:child_process'
 import { appendFileSync, readFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -143,13 +143,19 @@ const SCENARIOS = {
   'demo-working': { files: ['90-demo-working'] },
   'demo-edit': { files: ['91-demo-edit'], askInline: true, onDeny: '91-demo-edit-denied' },
 }
+// Своя запись из `.pult-fake.json`: `{"scenario": "custom", "files": ["/абс/путь/без/.jsonl"], "askInline": true}`.
+// Её пишут кадры README (shell/test/readme) — сцене нужны свои реплики, а не реплики тестовых записей.
+if (Array.isArray(fileCfg.files) && fileCfg.files.length) {
+  SCENARIOS.custom = { files: fileCfg.files, ...(fileCfg.askInline === true ? { askInline: true } : {}) }
+}
 
 function loadTurns(names) {
   const turns = []
   for (const name of names) {
-    const lines = readFileSync(join(FIXTURES, `${name}.jsonl`), 'utf8').split('\n').filter((l) => l.trim())
+    const base = isAbsolute(name) ? name : join(FIXTURES, name)
+    const lines = readFileSync(`${base}.jsonl`, 'utf8').split('\n').filter((l) => l.trim())
     let timing = []
-    try { timing = JSON.parse(readFileSync(join(FIXTURES, `${name}.timing.json`), 'utf8')) } catch { timing = [] }
+    try { timing = JSON.parse(readFileSync(`${base}.timing.json`, 'utf8')) } catch { timing = [] }
     // Метка реплики при записи: первая `command_uuid` файла. При игре она меняется на метку
     // пришедшей реплики — иначе адаптер справедливо счёл бы записанный ответ чужим.
     const tie = recordedTie(lines)
@@ -342,7 +348,7 @@ function recordedBgEnd() {
   const def = SCENARIOS[scenario] || SCENARIOS.simple
   let found = null
   for (const name of def.files) {
-    for (const l of readFileSync(join(FIXTURES, `${name}.jsonl`), 'utf8').split('\n')) {
+    for (const l of readFileSync(isAbsolute(name) ? `${name}.jsonl` : join(FIXTURES, `${name}.jsonl`), 'utf8').split('\n')) {
       try {
         const e = JSON.parse(l)
         if (e.type === 'system' && e.subtype === 'background_tasks_changed' && Array.isArray(e.tasks) && e.tasks.length === 0) found = l

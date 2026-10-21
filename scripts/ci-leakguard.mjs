@@ -52,8 +52,9 @@ const EMAIL_FALSE = [
 // Claude (`-Users-<логин>-…`) — не утечка. Только заглушки: настоящий логин владельца в
 // репозитории — такая же утечка, как любой другой (до 14.10.2026 он был в этом списке).
 //   user/USER/you — заглушки в документации, тестах и вычищенных записях;
-//   runner/ubuntu/root — служебные домашние папки раннеров CI.
-const HOME_ALLOW = ['runner', 'ubuntu', 'root', 'user', 'USER', 'you']
+//   runner/ubuntu/root — служебные домашние папки раннеров CI;
+//   Shared — общая папка macOS `/Users/Shared`, не логин (в ней кадры README держат папки сцены).
+const HOME_ALLOW = ['runner', 'ubuntu', 'root', 'user', 'USER', 'you', 'Shared']
 
 const RULES = [
   {

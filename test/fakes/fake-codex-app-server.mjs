@@ -29,7 +29,7 @@
 //   resume-turn · slow · hang · crash · crash-kill · unknown-thread · limits
 
 import { appendFileSync, readFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -67,6 +67,9 @@ const SCENARIOS = {
   'unknown-thread': ['01-simple-turn'],
   // Фикстуры нет: ход сразу закрывается сервером как interrupted с `Turn.error` (playTurn).
   'server-interrupt': [],
+  // Свои записи из настройки: `"scenarios": {"имя": ["/абс/путь/без/.jsonl"]}` — так кадры README
+  // (shell/test/readme) ставят сцене свою команду, не трогая тестовые записи.
+  ...(cfg.scenarios && typeof cfg.scenarios === 'object' ? cfg.scenarios : {}),
 }
 
 const cache = new Map()
@@ -75,9 +78,10 @@ function fixture(names) {
   if (cache.has(key)) return cache.get(key)
   const msgs = []
   for (const name of names) {
-    const lines = readFileSync(join(FIXTURES, `${name}.jsonl`), 'utf8').split('\n').filter((l) => l.trim())
+    const file = isAbsolute(name) ? name : join(FIXTURES, name)
+    const lines = readFileSync(`${file}.jsonl`, 'utf8').split('\n').filter((l) => l.trim())
     let timing = []
-    try { timing = JSON.parse(readFileSync(join(FIXTURES, `${name}.timing.json`), 'utf8')) } catch { timing = [] }
+    try { timing = JSON.parse(readFileSync(`${file}.timing.json`, 'utf8')) } catch { timing = [] }
     const base = msgs.length ? (msgs[msgs.length - 1].ms + 5) : 0
     for (let i = 0; i < lines.length; i++) {
       msgs.push({ raw: lines[i], msg: JSON.parse(lines[i]), ms: base + (timing[i] ?? i * 5) })
