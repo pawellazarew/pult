@@ -106,3 +106,11 @@ jobs:
       - run: ./scripts/ci-check.sh
         env:
           PULT_E2E: ${{ matrix.os == 'macos-latest' && needs.changes.outputs.e2e == '1' && '1' || '0' }}
+      # Улики провала e2e окна: полный вывод с call log Playwright, кадры и логи демона каждого запуска.
+      - if: failure() && matrix.os == 'macos-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-test-results
+          path: shell/test-results
+          if-no-files-found: ignore
+          retention-days: 14

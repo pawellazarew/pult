@@ -10,7 +10,7 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
-import { mkdirSync, mkdtempSync, openSync, closeSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdirSync, mkdtempSync, openSync, closeSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -136,6 +136,24 @@ export async function launch(opts: { backoff?: string; name: string; args?: stri
   })
   const win = await app.firstWindow()
   await win.waitForLoadState('domcontentloaded')
+  // Размер окна и экрана — в вывод: у раннера CI экран меньше рабочего мака, и окно 1280×820 туда не
+  // помещается (macOS ужимает его по экрану). PULT_E2E_SIZE=ШxВ задаёт размер окна руками — так
+  // прогон у себя повторяет экран раннера.
+  const forced = /^(\d+)x(\d+)$/.exec(process.env['PULT_E2E_SIZE'] ?? '')
+  if (forced) {
+    await app.evaluate(({ BrowserWindow }, [w, hh]) => { BrowserWindow.getAllWindows()[0]?.setSize(w, hh) }, [Number(forced[1]), Number(forced[2])] as [number, number])
+  }
+  const geometry = await app.evaluate(({ BrowserWindow, screen }) => ({
+    content: BrowserWindow.getAllWindows()[0]?.getContentBounds(),
+    workArea: screen.getPrimaryDisplay().workArea,
+  }))
+  process.stderr.write(`e2e ${opts.name}: окно ${JSON.stringify(geometry.content)}, экран ${JSON.stringify(geometry.workArea)}\n`)
+
+  // Улики на случай провала (CI выкладывает test-results/ артефактом): консоль окна, кадр перед
+  // закрытием и логи демона из PULT_HOME, который close() стирает.
+  const consoleLines: string[] = []
+  const listen = (p: Page): void => { p.on('console', (m) => { consoleLines.push(`${new Date().toISOString()} ${m.type()} ${m.text()}`) }) }
+  listen(win)
 
   let current = win
   const h: Harness = {
@@ -205,10 +223,15 @@ export async function launch(opts: { backoff?: string; name: string; args?: stri
       // Как клик по иконке в доке: macOS шлёт `activate`, оболочка открывает окно заново.
       await app.evaluate(({ app: a }) => { (a as unknown as { emit(e: string): boolean }).emit('activate') })
       current = await next
+      listen(current)
       await current.waitForLoadState('domcontentloaded')
       return current
     },
     async close() {
+      mkdirSync(RESULTS, { recursive: true })
+      if (!current.isClosed()) await current.screenshot({ path: path.join(RESULTS, `${opts.name}-at-close.png`), timeout: 5000 }).catch(() => {})
+      writeFileSync(path.join(RESULTS, `${opts.name}-console.log`), consoleLines.join('\n') + '\n')
+      try { cpSync(paths.logs, path.join(RESULTS, `${opts.name}-logs`), { recursive: true }) } catch { /* логов нет — и ладно */ }
       for (const c of clients) c.close()
       const last = daemonPid()
       if (last) pids.add(last)

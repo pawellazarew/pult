@@ -48,7 +48,14 @@ export function ContextMenu({ at, items, onClose, testId, label, above }: {
     window.addEventListener('blur', onClose)
     window.addEventListener('resize', onClose)
     // Прокрутка самого меню (длинный список моделей) его не закрывает — только прокрутка страницы под ним.
-    const scroll = (e: Event): void => { if (!ref.current?.contains(e.target as Node)) onClose() }
+    // И только та, что случилась ПОСЛЕ открытия: событие `scroll` браузер доставляет на следующем кадре,
+    // поэтому прокрутка, которая была до правого клика (список докрутили до строки у нижнего края окна),
+    // приходит, когда меню уже открыто, и закрывала его на миг. Метка события — время самой прокрутки.
+    const openedAt = performance.now()
+    const scroll = (e: Event): void => {
+      if (e.timeStamp < openedAt) return
+      if (!ref.current?.contains(e.target as Node)) onClose()
+    }
     document.addEventListener('scroll', scroll, true)
     return () => {
       window.removeEventListener('mousedown', down, true)

@@ -204,8 +204,13 @@ if [ -f shell/package.json ]; then
   if [ "$E2E" = 1 ]; then
     (cd shell && npm run e2e) > "$TMP/shell-e2e.out" 2>&1 || {
       node scripts/ci-test-report.mjs "$TMP/shell-e2e.out" || tail -n 80 "$TMP/shell-e2e.out" >&2
+      # Полный вывод (с call log Playwright, который выжимка режет) — рядом с кадрами и логами
+      # прогона: CI выкладывает shell/test-results/ артефактом.
+      mkdir -p shell/test-results && cp "$TMP/shell-e2e.out" shell/test-results/e2e-output.txt
       fail 'shell: npm run e2e'
     }
+    # Размер окна, в котором шёл прогон: на раннере CI экран меньше, чем у разработчика.
+    printf '   %s\n' "$(grep -Eo 'e2e [^ ]+: окно .*' "$TMP/shell-e2e.out" | head -n 1)"
     printf '   npm run e2e (Electron): %s\n' "$(grep -Eo '(tests|pass|fail) [0-9]+' "$TMP/shell-e2e.out" | tr '\n' ' ')"
   else
     printf '   e2e Electron: пропущено (PULT_E2E=%s, %s)\n' "${PULT_E2E:-auto}" "$(uname -s)"
