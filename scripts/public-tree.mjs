@@ -18,7 +18,7 @@
 //   c. PATTERNS — personal and history markers the leakguard does not know (list below); every hit is printed,
 //      only the ones on ALLOW pass.
 
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, readlinkSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join, posix, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -106,6 +106,18 @@ function isExcluded(rules, path) {
   return out
 }
 
+/**
+ * Which of `paths` the export's .gitignore ignores. `git check-ignore` exits 1 when NOTHING is ignored (not an
+ * error) and dies on an empty line («empty string is not a valid pathspec»), so an export with no excluded files
+ * — the public repo itself — asks it nothing.
+ */
+function checkIgnored(paths) {
+  if (!paths.length) return []
+  const r = spawnSync('git', ['-C', OUT, 'check-ignore', '--no-index', '--stdin'], { input: paths.join('\n') + '\n', encoding: 'utf8', env: gitEnv, maxBuffer: 256 << 20 })
+  if (r.error || (r.status !== 0 && r.status !== 1)) die(`git check-ignore: ${r.error?.message ?? r.stderr.trim()}`)
+  return r.stdout.split('\n').filter(Boolean)
+}
+
 function isText(buf) {
   return !buf.subarray(0, 8192).includes(0)
 }
@@ -175,7 +187,7 @@ const failures = []
   const exclList = excluded.map((e) => e.path)
   const allList = entries.map((e) => e.path)
   // Paths the exported .gitignore ignores — spike run outputs (see the exception in the header).
-  const ignored = new Set(sh('git', ['-C', OUT, 'check-ignore', '--no-index', '--stdin'], { input: exclList.join('\n') + '\n', env: gitEnv }).split('\n').filter(Boolean))
+  const ignored = new Set(checkIgnored(exclList))
   // Pattern files are lists of globs, not references.
   const SKIP_REF = new Set(['.gitignore', 'scripts/public-exclude.txt', 'scripts/public-tree.mjs'])
   const legOf = (p) => { const m = /^spike\/([^/]+)\//.exec(p); return m ? m[1] : null }

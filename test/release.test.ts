@@ -106,6 +106,29 @@ describe('release.mjs: сухой прогон', () => {
     assert.equal(existsSync(join(dir, 'gh-called')), false, 'сухой прогон позвал gh')
   })
 
+  it('окно: Pult-<appv>-arm64.zip и те же байты под постоянным именем Pult-arm64.zip; в манифесте — имя с версией', () => {
+    const out = join(dir, 'out-app')
+    const zip = join(dir, 'fake-app.zip')
+    writeFileSync(zip, 'PK\u0003\u0004 не настоящий zip — release.mjs его только копирует и хэширует')
+    const r = node(RELEASE, [VERSION, '--skip-checks', '--app-zip', zip, '--out', out, '--key', key, '--trust', pub])
+    assert.equal(r.code, 0, r.stderr + r.stdout)
+    const versioned = `Pult-${SHELL_VERSION}-arm64.zip`
+    assert.deepEqual(readdirSync(out).sort(), ['Pult-arm64.zip', versioned, 'install.sh', 'latest.json', `pult-${VERSION}.tgz`, 'pult.tgz'].sort())
+    assert.deepEqual(readFileSync(join(out, 'Pult-arm64.zip')), readFileSync(zip))
+    assert.deepEqual(readFileSync(join(out, versioned)), readFileSync(zip))
+    const m = verifyEnvelope(readFileSync(join(out, 'latest.json')), [{ id: keyIdOf(rawPublicKey(pub)), publicKey: pub }])
+    assert.deepEqual(m.app?.['darwin-arm64'], {
+      url: `https://github.com/pawellazarew/pult/releases/download/v${VERSION}/${versioned}`,
+      sha256: createHash('sha256').update(readFileSync(zip)).digest('hex'),
+      size: statSync(zip).size,
+    })
+    assert.match(r.stdout, /Pult-arm64\.zip/)
+    // Готовый zip — только для репетиции: публикуется окно, собранное этим прогоном.
+    assert.match(node(RELEASE, [VERSION, '--publish', '--app-zip', zip]).stderr, /--app-zip с --publish нельзя/)
+    assert.match(node(RELEASE, [VERSION, '--skip-checks', '--no-app', '--app-zip', zip, '--key', key]).stderr, /--no-app и --app-zip вместе не бывают/)
+    assert.equal(existsSync(join(dir, 'gh-called')), false)
+  })
+
   it('ключ подписи не из доверенных сборки (keys.ts пуст, без --trust) — отказ', () => {
     const r = node(RELEASE, [VERSION, '--skip-checks', '--no-app', '--out', join(dir, 'out2'), '--key', key])
     assert.equal(r.code, 1)

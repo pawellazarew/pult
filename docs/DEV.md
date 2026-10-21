@@ -642,7 +642,9 @@ PATH → Homebrew): `execPath` оболочки — Electron, а fuse `RunAsNode
 сравнение версий вынесено в `src/core/semver.ts` (его берёт и окно).
 
 **Файлы релиза** (`pawellazarew/pult`): `pult-<v>.tgz`; `pult.tgz` — те же байты под постоянным именем для
-install.sh; `install.sh`; `Pult-<appv>-arm64.zip` (`ditto -c -k --keepParent`); `latest.json`. Адрес по умолчанию —
+install.sh; `install.sh`; `Pult-<appv>-arm64.zip` (`ditto -c -k --keepParent`); `Pult-arm64.zip` — те же байты под
+постоянным именем для README (`…/releases/latest/download/Pult-arm64.zip`: версию окна 0.1.x новичок не угадает; в
+манифесте — имя с версией); `latest.json`. Адрес по умолчанию —
 `https://github.com/pawellazarew/pult/releases/latest/download/latest.json` (GitHub сам ведёт `latest` на свежий
 не-черновик и не-пререлиз); перебивается `updates.url` в `config.json` и `PULT_UPDATE_URL` — оба только https.
 Последний релиз с нуля: `curl -q --proto '=https' -fsSLO …/latest/download/install.sh && sh install.sh --from
@@ -794,13 +796,15 @@ e2e сверяет с shell/package.json) — так плашка работае
 `.mjs`, а не `.sh`: подписывать всё равно node, а проверять релиз надо кодом из СОБРАННОГО тарбола. Шаги: чистое
 дерево на main и версия в package.json = аргумент → `PULT_E2E=1 ./scripts/ci-check.sh` → `npm pack` (+ копия
 `pult.tgz`, + install.sh) → Pult.app (`cd shell && npm ci && node node_modules/electron/install.js && npm run
-dist:mac`) → zip → манифест (`app.minVersion` — `WINDOW_MIN_VERSION` из тарбола) → подпись ключом из
+dist:mac`) → zip (+ копия `Pult-arm64.zip`) → манифест (`app.minVersion` — `WINDOW_MIN_VERSION` из тарбола) → подпись ключом из
 `--key` / `PULT_RELEASE_KEY` / `~/.config/pult-release/ed25519.pem` (ключ доступен не только владельцу — отказ) →
 самопроверка `verifyEnvelope` из `dist/` тарбола его же `keys.ts` (ключ подписи не из них — отказ: такой latest.json
 отвергнет каждый Пульт) и сверка sha256 файлов → `release/<v>/`. По умолчанию СУХОЙ прогон: печатает
 `gh release create v<v> … --draft <файлы>` и `gh release edit v<v> --draft=false --latest`; `--publish` выполняет их.
 Черновик — чтобы `releases/latest` не указывал на релиз, у которого ещё нет тарбола. Флаги репетиции: `--out`,
-`--no-app`, `--skip-checks` и `--trust <открытый ключ>` (оба последних с `--publish` — отказ). `release/` — в .gitignore.
+`--no-app`, `--app-zip <zip>` (готовый zip окна вместо сборки), `--skip-checks` и `--trust <открытый ключ>` (три
+последних с `--publish` — отказ). `Pult-arm64.zip` в v0.3.1 доложен руками (`gh release upload`) — релиз вышел до
+этого шага. `release/` — в .gitignore.
 
 **Модель угроз** — что закрывает каждая мера и чего НЕ закрывает:
 - **Украден токен GitHub / взломан аккаунт.** Злоумышленник выкладывает любой релиз. Подпись: без закрытого ключа
@@ -834,7 +838,8 @@ dist:mac`) → zip → манифест (`app.minVersion` — `WINDOW_MIN_VERSIO
 http в PULT_UPDATE_URL, bad, режимы по одному), `test/update-checker.test.ts` (расписание, стенные часы,
 `updates.check: false`, сбой сети, ожидание ходов, `force`, отказы, `applyArgv`; демон целиком — настоящий ход
 fake-claude, `update.apply` ждёт его и запускает после стопа), `test/release.test.ts` (keygen: права, отказ перезаписи,
-закрытый ключ не на экране; сухой прогон release.mjs с тестовым ключом через `--trust`, gh не зовётся; отказы),
+закрытый ключ не на экране; сухой прогон release.mjs с тестовым ключом через `--trust`, gh не зовётся; `Pult-arm64.zip` = байты
+`Pult-<appv>-arm64.zip` через `--app-zip`; отказы),
 `ui/test/update.test.ts` (версия из UA, состояния плашки), e2e `shell/test/e2e/update.test.ts`.
 
 ## M8d: «в этой сессии / всегда» и режим подтверждений (0.2.28)
@@ -1014,6 +1019,9 @@ cd /tmp/pult-public && npm ci && PULT_E2E=1 ./scripts/ci-check.sh
 ног) и их таблицы вердиктов, сводка результатов спайка, записи воркфлоу проверяющих, захваченные выводы проб
 `spike/env` (в том числе слепок окружения логин-шелла владельца), ресёрч с вердиктами проверяющих, страницы
 дизайна v0.5 и v0.6 и скрипт рендера их картинок.
+В самом публичном репозитории выбрасывать уже нечего: глобы ничего не находят («exclude pattern matched nothing»), а
+проверка ссылок не спрашивает `git check-ignore` о пустом списке (на пустой строке он падал с «empty string is not a
+valid pathspec»; код 1 у него значит «ничего не игнорируется», а не ошибку).
 Скрипты спайка, слепки схем Codex/opencode, фикстуры, тесты и нумерованные документы остаются.
 
 Исходный репозиторий согласован сам с собой: оставшиеся файлы не ссылаются на выброшенные (DELTA и DEV пишут

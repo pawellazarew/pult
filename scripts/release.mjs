@@ -15,7 +15,8 @@
 //   2. `PULT_E2E=1 ./scripts/ci-check.sh` — тот же гейт, что у PR;
 //   3. `npm run clean && npm run build` — в тарбол не попадёт устаревший dist/*.js от удалённого исходника;
 //      `npm pack` → pult-<v>.tgz и его копия pult.tgz (постоянное имя для install.sh);
-//   4. Pult.app (`cd shell && npm ci && electron install && npm run dist:mac`) → `ditto -c -k --keepParent`;
+//   4. Pult.app (`cd shell && npm ci && electron install && npm run dist:mac`) → `ditto -c -k --keepParent` →
+//      Pult-<appv>-arm64.zip и его копия Pult-arm64.zip (постоянное имя для README: releases/latest/download/…);
 //   5. манифест → подпись Ed25519 → latest.json. Подписывает и проверяет код ИЗ СОБРАННОГО ТАРБОЛА
 //      (dist/update/manifest.js и keys.js): релиз проверяется ровно тем, чем его проверят люди. Ключ
 //      подписи не из keys.ts этой сборки — отказ: такой latest.json отвергнет каждый стоящий Пульт;
@@ -23,8 +24,9 @@
 //      чтобы `releases/latest` не указывал на релиз, у которого ещё нет тарбола.
 //
 // Флаги для проверки самого скрипта (тест, репетиция): --out DIR, --key PATH (или PULT_RELEASE_KEY),
-// --skip-checks (без шагов 1–2 и пересборки, кроме сверки версии), --no-app (без шага 4), --trust <открытый ключ>
-// (доверять ещё и ему при самопроверке). --skip-checks и --trust с --publish — отказ.
+// --skip-checks (без шагов 1–2 и пересборки, кроме сверки версии), --no-app (без шага 4), --app-zip <zip> (шаг 4
+// не собирает окно, а берёт готовый zip), --trust <открытый ключ> (доверять ещё и ему при самопроверке).
+// --skip-checks, --app-zip и --trust с --publish — отказ.
 
 import { spawnSync } from 'node:child_process'
 import { createHash, createPrivateKey, createPublicKey } from 'node:crypto'
@@ -44,7 +46,7 @@ const say = (msg) => process.stdout.write(`${msg}\n`)
 try {
   // --- аргументы ----------------------------------------------------------------------------
   const argv = process.argv.slice(2)
-  const opt = { publish: false, skipChecks: false, noApp: false, out: null, key: null, trust: [], repo: REPO_SLUG }
+  const opt = { publish: false, skipChecks: false, noApp: false, appZip: null, out: null, key: null, trust: [], repo: REPO_SLUG }
   let version = null
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
@@ -52,11 +54,12 @@ try {
     if (a === '--publish') opt.publish = true
     else if (a === '--skip-checks') opt.skipChecks = true
     else if (a === '--no-app') opt.noApp = true
+    else if (a === '--app-zip') opt.appZip = val()
     else if (a === '--out') opt.out = val()
     else if (a === '--key') opt.key = val()
     else if (a === '--trust') opt.trust.push(val())
     else if (a === '--repo') opt.repo = val()
-    else if (a === '-h' || a === '--help') { say('node scripts/release.mjs <x.y.z> [--publish] [--out DIR] [--key PATH] [--no-app] [--skip-checks] [--trust PUB]'); process.exit(0) }
+    else if (a === '-h' || a === '--help') { say('node scripts/release.mjs <x.y.z> [--publish] [--out DIR] [--key PATH] [--no-app | --app-zip ZIP] [--skip-checks] [--trust PUB]'); process.exit(0) }
     else if (a.startsWith('-')) die(`незнакомый флаг «${a}»`)
     else if (version === null) version = a
     else die(`лишний аргумент «${a}»`)
@@ -65,6 +68,9 @@ try {
   if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) die(`«${version}» — не x.y.z: пререлизы каналом не ходят`)
   if (opt.publish && opt.skipChecks) die('--skip-checks с --publish нельзя: публикуется только то, что прошло гейт')
   if (opt.publish && opt.trust.length) die('--trust с --publish нельзя: релиз проверяется только ключами из сборки')
+  if (opt.publish && opt.appZip) die('--app-zip с --publish нельзя: публикуется только окно, собранное этим прогоном')
+  if (opt.noApp && opt.appZip) die('--no-app и --app-zip вместе не бывают')
+  if (opt.appZip && !existsSync(opt.appZip)) die(`--app-zip: нет файла ${opt.appZip}`)
   if (!/^[\w.-]+\/[\w.-]+$/.test(opt.repo)) die(`--repo «${opt.repo}» — не owner/name`)
 
   function run(cmd, args, o = {}) {
@@ -193,7 +199,15 @@ try {
     const appVersion = shellPkg.version
     let appAsset = null
     const appZipName = `Pult-${appVersion}-arm64.zip`
-    if (!opt.noApp) {
+    // Постоянное имя для README и ссылки releases/latest/download/Pult-arm64.zip: версию окна (0.1.x, своя, не
+    // версия пакета) новичок угадать не может. Те же байты; в манифесте — имя с версией.
+    const appAliasName = 'Pult-arm64.zip'
+    if (opt.appZip) {
+      const zip = join(out, appZipName)
+      copyFileSync(resolve(opt.appZip), zip)
+      copyFileSync(zip, join(out, appAliasName))
+      appAsset = zip
+    } else if (!opt.noApp) {
       if (process.platform !== 'darwin') die('Pult.app собирается только на macOS (или --no-app)')
       say('Pult.app: npm ci, electron, dist:mac …')
       const shellDir = join(ROOT, 'shell')
@@ -204,6 +218,7 @@ try {
       if (!existsSync(app)) die(`после dist:mac нет ${app}`)
       const zip = join(out, appZipName)
       run('ditto', ['-c', '-k', '--keepParent', app, zip])
+      copyFileSync(zip, join(out, appAliasName))
       appAsset = zip
     }
 
@@ -235,7 +250,7 @@ try {
     }
     let checked
     try { checked = manifestMod.verifyEnvelope(readFileSync(latestFile), keys) } catch (e) { die(`самопроверка latest.json: ${e.message}`) }
-    for (const [file, a] of [[tgz, checked.package], [join(out, 'pult.tgz'), checked.package], ...(appAsset ? [[appAsset, checked.app['darwin-arm64']]] : [])]) {
+    for (const [file, a] of [[tgz, checked.package], [join(out, 'pult.tgz'), checked.package], ...(appAsset ? [[appAsset, checked.app['darwin-arm64']], [join(out, appAliasName), checked.app['darwin-arm64']]] : [])]) {
       if (sha256(file) !== a.sha256 || statSync(file).size !== a.size) die(`самопроверка: ${file} не сходится с манифестом`)
     }
     say(`latest.json подписан ключом ${keyId} и проверен кодом из ${tgzName}`)
