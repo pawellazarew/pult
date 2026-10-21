@@ -333,6 +333,7 @@ describe('M8f (ревью): адаптер claude — гонки и живой �
   })
   it('ревью 2: браузер выключили, а идут фоновые задачи — как режим строже: реплика ждёт их конца', async () => {
     const r = claudeRig('background-live', { subagentGraceMs: 400 })
+    r.retune({ scenario: 'background-live', bgEndMs: 1500 })
     try {
       await r.adapter.startSession({ name: 'w', cwd: r.cwd, mode: 'turn', broker: false })
       await (await r.adapter.send('w', 'запусти фоновую задачу', { browser: {} })).done
@@ -345,6 +346,7 @@ describe('M8f (ревью): адаптер claude — гонки и живой �
   })
   it('MED 6: режим строже, а идут фоновые задачи — реплика ждёт их конца (не отказ) и уходит в новый процесс', async () => {
     const r = claudeRig('background-live', { subagentGraceMs: 400 })
+    r.retune({ scenario: 'background-live', bgEndMs: 1500 })
     try {
       await r.adapter.startSession({ name: 'w', cwd: r.cwd, mode: 'turn', broker: false })
       await (await r.adapter.send('w', 'запусти фоновую задачу')).done

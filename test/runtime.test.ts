@@ -6,7 +6,7 @@
 
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, describe, it } from 'node:test'
@@ -174,11 +174,17 @@ describe('node демона: выбор и отчёт', () => {
     writeFileSync(own, '')
     assert.deepEqual(daemonNodeInfo(rt, own, 'v1.0.0'), { path: own, version: 'v1.0.0', alive: true, own: true })
     // Новая версия по ТОМУ ЖЕ пути (установщик nodejs.org, apt): путь есть, а бинарь процесса — другой.
+    // Живой демон держит свой бинарь открытым, поэтому старый inode занят и новый файл получает другой.
+    // Открытый дескриптор здесь — ровно это: без него ext4 на Linux тут же отдаёт освобождённый inode
+    // новому файлу, и «другой бинарь» в тесте совпадал бы с прежним по dev+ino.
     const startedAs = fileId(own)
-    rmSync(own)
-    writeFileSync(own, '')
-    assert.equal(daemonNodeInfo(rt, own, 'v1.0.0', startedAs).alive, false)
-    assert.equal(daemonNodeInfo(rt, own, 'v1.0.0', fileId(own)).alive, true)
+    const held = openSync(own, 'r')
+    try {
+      rmSync(own)
+      writeFileSync(own, '')
+      assert.equal(daemonNodeInfo(rt, own, 'v1.0.0', startedAs).alive, false)
+      assert.equal(daemonNodeInfo(rt, own, 'v1.0.0', fileId(own)).alive, true)
+    } finally { closeSync(held) }
     assert.deepEqual(daemonNodeInfo(rt, '/opt/homebrew/Cellar/node/26.11.0/bin/node', 'v26.11.0'),
       { path: '/opt/homebrew/Cellar/node/26.11.0/bin/node', version: 'v26.11.0', alive: false, own: false })
   })

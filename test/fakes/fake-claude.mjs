@@ -35,6 +35,8 @@
 //   PULT_FAKE_DEAF       1: НЕ реагировать ни на SIGINT, ни на SIGTERM — так ведёт себя
 //                        процесс, застрявший в сисколле. Уходит только по SIGKILL.
 //   PULT_FAKE_KEEPALIVE  1: НЕ выходить по закрытию stdin — проверка добивающего сигнала.
+//   PULT_FAKE_BG_END_MS  мс: фоновые задачи кончаются сами — столько тишины после хода, и процесс
+//                        печатает записанный `background_tasks_changed` с пустым списком.
 
 import { spawn } from 'node:child_process'
 import { appendFileSync, readFileSync } from 'node:fs'
@@ -59,6 +61,10 @@ const cfg = {
   // О3: спросить разрешение от имени ЭТОГО инструмента (например `mcp__browser__browser_navigate`) вместо
   // записанного в фикстуре — так проверяется, что вызов браузера идёт тем же кругом через Inbox.
   askTool: process.env.PULT_FAKE_ASK_TOOL ?? fileCfg.askTool ?? null,
+  // Конец фоновых задач без новой реплики. Без него сценарий `background-live` держит задачи, пока не придёт
+  // следующая реплика (ходы 3–4 записи отыгрываются только после неё), и тест «реплика ждёт конца фоновых
+  // задач» дожидался лишь страховки `guard` — 60 с, после которых процесс просто выходил.
+  bgEndMs: Number(process.env.PULT_FAKE_BG_END_MS ?? fileCfg.bgEndMs ?? 0) || 0,
 }
 const SPEED = cfg.speed
 
@@ -331,6 +337,33 @@ async function playTurn(uuid = null) {
   if ((def.auto || (def.autoFrom !== undefined && turnIndex >= def.autoFrom)) && turnIndex < total) await playTurn(uuid)
 }
 
+/** Записанная строка «фоновых задач не осталось» текущего сценария: последний пустой `background_tasks_changed`. */
+function recordedBgEnd() {
+  const def = SCENARIOS[scenario] || SCENARIOS.simple
+  let found = null
+  for (const name of def.files) {
+    for (const l of readFileSync(join(FIXTURES, `${name}.jsonl`), 'utf8').split('\n')) {
+      try {
+        const e = JSON.parse(l)
+        if (e.type === 'system' && e.subtype === 'background_tasks_changed' && Array.isArray(e.tasks) && e.tasks.length === 0) found = l
+      } catch { /* не JSON */ }
+    }
+  }
+  return found
+}
+
+let bgEndTimer = null
+const cancelBgEnd = () => { if (bgEndTimer) { clearTimeout(bgEndTimer); bgEndTimer = null } }
+const scheduleBgEnd = () => {
+  if (!(cfg.bgEndMs > 0)) return
+  cancelBgEnd()
+  bgEndTimer = setTimeout(() => {
+    bgEndTimer = null
+    const line = recordedBgEnd()
+    if (line) out(line)
+  }, cfg.bgEndMs)
+}
+
 // --- цикл по stdin ------------------------------------------------------------
 let buf = ''
 let queue = Promise.resolve()
@@ -371,12 +404,14 @@ process.stdin.on('data', (chunk) => {
       }
     }
     const uuid = typeof msg?.uuid === 'string' ? msg.uuid : null
-    queue = queue.then(() => playTurn(uuid))
+    cancelBgEnd()
+    queue = queue.then(() => playTurn(uuid)).then(scheduleBgEnd)
   }
 })
 
 process.stdin.on('end', () => {
   ended = true
+  cancelBgEnd()
   // `keepAlive` — процесс, который закрытие stdin не убивает: его обязан добить сигнал.
   if (cfg.keepAlive) { setInterval(() => {}, 1000); return }
   queue = queue.then(async () => {

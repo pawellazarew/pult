@@ -258,7 +258,13 @@ describe('сеть канала: https, редиректы, потолки', () 
       header: () => null,
       body: (async function* () {
         yield Buffer.from('a')
-        await new Promise((_r, rej) => signal.addEventListener('abort', () => rej(new Error('aborted'))))
+        // Настоящий сокет держит цикл событий, пока ждёт байты; таймеры потолка и тишины в fetch.ts — unref.
+        // Без этой замены сокета node 22 видит пустой цикл раньше, чем сработает тишина, и снимает тест
+        // («Promise resolution is still pending but the event loop has already resolved»).
+        const socket = setInterval(() => {}, 1000)
+        try {
+          await new Promise((_r, rej) => signal.addEventListener('abort', () => rej(new Error('aborted'))))
+        } finally { clearInterval(socket) }
       })(),
     })
     await assert.rejects(downloadTo('https://a.example/p.tgz', file, { http, size: 10, sha256: SHA, idleMs: 80, what: 'p.tgz' }), /ни байта за 1 с/)
