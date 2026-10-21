@@ -2,6 +2,7 @@
 // реплик под полем ввода, «Очередь стоит», карточка «Похоже, завис» в Inbox, заметка о молчании в ленте.
 
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { describe, it } from 'node:test'
 import { createElement } from 'react'
 import type { ComponentType } from 'react'
@@ -145,6 +146,11 @@ describe('очередь реплик под полем ввода', () => {
     assert.match(h, /data-testid="queue-paused"/)
     assert.match(text(h), /Очередь стоит: ход не удался/)
     assert.match(h, /data-testid="queue-resume"[^>]*>Продолжить/)
+    // Значок плашки — со своим размером: без него SVG растягивался на всю беседу и сжимал текст в столбик.
+    assert.match(h, /data-testid="queue-paused"><svg class="ic" width="16" height="16" viewBox="0 0 16 16"/)
+    const css = readFileSync(new URL('../ui/src/styles.css', import.meta.url), 'utf8')
+    assert.match(css, /^\.ic \{ width: 16px; height: 16px; flex: none; \}/m, 'нет размера значка по умолчанию')
+    assert.match(css, /^\.queue-paused \.ic \{ width: 15px; height: 15px; flex: none;/m, 'нет размера значка плашки «Очередь стоит»')
     // Свободная сессия без очереди — ничего под полем.
     assert.doesNotMatch(html(Conversation, convProps(ag())), /data-testid="queue"/)
   })
