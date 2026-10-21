@@ -96,6 +96,10 @@ export const ERROR_CODES = {
    * занятого контекста. Окно показывает вопрос, CLI — подсказку `--yes`.
    */
   needsConfirm: 'needs_confirm',
+  /** Правка реплики очереди: реплика уже ушла в ход — окно возвращает исправленный текст в поле ввода. */
+  queueItemSent: 'queue_item_sent',
+  /** Правка реплики очереди: реплику убрали из очереди (или сессии больше нет) — текст тоже в поле ввода. */
+  queueItemRemoved: 'queue_item_removed',
 } as const
 
 export interface DaemonStatus {

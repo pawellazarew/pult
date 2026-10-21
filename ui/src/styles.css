@@ -735,6 +735,16 @@ button { font: inherit; color: inherit; }
 .queue-item .n { color: var(--faint); font-size: 11px; }
 .queue-item .txt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .queue-item .btn { height: 24px; min-width: 24px; padding: 0 6px; }
+.queue-notice { padding: 5px 10px; margin-bottom: 6px; border: 1px solid var(--line); border-radius: 8px; font-size: 12px; color: var(--mut); }
+/* 0.3.2: правка реплики на месте строки очереди. */
+.queue-item-edit { align-items: flex-start; border-style: solid; border-color: var(--accent); color: var(--ink); }
+.queue-item-edit .n { padding-top: 6px; }
+.queue-edit-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.queue-edit-body textarea { width: 100%; resize: none; min-height: 28px; max-height: 180px; padding: 5px 8px; border: 1px solid var(--line);
+  border-radius: 3px; background: var(--ground); color: var(--ink); font: inherit; font-size: 13px; line-height: 1.4; outline: none; }
+.queue-edit-body textarea:focus { border-color: var(--accent); }
+.queue-edit-note { font-size: 11px; color: var(--faint); }
+.queue-edit-err { font-size: 12px; color: var(--fail); }
 
 /* --- О2 «Поиск, метки» (docs/14): полоса меток реплик человека, подсветка перехода, поиск ⌘⇧F --- */
 .user-rail { position: absolute; left: 0; top: 6px; bottom: 6px; width: 12px; z-index: 1; pointer-events: none; }

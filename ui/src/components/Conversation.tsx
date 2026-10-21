@@ -26,7 +26,10 @@ import { settingsMenu } from '../model/sessionSettings.js'
 import type { SettingsPick } from '../model/sessionSettings.js'
 import type { ProviderCatalog } from '../model/types.js'
 import { copyToClipboard, Markdown, MdBridgeContext, useFlash } from './Markdown.js'
-import { sendFromComposer } from '../model/pending.js'
+import { restoreDraft, sendFromComposer } from '../model/pending.js'
+import { expireQueueEdit, queueEditKey, saveQueueEdit, startQueueEdit } from '../model/queueEdit.js'
+import type { QueueEditApi, QueueEditState, QueueEditStep } from '../model/queueEdit.js'
+import { errorText, isBridgeError } from '../bridge.js'
 import { PermCard } from './PermCard.js'
 import { takeAutoFocus } from '../lib/linkGuard.js'
 
@@ -59,6 +62,11 @@ export interface ConversationProps {
   onQueueRemove?(id: string): void
   onQueueMove?(id: string, to: number): void
   onQueueResume?(): void
+  /**
+   * Правка реплики в очереди (0.3.2): «Изменить» держит очередь на реплике, пока правка открыта. Нет — старый
+   * демон: кнопки нет.
+   */
+  onQueueEdit?: QueueEditApi
   /** Лента собирается из истории (`events.history`) — пустая лента ещё не значит «разговор пуст». */
   historyLoading?: boolean
   /** Полные события по номерам (`events.get`): раскрытая строка инструмента из лёгкой истории. */
@@ -108,6 +116,7 @@ export function Conversation(p: ConversationProps): ReactElement {
   const { agent } = p
   const sv = statusView(agent.status)
   const feed = useRef<HTMLDivElement>(null)
+  const qe = useQueueEdit(p.onQueueEdit)
   const stick = useRef(true)
 
   // Своя реплика ушла — лента едет вниз к ней, даже если человек перед этим листал вверх.
@@ -243,10 +252,11 @@ export function Conversation(p: ConversationProps): ReactElement {
       </div>
 
       <Composer busy={sv.busy} needsYou={sv.needsYou} permFocused={p.focusedPerm !== null} link={p.link ?? 'up'} disabled={holds} sending={p.sending} error={p.sendError} onSend={p.onSend} agentName={agent.name} label={agentLabel(agent)} filePaths={p.filePaths ?? null}
-        queueable={!!p.onQueueRemove} />
-      {p.onQueueRemove && (agent.queue?.length || agent.queuePaused) ? (
+        queueable={!!p.onQueueRemove} inject={qe.inject} />
+      {p.onQueueRemove && (agent.queue?.length || agent.queuePaused || qe.edit || qe.notice) ? (
         <QueueList queue={agent.queue ?? []} paused={agent.queuePaused === true} onRemove={p.onQueueRemove}
-          onMove={p.onQueueMove ?? (() => {})} onResume={p.onQueueResume ?? (() => {})} />
+          onMove={p.onQueueMove ?? (() => {})} onResume={p.onQueueResume ?? (() => {})}
+          {...(p.onQueueEdit ? { edit: qe.view } : {})} notice={qe.notice} />
       ) : null}
       <ChatFooter agent={agent} usage={p.usage} now={p.now} onReveal={p.onReveal} {...(p.onHelp ? { onHelp: p.onHelp } : {})}
         {...(p.onConfigure ? { onConfigure: p.onConfigure } : {})} catalog={p.catalog ?? null} windows={p.windows ?? EMPTY_WINDOWS} />
@@ -647,7 +657,88 @@ function placeholderFor(p: { link: ConnState['state']; needsYou: boolean; busy: 
   return `реплика для ${p.label}`
 }
 
-function Composer({ busy, needsYou, permFocused, link, disabled, sending, error, onSend, agentName, label, filePaths, queueable }: {
+/** Что видит список очереди о правке: состояние и действия. */
+export interface QueueEditView {
+  state: QueueEditState | null
+  /** Ждём ответа демона на «Изменить» — у этой реплики. */
+  opening: string | null
+  onStart(id: string): void
+  onChange(text: string): void
+  onSave(): void
+  onCancel(): void
+}
+
+/**
+ * Правка реплики очереди: состояние, срок удержания и возврат текста в поле ввода. Живёт в `Conversation`
+ * (он пересоздаётся на каждую сессию — уход с сессии отпускает очередь), а не в списке: список пропадает,
+ * когда очередь пустеет, а открытая правка с текстом человека пропадать не должна.
+ */
+function useQueueEdit(api: QueueEditApi | undefined): { view: QueueEditView; notice: string | null; inject: { text: string; nonce: number } | null; edit: boolean } {
+  const [state, setState] = useState<QueueEditState | null>(null)
+  const [opening, setOpening] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [inject, setInject] = useState<{ text: string; nonce: number } | null>(null)
+  const cur = useRef<QueueEditState | null>(null)
+  cur.current = state
+  const apiRef = useRef(api)
+  apiRef.current = api
+  const toComposer = (text: string): void => setInject((p) => ({ text, nonce: (p?.nonce ?? 0) + 1 }))
+  const apply = (step: QueueEditStep): void => { setState(step.next); if (step.notice !== null) setNotice(step.notice) }
+  // Ушли с сессии или закрыли окно — очередь не ждёт брошенной правки (и той, что ещё берётся: `alive`).
+  const alive = useRef(true)
+  useEffect(() => {
+    alive.current = true
+    return () => { alive.current = false; const st = cur.current; if (st) apiRef.current?.release(st.id) }
+  }, [])
+  // Срок удержания у демона — тот же, что он назвал; вышел — правка закрыта, исправленное — в поле ввода.
+  const holdKey = state ? `${state.id}:${state.holdMs}` : null
+  useEffect(() => {
+    if (!holdKey || !cur.current) return
+    const t = window.setTimeout(() => {
+      const st = cur.current
+      if (st && apiRef.current) apply(expireQueueEdit(st, { release: apiRef.current.release, toComposer }))
+    }, cur.current.holdMs)
+    return () => window.clearTimeout(t)
+  }, [holdKey])
+  // Заметка («уже ушла», «время вышло») гаснет сама.
+  useEffect(() => {
+    if (notice === null) return
+    const t = window.setTimeout(() => setNotice(null), 15_000)
+    return () => window.clearTimeout(t)
+  }, [notice])
+  const errorOf = (e: unknown): { code: string | null; text: string } =>
+    (isBridgeError(e) ? { code: e.code, text: e.message } : { code: null, text: errorText(e) })
+  const view: QueueEditView = {
+    state, opening,
+    onStart: (id) => {
+      if (!api || opening || cur.current) return
+      setNotice(null)
+      setOpening(id)
+      api.hold(id).then((r) => { if (alive.current) setState(startQueueEdit(id, r)); else api.release(id) }, (e: unknown) => {
+        // «Изменить» опоздало: реплика ушла или убрана — править нечего, текст человека ещё не тронут.
+        const err = errorOf(e)
+        setNotice(err.code === 'queue_item_sent' ? 'Реплика уже ушла' : err.code === 'queue_item_removed' ? 'Реплика уже удалена' : err.text)
+      }).finally(() => setOpening(null))
+    },
+    onChange: (text) => setState((st) => (st ? { ...st, text, error: null } : st)),
+    onSave: () => {
+      const st = cur.current
+      if (!api || !st || st.saving) return
+      setState({ ...st, saving: true })
+      void saveQueueEdit(st, { save: api.save, release: api.release, toComposer, errorOf }).then(apply)
+    },
+    onCancel: () => {
+      const st = cur.current
+      // Сохранение в пути — отмена его не обгоняет (иначе очередь ушла бы раньше, чем дошла правка).
+      if (!st || st.saving) return
+      api?.release(st.id)
+      setState(null)
+    },
+  }
+  return { view, notice, inject, edit: state !== null }
+}
+
+function Composer({ busy, needsYou, permFocused, link, disabled, sending, error, onSend, agentName, label, filePaths, queueable, inject }: {
   /** В Inbox есть выделенный запрос (любой сессии): ⌘Enter — его «разрешить», а не «прервать и сказать». */
   permFocused: boolean
   busy: boolean; needsYou: boolean; link: ConnState['state']; disabled: boolean; sending: boolean; error: string | null
@@ -657,9 +748,22 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
   filePaths: FilePathSource | null
   /** Демон знает очередь (О2): во время хода поле не заперто — Enter ставит в очередь, ⌘Enter прерывает. */
   queueable: boolean
+  /**
+   * Текст из правки очереди, которую не удалось сохранить (реплика ушла или убрана, вышел срок): в поле по
+   * правилу M8e — пустое поле получает его как есть, набранное остаётся под ним через пустую строку.
+   */
+  inject?: { text: string; nonce: number } | null
 }): ReactElement {
   const [text, setText] = useState('')
   const ta = useRef<HTMLTextAreaElement>(null)
+  const injected = inject?.nonce ?? 0
+  useEffect(() => {
+    if (!inject || !injected) return
+    const r = restoreDraft(ta.current?.value ?? '', inject.text)
+    setText(r.text)
+    requestAnimationFrame(() => { const el = ta.current; if (el && el.value === r.text) { el.focus(); el.setSelectionRange(r.caret, r.caret) } })
+    // Только по новому nonce: тот же текст второй раз в поле не встаёт.
+  }, [injected])
   useLayoutEffect(() => {
     const el = ta.current
     if (!el) return
@@ -760,13 +864,21 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
 
 /**
  * Очередь реплик под полем ввода (О2, как в Cursor): уйдут сами по одной, когда ход кончится `idle`.
- * × убирает, ↑/↓ переставляют. Ход упал, упёрся в лимит или его прервали — очередь стоит до «Продолжить»:
- * следующая реплика могла держаться на результате упавшего хода.
+ * × убирает, ↑/↓ переставляют, «Изменить» (0.3.2) открывает правку на месте — пока она открыта, очередь на этой
+ * реплике стоит. Ход упал, упёрся в лимит или его прервали — очередь стоит до «Продолжить»: следующая реплика
+ * могла держаться на результате упавшего хода.
  */
-export function QueueList({ queue, paused, onRemove, onMove, onResume }: {
+export function QueueList({ queue, paused, onRemove, onMove, onResume, edit, notice }: {
   queue: readonly QueueItem[]; paused: boolean
   onRemove(id: string): void; onMove(id: string, to: number): void; onResume(): void
+  /** Правка реплики; нет — старый демон, кнопки «Изменить» нет. */
+  edit?: QueueEditView
+  /** Заметка над списком: «Реплика уже ушла…», «Время правки вышло…». */
+  notice?: string | null
 }): ReactElement {
+  const st = edit?.state ?? null
+  // Правленую реплику убрали из очереди, пока правка открыта, — правка остаётся (там текст человека) последней строкой.
+  const orphan = st !== null && !queue.some((it) => it.id === st.id)
   return (
     <div className="queue" data-testid="queue" data-paused={paused ? '1' : '0'}>
       {paused && (
@@ -776,12 +888,18 @@ export function QueueList({ queue, paused, onRemove, onMove, onResume }: {
           {queue.length > 0 && <button type="button" className="btn btn-sm" onClick={onResume} data-testid="queue-resume">Продолжить</button>}
         </div>
       )}
-      {queue.length > 0 && (
+      {notice ? <div className="queue-notice" role="status" data-testid="queue-notice">{notice}</div> : null}
+      {(queue.length > 0 || orphan) && (
         <ol className="queue-list" aria-label="Очередь реплик">
-          {queue.map((it, i) => (
+          {queue.map((it, i) => (st && st.id === it.id && edit ? <QueueEditor key={it.id} n={i + 1} st={st} edit={edit} /> : (
             <li key={it.id} className="queue-item" data-testid="queue-item" data-id={it.id}>
               <span className="n mono">{i + 1}</span>
               <span className="txt" title={it.text}>{it.text}</span>
+              {edit && (
+                <button type="button" className="btn btn-ghost btn-sm" aria-label="Изменить реплику" title="Изменить: очередь подождёт, пока правишь"
+                  disabled={st !== null || edit.opening !== null} aria-busy={edit.opening === it.id ? true : undefined}
+                  onClick={() => edit.onStart(it.id)} data-testid="queue-edit">Изменить</button>
+              )}
               <button type="button" className="btn btn-ghost btn-sm" aria-label="Выше" title="Выше" disabled={i === 0}
                 onClick={() => onMove(it.id, i - 1)} data-testid="queue-up">↑</button>
               <button type="button" className="btn btn-ghost btn-sm" aria-label="Ниже" title="Ниже" disabled={i === queue.length - 1}
@@ -789,9 +907,54 @@ export function QueueList({ queue, paused, onRemove, onMove, onResume }: {
               <button type="button" className="btn btn-ghost btn-sm" aria-label="Убрать из очереди" title="Убрать из очереди"
                 onClick={() => onRemove(it.id)} data-testid="queue-remove"><Icon name="x" /></button>
             </li>
-          ))}
+          )))}
+          {orphan && st && edit ? <QueueEditor key={st.id} n={null} st={st} edit={edit} /> : null}
         </ol>
       )}
     </div>
+  )
+}
+
+/**
+ * Реплика очереди в правке: поле на месте строки, Enter — сохранить, Shift+Enter — новая строка, Esc — отмена
+ * (до горячих клавиш окна Esc не доходит — там он «Стоп»). `n: null` — реплики в очереди уже нет.
+ */
+function QueueEditor({ n, st, edit }: { n: number | null; st: QueueEditState; edit: QueueEditView }): ReactElement {
+  const ta = useRef<HTMLTextAreaElement>(null)
+  useLayoutEffect(() => {
+    const el = ta.current
+    if (!el) return
+    el.focus()
+    el.setSelectionRange(el.value.length, el.value.length)
+  }, [])
+  useLayoutEffect(() => {
+    const el = ta.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = `${Math.min(180, el.scrollHeight + 2)}px`
+  }, [st.text])
+  const onKey = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
+    const k = queueEditKey({ key: e.key, shiftKey: e.shiftKey, altKey: e.altKey, metaKey: e.metaKey, ctrlKey: e.ctrlKey, isComposing: e.nativeEvent.isComposing })
+    if (k === 'save') { e.preventDefault(); edit.onSave() }
+    if (k === 'cancel') {
+      e.preventDefault()
+      e.stopPropagation()
+      edit.onCancel()
+      document.querySelector<HTMLTextAreaElement>('[data-testid="composer"]')?.focus()
+    }
+  }
+  return (
+    <li className="queue-item queue-item-edit" data-testid="queue-item-edit" data-id={st.id}>
+      <span className="n mono">{n ?? '—'}</span>
+      <div className="queue-edit-body">
+        {/* `readOnly`, а не `disabled`, пока сохраняется: выключенное поле теряет фокус, и Esc ушёл бы в «Стоп». */}
+        <textarea ref={ta} rows={1} value={st.text} readOnly={st.saving} onChange={(e) => edit.onChange(e.target.value)} onKeyDown={onKey}
+          aria-label="Изменить реплику в очереди" data-testid="queue-edit-text" />
+        {n === null && <div className="queue-edit-note">реплики уже нет в очереди — сохранение вернёт текст в поле ввода</div>}
+        {st.error && <div className="queue-edit-err" role="alert" data-testid="queue-edit-error">{st.error}</div>}
+      </div>
+      <button type="button" className="btn btn-sm btn-primary" onClick={edit.onSave} disabled={st.saving} data-testid="queue-edit-save">Сохранить</button>
+      <button type="button" className="btn btn-sm btn-ghost" onClick={edit.onCancel} disabled={st.saving} data-testid="queue-edit-cancel">Отмена</button>
+    </li>
   )
 }

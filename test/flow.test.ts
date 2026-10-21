@@ -151,10 +151,10 @@ const queueOf = async (c: PultClient, name: string): Promise<{ texts: string[]; 
 const code = (want: string) => (e: { code?: string }): boolean => e.code === want
 
 /** Демон и сессия `q`, у которой каждый ход висит `hang` мс до первого события. */
-async function rig(hang: number, home: TempHome = tempHome()): Promise<{ home: TempHome; cwd: string; d: Awaited<ReturnType<typeof startTestDaemon>>; c: PultClient }> {
+async function rig(hang: number, home: TempHome = tempHome(), dopts: Parameters<typeof startTestDaemon>[1] = {}): Promise<{ home: TempHome; cwd: string; d: Awaited<ReturnType<typeof startTestDaemon>>; c: PultClient }> {
   const cwd = mkdtempSync(join(tmpdir(), 'pt-q-'))
   writeFileSync(join(cwd, '.pult-fake.json'), JSON.stringify({ scenario: 'simple', speed: 0, hang }))
-  const d = await startTestDaemon(home)
+  const d = await startTestDaemon(home, dopts)
   const c = await connectClient(home.paths)
   await c.request('agent.start', { name: 'q', kind: 'claude', cwd })
   return { home, cwd, d, c }
@@ -366,6 +366,141 @@ describe('ход, прерванный сервером (codex)', () => {
         e.kind === 'status.changed' && e.data['status'] === 'interrupted' && e.data['reason'] === 'provider_interrupted'), 10_000),
       'нет interrupted от сервера')
       assert.equal((await record(c, 'x'))['lastStatus'], 'interrupted', 'статус застрял')
+    } finally { c.close(); await d.stop('конец теста'); home.remove(); rmSync(cwd, { recursive: true, force: true }) }
+  })
+})
+
+describe('правка реплики в очереди (0.3.2): agent.queue.move {hold | text}', () => {
+  type Held = { queue: Array<{ id: string; text: string }>; edit: { id: string; text: string; holdMs: number } }
+  const idle = (c: PultClient, name = 'q'): Promise<unknown> => c.request('agent.wait', { name, until: ['idle'], timeoutMs: 20_000 })
+  const settle = (ms = 400): Promise<void> => new Promise((r) => setTimeout(r, ms))
+
+  it('место и id прежние; правка держит очередь, пока ход кончается; сохранить — уходит новый текст; журнал без текста', async () => {
+    const { home, cwd, d, c } = await rig(700)
+    try {
+      await c.request('agent.prompt', { name: 'q', text: 'раз' })
+      const a = (await c.request('agent.prompt', { name: 'q', text: 'два', queue: true })) as { id: string }
+      const b = (await c.request('agent.prompt', { name: 'q', text: 'три', queue: true })) as { id: string }
+      const long = 'ж'.repeat(300)
+      const z = (await c.request('agent.prompt', { name: 'q', text: long, queue: true })) as { id: string }
+      // Полный текст — только в ответе на «Изменить» (в списке — превью 200 знаков).
+      const full = (await c.request('agent.queue.move', { name: 'q', id: z.id, hold: true })) as Held
+      assert.equal(full.edit.text, long)
+      await c.request('agent.queue.move', { name: 'q', id: z.id, hold: false })
+
+      const held = (await c.request('agent.queue.move', { name: 'q', id: a.id, hold: true })) as Held
+      assert.deepEqual([held.edit.id, held.edit.text, held.edit.holdMs], [a.id, 'два', 600_000])
+      await idle(c)
+      await settle()
+      assert.deepEqual(await userTexts(c, 'q'), ['раз'], 'правленая голова не ушла, и те, что за ней, тоже')
+      assert.equal((await record(c, 'q'))['lastStatus'], 'idle')
+
+      const secret = ['sk', 'ant', 'api03', 'Q'.repeat(24)].join('-')
+      const saved = (await c.request('agent.queue.move', { name: 'q', id: a.id, text: `два, исправлено ${secret}` })) as Held
+      assert.deepEqual(saved.queue.map((x) => x.id), [a.id, b.id, z.id], 'место и id прежние')
+      assert.equal(saved.queue[0]?.text, `два, исправлено ${secret}`)
+      assert.ok(await waitFor(async () => (await userTexts(c, 'q')).length >= 2, 10_000))
+      const users = await userTexts(c, 'q')
+      assert.equal(users[1], 'два, исправлено <token>', 'ушёл новый текст, секрет в журнале замаскирован')
+      const upd = (await events(c, 'q')).filter((e) => e.kind === 'queue.updated')
+      assert.deepEqual(upd.map((e) => e.data), [{ id: a.id }], 'событие правки — id без текста')
+      assert.ok(!JSON.stringify(await events(c, 'q')).includes(secret), 'секрета нет в журнале')
+      assert.ok(await waitFor(async () => (await userTexts(c, 'q')).length === 4, 15_000))
+      assert.deepEqual((await userTexts(c, 'q')).slice(2), ['три', long])
+    } finally { c.close(); await d.stop('конец теста'); home.remove(); rmSync(cwd, { recursive: true, force: true }) }
+  })
+
+  it('правка не первой: впереди уходит, на правленой стоит; сохранение без изменений места; отмена отпускает', async () => {
+    const { home, cwd, d, c } = await rig(500)
+    try {
+      await c.request('agent.prompt', { name: 'q', text: 'раз' })
+      const a = (await c.request('agent.prompt', { name: 'q', text: 'два', queue: true })) as { id: string }
+      const b = (await c.request('agent.prompt', { name: 'q', text: 'три', queue: true })) as { id: string }
+      const e = (await c.request('agent.prompt', { name: 'q', text: 'четыре', queue: true })) as { id: string }
+      await c.request('agent.queue.move', { name: 'q', id: b.id, hold: true })
+      // Правка посреди очереди — место и id прежние.
+      const saved = (await c.request('agent.queue.move', { name: 'q', id: b.id, text: 'три!' })) as Held
+      assert.deepEqual(saved.queue.map((x) => [x.id, x.text]), [[a.id, 'два'], [b.id, 'три!'], [e.id, 'четыре']])
+      await c.request('agent.queue.move', { name: 'q', id: b.id, hold: true })
+      assert.ok(await waitFor(async () => (await userTexts(c, 'q')).includes('два'), 10_000), '«два» впереди правки уходит')
+      await idle(c)
+      await settle()
+      assert.deepEqual(await userTexts(c, 'q'), ['раз', 'два'])
+      assert.deepEqual((await queueOf(c, 'q')).ids, [b.id, e.id])
+      // Отмена: очередь идёт дальше с прежним (уже исправленным раньше) текстом.
+      await c.request('agent.queue.move', { name: 'q', id: b.id, hold: false })
+      assert.ok(await waitFor(async () => (await userTexts(c, 'q')).length === 4, 15_000))
+      assert.deepEqual(await userTexts(c, 'q'), ['раз', 'два', 'три!', 'четыре'])
+      // Отпустить то, чего нет, — без вреда.
+      await c.request('agent.queue.move', { name: 'q', id: b.id, hold: false })
+    } finally { c.close(); await d.stop('конец теста'); home.remove(); rmSync(cwd, { recursive: true, force: true }) }
+  })
+
+  it('отключился клиент — правка снята; срок вышел — уходит прежний текст', async () => {
+    const { home, cwd, d, c } = await rig(400, tempHome(), { queueEditHoldMs: 1500 })
+    try {
+      await c.request('agent.prompt', { name: 'q', text: 'раз' })
+      const a = (await c.request('agent.prompt', { name: 'q', text: 'два', queue: true })) as { id: string }
+      const other = await connectClient(home.paths)
+      await other.request('agent.queue.move', { name: 'q', id: a.id, hold: true })
+      await idle(c)
+      await settle()
+      assert.deepEqual(await userTexts(c, 'q'), ['раз'])
+      other.close()
+      assert.ok(await waitFor(async () => (await userTexts(c, 'q')).includes('два'), 10_000), 'отключение не отпустило очередь')
+      await idle(c)
+
+      await c.request('agent.prompt', { name: 'q', text: 'четыре' })
+      const x = (await c.request('agent.prompt', { name: 'q', text: 'пять', queue: true })) as { id: string }
+      const t0 = Date.now()
+      await c.request('agent.queue.move', { name: 'q', id: x.id, hold: true })
+      await idle(c)
+      assert.ok(!(await userTexts(c, 'q')).includes('пять'), 'до срока правка держит')
+      assert.ok(await waitFor(async () => (await userTexts(c, 'q')).includes('пять'), 10_000), 'срок вышел — очередь не пошла')
+      assert.ok(Date.now() - t0 >= 1400, 'ушла не раньше срока')
+      await assert.rejects(c.request('agent.queue.move', { name: 'q', id: x.id, text: 'поздно' }), code('queue_item_sent'))
+    } finally { c.close(); await d.stop('конец теста'); home.remove(); rmSync(cwd, { recursive: true, force: true }) }
+  })
+
+  it('реплики нет: ушла → queue_item_sent, убрана или сессии нет → queue_item_removed; другие сессии не ждут; параметры', async () => {
+    const { home, cwd, d, c } = await rig(500)
+    try {
+      await c.request('agent.start', { name: 'q2', kind: 'claude', cwd })
+      await c.request('agent.prompt', { name: 'q', text: 'раз' })
+      await c.request('agent.prompt', { name: 'q2', text: 'другая' })
+      const a = (await c.request('agent.prompt', { name: 'q', text: 'два', queue: true })) as { id: string }
+      const o = (await c.request('agent.prompt', { name: 'q2', text: 'другая-2', queue: true })) as { id: string }
+      await c.request('agent.queue.move', { name: 'q', id: a.id, hold: true })
+      assert.ok(await waitFor(async () => (await userTexts(c, 'q2')).includes('другая-2'), 10_000), 'правка в q задержала очередь q2')
+      assert.equal(typeof o.id, 'string')
+
+      // Параметры: ровно одно из to | hold | text.
+      await assert.rejects(c.request('agent.queue.move', { name: 'q', id: a.id, to: 0, text: 'x' }), code('invalid_params'))
+      await assert.rejects(c.request('agent.queue.move', { name: 'q', id: a.id, hold: 'yes' }), code('invalid_params'))
+      await assert.rejects(c.request('agent.queue.move', { name: 'q', id: a.id, text: 5 }), code('invalid_params'))
+      await assert.rejects(c.request('agent.queue.move', { name: 'q', id: a.id, text: '   ' }), code('invalid_params'))
+      await assert.rejects(c.request('agent.queue.move', { name: 'q', id: a.id, text: 'я'.repeat(50_001) }), code('invalid_params'))
+
+      // Убрали, пока правка открыта, — сохранение: «удалена»; взять в правку убранную — тоже.
+      await c.request('agent.queue.remove', { name: 'q', id: a.id })
+      await assert.rejects(c.request('agent.queue.move', { name: 'q', id: a.id, text: 'поздно' }), code('queue_item_removed'))
+      await assert.rejects(c.request('agent.queue.move', { name: 'q', id: a.id, hold: true }), code('queue_item_removed'))
+
+      // Ушла раньше, чем взяли в правку, — «уже ушла».
+      await idle(c)
+      await c.request('agent.prompt', { name: 'q', text: 'ход' })
+      const b = (await c.request('agent.prompt', { name: 'q', text: 'три', queue: true })) as { id: string }
+      assert.ok(await waitFor(async () => (await userTexts(c, 'q')).includes('три'), 10_000))
+      await assert.rejects(c.request('agent.queue.move', { name: 'q', id: b.id, hold: true }), code('queue_item_sent'))
+      await assert.rejects(c.request('agent.queue.move', { name: 'q', id: b.id, text: 'три!' }), code('queue_item_sent'))
+
+      // Сессию удалили посреди правки — «удалена».
+      await idle(c, 'q2')
+      await c.request('agent.prompt', { name: 'q2', text: 'держит' })
+      const r = (await c.request('agent.prompt', { name: 'q2', text: 'в правке', queue: true })) as { id: string }
+      await c.request('agent.queue.move', { name: 'q2', id: r.id, hold: true })
+      await c.request('agent.rm', { name: 'q2' })
+      await assert.rejects(c.request('agent.queue.move', { name: 'q2', id: r.id, text: 'поздно' }), code('queue_item_removed'))
     } finally { c.close(); await d.stop('конец теста'); home.remove(); rmSync(cwd, { recursive: true, force: true }) }
   })
 })

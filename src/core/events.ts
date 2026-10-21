@@ -67,6 +67,11 @@ export const EVENT_KINDS = [
    * заметка адаптера Claude: ход идёт на прежних настройках или ждёт конца фоновых задач (ревью M8f).
    */
   'session.configured',
+  /**
+   * Реплику в очереди исправили (`agent.queue.move {text}`) — `{id}`: место и id прежние. Текста нет: реплика
+   * очереди попадает в журнал, как и прямая, отредактированным `message.user` в момент отправки. Статус не двигает.
+   */
+  'queue.updated',
   'daemon.started',
   'daemon.stopping',
 ] as const

@@ -49,6 +49,7 @@ import type { Notice, NotifyRules, Throttle } from './model/notify.js'
 import type { EventsSnapshot, HistoryPageReply, UiState } from './model/state.js'
 import type { ConvItem } from './model/conversation.js'
 import { PENDING_SENT_MAX_MS, pendingBubble, pendingConfirmed, willQueue } from './model/pending.js'
+import type { QueueEditApi } from './model/queueEdit.js'
 import type { PendingSend } from './model/pending.js'
 import type { AgentRecord, DaemonStatus, DoctorReport, PendingPermission } from './model/types.js'
 import type { ProviderCatalog } from './model/types.js'
@@ -596,6 +597,24 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     bridge.call(method, params).then(() => refreshAgents(), (e: unknown) => setBannerError(errorText(e)))
   }
 
+  /**
+   * Правка реплики очереди (0.3.2) — через `agent.queue.move` с `hold`/`text`: метод уже в белом списке моста,
+   * новое окно не нужно. Отказы (`queue_item_sent`/`queue_item_removed`, пусто, длинно) разбирает список.
+   */
+  const queueEditApi = (name: string): QueueEditApi => ({
+    hold: async (id) => {
+      const r = (await bridge.call('agent.queue.move', { name, id, hold: true })) as { edit?: { text?: unknown; holdMs?: unknown } } | null
+      const text = r?.edit?.text
+      // Старый демон молча переставил бы реплику вместо правки — без полного текста правку не открываем.
+      if (typeof text !== 'string') throw new Error('демон не умеет править очередь — обнови Пульт')
+      return { text, holdMs: typeof r?.edit?.holdMs === 'number' ? r.edit.holdMs : 10 * 60_000 }
+    },
+    save: async (id, text) => {
+      try { await bridge.call('agent.queue.move', { name, id, text }) } finally { void refreshAgents() }
+    },
+    release: (id) => { bridge.call('agent.queue.move', { name, id, hold: false }).then(() => refreshAgents(), () => { /* реплики или сессии уже нет */ }) },
+  })
+
   /** «Повторить» в карточке ошибки: последняя реплика заново (`agent.retry`), ошибка — прочитана. */
   const retryAgent = (name: string): void => {
     setRetrying((r) => new Set(r).add(name))
@@ -933,7 +952,8 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
             onSend={sendPrompt} filePaths={filePaths}
             onQueueRemove={(id) => queueCall('agent.queue.remove', { name: current.name, id })}
             onQueueMove={(id, to) => queueCall('agent.queue.move', { name: current.name, id, to })}
-            onQueueResume={() => queueCall('agent.queue.resume', { name: current.name })} onHelp={() => setModal({ type: 'help' })} onRename={(title) => renameAgent(current.name, title)}
+            onQueueResume={() => queueCall('agent.queue.resume', { name: current.name })}
+            onQueueEdit={queueEditApi(current.name)} onHelp={() => setModal({ type: 'help' })} onRename={(title) => renameAgent(current.name, title)}
             onStop={() => setModal({ type: 'stop', name: current.name })}
             onRemove={() => setModal({ type: 'rm', name: current.name })}
             onReveal={(p) => void bridge.revealPath(p)}

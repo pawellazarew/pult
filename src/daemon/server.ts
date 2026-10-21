@@ -124,6 +124,8 @@ export interface DaemonOptions {
   updates?: Pick<CheckerOptions, 'http' | 'keys' | 'spawnApply' | 'schedule' | 'firstDelayMs' | 'intervalMs' | 'jitterMs' | 'tickMs' | 'now' | 'random'>
   /** M8f: подмена живого списка моделей Codex для `agent.configure` (`null` — списка нет). */
   codexModels?: () => Promise<ProviderModel[] | null>
+  /** Срок, на который открытая правка держит очередь реплик (мс). Тест ставит короче; по умолчанию 10 мин. */
+  queueEditHoldMs?: number
 }
 
 /** M8f: сколько живёт список моделей Codex для проверки `agent.configure` (`model/list` поднимает app-server). */
@@ -366,6 +368,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     adapters: { claude, codex },
     broker,
     modelChoices: (provider) => (provider === 'codex' ? codexChoices() : Promise.resolve(null)),
+    ...(opts.queueEditHoldMs !== undefined ? { queueEditHoldMs: opts.queueEditHoldMs } : {}),
     ...(titler ? { titler } : {}),
     ...(notifyRunner ? {
       onAttention: (ev: PultEvent, att, title: string) => {
@@ -786,9 +789,25 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
         return manager.queueResume(String(p['name'] ?? ''))
       case 'agent.queue.remove':
         return manager.queueRemove(String(p['name'] ?? ''), String(p['id'] ?? ''))
-      case 'agent.queue.move':
+      case 'agent.queue.move': {
+        // Правка реплики очереди (0.3.2) — тем же методом, что ↑/↓: он уже в белом списке моста окна, и новое окно
+        // не нужно. Ровно одно из: `to` — переставить; `hold: true|false` — взять в правку (очередь стоит на
+        // реплике, пока правка открыта) или бросить её; `text` — сохранить правку (место и id прежние).
+        const name = String(p['name'] ?? '')
+        const id = String(p['id'] ?? '')
+        const given = ['to', 'hold', 'text'].filter((k) => p[k] !== undefined)
+        if (given.length > 1) throw new ManagerError(ERROR_CODES.invalidParams, `agent.queue.move: ${given.join(' и ')} вместе не бывают`)
+        if (p['hold'] !== undefined) {
+          if (typeof p['hold'] !== 'boolean') throw new ManagerError(ERROR_CODES.invalidParams, 'agent.queue.move: hold — true|false')
+          return p['hold'] ? manager.queueHold(name, id, conn.id) : manager.queueRelease(name, id)
+        }
+        if (p['text'] !== undefined) {
+          if (typeof p['text'] !== 'string') throw new ManagerError(ERROR_CODES.invalidParams, 'agent.queue.move: text — строка')
+          return manager.queueEdit(name, id, p['text'])
+        }
         if (!Number.isSafeInteger(p['to'])) throw new ManagerError(ERROR_CODES.invalidParams, 'agent.queue.move: to — целый индекс')
-        return manager.queueMove(String(p['name'] ?? ''), String(p['id'] ?? ''), p['to'] as number)
+        return manager.queueMove(name, id, p['to'] as number)
+      }
       case 'agent.wait':
         return await manager.wait({
           name: String(p['name'] ?? ''),
@@ -1244,6 +1263,8 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
       clearTimeout(timer)
       conn.subs.dispose()
       connections.delete(id)
+      // Окно, которое правило реплику очереди, ушло — очередь не ждёт его правки.
+      manager.queueReleaseOwner(id)
     })
   })
 

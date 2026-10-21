@@ -146,6 +146,19 @@ export const QUEUE_PREVIEW_CHARS = 200
 export const QUEUE_TEXT_MAX = 50_000
 /** Предел всей очереди одной сессии в байтах (сумма реплик). */
 export const QUEUE_TOTAL_BYTES = 256 * 1024
+/**
+ * Правка реплики в очереди держит очередь на этой реплике (и за ней) не дольше этого: окно закрыли без
+ * отключения или человек ушёл — реплика уйдёт с прежним текстом, окно скажет, что время правки вышло.
+ */
+export const QUEUE_EDIT_HOLD_MS = 10 * 60_000
+/** Сколько последних ушедших реплик сессии помнится — чтобы отказ правки различал «ушла» и «удалена». */
+const QUEUE_SENT_MEMORY = 50
+
+/** Ответ на взятие реплики в правку: очередь, полный текст реплики (в очереди — превью) и срок удержания. */
+export interface QueueEditHold extends QueueState {
+  edit: { id: string; text: string; holdMs: number }
+}
+
 /** Сколько «прервать и сказать» ждёт, пока прерванный ход осядет. */
 export const INTERRUPT_SETTLE_MS = 10_000
 
@@ -218,6 +231,21 @@ export interface SessionManager {
   /** Переставить реплику на место `to` (индекс; за краями — к краю). */
   queueMove(name: string, id: string, to: number): QueueState
   /**
+   * Взять реплику в правку: пока правка открыта, очередь на этой реплике стоит (она и те, что за ней, не уходят;
+   * идущий ход и другие сессии не трогаются). Снимается `queueEdit`, `queueRelease`, отключением `owner`
+   * (`queueReleaseOwner`) или по сроку `QUEUE_EDIT_HOLD_MS`. Реплики нет — отказ `queue_item_sent` / `queue_item_removed`.
+   */
+  queueHold(name: string, id: string, owner?: number): QueueEditHold
+  /** Бросить правку: очередь идёт дальше. Реплики или правки уже нет — ничего не делается. */
+  queueRelease(name: string, id: string): QueueState
+  /**
+   * Сохранить правку: новый текст на том же месте и с тем же id, удержание снято, событие `queue.updated {id}`
+   * (без текста). Реплики уже нет — отказ `queue_item_sent` (ушла) или `queue_item_removed` (убрана, сессии нет).
+   */
+  queueEdit(name: string, id: string, text: string): QueueState
+  /** Клиент отключился — снять все его правки. */
+  queueReleaseOwner(owner: number): void
+  /**
    * О2: человек видел сессию — отметка «видел» встаёт на последний номер журнала; `unread` — наоборот,
    * пометить непрочитанной (⌥⌘U). Событий не пишет: это свойство записи, как название.
    */
@@ -283,6 +311,8 @@ export interface ManagerOptions {
    * офлайн): тогда только форма имени. У Claude по умолчанию — пресеты формы «+ Сессия».
    */
   modelChoices?(provider: 'claude' | 'codex'): Promise<ModelChoice[] | null>
+  /** Срок удержания очереди открытой правкой (мс); по умолчанию `QUEUE_EDIT_HOLD_MS`. Тесты ставят короче. */
+  queueEditHoldMs?: number
 }
 
 /** Отказ хода, пока ставится обновление: окно оставляет текст в поле ввода. */
@@ -580,7 +610,10 @@ export function createManager(opts: ManagerOptions): SessionManager {
     if (!rec?.queue?.length || rec.queuePaused || holdDrain.has(name) || removing.has(name) || busyNow(name)) return
     if (opts.holdTurns?.()) return
     const [item, ...rest] = rec.queue as [QueueItem, ...QueueItem[]]
+    // Голову правят — очередь стоит на ней: ни она, ни те, что за ней, не обгоняют правку.
+    if (editHolds.get(name)?.has(item.id)) return
     registry.update(name, { queue: rest.length ? rest : undefined })
+    rememberSent(name, item.id)
     try {
       const turn = await api.prompt(name, item.text)
       opts.logger.info('очередь: реплика ушла', { session: name, id: item.id, turnId: turn.turnId })
@@ -606,6 +639,51 @@ export function createManager(opts: ManagerOptions): SessionManager {
     const rec = needRec(name)
     const at = (rec.queue ?? []).findIndex((it) => it.id === id)
     if (at < 0) throw new ManagerError('not_found', `в очереди ${name} нет реплики ${id}`)
+    return { rec, at }
+  }
+
+  // --- правка реплики в очереди: удержание ------------------------------------------------------
+  // Удержания живут в памяти: рестарт демона и так ставит непустую очередь на паузу, а окно теряет связь.
+  // Ключ — сессия, внутри — id реплики; владелец — номер соединения (отключился — правка снята).
+  const editHolds = new Map<string, Map<string, { owner: number | null; timer: ReturnType<typeof setTimeout> }>>()
+  // Последние ушедшие из очереди id — отказ правки говорит «уже ушла», а не «удалена».
+  const sentIds = new Map<string, string[]>()
+  const holdMs = opts.queueEditHoldMs ?? QUEUE_EDIT_HOLD_MS
+  function rememberSent(name: string, id: string): void {
+    const list = sentIds.get(name) ?? []
+    list.push(id)
+    if (list.length > QUEUE_SENT_MEMORY) list.splice(0, list.length - QUEUE_SENT_MEMORY)
+    sentIds.set(name, list)
+  }
+  /** Снять удержание; `wake` — разбудить очередь (сессия могла простаивать, пока правка держала голову). */
+  function dropHold(name: string, id: string, wake: boolean): boolean {
+    const holds = editHolds.get(name)
+    const h = holds?.get(id)
+    if (!holds || !h) return false
+    clearTimeout(h.timer)
+    holds.delete(id)
+    if (!holds.size) editHolds.delete(name)
+    if (wake) {
+      const rec = registry.get(name)
+      if (rec?.queue?.length && !rec.queuePaused) scheduleDrain(name)
+    }
+    return true
+  }
+  function dropSessionHolds(name: string): void {
+    for (const h of editHolds.get(name)?.values() ?? []) clearTimeout(h.timer)
+    editHolds.delete(name)
+    sentIds.delete(name)
+  }
+  /** Реплики в очереди нет: ушла (помним её id) или убрана; сессии нет — тоже «убрана». */
+  const goneItem = (name: string, id: string): ManagerError => {
+    if (!registry.get(name)) return new ManagerError('queue_item_removed', `сессии ${name} больше нет — реплика не сохранена`)
+    if (sentIds.get(name)?.includes(id)) return new ManagerError('queue_item_sent', 'Реплика уже ушла — правка не сохранена')
+    return new ManagerError('queue_item_removed', 'Реплика уже удалена из очереди — правка не сохранена')
+  }
+  const findQueueItem = (name: string, id: string): { rec: SessionRecord; at: number } => {
+    const rec = registry.get(name)
+    const at = rec ? (rec.queue ?? []).findIndex((it) => it.id === id) : -1
+    if (!rec || at < 0) throw goneItem(name, id)
     return { rec, at }
   }
 
@@ -1056,6 +1134,8 @@ export function createManager(opts: ManagerOptions): SessionManager {
     queueRemove(name, id) {
       const { rec, at } = needQueueItem(name, id)
       const q = (rec.queue ?? []).filter((_, i) => i !== at)
+      // Убрали реплику, которую правят, — правка держать больше нечего (сохранение получит «удалена»).
+      dropHold(name, id, false)
       // Пустая очередь паузы не держит: следующая неудача поставит её заново.
       return queueState(registry.update(name, { queue: q.length ? q : undefined, ...(q.length ? {} : { queuePaused: undefined }) }) as SessionRecord)
     },
@@ -1066,7 +1146,57 @@ export function createManager(opts: ManagerOptions): SessionManager {
       const q = [...(rec.queue ?? [])]
       const [item] = q.splice(at, 1) as [QueueItem]
       q.splice(Math.max(0, Math.min(to, q.length)), 0, item)
-      return queueState(registry.update(name, { queue: q }) as SessionRecord)
+      const next = registry.update(name, { queue: q }) as SessionRecord
+      // Правленую реплику увели с головы — новая голова может уйти, если сессия свободна.
+      if (editHolds.has(name) && !next.queuePaused) scheduleDrain(name)
+      return queueState(next)
+    },
+
+    queueHold(name, id, owner) {
+      const { rec, at } = findQueueItem(name, id)
+      let holds = editHolds.get(name)
+      if (!holds) { holds = new Map(); editHolds.set(name, holds) }
+      const prev = holds.get(id)
+      if (prev) clearTimeout(prev.timer)
+      const timer = setTimeout(() => {
+        if (!dropHold(name, id, true)) return
+        opts.logger.info('очередь: правка реплики не сохранена за срок — реплика уйдёт как была', { session: name, id })
+      }, holdMs)
+      timer.unref?.()
+      holds.set(id, { owner: owner ?? null, timer })
+      const item = (rec.queue ?? [])[at] as QueueItem
+      return { ...queueState(rec), edit: { id, text: item.text, holdMs } }
+    },
+
+    queueRelease(name, id) {
+      const rec = needRec(name)
+      dropHold(name, id, true)
+      return queueState(rec)
+    },
+
+    queueEdit(name, id, text) {
+      if (typeof text !== 'string' || !text.trim()) throw new ManagerError('invalid_params', 'пустая реплика — убери её из очереди крестиком')
+      const { rec, at } = findQueueItem(name, id)
+      const q = [...(rec.queue ?? [])]
+      const old = q[at] as QueueItem
+      if ([...text].length > QUEUE_TEXT_MAX) throw new ManagerError('invalid_params', `реплика для очереди длиннее ${QUEUE_TEXT_MAX} знаков — отправь её, когда ход кончится`)
+      if (queueBytes(q) - Buffer.byteLength(old.text) + Buffer.byteLength(text) > QUEUE_TOTAL_BYTES) {
+        throw new ManagerError('invalid_params', `очередь ${name} больше ${QUEUE_TOTAL_BYTES / 1024} КБ — сократи реплику или убери лишние`)
+      }
+      q[at] = { ...old, text }
+      const next = registry.update(name, { queue: q }) as SessionRecord
+      // В журнал — только факт правки и id: текст реплики попадёт туда, как и прямая, отредактированным
+      // `message.user` в момент отправки. Мимо `emit`: правка не активность хода (сторож тишины её не видит).
+      opts.publish({ sessionId: name, provider: rec.provider, kind: 'queue.updated', data: { id } })
+      opts.logger.info('очередь: реплика исправлена', { session: name, id })
+      dropHold(name, id, true)
+      return queueState(next)
+    },
+
+    queueReleaseOwner(owner) {
+      for (const [name, holds] of [...editHolds]) {
+        for (const [id, h] of [...holds]) if (h.owner === owner) dropHold(name, id, true)
+      }
     },
 
     seen(name, unread, upTo) {
@@ -1229,6 +1359,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
         await adapterFor(rec.provider).close(name)
         emit({ sessionId: name, provider: rec.provider, kind: 'session.ended', data: { reason: 'rm' } })
         registry.remove(name)
+        dropSessionHolds(name)
         statuses.delete(name)
         inflight.delete(name)
         usageBySession.delete(name)
@@ -1272,6 +1403,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
 
     async shutdown() {
       if (watchdog) clearInterval(watchdog)
+      for (const name of [...editHolds.keys()]) dropSessionHolds(name)
       for (const a of Object.values(opts.adapters)) {
         if (a) await a.shutdown()
       }

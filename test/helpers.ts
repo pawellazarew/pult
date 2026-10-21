@@ -63,6 +63,7 @@ export async function startTestDaemon(
     findChrome?: DaemonOptions['findChrome']
     updates?: DaemonOptions['updates']
     codexModels?: DaemonOptions['codexModels']
+    queueEditHoldMs?: DaemonOptions['queueEditHoldMs']
   } = {},
 ): Promise<DaemonHandle> {
   const started = await startDaemon({
@@ -80,6 +81,7 @@ export async function startTestDaemon(
     ...(opts.findChrome !== undefined ? { findChrome: opts.findChrome } : {}),
     ...(opts.updates !== undefined ? { updates: opts.updates } : {}),
     ...(opts.codexModels !== undefined ? { codexModels: opts.codexModels } : {}),
+    ...(opts.queueEditHoldMs !== undefined ? { queueEditHoldMs: opts.queueEditHoldMs } : {}),
   })
   if (!started.ok) throw new Error(`демон не стартовал: держит pid ${started.holderPid}`)
   return started.daemon
