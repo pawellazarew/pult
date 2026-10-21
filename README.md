@@ -128,6 +128,11 @@ local proxy, set `network.<provider>.proxy` in `~/.pult/config.json` (fields you
 means `auto`. The agent gets the proxy as `HTTPS_PROXY` (Codex also `ALL_PROXY`) with `NO_PROXY` for localhost.
 `pult doctor` shows the chosen path per provider.
 
+Some services only accept you from another exit, say a work JIRA or git behind the company VPN. List them in
+`network.<provider>.noProxy` and the agent and its tools reach them around the proxy:
+`"noProxy": [".corp.example", "10.0.0.0/8"]`. Write domains as `.domain`; `*.domain` is turned into `.domain`
+because Python and requests do not understand the wildcard. Entries with commas or spaces are dropped with a warning.
+
 ## Approval modes and Inbox
 
 Each session gets an approval mode when it is created (`--approval`, or the field in "+ Session"):

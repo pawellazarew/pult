@@ -5,7 +5,9 @@
 import assert from 'node:assert/strict'
 import { beforeEach, describe, it } from 'node:test'
 import { DEFAULT_GUARD_COUNTRIES } from '../dist/core/config.js'
-import { checkNetwork, clearNetCache, curlArgs, parseLoc } from '../dist/env/net.js'
+import { checkNetwork, clearNetCache, curlArgs, noProxyValue, parseLoc } from '../dist/env/net.js'
+import { claudeNetworkEnv } from '../dist/adapters/claude/adapter.js'
+import { codexNetworkEnv } from '../dist/adapters/codex/adapter.js'
 import type { ProbeFn } from '../dist/env/net.js'
 
 const trace = (loc: string): string => `fl=1f2\nh=api.anthropic.com\nloc=${loc}\ntls=TLSv1.3\n`
@@ -160,5 +162,37 @@ describe('страж', () => {
     const c = await checkNetwork('claude', { mode: 'auto', proxy: 'p' }, ['fi'], { probe: probe.fn })
     assert.equal(c.ok, false)
     assert.equal(c.reason, 'blocked_country')
+  })
+})
+
+// noProxy (21.10.2026): агент за прокси ходит в корпоративные сервисы мимо него — их пускают
+// только с выхода корпоративного VPN. Без поля ребёнок получает прежний NO_PROXY.
+describe('noProxy профиля', () => {
+  const profile = { mode: 'auto' as const, proxy: 'http://127.0.0.1:28781', noProxy: ['.sun-team.ru', '.global.internal'] }
+
+  it('без добавки — только localhost, как раньше', () => {
+    assert.equal(noProxyValue(), 'localhost,127.0.0.1,::1')
+    assert.equal(noProxyValue(['localhost', '.sun-team.ru']), 'localhost,127.0.0.1,::1,.sun-team.ru')
+  })
+
+  it('доходит до NO_PROXY ребёнка claude и codex', async () => {
+    const c = await checkNetwork('claude', profile, DEFAULT_GUARD_COUNTRIES, { probe: fakeProbe({ proxy: 'FI' }).fn })
+    assert.deepEqual(c.noProxy, ['.sun-team.ru', '.global.internal'])
+    assert.equal(claudeNetworkEnv(c).NO_PROXY, 'localhost,127.0.0.1,::1,.sun-team.ru,.global.internal')
+    assert.equal(codexNetworkEnv({ ...c, provider: 'codex' }).NO_PROXY, 'localhost,127.0.0.1,::1,.sun-team.ru,.global.internal')
+  })
+
+  it('прямой путь не ставит переменных, даже с noProxy', async () => {
+    const c = await checkNetwork('claude', profile, DEFAULT_GUARD_COUNTRIES, { probe: fakeProbe({ proxy: null, direct: 'DE' }).fn })
+    assert.equal(c.path, 'direct')
+    assert.deepEqual(claudeNetworkEnv(c), {})
+  })
+
+  it('правка noProxy не ждёт кэша', async () => {
+    const probe = fakeProbe({ proxy: 'FI' })
+    await checkNetwork('claude', { ...profile, noProxy: [] }, DEFAULT_GUARD_COUNTRIES, { probe: probe.fn })
+    const c = await checkNetwork('claude', profile, DEFAULT_GUARD_COUNTRIES, { probe: probe.fn })
+    assert.equal(c.cached, false)
+    assert.deepEqual(c.noProxy, ['.sun-team.ru', '.global.internal'])
   })
 })

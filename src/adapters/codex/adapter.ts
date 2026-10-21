@@ -45,7 +45,7 @@ import { redact, redactString } from '../../core/log.js'
 import type { PultPaths } from '../../core/paths.js'
 import { VERSION } from '../../core/version.js'
 import { buildChildEnv } from '../../env/allowlist.js'
-import { checkNetwork } from '../../env/net.js'
+import { checkNetwork, noProxyValue } from '../../env/net.js'
 import type { NetCheck } from '../../env/net.js'
 import { readSavedNode, resolveChildNode } from '../../env/nodeBin.js'
 import { BROWSER_SERVER_NAME, DENIED_BROWSER_TOOLS } from '../../mcp/browser.js'
@@ -90,7 +90,7 @@ export const KILL_WAIT_MS = 3_000
  */
 export function codexNetworkEnv(check: NetCheck): Record<string, string> {
   return check.path === 'proxy' && check.proxy
-    ? { ALL_PROXY: check.proxy, HTTPS_PROXY: check.proxy, NO_PROXY: 'localhost,127.0.0.1,::1' }
+    ? { ALL_PROXY: check.proxy, HTTPS_PROXY: check.proxy, NO_PROXY: noProxyValue(check.noProxy) }
     : {}
 }
 

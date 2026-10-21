@@ -20,6 +20,14 @@ export const EGRESS_URLS = [
   'https://cloudflare.com/cdn-cgi/trace',
 ] as const
 
+/** Что ребёнок всегда ходит мимо прокси: свой Пульт и локальные серверы. */
+export const BASE_NO_PROXY: readonly string[] = ['localhost', '127.0.0.1', '::1']
+
+/** `NO_PROXY` ребёнка: localhost плюс `network.<провайдер>.noProxy`, без повторов. */
+export function noProxyValue(extra: readonly string[] = []): string {
+  return [...new Set([...BASE_NO_PROXY, ...extra])].join(',')
+}
+
 export const PROBE_TIMEOUT_MS = 8000
 export const CACHE_TTL_MS = 60_000
 
@@ -54,6 +62,8 @@ export interface NetCheck {
   reason: NetReason
   /** Режим auto откатился с прокси на прямой путь. */
   fellBack: boolean
+  /** `network.<провайдер>.noProxy` профиля — добавка к localhost в `NO_PROXY` ребёнка. */
+  noProxy?: string[]
   guard: string[]
   attempts: NetAttempt[]
   ms: number
@@ -146,12 +156,15 @@ async function traceVia(
  */
 export async function checkNetwork(
   provider: ProviderName,
-  profile: { mode: NetMode; proxy: string },
+  profile: { mode: NetMode; proxy: string; noProxy?: string[] },
   guardCountries: string[],
   opts: NetOptions = {},
 ): Promise<NetCheck> {
   const now = opts.now ?? Date.now
-  const key = `${provider}|${profile.mode}|${profile.proxy}|${guardCountries.join(',')}`
+  const noProxy = profile.noProxy ?? []
+  // noProxy в ключе: проба от него не зависит, но результат несёт его ребёнку — правка конфига
+  // не должна ждать минуту, пока истечёт кэш.
+  const key = `${provider}|${profile.mode}|${profile.proxy}|${guardCountries.join(',')}|${noProxy.join(',')}`
   if (!opts.fresh) {
     const hit = cache.get(key)
     if (hit && now() - hit.at < CACHE_TTL_MS) return { ...hit.check, cached: true }
@@ -184,7 +197,7 @@ export async function checkNetwork(
     } else if (profile.mode === 'required') {
       const check: NetCheck = {
         provider, mode: profile.mode, path: 'none', proxy: profile.proxy, loc: null,
-        ok: false, reason: 'proxy_dead', fellBack: false, guard, attempts,
+        ok: false, reason: 'proxy_dead', fellBack: false, guard, attempts, noProxy,
         ms: now() - t0, checkedAt: new Date().toISOString(), cached: false,
       }
       cache.set(key, { at: now(), check })
@@ -208,6 +221,7 @@ export async function checkNetwork(
     ok: !blocked,
     reason: loc === null ? 'unknown_location' : guard.includes(loc) ? 'blocked_country' : 'ok',
     fellBack,
+    noProxy,
     guard,
     attempts,
     ms: now() - t0,

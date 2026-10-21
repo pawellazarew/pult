@@ -43,7 +43,7 @@ import { redactString } from '../../core/log.js'
 import { createLineSplitter } from '../../core/ndjson.js'
 import type { PultPaths } from '../../core/paths.js'
 import { buildChildEnv } from '../../env/allowlist.js'
-import { checkNetwork } from '../../env/net.js'
+import { checkNetwork, noProxyValue } from '../../env/net.js'
 import { readSavedNode, resolveChildNode } from '../../env/nodeBin.js'
 import type { NetCheck } from '../../env/net.js'
 import type { SessionRecord } from '../../sessions/registry.js'
@@ -167,7 +167,7 @@ const closedChildren = new WeakSet<ChildProcess>()
  * «Claude Code does not support SOCKS proxies»). Тот же профиль у служебного запроса названия.
  */
 export function claudeNetworkEnv(check: NetCheck): Record<string, string> {
-  return check.path === 'proxy' && check.proxy ? { HTTPS_PROXY: check.proxy, NO_PROXY: 'localhost,127.0.0.1,::1' } : {}
+  return check.path === 'proxy' && check.proxy ? { HTTPS_PROXY: check.proxy, NO_PROXY: noProxyValue(check.noProxy) } : {}
 }
 
 let turnSeq = 0

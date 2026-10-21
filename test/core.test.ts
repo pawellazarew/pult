@@ -494,6 +494,30 @@ describe('config', () => {
     assert.equal(warnings.length, 3)
   })
 
+  it('noProxy: «*.домен» становится «.домен», повторы схлопываются, без поля профиль прежний', () => {
+    const { config, warnings } = validateConfig({
+      network: {
+        claude: { proxy: 'http://127.0.0.1:28781', noProxy: ['*.sun-team.ru', '.global.internal', '10.0.0.0/8', '.sun-team.ru'] },
+        codex: { proxy: 'socks5h://127.0.0.1:28780' },
+      },
+    })
+    assert.deepEqual(warnings, [])
+    assert.deepEqual(config.network.claude.noProxy, ['.sun-team.ru', '.global.internal', '10.0.0.0/8'])
+    assert.deepEqual(config.network.codex, { mode: 'auto', proxy: 'socks5h://127.0.0.1:28780' })
+  })
+
+  it('noProxy: запятые, пробелы и не-строки отбрасываются с предупреждением — NO_PROXY не ломается целиком', () => {
+    const { config, warnings } = validateConfig({
+      network: {
+        claude: { proxy: 'http://127.0.0.1:28781', noProxy: ['.ok.ru', 'a.ru,b.ru', 'с пробелом', 42, ''] },
+        codex: { proxy: 'http://127.0.0.1:28781', noProxy: '.sun-team.ru' },
+      },
+    })
+    assert.deepEqual(config.network.claude.noProxy, ['.ok.ru'])
+    assert.equal(config.network.codex.noProxy, undefined)
+    assert.equal(warnings.length, 5)
+  })
+
   it('записанный конфиг читается обратно', () => {
     const home = tempHome()
     try {

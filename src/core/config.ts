@@ -21,6 +21,12 @@ export interface NetworkProfile {
    * всегда `off` (это гарантирует `validateConfig`, а `checkNetwork` страхует ещё раз).
    */
   proxy: string
+  /**
+   * Адреса мимо прокси для ребёнка — добавка к localhost в `NO_PROXY`. Нужна, когда агент ходит
+   * в сервисы, которые пускают только с другого выхода (корпоративные JIRA и git за VPN компании).
+   * Формат `.domain`: `*.domain` Python и requests не понимают, поэтому разбор переводит его в `.domain`.
+   */
+  noProxy?: string[]
 }
 
 export interface PultConfig {
@@ -157,6 +163,26 @@ export interface LoadedConfig {
   fromFile: boolean
 }
 
+/**
+ * Разбор `network.<провайдер>.noProxy`: список хостов, доменов или подсетей. `*.domain` становится
+ * `.domain`; запятые и пробелы внутри записи ломают `NO_PROXY` целиком, такие записи отбрасываются.
+ */
+export function parseNoProxy(raw: unknown): { entries: string[]; rejected: string[] } {
+  if (!Array.isArray(raw)) return { entries: [], rejected: ['не список строк'] }
+  const entries: string[] = []
+  const rejected: string[] = []
+  for (const item of raw) {
+    const s = typeof item === 'string' ? item.trim() : ''
+    if (!s || /[\s,]/.test(s)) {
+      rejected.push(JSON.stringify(item))
+      continue
+    }
+    const entry = s.startsWith('*.') ? s.slice(1) : s
+    if (!entries.includes(entry)) entries.push(entry)
+  }
+  return { entries, rejected }
+}
+
 export function validateConfig(raw: unknown): { config: PultConfig; warnings: string[] } {
   const warnings: string[] = []
   const cfg = defaultConfig()
@@ -200,6 +226,14 @@ export function validateConfig(raw: unknown): { config: PultConfig; warnings: st
         if (cfg.network[p].mode !== 'off' && !hasProxy) {
           warnings.push(`config.json: network.${p}.mode = ${cfg.network[p].mode} без proxy — прокси нет, взят off (прямой путь)`)
           cfg.network[p].mode = 'off'
+        }
+        const noProxy = e['noProxy']
+        if (noProxy !== undefined) {
+          const parsed = parseNoProxy(noProxy)
+          if (parsed.entries.length > 0) cfg.network[p].noProxy = parsed.entries
+          for (const bad of parsed.rejected) {
+            warnings.push(`config.json: network.${p}.noProxy: ${bad} — пропущено`)
+          }
         }
       }
     }
