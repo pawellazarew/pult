@@ -30,7 +30,7 @@ import { acquireLock } from '../dist/core/lock.js'
 import { load, queryState, start } from '../dist/service/manager.js'
 import { renderService } from '../dist/service/render.js'
 import { stopDaemon } from '../dist/service/stop.js'
-import { FAKE_CLAUDE, FAKE_CODEX, sleep, startTestDaemon, tempHome, waitFor } from './helpers.js'
+import { FAKE_CLAUDE, FAKE_CODEX, reapFakeSupervisors, removeTree, sleep, startTestDaemon, tempHome, waitFor } from './helpers.js'
 
 const CLI = fileURLToPath(new URL('../dist/cli/main.js', import.meta.url))
 const ROOT = fileURLToPath(new URL('../', import.meta.url)).replace(/\/$/, '')
@@ -133,8 +133,9 @@ async function teardown(svc: Svc): Promise<void> {
   for (const pid of pids) { try { process.kill(pid, 'SIGKILL') } catch { /* ушёл */ } }
   await waitFor(() => !existsSync(svc.paths.lock) && pids.every((p) => !alive(p)), 10_000)
   // Надзиратель фальшивого launchd отсоединён и после смерти процесса службы ещё пишет состояние и
-  // журнал в этот дом — rmSync ловил ENOTEMPTY (флак CI). Повтор на ENOTEMPTY Node делает сам.
-  rmSync(svc.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  // журнал в этот дом: стирать дом можно только после его выхода (ENOTEMPTY на CI macOS, 22.10.2026).
+  await reapFakeSupervisors(svc.log)
+  removeTree(svc.dir)
 }
 
 for (const platform of ['darwin', 'linux'] as const) {
@@ -770,7 +771,8 @@ describe('pult daemon stop посреди старта демона', () => {
       assert.ok(!existsSync(svc.paths.lock), 'lock не снят')
     } finally {
       if (holder.exitCode === null && holder.signalCode === null) holder.kill('SIGKILL')
-      rmSync(svc.dir, { recursive: true, force: true })
+      await reapFakeSupervisors(svc.log)
+      removeTree(svc.dir)
     }
   })
 })
@@ -1058,7 +1060,7 @@ describe('launchd: служба установлена, но не загруже
     }
   })
 
-  it('lock держит живой демон, поднятый напрямую, — службу поверх него не грузим', () => {
+  it('lock держит живой демон, поднятый напрямую, — службу поверх него не грузим', async () => {
     // Иначе процесс службы выходил бы с кодом 3, launchd поднимал бы его каждые 10 с, а после
     // `pult daemon stop` поднял бы демона, которого просили остановить.
     const svc = makeSvc('darwin')
@@ -1085,7 +1087,8 @@ describe('launchd: служба установлена, но не загруже
       assert.equal(st.ok, true, st.detail)
       assert.ok(called(svc, (a) => a[0] === 'bootstrap'))
     } finally {
-      rmSync(svc.dir, { recursive: true, force: true })
+      await reapFakeSupervisors(svc.log)
+      removeTree(svc.dir)
     }
   })
 
@@ -1177,7 +1180,7 @@ describe('launchd: bootout возвращается раньше, чем слу�
     })
   }
 
-  it('служба так и не выгрузилась — честный отказ с причиной, а не bootstrap поверх живой', () => {
+  it('служба так и не выгрузилась — честный отказ с причиной, а не bootstrap поверх живой', async () => {
     const svc = makeSvc('darwin')
     try {
       mkdirSync(svc.svcDir, { recursive: true })
@@ -1197,7 +1200,8 @@ describe('launchd: bootout возвращается раньше, чем слу�
       assert.match(again.steps.at(-1)?.detail ?? '', /служба не выгрузилась за \d+ с после bootout/)
       assert.ok(!again.steps.some((s) => s.cmd.startsWith('launchctl bootstrap')), 'bootstrap поверх невыгруженной службы')
     } finally {
-      rmSync(svc.dir, { recursive: true, force: true })
+      await reapFakeSupervisors(svc.log)
+      removeTree(svc.dir)
     }
   })
 })

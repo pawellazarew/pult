@@ -11,7 +11,7 @@ import { describe, it } from 'node:test'
 import { connectClient } from '../dist/cli/client.js'
 import { ClientError } from '../dist/cli/client.js'
 import type { DaemonStatus, UpdateStatus } from '../dist/core/rpc.js'
-import { APPLY_PASS, applyArgv, applyEnv, CHECK_INTERVAL_MS, CHECK_JITTER_MS, createUpdateChecker, FIRST_CHECK_MS, MIN_AUTO_GAP_MS, openUpdateLog } from '../dist/update/checker.js'
+import { APPLY_PASS, ApplyError, applyArgv, applyEnv, CHECK_INTERVAL_MS, CHECK_JITTER_MS, createUpdateChecker, FIRST_CHECK_MS, MIN_AUTO_GAP_MS, openUpdateLog } from '../dist/update/checker.js'
 import type { ApplyChild, CheckerOptions } from '../dist/update/checker.js'
 import type { HttpGet } from '../dist/update/fetch.js'
 import { publicOf, signEnvelope } from '../dist/update/manifest.js'
@@ -364,6 +364,25 @@ describe('ревью M8c: гонки, откат, рабочая копия, п�
       assert.equal(spawned, 1)
     } finally {
       c.stop()
+      home.remove()
+    }
+  })
+
+  it('stop() во время проверки: итог не пишется в дом, «Обновить» ребёнка не запускает', async () => {
+    const home = tempHome()
+    let spawned = 0
+    const slow: HttpGet = async (url, signal) => { await sleep(80); return channel(() => '0.2.28').http(url, signal) }
+    const c = checker(home, { http: slow, spawnApply: () => { spawned++; return new FakeChild() } })
+    try {
+      const checking = c.check()
+      const applying = c.apply(false)
+      await sleep(10)
+      c.stop()
+      await checking
+      await assert.rejects(applying, (e: Error) => e instanceof ApplyError && /останавливается/.test(e.message))
+      assert.equal(existsSync(home.paths.updateCheck), false, 'проверка после stop() записала update-check.json')
+      assert.equal(spawned, 0)
+    } finally {
       home.remove()
     }
   })

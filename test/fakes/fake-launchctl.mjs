@@ -23,7 +23,7 @@ import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { alive, fail, killJob, loadState, logArgv, sleepSync, withState } from './fake-svc-lib.mjs'
+import { alive, fail, killJob, loadState, logArgv, logEvent, sleepSync, withState } from './fake-svc-lib.mjs'
 
 logArgv('launchctl')
 const argv = process.argv.slice(2)
@@ -109,6 +109,9 @@ function startJob(label, { ifIdle = false } = {}) {
     env: { ...process.env, FAKE_JOB: JSON.stringify({ label, gen, program: p.program, env: p.env, cwd: p.cwd, logPath: p.logPath }) },
   })
   sup.unref()
+  // pid надзирателя — в журнал до выхода команды: он отсоединён и пишет в дом теста и после смерти
+  // процесса службы, поэтому тест перед стиранием дома ждёт его выхода (test/helpers.ts, reapFakeSupervisors).
+  if (sup.pid) logEvent('launchctl', 'supervisor', { label, gen, pid: sup.pid })
   for (let i = 0; i < 400; i++) {
     const j = loadState().jobs[label]
     if (!j || j.gen !== gen || (j.runs || 0) > runs) return

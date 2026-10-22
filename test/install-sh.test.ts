@@ -13,7 +13,7 @@ import { join } from 'node:path'
 import { after, before, describe, it } from 'node:test'
 import { platformKey, runtimeName } from '../dist/update/runtime.js'
 import type { PlatformKey } from '../dist/update/runtime.js'
-import { FAKE_CLAUDE, FAKE_CODEX, waitFor } from './helpers.js'
+import { FAKE_CLAUDE, FAKE_CODEX, reapFakeSupervisors, removeTree, waitFor } from './helpers.js'
 import { BROKEN_DAEMON, fakeNodeTarball, fakePin, NODE_DIR, packPult, ROOT, runProc } from './pack-helpers.js'
 import type { Run } from './pack-helpers.js'
 
@@ -84,7 +84,9 @@ async function teardown(box: Box, pultHome: string): Promise<void> {
   }
   for (const pid of box.pids) { try { process.kill(pid, 'SIGKILL') } catch { /* ушёл */ } }
   await waitFor(() => !existsSync(join(pultHome, 'run', 'pultd.lock')) && [...box.pids].every((p) => !alive(p)), 10_000)
-  rmSync(box.dir, { recursive: true, force: true })
+  // Надзиратель фальшивого launchd пишет в этот дом и после смерти процесса службы — сначала его выход.
+  await reapFakeSupervisors(join(box.dir, 'fake.jsonl'))
+  removeTree(box.dir)
 }
 
 describe('install.sh: скачивание только по https', () => {

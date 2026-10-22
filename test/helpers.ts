@@ -3,7 +3,8 @@
 //   2. путь сокета короткий: на macOS у sun_path предел 104 байта, и mkdtemp в /var/folders
 //      вместе с именем теста туда почти упирается.
 
-import { mkdtempSync, rmSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import net from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -48,7 +49,7 @@ export function tempHome(): TempHome {
     logger,
     remove() {
       logger.close()
-      rmSync(dir, { recursive: true, force: true })
+      removeTree(dir)
     },
   }
 }
@@ -149,4 +150,62 @@ export async function waitFor(fn: () => boolean | Promise<boolean>, timeoutMs = 
     await sleep(20)
   }
   return false
+}
+
+/**
+ * Стереть временный каталог теста. Повторяется rmSync ЦЕЛИКОМ, а не его `maxRetries`: Node 22 (rimraf на JS)
+ * обходит детей один раз и повторяет только rmdir самого каталога — файл, который запоздалый писатель создал
+ * после обхода, не уходит ни с одной попытки, и всё кончается ENOTEMPTY (CI macOS, 22.10.2026). Повтор не
+ * лечит причину — писателей тест обязан дождаться сам (см. reapFakeSupervisors) — а страхует от неё.
+ */
+export function removeTree(dir: string, tries = 20): void {
+  for (let i = 1; ; i++) {
+    try {
+      rmSync(dir, { recursive: true, force: true })
+      return
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code
+      if (i >= tries || (code !== 'ENOTEMPTY' && code !== 'EEXIST' && code !== 'EBUSY')) throw e
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50)
+    }
+  }
+}
+
+/**
+ * pid надзирателей фальшивого launchd (test/fakes/fake-launchd-job.mjs) из журнала FAKE_SVC_LOG: fake-launchctl
+ * пишет туда событие `supervisor` при запуске каждого поколения — до того, как сам выходит.
+ */
+export function fakeSupervisorPids(log: string): number[] {
+  if (!existsSync(log)) return []
+  const pids: number[] = []
+  for (const line of readFileSync(log, 'utf8').split('\n')) {
+    if (!line) continue
+    try {
+      const e = JSON.parse(line) as { event?: string; pid?: unknown }
+      if (e.event === 'supervisor' && typeof e.pid === 'number') pids.push(e.pid)
+    } catch { /* строка дописывается прямо сейчас */ }
+  }
+  return pids
+}
+
+const pidAlive = (pid: number): boolean => { try { process.kill(pid, 0); return true } catch (e) { return (e as NodeJS.ErrnoException).code === 'EPERM' } }
+
+/**
+ * Дождаться выхода всех надзирателей фальшивого launchd этого дома. Надзиратель отсоединён и после смерти
+ * процесса службы ещё пишет в дом теста: блокировку и состояние (FAKE_SVC_STATE) и событие `exit` в журнал.
+ * Стереть дом раньше — его запись создаёт файл посреди rmSync (ENOTEMPTY). Служба снята, процесс убит —
+ * надзиратель уходит сам за доли секунды (или через ThrottleInterval); не ушёл за `timeoutMs` — SIGKILL.
+ */
+export async function reapFakeSupervisors(log: string, timeoutMs = 10_000): Promise<void> {
+  const supervisors = (): number[] => {
+    const pids = fakeSupervisorPids(log).filter(pidAlive)
+    if (!pids.length) return []
+    // Живой pid — ещё не значит «наш надзиратель»: номер мог достаться чужому процессу. Сверка по команде.
+    const r = spawnSync('ps', ['-p', pids.join(','), '-o', 'pid=,command='], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin' } })
+    return (r.stdout ?? '').split('\n').filter((l) => l.includes('fake-launchd-job')).map((l) => Number.parseInt(l.trim(), 10))
+  }
+  const pids = supervisors()
+  if (await waitFor(() => pids.every((p) => !pidAlive(p)), timeoutMs)) return
+  for (const p of supervisors()) { try { process.kill(p, 'SIGKILL') } catch { /* ушёл */ } }
+  await waitFor(() => pids.every((p) => !pidAlive(p)), 2_000)
 }

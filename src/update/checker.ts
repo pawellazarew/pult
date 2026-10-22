@@ -278,6 +278,9 @@ export function createUpdateChecker(o: CheckerOptions): UpdateChecker {
   }
 
   const persist = (): void => {
+    // Проверка, начатая до stop() и кончившаяся после, в PULT_HOME не пишет: демон остановлен, его дом
+    // уже могут стирать (тесты) или занимать новой версией (pult update) — запоздалый файл там лишний.
+    if (stopped) return
     try {
       atomicWrite(o.paths.updateCheck, JSON.stringify({ schema: 1, ...saved }, null, 2) + '\n', 0o600)
     } catch (e) {
@@ -373,6 +376,8 @@ export function createUpdateChecker(o: CheckerOptions): UpdateChecker {
     let st = status()
     // Окно жмёт «Обновить» по тому, что видело; итог мог устареть или его ещё не было — проверить заново.
     if (!st.available) st = await check()
+    // Демон остановили, пока шла проверка: ребёнка `pult update` от остановленного демона не запускать.
+    if (stopped) throw new ApplyError('демон останавливается — обновление не запущено')
     // Пока ждали проверку, состояние могло смениться (запуск из poke) — второй ребёнок не нужен.
     if ((apply as UpdateApplyState).state === 'applying') return { applying: true, to: (apply as { to: string }).to }
     if (!st.available || !st.latest) {

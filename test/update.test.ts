@@ -28,7 +28,7 @@ import { stopRunningDaemon } from '../dist/service/install.js'
 import { versionDoctorItems } from '../dist/update/doctor.js'
 import { daemonStatusOnce } from '../dist/update/probe.js'
 import { compareVersions, isVersionName } from '../dist/update/versions.js'
-import { FAKE_CLAUDE, FAKE_CODEX, waitFor } from './helpers.js'
+import { FAKE_CLAUDE, FAKE_CODEX, reapFakeSupervisors, removeTree, waitFor } from './helpers.js'
 import { BROKEN_DAEMON, CLI, CRASH_AFTER_HELLO, fakeNodeTarball, fakePin, NODE_DIR, packPult, ROOT, runProc } from './pack-helpers.js'
 import { platformKey, runtimeName } from '../dist/update/runtime.js'
 import type { PlatformKey } from '../dist/update/runtime.js'
@@ -105,8 +105,9 @@ async function teardown(h: Home): Promise<void> {
   for (const pid of h.pids) { try { process.kill(pid, 'SIGKILL') } catch { /* ушёл */ } }
   await waitFor(() => !existsSync(h.paths.lock) && [...h.pids].every((p) => !alive(p)), 10_000)
   // Надзиратель фальшивого launchd отсоединён и после смерти процесса службы ещё пишет состояние и
-  // журнал в этот дом — rmSync ловил ENOTEMPTY (флак CI). Повтор на ENOTEMPTY Node делает сам.
-  rmSync(h.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  // журнал в этот дом: стирать дом можно только после его выхода (ENOTEMPTY на CI macOS, 22.10.2026).
+  await reapFakeSupervisors(join(h.dir, 'fake.jsonl'))
+  removeTree(h.dir)
 }
 
 const state = (h: Home): { current: string | null; previous: string | null; bad: string[]; last: { result: string } | null } =>
