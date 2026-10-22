@@ -146,9 +146,9 @@ export function draftError(d: NewSessionSettings): string | null {
   }
 }
 
-/** Параметры `settings.set`. */
-export function settingsParams(d: NewSessionSettings): { newSession: NewSessionSettings } {
-  return { newSession: d }
+/** Параметры `settings.set`; `updatesCheck` — флаг автопроверки обновлений, только когда он сменился. */
+export function settingsParams(d: NewSessionSettings, updatesCheck?: boolean): { newSession: NewSessionSettings; updates?: { check: boolean } } {
+  return { newSession: d, ...(updatesCheck !== undefined ? { updates: { check: updatesCheck } } : {}) }
 }
 
 // --- старое окно -------------------------------------------------------------------------------------

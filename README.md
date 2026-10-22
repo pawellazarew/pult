@@ -216,6 +216,15 @@ conversation footer, or run `pult agent set <name> [--model M] [--effort E] [--a
 
 ## Updates
 
+**In the window: Settings (⌘,) → Обновления (Updates) → «Проверить сейчас» (Check now) / «Обновить до X» (Update to X).**
+The section shows the installed package and window versions, the channel status (up to date, a new version with a
+«Что нового» (What's new) link, or the error) and when the channel was last checked. «Обновить» works like the banner at the top
+of the window: running turns finish first (or press «Сейчас» to not wait), then the daemon updates and restarts, and the
+window reconnects by itself. The toggle «Проверять обновления автоматически» (check automatically) is
+`updates.check` in `config.json`.
+
+In the terminal:
+
 ```sh
 pult update              # check, download, verify, install, restart the daemon
 pult update --check      # only check: exit 0 — up to date, 10 — an update is available
@@ -225,8 +234,9 @@ pult update --to <ver>   # switch back to a version from `pult update --list`
 
 - `latest.json` of the latest GitHub release is signed with Ed25519 (the public key is built into Pult); the package
   must match the size and sha256 in the signed manifest. Anything else is refused and nothing is installed.
-- The daemon checks once a day. In the window a new version shows up as a quiet line at the top. Running turns are not
-  cut off, and a version that fails its start-up check is rolled back automatically.
+- The daemon checks a minute after start, then every 6 hours, and when the window comes back to the screen if the last
+  check is older than an hour (at most once per 10 minutes). In the window a new version shows up as a quiet line at the
+  top. Running turns are not cut off, and a version that fails its start-up check is rolled back automatically.
 - `Pult.app` is not replaced by `pult update` yet: download `Pult-arm64.zip` again as in [Install](#2-the-window-macos-apple-silicon).
   Automatic window replacement is planned for a later release. If a new Pult needs a newer window, the window says so.
 
@@ -242,8 +252,10 @@ Pult has no telemetry. Besides your agents' own traffic, it makes these requests
   your account. The list is `guardCountries` in `~/.pult/config.json`.
 - **Session titles.** An untitled session names itself from your first message with one cheap `haiku` request on your
   Claude subscription. Turn it off with `"autoTitle": false` in `config.json`.
-- **Update check.** One `GET` of `latest.json` from github.com a day, with the header `user-agent: pult/<version>` and
-  no identifiers. Turn it off with `{ "updates": { "check": false } }`. The package is downloaded only when you update.
+- **Update check.** One `GET` of `latest.json` from github.com every 6 hours (and when the window returns after an hour
+  or more, at most once per 10 minutes), with the header `user-agent: pult/<version>` and no identifiers. Turn it off in
+  Settings (⌘,) → Обновления or with `{ "updates": { "check": false } }`; «Проверить сейчас» still works. The package is
+  downloaded only when you update.
 
 After editing `~/.pult/config.json`, run `pult daemon stop`; the next command starts the daemon with the new settings.
 

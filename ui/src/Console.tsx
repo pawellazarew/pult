@@ -22,7 +22,8 @@ import type { SettingsReply } from './model/newAgent.js'
 import type { NewSessionSettings } from '../../src/sessions/settings.js'
 import { APPROVAL_FULL_WARNING } from './model/newAgent.js'
 import { UpdateBanner } from './components/UpdateBanner.js'
-import { addDismissed, applyErrorText, updateBanner, windowVersionFromUA } from './model/update.js'
+import { addDismissed, applyErrorText, checkErrorText, FOCUS_CHECK_STALE_MS, focusCheckWanted, updateBanner, upToDateNote, windowVersionFromUA } from './model/update.js'
+import type { UpdateStatus } from '../../src/core/rpc.js'
 import type { McpListing } from './model/mcp.js'
 import { connView } from './lib/conn.js'
 import { agentLabel, buildAgents, statusView, waitingCount } from './model/agents.js'
@@ -111,6 +112,12 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   // Скрытые крестиком «Доступна X» и «не встало» — списком: скрыть одно не должно воскрешать другое.
   const [updDismissed, setUpdDismissed] = useState<string[]>(() => store.list('pult.updateDismissed'))
   const [updBusy, setUpdBusy] = useState(false)
+  // «Настройки» → «Обновления»: идёт ли «Проверить сейчас», чем кончился сам вызов, отказ «Обновить» оттуда.
+  const [updCheck, setUpdCheck] = useState<{ checking: boolean; error: string | null; applyError: string | null }>({ checking: false, error: null, applyError: null })
+  // Короткая плашка «Установлена последняя версия (X)» после ручной проверки, которой нечего ставить.
+  const [updNote, setUpdNote] = useState<string | null>(null)
+  const updNoteTimer = useRef<number | null>(null)
+  useEffect(() => () => { if (updNoteTimer.current !== null) clearTimeout(updNoteTimer.current) }, [])
   const windowVersion = useMemo(() => windowVersionFromUA(typeof navigator !== 'undefined' ? navigator.userAgent : null), [])
   // О2: отложенные ⌃⌘L (только в окне) и «Повторить» в пути.
   const [snoozed, setSnoozed] = useState<Snoozed>({})
@@ -192,6 +199,18 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     } catch { /* см. выше */ }
   }, [bridge])
 
+  const statusRef = useRef<DaemonStatus | null>(null)
+  useEffect(() => { statusRef.current = status }, [status])
+  /** Свежий статус канала — сразу в `daemon.status.update`: плашка и «Настройки» видят его без опроса. */
+  const putUpdate = useCallback((u: UpdateStatus): void => { setStatus((s) => (s ? { ...s, update: u } : s)) }, [])
+  // Снимок статуса застал проверку канала («Проверяю…») — переспросить через секунду, а не ждать опроса раз в 15 с.
+  const refreshStatusRef = useRef<(() => Promise<void>) | null>(null)
+  const updChecking = status?.update?.checking === true
+  useEffect(() => {
+    if (!updChecking) return
+    const t = window.setTimeout(() => { void refreshStatusRef.current?.() }, 1_000)
+    return () => clearTimeout(t)
+  }, [updChecking, status])
   const refreshStatus = useCallback(async (): Promise<void> => {
     try {
       const st = (await bridge.call('daemon.status')) as DaemonStatus
@@ -200,6 +219,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     } catch { /* см. выше */ }
   }, [bridge])
 
+  refreshStatusRef.current = refreshStatus
   const runDoctor = useCallback(async (): Promise<void> => {
     setDoctor((d) => ({ ...d, loading: true, error: null }))
     try {
@@ -285,11 +305,16 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
       if (document.visibilityState === 'hidden') return
       setNow(Date.now())
       void refreshStatus(); void refreshAgents(); void refreshPerms()
+      // Окно вернулось, а канал давно не проверяли — попросить демона. Решает он: автопроверка включена,
+      // не чаще раза в 10 минут на всех. Старая оболочка (без update.check) молча откажет.
+      if (focusCheckWanted(statusRef.current?.update, Date.now())) {
+        bridge.call('update.check', { ifOlderThanMs: FOCUS_CHECK_STALE_MS }).then((u) => { putUpdate(u as UpdateStatus); void refreshStatus() }, () => { /* не вышло — опрос статуса покажет */ })
+      }
     }
     window.addEventListener('focus', refresh)
     document.addEventListener('visibilitychange', refresh)
     return () => { window.removeEventListener('focus', refresh); document.removeEventListener('visibilitychange', refresh) }
-  }, [refreshStatus, refreshAgents, refreshPerms])
+  }, [bridge, putUpdate, refreshStatus, refreshAgents, refreshPerms])
 
   // Старт без доигрывания журнала (0.2.19, model/state.ts): снимок, когда связь поднялась, —
   // и поток с его курсора. Снимок ложится ПОВЕРХ того, что уже пришло из `perm.list`/`agent.list`.
@@ -755,12 +780,15 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
       setBannerError(settingsErrorText(isBridgeError(e) ? e.code : null, errorText(e)))
     })
   }
-  const saveSettings = async (next: NewSessionSettings): Promise<string | null> => {
+  const saveSettings = async (next: NewSessionSettings, autoCheck: boolean | null): Promise<string | null> => {
+    // Флаг автопроверки — только если сменился: старый демон `updates` не принимает, и зря трогать файл незачем.
+    const updates = autoCheck !== null && settings?.updates && autoCheck !== settings.updates.check ? autoCheck : undefined
     try {
-      setSettings(await bridge.call('settings.set', settingsParams(next)) as SettingsReply)
+      setSettings(await bridge.call('settings.set', settingsParams(next, updates)) as SettingsReply)
     } catch (e) {
       return settingsErrorText(isBridgeError(e) ? e.code : null, errorText(e))
     }
+    if (updates !== undefined) void refreshStatus()
     setModal(null)
     return null
   }
@@ -772,9 +800,41 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   // «Обновить» / «Сейчас» / «Повторить»: дальше демон сам — ждёт ходы или запускает `pult update` и перезапускается.
   const applyUpdate = (force: boolean): void => {
     setUpdBusy(true)
+    setUpdCheck((c) => ({ ...c, applyError: null }))
     bridge.call('update.apply', force ? { force: true } : {})
-      .then(() => refreshStatus(), (e: unknown) => setBannerError(isBridgeError(e) ? applyErrorText(e.code, e.message) : applyErrorText(null, errorText(e))))
+      .then(() => refreshStatus(), (e: unknown) => {
+        const text = isBridgeError(e) ? applyErrorText(e.code, e.message) : applyErrorText(null, errorText(e))
+        setBannerError(text)
+        setUpdCheck((c) => ({ ...c, applyError: text }))
+      })
       .finally(() => setUpdBusy(false))
+  }
+  // «Проверить сейчас» (⌘, → «Обновления»): ручная проверка идёт в сеть всегда. Есть что ставить — плашка сразу
+  // (и снова, если эту версию скрывали крестиком: человек сам спросил); нечего — короткое «последняя версия».
+  const checkUpdates = (): void => {
+    if (updCheck.checking) return
+    setUpdCheck({ checking: true, error: null, applyError: null })
+    setUpdNote(null)
+    bridge.call('update.check').then((r) => {
+      const u = r as UpdateStatus
+      putUpdate(u)
+      void refreshStatus()
+      setNow(Date.now())
+      setUpdCheck({ checking: false, error: null, applyError: null })
+      if (u.available && u.latest && updDismissed.includes(u.latest.version)) {
+        const next = updDismissed.filter((k) => k !== u.latest?.version)
+        setUpdDismissed(next)
+        store.set('pult.updateDismissed', JSON.stringify(next))
+      }
+      const note = upToDateNote(u)
+      if (note) {
+        setUpdNote(note)
+        if (updNoteTimer.current !== null) clearTimeout(updNoteTimer.current)
+        updNoteTimer.current = window.setTimeout(() => { updNoteTimer.current = null; setUpdNote(null) }, 6_000)
+      }
+    }, (e: unknown) => {
+      setUpdCheck({ checking: false, error: checkErrorText(isBridgeError(e) ? e.code : null, errorText(e)), applyError: null })
+    })
   }
   const updateView = updateBanner(status?.update, windowVersion, updDismissed)
 
@@ -917,6 +977,13 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
           onNotes={(url) => { void followLink(bridge, url, url) }}
           onDismiss={(v) => { const next = addDismissed(updDismissed, v); setUpdDismissed(next); store.set('pult.updateDismissed', JSON.stringify(next)) }} />
       )}
+      {!view.banner && !updateView && updNote && (
+        <div className="banner banner-update" role="status" data-testid="update-latest">
+          <Icon name="info" />
+          <span className="grow">{updNote}</span>
+          <button type="button" className="btn btn-ghost btn-sm" title="Скрыть" aria-label="Скрыть" onClick={() => setUpdNote(null)}><Icon name="x" /></button>
+        </div>
+      )}
       {!view.banner && bannerError && (
         <div className="banner banner-wait" role="alert" data-testid="action-error">
           <Icon name="alert" />
@@ -1007,7 +1074,13 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
       )}
       {modal?.type === 'help' && <HotkeysHelp onClose={() => setModal(null)} />}
       {modal?.type === 'settings' && (
-        <SettingsDialog settings={settings?.newSession ?? null} catalog={providers} onSave={saveSettings} onClose={() => setModal(null)} />
+        <SettingsDialog settings={settings?.newSession ?? null} catalog={providers} onSave={saveSettings} onClose={() => setModal(null)}
+          autoCheck={settings?.updates?.check ?? null}
+          updates={{
+            status: status?.update, packageVersion: status?.update?.current ?? (conn.state === 'up' ? conn.daemon.version : null), windowVersion,
+            checking: updCheck.checking, error: updCheck.error, applyError: updCheck.applyError, busy: updBusy, now,
+            onCheck: checkUpdates, onApply: applyUpdate, onNotes: (url) => { void followLink(bridge, url, url) },
+          }} />
       )}
       {modal?.type === 'configure' && (
         <Confirm testId="confirm-configure" danger

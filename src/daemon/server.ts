@@ -45,7 +45,7 @@ import { createAutoTitler } from '../sessions/autotitle.js'
 import { createProviderCatalog, codexMetadataRequest, fetchCodexModels } from '../env/providers.js'
 import type { ProviderModel } from '../env/providers.js'
 import { nextLastUsed, parseLastUsed, parseNewSession, ConfigureError } from '../sessions/settings.js'
-import type { LastUsed, ModelChoice } from '../sessions/settings.js'
+import type { LastUsed, ModelChoice, NewSessionSettings } from '../sessions/settings.js'
 import { atomicWrite } from '../service/fsutil.js'
 import { createExternalSessions } from '../sessions/external.js'
 import { createProjectStore, ProjectError } from '../projects/store.js'
@@ -66,7 +66,7 @@ import type { BrowserInstaller, InstallResult } from '../mcp/browser.js'
 import { browserDoctorItems, bypassDoctorItems, mcpDoctorItems } from '../mcp/doctor.js'
 import { createMcpExtras } from '../mcp/session.js'
 import { listServers, RESERVED_MCP_NAMES } from '../mcp/servers.js'
-import { MCP_SERVER_NAME_RE, MCP_SERVERS_MAX, writeMcpSelection, writeNewSession } from '../core/config.js'
+import { MCP_SERVER_NAME_RE, MCP_SERVERS_MAX, writeMcpSelection, writeNewSession, writeUpdatesCheck } from '../core/config.js'
 import type { SessionBrowser, SessionRecord, SessionStatus } from '../sessions/registry.js'
 import { ApplyError, createUpdateChecker } from '../update/checker.js'
 import type { CheckerOptions, UpdateChecker } from '../update/checker.js'
@@ -388,7 +388,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     runningTurns: () => new Set([...manager.list().filter((r) => RUNNING_TURN.has(r.lastStatus)).map((r) => r.name), ...manager.startingTurns()]).size,
     onApplyEnd: () => { manager.resumeQueues() },
     ...(opts.testMode && !opts.updates
-      ? { schedule: config.updates.check && !!process.env['PULT_TEST_UPDATE_DIR'], ...(Number.isFinite(testFirst) && testFirst >= 0 ? { firstDelayMs: testFirst } : {}) }
+      ? { schedule: !!process.env['PULT_TEST_UPDATE_DIR'], ...(Number.isFinite(testFirst) && testFirst >= 0 ? { firstDelayMs: testFirst } : {}) }
       : {}),
     ...(opts.updates ?? {}),
   })
@@ -430,7 +430,8 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
   const readLastUsed = (): LastUsed => {
     try { return parseLastUsed(JSON.parse(readFileSync(paths.newSessionLast, 'utf8'))) } catch { return {} }
   }
-  const settingsReply = (): Record<string, unknown> => ({ newSession: config.newSession, lastUsed: readLastUsed() })
+  // `updates` — только флаг автопроверки: адрес канала окну не нужен и окном не пишется.
+  const settingsReply = (): Record<string, unknown> => ({ newSession: config.newSession, lastUsed: readLastUsed(), updates: { check: config.updates.check } })
   const projects = createProjectStore(join(paths.home, 'projects.json'))
   // `PULT_TEST_PROVIDERS=run` (только вместе с PULT_TEST=1): проверка входа идёт по-настоящему — в фальшивые CLI
   // из PULT_CLAUDE_BIN / PULT_CODEX_BIN. Нужна кадрам README (shell/test/readme): шапка «готов», а не «ошибка».
@@ -597,20 +598,41 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
       case 'settings.get':
         return settingsReply()
       case 'settings.set': {
-        // Окно пишет ТОЛЬКО раздел `newSession` (и будущие разделы интерфейса): сеть, прокси, команды и всё прочее
-        // config.json отсюда не достать. Разбор строгий — кривое поле отказывает целиком, файл не трогается.
+        // Окно пишет ТОЛЬКО раздел `newSession` и флаг `updates.check` (автопроверка обновлений): сеть, прокси,
+        // команды, адрес канала (`updates.url`) и всё прочее config.json отсюда не достать. Разбор строгий —
+        // кривое поле отказывает целиком, и тогда файл не трогается вовсе.
         const keys = Object.keys(p)
-        if (!keys.length || keys.some((k) => k !== 'newSession')) {
-          throw new ManagerError(ERROR_CODES.invalidParams, 'settings.set: можно менять только newSession')
+        if (!keys.length || keys.some((k) => k !== 'newSession' && k !== 'updates')) {
+          throw new ManagerError(ERROR_CODES.invalidParams, 'settings.set: можно менять только newSession и updates.check')
         }
-        let value
-        try { value = parseNewSession(p['newSession'], true).value } catch (e) {
-          if (e instanceof ConfigureError) throw new ManagerError(ERROR_CODES.invalidParams, `settings.set: ${e.message}`)
-          throw e
+        let ns: NewSessionSettings | undefined
+        if (p['newSession'] !== undefined) {
+          try { ns = parseNewSession(p['newSession'], true).value } catch (e) {
+            if (e instanceof ConfigureError) throw new ManagerError(ERROR_CODES.invalidParams, `settings.set: ${e.message}`)
+            throw e
+          }
         }
-        try { writeNewSession(paths.config, value) } catch (e) { throw new ManagerError(ERROR_CODES.internal, (e as Error).message) }
-        config.newSession = value
-        logger.info('настройки новой сессии записаны', { newSession: value })
+        let check: boolean | undefined
+        if (p['updates'] !== undefined) {
+          const u = p['updates']
+          const uk = u !== null && typeof u === 'object' && !Array.isArray(u) ? Object.keys(u) : null
+          if (!uk || uk.length !== 1 || uk[0] !== 'check' || typeof (u as Record<string, unknown>)['check'] !== 'boolean') {
+            throw new ManagerError(ERROR_CODES.invalidParams, 'settings.set: updates — только {check: true|false}')
+          }
+          check = (u as { check: boolean }).check
+        }
+        try {
+          if (ns !== undefined) writeNewSession(paths.config, ns)
+          if (check !== undefined) writeUpdatesCheck(paths.config, check)
+        } catch (e) { throw new ManagerError(ERROR_CODES.internal, (e as Error).message) }
+        if (ns !== undefined) {
+          config.newSession = ns
+          logger.info('настройки новой сессии записаны', { newSession: ns })
+        }
+        if (check !== undefined) {
+          config.updates.check = check
+          updater.setEnabled(check)
+        }
         return settingsReply()
       }
       case 'project.list':
@@ -954,9 +976,17 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
         send({ id: req.id, result: updater.status() })
         return
 
-      case 'update.check':
-        send({ id: req.id, result: await updater.check() })
+      case 'update.check': {
+        // Без параметров — ручная «Проверить сейчас». `ifOlderThanMs` — просьба окна по фокусу: демон сам решает,
+        // идти ли в сеть (автопроверка включена, последняя попытка старше, не чаще раза в 10 минут).
+        const older = params['ifOlderThanMs']
+        if (older !== undefined && (typeof older !== 'number' || !Number.isFinite(older) || older < 0)) {
+          fail(ERROR_CODES.invalidParams, 'update.check: ifOlderThanMs — неотрицательное число')
+          return
+        }
+        send({ id: req.id, result: await (older !== undefined ? updater.checkIfStale(older) : updater.check()) })
         return
+      }
 
       case 'update.apply': {
         if (params['force'] !== undefined && typeof params['force'] !== 'boolean') { fail(ERROR_CODES.invalidParams, 'update.apply: force — true или false'); return }

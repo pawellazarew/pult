@@ -11,7 +11,7 @@ import { describe, it } from 'node:test'
 import { connectClient } from '../dist/cli/client.js'
 import { ClientError } from '../dist/cli/client.js'
 import type { DaemonStatus, UpdateStatus } from '../dist/core/rpc.js'
-import { APPLY_PASS, applyArgv, applyEnv, createUpdateChecker, openUpdateLog } from '../dist/update/checker.js'
+import { APPLY_PASS, applyArgv, applyEnv, CHECK_INTERVAL_MS, CHECK_JITTER_MS, createUpdateChecker, FIRST_CHECK_MS, MIN_AUTO_GAP_MS, openUpdateLog } from '../dist/update/checker.js'
 import type { ApplyChild, CheckerOptions } from '../dist/update/checker.js'
 import type { HttpGet } from '../dist/update/fetch.js'
 import { publicOf, signEnvelope } from '../dist/update/manifest.js'
@@ -541,6 +541,163 @@ describe('пока ставится обновление, новые ходы н
       c.close()
       await d.stop('тест')
       rmSync(cwd, { recursive: true, force: true })
+      home.remove()
+    }
+  })
+})
+
+describe('обновление из окна: срок 6 ч, проверка по фокусу, флаг из «Настроек»', () => {
+  const min = 60_000
+  const hour = 60 * min
+
+  it('сроки по умолчанию: первая через 60 с, дальше раз в 6 ч ± 30 мин; удачная ручная сдвигает плановую', async () => {
+    assert.equal(FIRST_CHECK_MS, 60_000)
+    assert.equal(CHECK_INTERVAL_MS, 6 * hour)
+    assert.equal(CHECK_JITTER_MS, 30 * min)
+    assert.equal(MIN_AUTO_GAP_MS, 10 * min)
+    const home = tempHome()
+    const ch = channel(() => '0.2.28')
+    let clock = 1_000_000
+    // random 0.5 — разброс ровно ноль; остальные сроки — по умолчанию.
+    const c = checker(home, { http: ch.http, schedule: true, tickMs: 5, now: () => clock, random: () => 0.5 })
+    const calls = async (n: number, what: string): Promise<void> => { assert.ok(await waitFor(() => ch.calls() === n, 2000), `${what}: ждали ${n}, было ${ch.calls()}`); await sleep(20) }
+    try {
+      clock += 59_000; await sleep(40); assert.equal(ch.calls(), 0, 'раньше минуты — тишина')
+      clock += 1_000; await calls(1, 'первая через 60 с')
+      clock += 6 * hour - 1; await sleep(40); assert.equal(ch.calls(), 1, 'раньше 6 ч — тишина')
+      clock += 1; await calls(2, 'вторая через 6 ч')
+      clock += 5 * hour
+      await c.check() // ручная за час до плановой
+      assert.equal(ch.calls(), 3)
+      clock += 1 * hour; await sleep(40); assert.equal(ch.calls(), 3, 'плановая сдвинута ручной на полный срок')
+      clock += 5 * hour; await calls(4, 'плановая через 6 ч после ручной')
+    } finally {
+      c.stop()
+      home.remove()
+    }
+  })
+
+  it('по фокусу окна: только если последняя попытка старше просимого; не чаще раза в 10 мин; ручная — без предела', async () => {
+    const home = tempHome()
+    const ch = channel(() => '0.2.28')
+    let clock = 1_000_000
+    const c = checker(home, { http: ch.http, schedule: true, firstDelayMs: 100 * hour, now: () => clock })
+    try {
+      const st = await c.checkIfStale(hour)
+      assert.equal(ch.calls(), 1, 'проверок ещё не было — идём в сеть')
+      assert.equal(st.latest?.version, '0.2.28')
+      await Promise.all([c.checkIfStale(hour), c.checkIfStale(0), c.checkIfStale(hour)])
+      assert.equal(ch.calls(), 1, 'только что проверяли — без сети')
+      clock += 30 * min
+      await c.checkIfStale(hour)
+      assert.equal(ch.calls(), 1, 'моложе часа — без сети')
+      await c.checkIfStale(0)
+      assert.equal(ch.calls(), 2, 'старше 10 мин и просят «любую давность» — в сеть')
+      clock += 5 * min
+      await c.checkIfStale(0)
+      await c.checkIfStale(-1)
+      assert.equal(ch.calls(), 2, 'предел 10 мин держит любого просящего')
+      await c.check()
+      await c.check()
+      assert.equal(ch.calls(), 4, 'ручная «Проверить сейчас» предела не знает')
+      // Много окон разом, давно не проверяли — один запрос.
+      clock += 2 * hour
+      await Promise.all([c.checkIfStale(hour), c.checkIfStale(hour), c.checkIfStale(hour)])
+      assert.equal(ch.calls(), 5)
+    } finally {
+      c.stop()
+      home.remove()
+    }
+  })
+
+  it('по фокусу без автопроверки (updates.check: false или тестовый демон без шва) — сети нет', async () => {
+    const home = tempHome()
+    const ch = channel(() => '0.2.28')
+    const off = createUpdateChecker({
+      paths: home.paths, config: { ...home.config, updates: { check: false, url: URL_LATEST } }, logger: home.logger,
+      current: '0.2.27', keys: KEYS, runningTurns: () => 0, http: ch.http, firstDelayMs: 100 * hour,
+    })
+    const noSeam = checker(home, { http: ch.http, schedule: false })
+    try {
+      assert.equal((await off.checkIfStale(0)).enabled, false)
+      await noSeam.checkIfStale(0)
+      assert.equal(ch.calls(), 0)
+    } finally {
+      off.stop()
+      noSeam.stop()
+      home.remove()
+    }
+  })
+
+  it('setEnabled на лету: включили — расписание с первой проверки; выключили — ни запроса сам', async () => {
+    const home = tempHome()
+    const ch = channel(() => '0.2.28')
+    let clock = 1_000_000
+    const c = createUpdateChecker({
+      paths: home.paths, config: { ...home.config, updates: { check: false, url: URL_LATEST } }, logger: home.logger,
+      current: '0.2.27', keys: KEYS, runningTurns: () => 0, http: ch.http, tickMs: 5, now: () => clock, random: () => 0.5,
+    })
+    try {
+      clock += 2 * min; await sleep(40)
+      assert.equal(ch.calls(), 0)
+      c.setEnabled(true)
+      assert.equal(c.status().enabled, true)
+      clock += 59_000; await sleep(40); assert.equal(ch.calls(), 0)
+      clock += 1_000; assert.ok(await waitFor(() => ch.calls() === 1, 2000), 'после включения первая проверка не пришла')
+      c.setEnabled(false)
+      assert.equal(c.status().enabled, false)
+      clock += 24 * hour; await sleep(60)
+      assert.equal(ch.calls(), 1, 'выключено — ни одного запроса сам')
+      assert.equal(ch.calls(), (await c.checkIfStale(0), ch.calls()), 'и по фокусу — тоже')
+    } finally {
+      c.stop()
+      home.remove()
+    }
+  })
+
+  it('демон: settings.set принимает только updates.check (true/false); адрес канала и прочее — отказ, файл не тронут', async () => {
+    const home = tempHome()
+    const url = 'https://mirror.example/latest.json'
+    writeFileSync(home.paths.config, JSON.stringify({ version: 1, updates: { check: true, url }, custom: 1 }))
+    home.config.updates = { check: true, url }
+    const d = await startTestDaemon(home, { updates: { http: channel(() => '0.2.28').http, keys: KEYS, schedule: false } })
+    const c = await connectClient(home.paths)
+    const bad = (e: unknown): boolean => e instanceof ClientError && e.code === 'invalid_params'
+    const ns = { rememberLast: true, defaults: { claude: {}, codex: {} } }
+    try {
+      assert.deepEqual(((await c.request('settings.get')) as { updates: unknown }).updates, { check: true })
+      const before = readFileSync(home.paths.config, 'utf8')
+      for (const params of [
+        { updates: { url: 'https://evil.example/latest.json' } },
+        { updates: { check: false, url: 'https://evil.example/latest.json' } },
+        { updates: { check: 'false' } },
+        { updates: { check: 0 } },
+        { updates: {} },
+        { updates: true },
+        { updates: null },
+        { updates: [false] },
+        { newSession: ns, updates: { check: 'нет' } },
+        { updates: { check: false }, network: { claude: { mode: 'off' } } },
+        { updates: { check: false }, notify: { sound: false } },
+      ]) {
+        await assert.rejects(c.request('settings.set', params), bad, JSON.stringify(params))
+      }
+      assert.equal(readFileSync(home.paths.config, 'utf8'), before, 'отказ — файл не тронут')
+      await assert.rejects(c.request('update.check', { ifOlderThanMs: 'час' }), bad)
+
+      const r = (await c.request('settings.set', { updates: { check: false } })) as { updates: unknown; newSession: unknown }
+      assert.deepEqual(r.updates, { check: false })
+      const file = JSON.parse(readFileSync(home.paths.config, 'utf8')) as Record<string, unknown>
+      assert.deepEqual(file['updates'], { check: false, url }, 'url остался прежним')
+      assert.equal(file['custom'], 1)
+      assert.equal(((await c.request('update.status')) as UpdateStatus).enabled, false)
+      // Вместе с newSession — одним вызовом.
+      await c.request('settings.set', { newSession: ns, updates: { check: true } })
+      assert.deepEqual((JSON.parse(readFileSync(home.paths.config, 'utf8')) as Record<string, unknown>)['updates'], { check: true, url })
+      assert.equal(((await c.request('daemon.status')) as DaemonStatus).update?.enabled, true)
+    } finally {
+      c.close()
+      await d.stop('тест')
       home.remove()
     }
   })

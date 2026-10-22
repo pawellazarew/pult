@@ -497,12 +497,12 @@ describe('config', () => {
   it('noProxy: «*.домен» становится «.домен», повторы схлопываются, без поля профиль прежний', () => {
     const { config, warnings } = validateConfig({
       network: {
-        claude: { proxy: 'http://127.0.0.1:28781', noProxy: ['*.sun-team.ru', '.global.internal', '10.0.0.0/8', '.sun-team.ru'] },
+        claude: { proxy: 'http://127.0.0.1:28781', noProxy: ['*.corp.example', '.git.corp.example', '10.0.0.0/8', '.corp.example'] },
         codex: { proxy: 'socks5h://127.0.0.1:28780' },
       },
     })
     assert.deepEqual(warnings, [])
-    assert.deepEqual(config.network.claude.noProxy, ['.sun-team.ru', '.global.internal', '10.0.0.0/8'])
+    assert.deepEqual(config.network.claude.noProxy, ['.corp.example', '.git.corp.example', '10.0.0.0/8'])
     assert.deepEqual(config.network.codex, { mode: 'auto', proxy: 'socks5h://127.0.0.1:28780' })
   })
 
@@ -510,7 +510,7 @@ describe('config', () => {
     const { config, warnings } = validateConfig({
       network: {
         claude: { proxy: 'http://127.0.0.1:28781', noProxy: ['.ok.ru', 'a.ru,b.ru', 'с пробелом', 42, ''] },
-        codex: { proxy: 'http://127.0.0.1:28781', noProxy: '.sun-team.ru' },
+        codex: { proxy: 'http://127.0.0.1:28781', noProxy: '.corp.example' },
       },
     })
     assert.deepEqual(config.network.claude.noProxy, ['.ok.ru'])

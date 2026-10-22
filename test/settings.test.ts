@@ -641,7 +641,7 @@ describe('M8f: демон — settings.get|set и последний выбор'
     const c = await connectClient(home.paths)
     try {
       const got = (await c.request('settings.get')) as Record<string, unknown>
-      assert.deepEqual(got, { newSession: { rememberLast: true, defaults: { claude: {}, codex: {} } }, lastUsed: {} })
+      assert.deepEqual(got, { newSession: { rememberLast: true, defaults: { claude: {}, codex: {} } }, lastUsed: {}, updates: { check: true } })
       await assert.rejects(c.request('settings.set', { network: { claude: { mode: 'off' } } }), code('invalid_params'))
       await assert.rejects(c.request('settings.set', { newSession: { rememberLast: true }, notifyCommand: 'curl x' }), code('invalid_params'))
       await assert.rejects(c.request('settings.set', { newSession: { defaults: { claude: { approval: 'full' } } } }), code('invalid_params'))

@@ -808,3 +808,10 @@ button { font: inherit; color: inherit; }
 .settings-prov fieldset { margin: 0; padding: 10px 12px; border: 1px solid var(--hair); border-radius: 3px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .settings-prov legend { padding: 0 4px; font-family: var(--disp); font-size: 12px; color: var(--mut); }
 @media (max-width: 620px) { .settings-prov { grid-template-columns: 1fr; } }
+.upd-versions { display: flex; gap: 14px; font-size: 12px; color: var(--mut); }
+.upd-state { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--hair); border-radius: 3px; font-size: 13px; min-width: 0; }
+.upd-state .grow, .upd-actions .grow { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.upd-state.upd-new { border-color: var(--accent-edge); background: var(--accent-soft); }
+.upd-state.upd-warn { border-color: var(--amber-edge); background: var(--amber-soft); }
+.upd-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.upd-actions > .note { font-size: 12px; color: var(--faint); }

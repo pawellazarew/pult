@@ -3,6 +3,7 @@
 
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -15,12 +16,12 @@ describe('ci-leakguard', () => {
   const dir = mkdtempSync(join(tmpdir(), 'lg-'))
   after(() => { rmSync(dir, { recursive: true, force: true }) })
 
-  function scan(text: string): { code: number | null; rules: string[] } {
+  function scan(text: string, env: Record<string, string> = {}): { code: number | null; rules: string[]; err: string } {
     const f = join(dir, `f-${Math.random().toString(36).slice(2)}.txt`)
     writeFileSync(f, text)
-    const r = spawnSync(process.execPath, [GUARD], { input: `${f}\n`, encoding: 'utf8' })
+    const r = spawnSync(process.execPath, [GUARD], { input: `${f}\n`, encoding: 'utf8', env: { ...process.env, ...env } })
     const rules = [...(r.stderr ?? '').matchAll(/:\d+: ([a-z-]+) — /g)].map((m) => m[1] ?? '')
-    return { code: r.status, rules }
+    return { code: r.status, rules, err: r.stderr ?? '' }
   }
 
   // Улики собираются из частей: этот файл сам проходит через стража в CI и не должен в него попадать.
@@ -68,5 +69,33 @@ describe('ci-leakguard', () => {
       'npm i pkg@1.0.0-beta.foo react@19.3.0 lib@v2.1.0-rc.next',
     ].join('\n'))
     assert.equal(r.code, 0, r.rules.join(' '))
+  })
+
+  it('denied-token: дайджест из шва ловится как токен, точечный суффикс и метка, а сам токен в вывод не попадает', () => {
+    // Выдуманное слово собирается из частей; в репозитории его нет, в списке стража — тоже: дайджест идёт через env.
+    const word = ['zq', 'xv', 'wk'].join('')
+    const host = `${word}-co.test`
+    const seam = { PULT_LEAKGUARD_EXTRA_SHA256: createHash('sha256').update(host).digest('hex') }
+    const label = { PULT_LEAKGUARD_EXTRA_SHA256: createHash('sha256').update(`${word}-co`).digest('hex') }
+    const bare = scan(`адрес ${host}.`, seam)
+    assert.equal(bare.code, 1)
+    assert.deepEqual(bare.rules, ['denied-token'])
+    assert.match(bare.err, /denied token \(sha256 prefix [0-9a-f]{8}\)/)
+    assert.ok(!bare.err.includes(word))
+    // Суффикс: хост спрятан внутри более длинного имени.
+    const suffix = scan(`NO_PROXY=.git.team.${host.toUpperCase()},10.0.0.0/8`, seam)
+    assert.deepEqual(suffix.rules, ['denied-token'])
+    assert.ok(!suffix.err.toLowerCase().includes(word))
+    // Метка: отрезок из частей через дефис внутри длинного токена.
+    const inner = scan(`имя: pre-${word}-co-post`, label)
+    assert.deepEqual(inner.rules, ['denied-token'])
+    assert.ok(!inner.err.includes(word))
+  })
+
+  it('denied-token: чистый текст проходит, а без дайджеста даже «запрещённое» слово не ловится', () => {
+    const word = ['zq', 'xv', 'wk'].join('')
+    const seam = { PULT_LEAKGUARD_EXTRA_SHA256: createHash('sha256').update(`${word}-co.test`).digest('hex') }
+    assert.equal(scan('noProxy: .corp.example, .git.corp.example, 10.0.0.0/8', seam).code, 0)
+    assert.equal(scan(`адрес ${word}-co.test`).code, 0)
   })
 })

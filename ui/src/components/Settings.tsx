@@ -1,12 +1,16 @@
 // M8f: «Настройки» (⌘,). Раздел «Новая сессия» — умолчания по провайдерам и «Подставлять последний выбор»;
-// «Внешний вид» пока пустой (темы и цвета — после редизайна, docs/15). Логика черновика — model/sessionSettings.ts.
+// «Обновления» — версии, состояние канала, «Проверить сейчас», «Обновить до X» и флаг автопроверки (что писать —
+// model/update.ts); «Внешний вид» пока пустой (темы и цвета — после редизайна, docs/15). Логика черновика —
+// model/sessionSettings.ts.
 
 import { useEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import { APPROVAL_LABEL, PRESETS } from '../model/newAgent.js'
 import { DEFAULT_APPROVALS, draftError, effortOptions, setDefault, setDefaultProvider, settingsDraft } from '../model/sessionSettings.js'
 import type { NewSessionSettings, Provider } from '../../../src/sessions/settings.js'
+import type { UpdateStatus } from '../../../src/core/rpc.js'
 import type { ProviderCatalog } from '../model/types.js'
+import { updateSection } from '../model/update.js'
 import { CMD, Kbd } from './common.js'
 import { Dialog } from './Panels.js'
 
@@ -72,14 +76,84 @@ function ProviderDefaultsBox({ provider, draft, catalog, onChange }: {
   )
 }
 
-export function SettingsDialog({ settings, catalog, onSave, onClose }: {
+/** Раздел «Обновления»: живой — кнопки работают сразу, мимо «Сохранить»; флаг автопроверки — в черновике. */
+export interface UpdatesPanel {
+  /** `daemon.status.update`; нет — старый демон. */
+  status: UpdateStatus | null | undefined
+  /** Версия пакета (демона) и окна (из user agent; null — неизвестна). */
+  packageVersion: string | null
+  windowVersion: string | null
+  /** Идёт «Проверить сейчас» из окна и чем кончился сам вызов (не ответ канала). */
+  checking: boolean
+  error: string | null
+  /** Идёт вызов `update.apply`; его отказ (старая оболочка, «ставить нечего»). */
+  busy: boolean
+  applyError: string | null
+  now: number
+  onCheck(): void
+  onApply(force: boolean): void
+  onNotes(url: string): void
+}
+
+export function UpdatesSection({ panel, auto, onAuto }: {
+  panel: UpdatesPanel
+  /** Флаг «Проверять автоматически»; null — демон его не отдаёт (старый), переключателя нет. */
+  auto: boolean | null
+  onAuto(on: boolean): void
+}): ReactElement {
+  const v = updateSection(panel.status, panel.windowVersion, { checking: panel.checking, error: panel.error }, panel.now)
+  const tone = v.state === 'error' || v.state === 'failed' || v.state === 'window' || v.state === 'bad' ? ' upd-warn' : v.state === 'available' ? ' upd-new' : ''
+  return (
+    <section className="settings-sec" aria-labelledby="settings-upd-h" data-testid="settings-updates">
+      <h3 id="settings-upd-h">Обновления</h3>
+      <div className="upd-versions" data-testid="settings-update-versions">
+        <span>Пульт <span className="mono">{panel.packageVersion ?? '—'}</span></span>
+        <span>окно <span className="mono">{panel.windowVersion ?? 'неизвестно'}</span></span>
+      </div>
+      <div className={`upd-state${tone}`} role="status" data-testid="settings-update-state" data-state={v.state}>
+        {v.state === 'checking' && <span className="spin" aria-hidden="true" />}
+        <span className="grow">{v.text}</span>
+        {v.notes && (
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => panel.onNotes(v.notes as string)} data-testid="settings-update-notes">Что нового</button>
+        )}
+      </div>
+      {v.note && <span className="note" data-testid="settings-update-note">{v.note}</span>}
+      {panel.applyError && <span className="err" role="alert" data-testid="settings-update-error">{panel.applyError}</span>}
+      <div className="upd-actions">
+        <span className="note" data-testid="settings-update-checked">{v.checked}</span>
+        <span className="grow" />
+        <button type="button" className="btn btn-sm" disabled={!v.canCheck} onClick={panel.onCheck} data-testid="settings-update-check">
+          {panel.checking ? 'Проверяю…' : 'Проверить сейчас'}
+        </button>
+        {v.action && (
+          <button type="button" className={`btn btn-sm${v.action.force ? '' : ' btn-primary'}`} disabled={panel.busy}
+            onClick={() => panel.onApply(v.action?.force === true)} data-testid="settings-update-apply">{v.action.label}</button>
+        )}
+      </div>
+      {auto !== null && (
+        <label className="check">
+          <input type="checkbox" checked={auto} data-testid="settings-update-auto" onChange={(e) => onAuto(e.target.checked)} />
+          <span>Проверять обновления автоматически</span>
+          <span className="note">Раз в 6 ч и когда окно возвращается на экран (не чаще раза в 10 мин): один запрос latest.json к GitHub. Ставится только по кнопке.</span>
+        </label>
+      )}
+    </section>
+  )
+}
+
+export function SettingsDialog({ settings, catalog, updates, autoCheck = null, onSave, onClose }: {
   settings: NewSessionSettings | null
   catalog: ProviderCatalog | null
-  /** `null` — записано; строка — отказ демона. */
-  onSave(next: NewSessionSettings): Promise<string | null>
+  /** Раздел «Обновления»; нет — раздела нет. */
+  updates?: UpdatesPanel
+  /** `updates.check` из `settings.get`; null — старый демон. */
+  autoCheck?: boolean | null
+  /** `null` — записано; строка — отказ демона. `autoCheck` — флаг автопроверки (null — не трогать). */
+  onSave(next: NewSessionSettings, autoCheck: boolean | null): Promise<string | null>
   onClose(): void
 }): ReactElement {
   const [draft, setDraft] = useState<NewSessionSettings>(() => settingsDraft(settings))
+  const [auto, setAuto] = useState<boolean | null>(autoCheck)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const first = useRef<HTMLSelectElement>(null)
@@ -89,7 +163,7 @@ export function SettingsDialog({ settings, catalog, onSave, onClose }: {
     if (busy || invalid) return
     setBusy(true)
     setErr(null)
-    const e = await onSave(draft)
+    const e = await onSave(draft, auto)
     setBusy(false)
     if (e) setErr(e)
   }
@@ -124,6 +198,7 @@ export function SettingsDialog({ settings, catalog, onSave, onClose }: {
             {PROVIDERS.map((p) => <ProviderDefaultsBox key={p} provider={p} draft={draft} catalog={catalog} onChange={setDraft} />)}
           </div>
         </section>
+        {updates && <UpdatesSection panel={updates} auto={auto} onAuto={setAuto} />}
         <section className="settings-sec" aria-labelledby="settings-look-h" data-testid="settings-appearance">
           <h3 id="settings-look-h">Внешний вид</h3>
           <span className="note">Темы и цвета — после редизайна.</span>

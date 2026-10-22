@@ -168,18 +168,18 @@ describe('страж', () => {
 // noProxy (21.10.2026): агент за прокси ходит в корпоративные сервисы мимо него — их пускают
 // только с выхода корпоративного VPN. Без поля ребёнок получает прежний NO_PROXY.
 describe('noProxy профиля', () => {
-  const profile = { mode: 'auto' as const, proxy: 'http://127.0.0.1:28781', noProxy: ['.sun-team.ru', '.global.internal'] }
+  const profile = { mode: 'auto' as const, proxy: 'http://127.0.0.1:28781', noProxy: ['.corp.example', '.git.corp.example'] }
 
   it('без добавки — только localhost, как раньше', () => {
     assert.equal(noProxyValue(), 'localhost,127.0.0.1,::1')
-    assert.equal(noProxyValue(['localhost', '.sun-team.ru']), 'localhost,127.0.0.1,::1,.sun-team.ru')
+    assert.equal(noProxyValue(['localhost', '.corp.example']), 'localhost,127.0.0.1,::1,.corp.example')
   })
 
   it('доходит до NO_PROXY ребёнка claude и codex', async () => {
     const c = await checkNetwork('claude', profile, DEFAULT_GUARD_COUNTRIES, { probe: fakeProbe({ proxy: 'FI' }).fn })
-    assert.deepEqual(c.noProxy, ['.sun-team.ru', '.global.internal'])
-    assert.equal(claudeNetworkEnv(c).NO_PROXY, 'localhost,127.0.0.1,::1,.sun-team.ru,.global.internal')
-    assert.equal(codexNetworkEnv({ ...c, provider: 'codex' }).NO_PROXY, 'localhost,127.0.0.1,::1,.sun-team.ru,.global.internal')
+    assert.deepEqual(c.noProxy, ['.corp.example', '.git.corp.example'])
+    assert.equal(claudeNetworkEnv(c).NO_PROXY, 'localhost,127.0.0.1,::1,.corp.example,.git.corp.example')
+    assert.equal(codexNetworkEnv({ ...c, provider: 'codex' }).NO_PROXY, 'localhost,127.0.0.1,::1,.corp.example,.git.corp.example')
   })
 
   it('прямой путь не ставит переменных, даже с noProxy', async () => {
@@ -193,6 +193,6 @@ describe('noProxy профиля', () => {
     await checkNetwork('claude', { ...profile, noProxy: [] }, DEFAULT_GUARD_COUNTRIES, { probe: probe.fn })
     const c = await checkNetwork('claude', profile, DEFAULT_GUARD_COUNTRIES, { probe: probe.fn })
     assert.equal(c.cached, false)
-    assert.deepEqual(c.noProxy, ['.sun-team.ru', '.global.internal'])
+    assert.deepEqual(c.noProxy, ['.corp.example', '.git.corp.example'])
   })
 })
