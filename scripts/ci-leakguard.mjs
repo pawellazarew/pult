@@ -12,7 +12,10 @@
 // Чего страж НЕ делает: он не разбирает base64 и не считает энтропию — это дало бы поток
 // ложных срабатываний на логах спайка. Он ловит ФОРМЫ известных секретов.
 
+import { createHash } from 'node:crypto'
 import { readFileSync, statSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 // Пути, которые не сканируем, и почему:
 //   spike/codex/schema/** — два сводных файла протокола Codex по ~0.6–0.9 МБ каждый:
@@ -140,6 +143,46 @@ const RULES = [
   },
 ]
 
+// Правило `denied-token`: запрещённые слова хранятся ТОЛЬКО как sha256 в scripts/leak-deny.sha256 рядом
+// со скриптом (сами слова в репозиторий не попадают). Тест-шов: PULT_LEAKGUARD_EXTRA_SHA256 — дайджесты
+// через запятую, добавляются к файлу. Файла нет — стража нельзя считать работающим, выходим с ошибкой.
+const DENY = new Set()
+{
+  const file = join(dirname(fileURLToPath(import.meta.url)), 'leak-deny.sha256')
+  let raw = ''
+  try { raw = readFileSync(file, 'utf8') } catch {
+    process.stderr.write('ci-leakguard: нет scripts/leak-deny.sha256\n')
+    process.exit(1)
+  }
+  for (const l of raw.split('\n')) {
+    const t = l.trim().toLowerCase()
+    if (/^[0-9a-f]{64}$/.test(t)) DENY.add(t)
+  }
+  for (const t of (process.env.PULT_LEAKGUARD_EXTRA_SHA256 ?? '').split(',')) {
+    const x = t.trim().toLowerCase()
+    if (/^[0-9a-f]{64}$/.test(x)) DENY.add(x)
+  }
+}
+const sha = (s) => createHash('sha256').update(s).digest('hex')
+const TOKEN_RE = /[a-z0-9][a-z0-9.-]*[a-z0-9]/g
+// Кандидаты из строки: максимальный токен и любой непрерывный отрезок его частей, разделённых `.`/`-`
+// (покрывает точечные суффиксы `b.c.d` и отдельные метки). Возвращает множество дайджестов-попаданий.
+function deniedDigests(line) {
+  const found = new Set()
+  for (const tok of line.toLowerCase().match(TOKEN_RE) ?? []) {
+    const parts = tok.split(/([.-])/) // чётные — части, нечётные — разделители
+    const n = (parts.length + 1) >> 1
+    if (n > 64) { const d = sha(tok); if (DENY.has(d)) found.add(d); continue }
+    for (let i = 0; i < n; i++) {
+      for (let j = i; j < n; j++) {
+        const d = sha(parts.slice(2 * i, 2 * j + 1).join(''))
+        if (DENY.has(d)) found.add(d)
+      }
+    }
+  }
+  return found
+}
+
 function readStdinList() {
   let raw = ''
   try { raw = readFileSync(0, 'utf8') } catch { raw = '' }
@@ -175,6 +218,9 @@ for (const path of files) {
         hits.push({ path, line: i + 1, rule: rule.name, hit: hit.slice(0, 120) })
       }
     }
+    for (const d of deniedDigests(lines[i])) {
+      hits.push({ path, line: i + 1, rule: 'denied-token', hit: `denied token (sha256 prefix ${d.slice(0, 8)})` })
+    }
   }
 }
 
@@ -184,4 +230,4 @@ if (hits.length) {
   process.exit(1)
 }
 
-process.stdout.write(`   ${scanned} файлов просканировано (${skipped} пропущено), ${RULES.length} правил — чисто\n`)
+process.stdout.write(`   ${scanned} файлов просканировано (${skipped} пропущено), ${RULES.length + 1} правил — чисто\n`)

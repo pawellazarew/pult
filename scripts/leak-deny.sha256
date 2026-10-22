@@ -1,0 +1,13 @@
+# leak-deny.sha256 — sha256 of lowercase tokens that must never appear in the public tree.
+# One lowercase hex digest per line; `#` starts a comment. The words themselves are NOT stored here:
+# scripts/ci-leakguard.mjs (rule `denied-token`) splits every scanned line into tokens
+# ([a-z0-9][a-z0-9.-]*[a-z0-9]), takes each token, each of its dot-suffixes and every contiguous run
+# of dash/dot-separated labels, hashes them with sha256 and looks the digest up here.
+# A hit prints only file:line and the first 8 hex of the digest — never the token.
+# To deny a new word: printf %s 'word' | shasum -a 256, and append the digest (lowercase, no word nearby).
+05af4ae4cee4cd7778e073fd0f094c352bb356a2acd5b7e0e5f192b6cb907610
+51cbdc31036411e435631acc0ce67af08ccc0eb14e2a9801ff9a6fcac6e57b8a
+f6a3a548aa0eadb7f42e3daf5743dfb7f263774207feb3eb2d93d12b90c4a126
+93d4e56656e1be536438d354186665fc561238521fd01a45495b007c18d859de
+11c0f76f8e4f26bb4ec10a35a9238233a39ce05f0a26217f267cf5b8476fc8d2
+921a95e8b614f668981d9eee4d24a3ffdb6821162246bb8036f73f4fd7d20564
