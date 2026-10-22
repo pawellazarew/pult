@@ -72,7 +72,7 @@ import { ApplyError, createUpdateChecker } from '../update/checker.js'
 import type { CheckerOptions, UpdateChecker } from '../update/checker.js'
 import { AppUpdateError, createAppUpdater, shellHelloOf } from '../update/appUpdate.js'
 import type { AppTools, AppUpdater, ShellHello } from '../update/appUpdate.js'
-import { insideApp } from '../update/appUpdate.js'
+import { bundleOf, insideApp } from '../update/appUpdate.js'
 import type { UpdateStatus } from '../core/rpc.js'
 
 export const HANDSHAKE_TIMEOUT_MS = 2000
@@ -432,7 +432,8 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
   /** Статус канала вместе с окном: одним объектом в `update.*` и `daemon.status.update`. */
   const updateStatus = (u: UpdateStatus = updater.status(), conn?: Connection): UpdateStatus => {
     const app = appUpdater.status()
-    return { ...u, app: { ...app, here: hereOf(conn, app.path) } }
+    const here = hereOf(conn, app.path)
+    return { ...u, app: { ...app, here, hereFrom: here === false && conn?.app?.execPath ? bundleOf(conn.app.execPath) : null } }
   }
   /** Спрашивающее окно — из поставленного бандла? Только для оболочки с путём. */
   const hereOf = (conn: Connection | undefined, app: string | null): boolean | null =>
@@ -1049,8 +1050,9 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
           const expect = params['expect']
           if (expect !== undefined && (typeof expect !== 'string' || !expect || expect.length > 40)) { fail(ERROR_CODES.invalidParams, 'update.apply: expect — версия окна'); return }
           if (params['allowBad'] !== undefined && typeof params['allowBad'] !== 'boolean') { fail(ERROR_CODES.invalidParams, 'update.apply: allowBad — true или false'); return }
+          if (params['rollback'] !== undefined && typeof params['rollback'] !== 'boolean') { fail(ERROR_CODES.invalidParams, 'update.apply: rollback — true или false'); return }
           try {
-            send({ id: req.id, result: await appUpdater.apply({ ...(typeof expect === 'string' ? { expect } : {}), allowBad: params['allowBad'] === true }) })
+            send({ id: req.id, result: await appUpdater.apply({ ...(typeof expect === 'string' ? { expect } : {}), allowBad: params['allowBad'] === true, rollback: params['rollback'] === true }) })
           } catch (e) {
             if (e instanceof AppUpdateError) { fail(ERROR_CODES.invalidParams, e.message); return }
             throw e
@@ -1333,7 +1335,10 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
           conn.client = typeof msg['client'] === 'string' ? msg['client'] : 'unknown'
           clearTimeout(timer)
           // 0.3.4: оболочка называет свою версию и путь — обновление окна ждёт hello НОВОЙ версии.
-          if (conn.client === 'shell') conn.app = shellHelloOf(msg['app'])
+          if (conn.client === 'shell') {
+            conn.app = shellHelloOf(msg['app'])
+            appUpdater.onShellHello(conn.app)
+          }
           socket.write(encodeLine({
             type: 'hello_ok',
             protocol: PROTOCOL_VERSION,
@@ -1388,13 +1393,14 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     stopping = true
     logger.info('остановка демона', { reason })
     updater.stop()
-    // Обновление окна, уже меняющее бандл, доводится (не дольше 25 с); иначе его доведёт старт по журналу.
-    await appUpdater.stop()
     // Сначала ОТКАЗ всем, кто ждёт решения, и только потом закрытие сокета: заглушка
     // `pult mcp-ask` иначе повисла бы на мёртвом сокете, а `claude` — на ней (инвариант 5).
     const denied = broker.shutdown('демон останавливается')
     if (denied) logger.warn('отказано ожидающим запросам разрешений', { count: denied })
     try { await manager.shutdown() } catch (e) { logger.error('адаптеры не погасились', { error: (e as Error).message }) }
+    // Обновление окна, уже меняющее бандл, — после отказов и адаптеров и ненадолго (≤ 3 с): launchd добивает службу
+    // SIGKILL через 5 с; оборванную замену доведёт или откатит следующий старт по журналу apps/swap.json.
+    await appUpdater.stop()
     notifyRunner?.close()
     // Журнал мог сломаться (диск кончился) — это не повод не доводить остановку до конца.
     try {

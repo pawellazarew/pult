@@ -106,7 +106,7 @@ export function UpdatesSection({ panel, auto, onAuto }: {
   const tone = v.state === 'error' || v.state === 'failed' || v.state === 'window' || v.state === 'bad' ? ' upd-warn' : v.state === 'available' ? ' upd-new' : ''
   // 0.3.4: окно обновляется само — своя строка с «Обновить окно».
   const w = appUpdateView(panel.status, panel.windowVersion)
-  const wTone = w.state === 'failed' || w.state === 'rolledback' || w.state === 'bad' ? ' upd-warn' : w.state === 'available' ? ' upd-new' : ''
+  const wTone = w.state === 'failed' || w.state === 'rolledback' || w.state === 'bad' || w.state === 'firstrun-failed' ? ' upd-warn' : w.state === 'available' ? ' upd-new' : ''
   return (
     <section className="settings-sec" aria-labelledby="settings-upd-h" data-testid="settings-updates">
       <h3 id="settings-upd-h">Обновления</h3>

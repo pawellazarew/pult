@@ -76,6 +76,8 @@ const HELP = `pult ${VERSION} — диспетчерская над claude, code
   pult update --app [--force]       обновить окно (Pult.app, macOS) из того же канала: демон качает и
                                     проверяет архив, закрывает окно, меняет и открывает; не поднялось —
                                     возвращает прежнее (--force — и версию, которая уже не встала)
+  pult update --app --rollback      вернуть прежнее окно, если новое (поставленное при закрытом окне)
+                                    не заработало при первом запуске
   pult runtime [--json]             свой node Пульта: стоит ли и на каком node работает демон
   pult runtime install [--from <node-vX-платформа.tar.gz>]   поставить свой node из пина пакета
                                     (демон и заглушка разрешений живут на нём: brew upgrade его не трогает)
@@ -176,7 +178,7 @@ function approvalLabel(raw: unknown): string {
 /** Флаги без значения — чтобы `--worktree --json` читался как «значения нет», а не как ветка «--json». */
 const BOOL_FLAGS = new Set([
   'json', 'warm', 'wait', 'dev', 'print', 'reinstall', 'list', 'check', 'no-follow', 'no-net', 'help', 'version', 'h', 'v', 'unread',
-  'queue', 'interrupt', 'stdout', 'browser', 'headed', 'none', 'rule', 'yes', 'app', 'force',
+  'queue', 'interrupt', 'stdout', 'browser', 'headed', 'none', 'rule', 'yes', 'app', 'force', 'rollback',
 ])
 
 /** Слово на «-» — это флаг Пульта (тогда у предыдущего флага значения нет), а не значение на «-». */
@@ -921,9 +923,10 @@ async function cmdUpdate(paths: PultPaths, args: ParsedArgs): Promise<number> {
   const modes = [from !== undefined, to !== undefined, args.flags.has('list'), args.flags.has('check') && !app, app].filter(Boolean).length
   if (modes > 1) { err('pult update: --from, --to, --list, --check и --app — по одному за раз'); return EXIT.error }
   if (args.flags.has('force') && !app) { err('pult update: --force — только вместе с --app'); return EXIT.error }
+  if (args.flags.has('rollback') && !app) { err('pult update: --rollback — только вместе с --app'); return EXIT.error }
   if (app && args.flags.has('check')) { err('pult update --app: проверить окно — pult update --check (строка «окно: …»)'); return EXIT.error }
   // 0.3.4: окно — через демона (он закрывает окно, меняет Pult.app и ждёт hello нового), сессии не трогаются.
-  if (app) return updateAppCli(cliIo, { force: args.flags.has('force'), connect: async () => (await ensureDaemon(paths)).client })
+  if (app) return updateAppCli(cliIo, { force: args.flags.has('force'), rollback: args.flags.has('rollback'), connect: async () => (await ensureDaemon(paths)).client })
   if (args.flags.has('list')) return updateList(paths, cliIo, opts)
   if (args.flags.has('check')) return updateCheck(paths, cliIo, { json: opts.json })
   if (from !== undefined) {

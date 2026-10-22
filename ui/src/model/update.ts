@@ -19,7 +19,7 @@ export function windowVersionFromUA(ua: string | undefined | null): string | nul
 }
 
 /** Кнопка обновления: пакет (`force` — не ждать ходов) или окно (`target: 'app'`, `expect` — версия, которую видел человек). */
-export interface UpdateAction { label: string; force: boolean; target?: 'app'; expect?: string }
+export interface UpdateAction { label: string; force: boolean; target?: 'app'; expect?: string; rollback?: true }
 
 export interface UpdateBannerView {
   /** data-testid и тон плашки. */
@@ -67,11 +67,15 @@ function appFailure(a: AppUpdateStatus): AppUpdateStatus['last'] {
  */
 const appAction = (a: AppUpdateStatus, label = 'Обновить окно'): UpdateAction | null =>
   (a.here === false ? null : { label, force: false, target: 'app', ...(a.latest ? { expect: a.latest } : {}) })
-const elsewhere = (a: AppUpdateStatus): string => (a.here === false ? ` · обновить можно из окна ${a.path ?? 'Pult.app'} или в терминале: pult update --app` : '')
+/** Окно не из поставленного бандла: пока оно открыто, обновление окна откажет — значит, закрыть его. */
+const elsewhere = (a: AppUpdateStatus): string =>
+  (a.here === false ? ` · закрой окно из ${a.hereFrom ?? 'этой копии'} и обнови из ${a.path ?? 'Pult.app'}` : '')
+/** «Вернуть <from>»: новое окно, заменённое закрытым, не заработало при первом запуске. */
+const backAction = (from: string): UpdateAction => ({ label: `Вернуть ${from}`, force: false, target: 'app', rollback: true })
 
 export interface AppUpdateView {
   /** data-state строки «Окно» в «Настройках». */
-  state: 'none' | 'available' | 'applying' | 'failed' | 'rolledback' | 'bad' | 'uptodate' | 'unsupported'
+  state: 'none' | 'available' | 'applying' | 'failed' | 'rolledback' | 'bad' | 'uptodate' | 'unsupported' | 'firstrun' | 'firstrun-failed'
   text: string
   action: UpdateAction | null
 }
@@ -87,6 +91,10 @@ export function appUpdateView(u: UpdateStatus | undefined | null, windowVersion:
   if (a.applying) {
     return { state: 'applying', text: `Обновляю окно до ${a.applying.to}: ${APP_STEP[a.applying.step]}… Окно закроется и откроется само, сессии работают дальше`, action: null }
   }
+  const fr = a.firstRun ?? null
+  if (fr?.state === 'failed') {
+    return { state: 'firstrun-failed', text: `Окно ${fr.to} не заработало при первом запуске — можно вернуть ${fr.from}`, action: backAction(fr.from) }
+  }
   const f = appFailure(a)
   if (f) {
     return f.result === 'rolled_back'
@@ -94,6 +102,7 @@ export function appUpdateView(u: UpdateStatus | undefined | null, windowVersion:
       : { state: 'failed', text: `Окно не обновилось: ${f.message}`, action: a.available ? appAction(a, 'Повторить') : null }
   }
   if (a.available && a.latest) return { state: 'available', text: `Окно: ${installed ?? '?'} → доступно ${a.latest}${elsewhere(a)}`, action: appAction(a) }
+  if (fr?.state === 'waiting') return { state: 'firstrun', text: `Окно обновлено до ${fr.to}, ещё не запускалось (прежнее ${fr.from} держу до первого запуска)`, action: null }
   if (a.unsupported) return { state: 'unsupported', text: `Окно ${installed ?? ''}`.trim() + ` · ${a.unsupported}`, action: null }
   if (a.bad && a.latest) return { state: 'bad', text: `Окно ${a.latest} уже не встало на этой машине — само не ставится; повторить: pult update --app --force`, action: null }
   if (a.latest && installed && compareVersions(a.latest, installed) <= 0) return { state: 'uptodate', text: `Окно ${installed} — последнее`, action: null }
@@ -137,6 +146,13 @@ export function updateBanner(u: UpdateStatus | undefined | null, windowVersion: 
       kind: 'app-applying',
       text: `Обновляю окно до ${a.applying.to}: ${APP_STEP[a.applying.step]}… Окно закроется и откроется само, сессии работают дальше`,
       notes: null, action: null, dismissKey: null,
+    }
+  }
+  if (a?.firstRun?.state === 'failed' && !dismissed.includes(`firstrun:${a.firstRun.to}`)) {
+    return {
+      kind: 'app-failed',
+      text: `Окно ${a.firstRun.to} не заработало при первом запуске — можно вернуть ${a.firstRun.from}`,
+      notes: null, action: backAction(a.firstRun.from), dismissKey: `firstrun:${a.firstRun.to}`,
     }
   }
   const af = a ? appFailure(a) : null

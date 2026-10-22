@@ -8,7 +8,14 @@ import { isStableVersion } from '../core/semver.js'
 import { atomicWrite } from '../service/fsutil.js'
 import { readFileSync } from 'node:fs'
 
-export interface AppState { bad: string[]; last: AppUpdateAttempt | null }
+/**
+ * Окно заменено, пока оно было закрыто, и ещё ни разу не запускалось: прежнее (`prev`) держится до первой готовности
+ * нового; первый запуск не заработал за 60 с — `failed`, и «Вернуть <from>» в «Настройках» / `pult update --app
+ * --rollback`.
+ */
+export interface AppPending { to: string; from: string; prev: string; app: string; swapAt: number; failed: boolean }
+
+export interface AppState { bad: string[]; last: AppUpdateAttempt | null; pending?: AppPending | null }
 
 export function readAppState(paths: PultPaths): AppState {
   try {
@@ -19,7 +26,12 @@ export function readAppState(paths: PultPaths): AppState {
       && (l['result'] === 'done' || l['result'] === 'failed' || l['result'] === 'rolled_back') && typeof l['message'] === 'string'
       ? { to: l['to'], from: typeof l['from'] === 'string' ? l['from'] : null, at: l['at'], result: l['result'], message: l['message'] } as AppUpdateAttempt
       : null
-    return { bad, last }
+    const pd = o['pending'] as Record<string, unknown> | null | undefined
+    const pending = pd && typeof pd === 'object' && typeof pd['to'] === 'string' && typeof pd['from'] === 'string'
+      && typeof pd['prev'] === 'string' && typeof pd['app'] === 'string' && typeof pd['swapAt'] === 'number'
+      ? { to: pd['to'], from: pd['from'], prev: pd['prev'], app: pd['app'], swapAt: pd['swapAt'], failed: pd['failed'] === true }
+      : null
+    return { bad, last, pending }
   } catch {
     return { bad: [], last: null }
   }

@@ -247,6 +247,13 @@ export interface AppUpdateStatus {
    * Pult.app): «Обновить окно» в нём не показывается. null — не окно или не известно.
    */
   here?: boolean | null
+  /** here === false: бандл спрашивающего окна (его надо закрыть). */
+  hereFrom?: string | null
+  /**
+   * Окно заменено, пока было закрыто: `waiting` — ещё не запускалось; `failed` — первый запуск не заработал за 60 с,
+   * можно вернуть прежнее (`update.apply {target: 'app', rollback: true}`).
+   */
+  firstRun?: { to: string; from: string; state: 'waiting' | 'failed' } | null
 }
 
 export interface DaemonBrowser {

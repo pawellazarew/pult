@@ -804,7 +804,9 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   const applyUpdate = (a: UpdateAction): void => {
     setUpdBusy(true)
     setUpdCheck((c) => ({ ...c, applyError: null }))
-    const params = a.target === 'app' ? { target: 'app', ...(a.expect ? { expect: a.expect } : {}) } : a.force ? { force: true } : {}
+    const params = a.target === 'app'
+      ? { target: 'app', ...(a.rollback ? { rollback: true } : a.expect ? { expect: a.expect } : {}) }
+      : a.force ? { force: true } : {}
     bridge.call('update.apply', params)
       .then(() => refreshStatus(), (e: unknown) => {
         const text = isBridgeError(e) ? applyErrorText(e.code, e.message, a.target) : applyErrorText(null, errorText(e), a.target)

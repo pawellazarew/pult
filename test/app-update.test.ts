@@ -4,7 +4,7 @@
 // и настоящий демон не трогаются никогда.
 
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { generateKeyPairSync, createHash } from 'node:crypto'
 import { chmodSync, cpSync, existsSync, renameSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -16,7 +16,7 @@ import type { AppUpdateStatus, UpdateStatus } from '../dist/core/rpc.js'
 import { acquireLock } from '../dist/core/lock.js'
 import { readAppState } from '../dist/update/appState.js'
 import {
-  APP_BUNDLE_ID, AppUpdateError, checkTree, createAppUpdater, machOArchs, manualSteps, scanZip, shellHelloOf,
+  APP_BUNDLE_ID, AppUpdateError, checkTree, createAppUpdater, etimeSeconds, homeTag, machOArchs, manualSteps, scanZip, shellHelloOf,
 } from '../dist/update/appUpdate.js'
 import type { AppTools, AppUpdater, AppUpdaterOptions, ShellHello } from '../dist/update/appUpdate.js'
 import { APP_UPDATE_MAC_ONLY, updateAppCli } from '../dist/update/appUpdateCli.js'
@@ -82,11 +82,12 @@ const crc32 = (b: Buffer): number => { let c = 0xffffffff; for (const x of b) c 
 interface ZEntry { name: string; data: Buffer; mode: number }
 
 /** Zip без сжатия, с unix-режимами в внешних атрибутах — как у `ditto -c -k` по существу. */
-function zipOf(entries: ZEntry[]): Buffer {
+function zipOf(entries: ZEntry[], opts: { hide?: number[]; dupFirst?: boolean } = {}): Buffer {
   const locals: Buffer[] = []
   const centrals: Buffer[] = []
   let off = 0
-  for (const e of entries) {
+  let listed = 0
+  for (const [i, e] of entries.entries()) {
     const name = Buffer.from(e.name, 'utf8')
     const crc = crc32(e.data)
     const lh = Buffer.alloc(30)
@@ -97,12 +98,14 @@ function zipOf(entries: ZEntry[]): Buffer {
     ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE((3 << 8) | 20, 4); ch.writeUInt16LE(20, 6); ch.writeUInt16LE(0x800, 8)
     ch.writeUInt32LE(crc, 16); ch.writeUInt32LE(e.data.length, 20); ch.writeUInt32LE(e.data.length, 24); ch.writeUInt16LE(name.length, 28)
     ch.writeUInt32LE((e.mode << 16) >>> 0, 38); ch.writeUInt32LE(off, 42)
-    centrals.push(ch, name)
+    // `hide` — локальная запись есть, а в каталоге её нет; `dupFirst` — первая запись в каталоге дважды (наложение).
+    if (!opts.hide?.includes(i)) { centrals.push(ch, name); listed++ }
+    if (i === 0 && opts.dupFirst) { centrals.push(ch, name); listed++ }
     off += 30 + name.length + e.data.length
   }
   const cd = Buffer.concat(centrals)
   const eocd = Buffer.alloc(22)
-  eocd.writeUInt32LE(0x06054b50, 0); eocd.writeUInt16LE(entries.length, 8); eocd.writeUInt16LE(entries.length, 10)
+  eocd.writeUInt32LE(0x06054b50, 0); eocd.writeUInt16LE(listed, 8); eocd.writeUInt16LE(listed, 10)
   eocd.writeUInt32LE(cd.length, 12); eocd.writeUInt32LE(off, 16)
   return Buffer.concat([...locals, cd, eocd])
 }
@@ -170,6 +173,7 @@ interface World {
   /** Новое окно после `open` здоровается с демоном. */
   helloOnOpen: boolean
   codesignFail: boolean
+  codesignFailFor: (p: string) => boolean
   /** Подключённые окна (hello оболочек) — для отказа «закрой окно из …». */
   shells: ShellHello[]
   /** Сбой rename: вернуть ошибку для пары путей — или null (настоящий rename). */
@@ -210,6 +214,7 @@ function world(o: { installed?: string; release?: BundleOpts; running?: boolean 
     quitOnTerm: true,
     helloOnOpen: true,
     codesignFail: false,
+    codesignFailFor: () => false,
     shells: [],
     renameFail: () => null,
     readyDelayMs: 20,
@@ -247,7 +252,7 @@ function world(o: { installed?: string; release?: BundleOpts; running?: boolean 
         http,
         unzip: testUnzip,
         copyTree: async (s, d) => { cpSync(s, d, { recursive: true, verbatimSymlinks: true }) },
-        codesignVerify: async () => { if (w.codesignFail) throw new Error('codesign: code object is not signed at all') },
+        codesignVerify: async (p) => { if (w.codesignFail || w.codesignFailFor(p)) throw new Error('codesign: code object is not signed at all') },
         findPids: async (exe) => (w.findPidsDelayMs ? await new Promise((r) => setTimeout(r, w.findPidsDelayMs)) : null, [...w.procs]).filter(([, p]) => p.alive && p.exe === exe && (p.uid ?? process.getuid?.()) === process.getuid?.()).map(([pid]) => pid),
         procInfo: async (pid) => {
           if (w.procInfoDelayMs) await new Promise((r) => setTimeout(r, w.procInfoDelayMs))
@@ -292,6 +297,8 @@ function world(o: { installed?: string; release?: BundleOpts; running?: boolean 
         helloWaitMs: 400,
         killWaitMs: 200,
         pollMs: 10,
+        recoverWaitMs: 300,
+        firstRunWaitMs: 300,
         ...over,
       }
     },
@@ -615,7 +622,7 @@ describe('обновление окна: демон целиком (сокет, 
     return c
   }
 
-  async function daemonWorld(w: World, opts: { hello?: boolean } = {}) {
+  async function daemonWorld(w: World, opts: { hello?: boolean; helloWaitMs?: number } = {}) {
     const tools = w.tools()
     const d = await startTestDaemon(w.home, {
       updates: { http: tools.http as HttpGet, keys: KEYS, schedule: false },
@@ -635,7 +642,7 @@ describe('обновление окна: демон целиком (сокет, 
             setTimeout(() => c.end(), 50)
           },
         },
-        quitWaitMs: 300, helloWaitMs: 2000, killWaitMs: 200, pollMs: 10,
+        quitWaitMs: 300, helloWaitMs: opts.helloWaitMs ?? 2000, killWaitMs: 200, pollMs: 10,
       },
     })
     return d
@@ -661,6 +668,29 @@ describe('обновление окна: демон целиком (сокет, 
     } finally {
       c.close()
       await d.stop('тест')
+      w.remove()
+    }
+  })
+
+  it('остановка демона посреди пробы: отказы ожидающим разрешениям и адаптеры — сразу, всё — быстрее 5 с; старт доводит по журналу', async () => {
+    const w = world()
+    w.home.config.updates = { check: false, url: URL_LATEST }
+    const d = await daemonWorld(w, { hello: false, helloWaitMs: 30_000 })
+    const c = await connectClient(w.home.paths)
+    try {
+      await c.request('update.check')
+      await c.request('update.apply', { target: 'app' })
+      assert.ok(await waitFor(async () => ((await c.request('update.status')) as UpdateStatus).app?.applying?.step === 'health', 10_000))
+      const perm = d.broker.request({ sessionId: 'w', toolName: 'Bash', input: { command: 'ls' } })
+      const t0 = Date.now()
+      c.close()
+      await d.stop('тест')
+      const took = Date.now() - t0
+      const decision = await perm
+      assert.equal(decision.behavior, 'deny', 'ожидающий запрос получил отказ')
+      assert.ok(took < 5000, `остановка шла ${took} мс`)
+      assert.ok(existsSync(join(w.home.paths.apps, 'swap.json')), 'оборванная проба — журнал на месте')
+    } finally {
       w.remove()
     }
   })
@@ -754,7 +784,7 @@ describe('обновление окна: замена двумя rename на о�
   it('новое окно на другом томе — проверенная копия рядом со старым до закрытия окна; дальше rename', async () => {
     const w = world()
     let copies = 0
-    w.renameFail = (src, dst) => (src.includes('staging-') && dst.endsWith(`.Pult.app.incoming-${NEW}`) ? errno('EXDEV') : null)
+    w.renameFail = (src, dst) => (src.includes('staging-') && dst.includes(`.Pult.app.incoming-${NEW}-`) ? errno('EXDEV') : null)
     try {
       const u = updaterOf(w, { tools: { ...w.tools(), copyTree: async (a, b) => { copies++; cpSync(a, b, { recursive: true, verbatimSymlinks: true }) } } })
       await u.apply()
@@ -779,6 +809,17 @@ describe('обновление окна: замена двумя rename на о�
     } finally { w.remove() }
   })
 
+  it('копия на другой том с неверной подписью — отказ до закрытия окна', async () => {
+    const w = world()
+    w.renameFail = (src, dst) => (src.includes('staging-') && dst.includes('.Pult.app.incoming-') ? errno('EXDEV') : null)
+    w.codesignFailFor = (p) => p.includes('.Pult.app.incoming-')
+    try {
+      await runFailed(w, /подпись копии .*не сходится/)
+      untouched(w)
+      assert.equal(w.signals.length, 0)
+    } finally { w.remove() }
+  })
+
   it('первый rename (окно → .old) не прошёл — «ничего не тронуто», прежнее окно открыто снова', async () => {
     const w = world()
     w.renameFail = (src) => (src === w.app ? errno('EACCES') : null)
@@ -793,7 +834,7 @@ describe('обновление окна: замена двумя rename на о�
 
   it('второй rename (.incoming → место) не прошёл — прежнее вернул и открыл', async () => {
     const w = world()
-    w.renameFail = (src, dst) => (src.endsWith(`.Pult.app.incoming-${NEW}`) && dst === w.app ? errno('EIO') : null)
+    w.renameFail = (src, dst) => (src.includes(`.Pult.app.incoming-${NEW}-`) && dst === w.app ? errno('EIO') : null)
     try {
       await runFailed(w, /новое окно не встало на место.*прежнее вернул/)
       assert.equal(versionAt(w.app), OLD)
@@ -806,12 +847,12 @@ describe('обновление окна: замена двумя rename на о�
     const w = world()
     let restoreFails = true
     w.renameFail = (src, dst) => {
-      if (src.endsWith(`.Pult.app.incoming-${NEW}`) && dst === w.app) return errno('EIO')
-      if (src.endsWith(`.Pult.app.old-${OLD}`) && dst === w.app && restoreFails) return errno('EIO')
+      if (src.includes(`.Pult.app.incoming-${NEW}-`) && dst === w.app) return errno('EIO')
+      if (src.includes(`.Pult.app.old-${OLD}-`) && dst === w.app && restoreFails) return errno('EIO')
       return null
     }
     try {
-      await runFailed(w, /прежнее не вернулось.*\.Pult\.app\.old-0\.1\.15/)
+      await runFailed(w, /прежнее не вернулось.*\.Pult\.app\.old-0\.1\.15-/)
       assert.equal(existsSync(w.app), false)
       assert.ok(existsSync(join(w.home.paths.apps, 'swap.json')), 'журнал оставлен для восстановления')
       restoreFails = false
@@ -827,7 +868,7 @@ describe('обновление окна: замена двумя rename на о�
   it('прежнее окно → PULT_HOME через другой том: копия (живое окно уже на месте); не вышло — только предупреждение', async () => {
     for (const code of ['EXDEV', 'EACCES']) {
       const w = world()
-      w.renameFail = (src, dst) => (src.endsWith(`.Pult.app.old-${OLD}`) && dst.includes('previous-') ? errno(code) : null)
+      w.renameFail = (src, dst) => (src.includes(`.Pult.app.old-${OLD}-`) && dst.includes('previous-') ? errno(code) : null)
       try {
         const u = updaterOf(w)
         await u.apply()
@@ -844,9 +885,9 @@ describe('обновление окна: замена двумя rename на о�
 describe('обновление окна: обрыв на каждом шаге и восстановление при старте', () => {
   const journal = (w: World, phase: string, over: Record<string, unknown> = {}): void => {
     mkdirSync(w.home.paths.apps, { recursive: true })
-    const old = join(w.appsDir, `.Pult.app.old-${OLD}`)
+    const old = join(w.appsDir, `.Pult.app.old-${OLD}-${homeTag(w.home.paths.home)}`)
     writeFileSync(join(w.home.paths.apps, 'swap.json'), JSON.stringify({
-      schema: 1, app: w.app, dir: w.appsDir, old, incoming: join(w.appsDir, `.Pult.app.incoming-${NEW}`), prev: old,
+      schema: 1, app: w.app, dir: w.appsDir, old, incoming: join(w.appsDir, `.Pult.app.incoming-${NEW}-${homeTag(w.home.paths.home)}`), prev: old,
       from: OLD, to: NEW, phase, wasRunning: true, at: new Date().toISOString(), ...over,
     }))
   }
@@ -869,8 +910,8 @@ describe('обновление окна: обрыв на каждом шаге �
     const w = world({ running: false })
     try {
       journal(w, 'swap')
-      renameSync(w.app, join(w.appsDir, `.Pult.app.old-${OLD}`))
-      mkdirSync(join(w.appsDir, `.Pult.app.incoming-${NEW}`))
+      renameSync(w.app, join(w.appsDir, `.Pult.app.old-${OLD}-${homeTag(w.home.paths.home)}`))
+      mkdirSync(join(w.appsDir, `.Pult.app.incoming-${NEW}-${homeTag(w.home.paths.home)}`))
       const u = await recovered(w)
       assert.equal(versionAt(w.app), OLD)
       assert.equal(u.status().last?.result, 'failed')
@@ -879,31 +920,84 @@ describe('обновление окна: обрыв на каждом шаге �
     } finally { w.remove() }
   })
 
-  for (const [phase, where] of [['swap', 'old'], ['swapped', 'old'], ['swapped', 'previous'], ['health', 'previous']] as const) {
-    it(`фаза ${phase}, прежнее в ${where}: новое стоит без «готово» — откат, bad, новое окно погашено`, async () => {
+  for (const [phase, where, bad] of [['swap', 'old', false], ['swapped', 'old', false], ['swapped', 'previous', false], ['health', 'previous', true]] as const) {
+    it(`фаза ${phase}, прежнее в ${where}: новое стоит без «готово» — откат${bad ? ', bad (проба не прошла и после перезапуска)' : ' без bad (обрыв наш)'}, новое окно погашено`, async () => {
       const w = world({ running: false })
       try {
-        const prevAt = where === 'old' ? join(w.appsDir, `.Pult.app.old-${OLD}`) : join(w.home.paths.apps, `previous-${OLD}`, 'Pult.app')
-        journal(w, phase, { prev: prevAt })
+        const prevAt = where === 'old' ? join(w.appsDir, `.Pult.app.old-${OLD}-${homeTag(w.home.paths.home)}`) : join(w.home.paths.apps, `previous-${OLD}`, 'Pult.app')
+        journal(w, phase, { prev: prevAt, swapAt: Date.now() })
         swapTo(w, prevAt)
         const pid = nextPid++
         w.procs.set(pid, { exe: join(w.app, 'Contents', 'MacOS', 'Pult'), alive: true, startedAt: Date.now() })
         const u = await recovered(w)
         assert.equal(versionAt(w.app), OLD)
         assert.equal(u.status().last?.result, 'rolled_back', u.status().last?.message)
-        assert.deepEqual(readAppState(w.home.paths).bad, [NEW])
+        assert.deepEqual(readAppState(w.home.paths).bad, bad ? [NEW] : [])
         assert.ok(w.signals.some(([p, sig]) => p === pid && sig === 'SIGTERM'), 'новое окно погашено')
         assert.deepEqual(w.opens, [w.app])
       } finally { w.remove() }
     })
   }
 
+  it('фаза health, демон перезапущен посреди пробы: новое окно переподключилось и готово — оставить, не bad', async () => {
+    const w = world({ running: false })
+    try {
+      const prevAt = join(w.home.paths.apps, `previous-${OLD}`, 'Pult.app')
+      const swapAt = Date.now() - 5000
+      journal(w, 'health', { prev: prevAt, swapAt })
+      swapTo(w, prevAt)
+      const pid = nextPid++
+      const exe = join(w.app, 'Contents', 'MacOS', 'Pult')
+      w.procs.set(pid, { exe, alive: true, startedAt: Date.now() - 4000 })
+      const u = updaterOf(w, { recoverWaitMs: 3000 })
+      setTimeout(() => u.onShellReady({ version: NEW, execPath: exe, pid }), 50)
+      await u.ready
+      assert.equal(versionAt(w.app), NEW)
+      assert.equal(u.status().last?.result, 'done', u.status().last?.message)
+      assert.match(u.status().last?.message ?? '', /после перезапуска демона/)
+      assert.deepEqual(readAppState(w.home.paths).bad, [])
+      assert.equal(w.signals.length, 0)
+      assert.equal(existsSync(join(w.home.paths.apps, 'swap.json')), false)
+    } finally { w.remove() }
+  })
+
+  it('кандидат в прежнее окно проверяется (подпись): испорченный .old пропускается, берётся previous', async () => {
+    const w = world({ running: false })
+    try {
+      const tagd = homeTag(w.home.paths.home)
+      const oldAt = join(w.appsDir, `.Pult.app.old-${OLD}-${tagd}`)
+      const prevAt = join(w.home.paths.apps, `previous-${OLD}`, 'Pult.app')
+      journal(w, 'swapped', { prev: oldAt })
+      swapTo(w, prevAt)
+      cpSync(prevAt, oldAt, { recursive: true, verbatimSymlinks: true })
+      w.codesignFailFor = (p) => p === oldAt
+      await recovered(w)
+      assert.equal(versionAt(w.app), OLD)
+      assert.equal(existsSync(prevAt), false, 'взят previous')
+    } finally { w.remove() }
+  })
+
+  it('восстановление не прошло (прежнего нет) — журнал остаётся, «Обновить окно» отказывает до перезапуска демона', async () => {
+    const w = world({ running: false })
+    try {
+      journal(w, 'swapped')
+      rmSync(w.app, { recursive: true })
+      renameSync(makeBundle(mkdtempSync(join(w.root, 'n-')), { version: NEW }), w.app)
+      const u = updaterOf(w)
+      await u.ready
+      assert.ok(existsSync(join(w.home.paths.apps, 'swap.json')))
+      assert.match(u.status().last?.message ?? '', /восстановление после обрыва не прошло/)
+      w.manifest.version = '0.1.17'
+      await assert.rejects(u.apply(), /прошлое обновление окна не доведено/)
+    } finally { w.remove() }
+  })
+
   it('оборванный откат: места пусто, прежнее в .incoming-<from>, новое в .failed-<to> — прежнее на место', async () => {
     const w = world({ running: false })
     try {
       journal(w, 'rollback')
-      renameSync(w.app, join(w.appsDir, `.Pult.app.incoming-${OLD}`))
-      renameSync(makeBundle(mkdtempSync(join(w.root, 'n-')), { version: NEW }), join(w.appsDir, `.Pult.app.failed-${NEW}`))
+      renameSync(w.app, join(w.appsDir, `.Pult.app.incoming-${OLD}-${homeTag(w.home.paths.home)}`))
+      renameSync(makeBundle(mkdtempSync(join(w.root, 'n-')), { version: NEW }), join(w.appsDir, `.Pult.app.failed-${NEW}-${homeTag(w.home.paths.home)}`))
       const u = await recovered(w)
       assert.equal(versionAt(w.app), OLD)
       assert.equal(u.status().last?.result, 'rolled_back')
@@ -920,13 +1014,16 @@ describe('обновление окна: обрыв на каждом шаге �
     } finally { w.remove() }
   })
 
-  it('без журнала — уборка staging-*, failed-*, .Pult.app.incoming-*, .Pult.app.failed-*; previous не трогается', async () => {
+  it('без журнала — уборка staging-*, failed-*, своих .Pult.app.{incoming,failed,old}-*-<метка>; чужие и previous — нет', async () => {
     const w = world({ running: false })
     try {
+      const tg = homeTag(w.home.paths.home)
       for (const d of [`staging-${NEW}`, `failed-${NEW}`, `previous-${OLD}`]) mkdirSync(join(w.home.paths.apps, d), { recursive: true })
-      for (const d of [`.Pult.app.incoming-${NEW}`, `.Pult.app.failed-${NEW}`]) mkdirSync(join(w.appsDir, d))
-      await recovered(w)
+      for (const d of [`.Pult.app.incoming-${NEW}-${tg}`, `.Pult.app.failed-${NEW}-${tg}`, `.Pult.app.old-${OLD}-${tg}`, `.Pult.app.incoming-${NEW}-deadbeef`]) mkdirSync(join(w.appsDir, d))
+      const u = updaterOf(w)
+      await u.ready
       assert.deepEqual(readdirSync(w.home.paths.apps), [`previous-${OLD}`])
+      assert.deepEqual(readdirSync(w.appsDir).sort(), [`.Pult.app.incoming-${NEW}-deadbeef`, 'Pult.app'], 'чужой PULT_HOME не тронут')
       assert.equal(versionAt(w.app), OLD)
     } finally { w.remove() }
   })
@@ -944,13 +1041,19 @@ describe('обновление окна: обрыв на каждом шаге �
     const w2 = world()
     w2.helloOnOpen = false
     try {
-      const u = updaterOf(w2, { helloWaitMs: 300 })
+      const u = updaterOf(w2, { helloWaitMs: 5000 })
       await u.apply()
       assert.ok(await waitFor(() => u.status().applying?.step === 'health', 5000))
       await u.stop()
-      assert.equal(u.status().applying, null, 'stop дождался конца работы')
-      assert.equal(u.status().last?.result, 'rolled_back')
+      assert.equal(u.status().applying, null, 'stop разбудил пробу и дождался выхода работы')
+      assert.ok(existsSync(join(w2.home.paths.apps, 'swap.json')), 'окно не гасили в спешке — журнал для старта')
+      assert.equal(versionAt(w2.app), NEW)
+      // Следующий старт: новое окно не поднялось и после перезапуска — откат и bad.
+      const u2 = updaterOf(w2)
+      await u2.ready
       assert.equal(versionAt(w2.app), OLD)
+      assert.equal(u2.status().last?.result, 'rolled_back')
+      assert.deepEqual(readAppState(w2.home.paths).bad, [NEW])
     } finally { w2.remove() }
   })
 })
@@ -1012,16 +1115,70 @@ describe('обновление окна: другие окна и строгая
     } finally { w.remove() }
   })
 
-  it('окно не было открыто — не открывается; итог говорит, как открыть', async () => {
+  it('окно было закрыто — не открывается; previous держится до первого запуска; первый запуск готов — отпускается', async () => {
     const w = world({ running: false })
+    mkdirSync(join(w.root, 'x'))
     try {
       const u = updaterOf(w)
       await u.apply()
       await u.idle()
       assert.equal(u.status().last?.result, 'done')
-      assert.match(u.status().last?.message ?? '', /не было открыто.*pult ui/)
+      assert.match(u.status().last?.message ?? '', /ещё не запускалось.*pult ui/)
       assert.deepEqual(w.opens, [])
+      assert.deepEqual(u.status().firstRun, { to: NEW, from: OLD, state: 'waiting' })
+      assert.ok(existsSync(join(w.home.paths.apps, `previous-${OLD}`, 'Pult.app')))
+      // Человек открыл окно: hello и готовность интерфейса из нового бандла.
+      const pid = nextPid++
+      const exe = join(w.app, 'Contents', 'MacOS', 'Pult')
+      w.procs.set(pid, { exe, alive: true, startedAt: Date.now() })
+      u.onShellHello({ version: NEW, execPath: exe, pid })
+      u.onShellReady({ version: NEW, execPath: exe, pid })
+      assert.ok(await waitFor(() => u.status().firstRun === null, 2000), 'первый запуск засчитан')
+      assert.ok(existsSync(join(w.home.paths.apps, `previous-${OLD}`)), 'previous — ещё один цикл')
     } finally { w.remove() }
+  })
+
+  it('первый запуск окна, заменённого закрытым, не заработал за срок — «Вернуть 0.1.15» (rollback) возвращает прежнее', async () => {
+    const w = world({ running: false })
+    try {
+      const u = updaterOf(w)
+      await u.apply()
+      await u.idle()
+      const pid = nextPid++
+      const exe = join(w.app, 'Contents', 'MacOS', 'Pult')
+      w.procs.set(pid, { exe, alive: true, startedAt: Date.now() })
+      u.onShellHello({ version: NEW, execPath: exe, pid })
+      assert.ok(await waitFor(() => u.status().firstRun?.state === 'failed', 3000))
+      assert.match(u.status().last?.message ?? '', /не заработало при первом запуске.*Вернуть 0\.1\.15/)
+      const r = await u.apply({ rollback: true })
+      assert.equal(r.to, NEW)
+      await u.idle()
+      assert.equal(versionAt(w.app), OLD)
+      assert.equal(u.status().last?.result, 'rolled_back', u.status().last?.message)
+      assert.deepEqual(readAppState(w.home.paths).bad, [NEW])
+      assert.equal(u.status().firstRun, null)
+      assert.ok(w.signals.some(([p, sig]) => p === pid && sig === 'SIGTERM'), 'неработающее новое окно погашено')
+      await assert.rejects(u.apply({ rollback: true }), /возвращать нечего/)
+    } finally { w.remove() }
+  })
+
+  it('откат не прошёл — итог называет, где прежнее окно сейчас', async () => {
+    const w = world()
+    w.helloOnOpen = false
+    w.renameFail = (src, dst) => (src.includes(`.Pult.app.incoming-${OLD}-`) && dst === w.app ? errno('EIO') : null)
+    try {
+      const u = updaterOf(w)
+      await u.apply()
+      await u.idle()
+      assert.match(u.status().last?.message ?? '', new RegExp(`откат не прошёл.*прежнее окно в .*\\.Pult\\.app\\.incoming-0\\.1\\.15-${homeTag(w.home.paths.home)}`))
+    } finally { w.remove() }
+  })
+
+  it('ps etime → секунды', () => {
+    assert.equal(etimeSeconds('00:07'), 7)
+    assert.equal(etimeSeconds('01:02:03'), 3723)
+    assert.equal(etimeSeconds('2-00:00:01'), 172801)
+    assert.equal(etimeSeconds('nope'), null)
   })
 })
 
@@ -1035,6 +1192,41 @@ describe('обновление окна: zip и дерево (ревью)', () =
       z.write('Pult.app/../', at, 'utf8') // только локальное имя; каталог прежний
       writeFileSync(file, z)
       assert.throws(() => scanZip(file), /имя в локальном заголовке другое/)
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+
+  it('локальная запись, которой нет в каталоге, и записи внахлёст — отказ', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pau-h-'))
+    try {
+      const file = join(dir, 'a.zip')
+      const e = (n: string): ZEntry => ({ name: n, data: Buffer.from(n), mode: 0o100644 })
+      writeFileSync(file, zipOf([e('Pult.app/a'), e('Pult.app/evil'), e('Pult.app/b')], { hide: [1] }))
+      assert.throws(() => scanZip(file), /лишние байты/)
+      writeFileSync(file, zipOf([e('Pult.app/a'), e('Pult.app/evil')], { hide: [1] }))
+      assert.throws(() => scanZip(file), /лишние байты/)
+      writeFileSync(file, zipOf([e('Pult.app/a'), e('Pult.app/b')], { dupFirst: true }))
+      assert.throws(() => scanZip(file), /наложена/)
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+
+  it('zip от настоящего ditto (дескрипторы данных, AppleDouble) проходит', { skip: process.platform !== 'darwin' ? 'ditto — только macOS' : false }, () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pau-d-'))
+    try {
+      const app = makeBundle(dir, { version: NEW })
+      writeFileSync(join(app, 'Contents', 'Resources.bin'), Buffer.alloc(200_000, 7))
+      const file = join(dir, 'd.zip')
+      spawnSync('/usr/bin/ditto', ['-c', '-k', '--keepParent', app, file])
+      assert.ok(scanZip(file).entries > 5)
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+
+  it('ссылка в никуда — отказ (по буквам её не проверить)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pau-n-'))
+    try {
+      const app = makeBundle(dir, { version: NEW })
+      symlinkSync('..', join(app, 'Contents', 'D'))
+      symlinkSync('Contents/D/../nonexist', join(app, 'F'))
+      assert.throws(() => checkTree(app), /ведёт в никуда/)
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
 

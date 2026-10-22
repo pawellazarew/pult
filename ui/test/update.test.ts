@@ -375,15 +375,30 @@ describe('окно обновляется само (0.3.4): «Окно: 0.1.15 �
   })
 
   it('окно не из поставленного бандла (here: false) — без кнопки, с подсказкой, где обновить', () => {
-    const v = appUpdateView(st(app({ here: false })), '0.1.15')
+    const v = appUpdateView(st(app({ here: false, hereFrom: '/w/node_modules/electron/dist/Electron.app' })), '0.1.15')
     assert.equal(v.state, 'available')
     assert.equal(v.action, null)
-    assert.match(v.text, /обновить можно из окна \/Applications\/Pult\.app или в терминале: pult update --app/)
-    const b = updateBanner(st(app({ here: false })), '0.1.15')
+    assert.match(v.text, /закрой окно из \/w\/node_modules\/electron\/dist\/Electron\.app и обнови из \/Applications\/Pult\.app/)
+    const b = updateBanner(st(app({ here: false, hereFrom: '/x/Pult.app' })), '0.1.15')
     assert.equal(b?.action, null)
-    assert.match(b?.text ?? '', /pult update --app/)
+    assert.match(b?.text ?? '', /закрой окно из \/x\/Pult\.app/)
     assert.doesNotMatch(section(st(app({ here: false }))), /settings-app-apply/)
     assert.equal(appUpdateView(st(app({ here: true })), '0.1.15').action?.target, 'app')
+  })
+
+  it('окно заменено закрытым: «ещё не запускалось»; первый запуск не заработал — «Вернуть 0.1.15» (rollback)', () => {
+    const wait = appUpdateView(st(app({ available: false, latest: '0.1.16', installed: '0.1.16', firstRun: { to: '0.1.16', from: '0.1.15', state: 'waiting' } })), null)
+    assert.equal(wait.state, 'firstrun')
+    assert.match(wait.text, /обновлено до 0\.1\.16, ещё не запускалось/)
+    assert.equal(wait.action, null)
+    const failed = appUpdateView(st(app({ available: false, installed: '0.1.16', firstRun: { to: '0.1.16', from: '0.1.15', state: 'failed' } })), null)
+    assert.equal(failed.state, 'firstrun-failed')
+    assert.deepEqual(failed.action, { label: 'Вернуть 0.1.15', force: false, target: 'app', rollback: true })
+    const b = updateBanner(st(app({ available: false, installed: '0.1.16', firstRun: { to: '0.1.16', from: '0.1.15', state: 'failed' } })), null)
+    assert.equal(b?.kind, 'app-failed')
+    assert.equal(b?.action?.rollback, true)
+    assert.equal(b?.dismissKey, 'firstrun:0.1.16')
+    assert.match(section(st(app({ available: false, installed: '0.1.16', firstRun: { to: '0.1.16', from: '0.1.15', state: 'failed' } }))), /data-state="firstrun-failed"[\s\S]*settings-app-apply/)
   })
 
   it('отказ «Обновить окно» словами; старая оболочка — подсказка pult update --app', () => {

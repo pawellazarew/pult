@@ -231,6 +231,7 @@ pult update --check      # only check: exit 0 — up to date, 10 — an update i
 pult update --list       # versions on disk
 pult update --to <ver>   # switch back to a version from `pult update --list`
 pult update --app        # update the window (Pult.app, macOS) from the same channel
+pult update --app --rollback   # put the previous window back if the new one failed on its first start
 ```
 
 - `latest.json` of the latest GitHub release is signed with Ed25519 (the public key is built into Pult); the package
@@ -244,7 +245,9 @@ pult update --app        # update the window (Pult.app, macOS) from the same cha
   code signature, puts the new bundle next to the old one, then closes the window, swaps `Pult.app` in place with two
   renames and opens the new one. If the new window is not up and working within 60 seconds, the old one is put back
   and reopened, and that version is not offered again (`pult update --app --force` retries it). If the daemon is
-  stopped mid-swap, the next start finishes or rolls back. Another open window (a second copy of `Pult.app`, a
+  stopped mid-swap, the next start finishes or rolls back. If the window was closed during the update, the previous
+  window is kept until the new one has started once; if that first start fails, Settings offers «Вернуть» (put it
+  back). Another open window (a second copy of `Pult.app`, a
   development window) has to be closed first; the button is shown only in the installed window. Agents keep working the whole time; unsent text in the message box survives
   the restart. If the window folder is not writable (for example, a non-admin user and `/Applications`), nothing is
   touched and Pult tells you how to replace the window by hand (download `Pult-arm64.zip` as in

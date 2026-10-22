@@ -19,6 +19,7 @@
 // доверие; доверие — подпись latest.json ключом релизов и sha256 zip из него (docs/DEV.md, модель угроз 0.3.4).
 
 import { execFile } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { appendFileSync, accessSync, existsSync, closeSync, constants as fsConstants, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, chmodSync } from 'node:fs'
 import path from 'node:path'
 import { appDirs } from '../cli/ui.js'
@@ -36,6 +37,7 @@ import type { TrustedKey } from './keys.js'
 import type { ReleaseAsset } from './manifest.js'
 import { bundleStrings, isBinaryPlist } from './plist.js'
 import { readAppState, writeAppState } from './appState.js'
+import type { AppPending } from './appState.js'
 import { atomicWrite } from '../service/fsutil.js'
 
 /** CFBundleIdentifier окна (shell/package.json → build.appId). Другой id в архиве или на месте — отказ. */
@@ -52,8 +54,12 @@ export const QUIT_WAIT_MS = 10_000
  * держит долго (проверка подписи) — лучше подождать, чем откатить годное.
  */
 export const HELLO_WAIT_MS = 60_000
-/** Сколько остановка демона ждёт работу, уже меняющую бандл. */
-export const STOP_WAIT_MS = 25_000
+/** Сколько остановка демона ждёт работу, уже меняющую бандл: launchd добивает службу через 5 с. */
+export const STOP_WAIT_MS = 3_000
+/** Старт после обрыва на пробе: столько ждать, не поднимется ли новое окно само (оно переподключится к демону). */
+export const RECOVER_WAIT_MS = 15_000
+/** Первый запуск окна, заменённого закрытым: столько от hello до готовности интерфейса. */
+export const FIRST_RUN_WAIT_MS = 60_000
 /** Сколько ждать выхода НОВОГО окна при откате, прежде чем SIGKILL (оно наше, данных человека в нём нет). */
 export const KILL_WAIT_MS = 5_000
 const POLL_MS = 100
@@ -111,6 +117,18 @@ function run(bin: string, args: string[], timeoutMs = 120_000): Promise<string> 
   })
 }
 
+/** `ps -o etime`: «[[dd-]hh:]mm:ss» → секунды; не то — null. */
+export function etimeSeconds(v: string): number | null {
+  const m = /^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$/.exec(v.trim())
+  if (!m) return null
+  return Number(m[1] ?? 0) * 86400 + Number(m[2] ?? 0) * 3600 + Number(m[3]) * 60 + Number(m[4])
+}
+
+/** Метка этого PULT_HOME в именах рядом с окном: уборка трогает только свои `.Pult.app.*-<метка>`. */
+export function homeTag(home: string): string {
+  return createHash('sha256').update(home).digest('hex').slice(0, 8)
+}
+
 const realpathOr = (p: string): string => { try { return realpathSync.native(p) } catch { return p } }
 
 /** Настоящие утилиты macOS. Только по абсолютным путям: PATH демона под launchd не наш. */
@@ -136,12 +154,12 @@ export function systemTools(env: NodeJS.ProcessEnv): AppTools {
     },
     procInfo: async (pid) => {
       if (!Number.isInteger(pid) || pid <= 0) return null
-      const out = await run('/bin/ps', ['-ww', '-o', 'uid=,lstart=,comm=', '-p', String(pid)], 15_000).catch(() => '')
-      // lstart в локали C: «Thu Oct 22 22:38:00 2026».
-      const m = /^\s*(\d+)\s+(\S+\s+\S+\s+\d+\s+[\d:]+\s+\d{4})\s+(.+?)\s*$/.exec(out.split('\n')[0] ?? '')
-      if (!m) return null
-      const startedAt = Date.parse(m[2] as string)
-      return Number.isFinite(startedAt) ? { uid: Number(m[1]), exe: m[3] as string, startedAt } : null
+      // `etime` ([[dd-]hh:]mm:ss) — сколько процесс живёт: старт = сейчас − etime, без разбора даты и перевода
+      // часов (lstart — местное время). `etimes` у ps macOS нет.
+      const out = await run('/bin/ps', ['-ww', '-o', 'uid=,etime=,comm=', '-p', String(pid)], 15_000).catch(() => '')
+      const m = /^\s*(\d+)\s+(\S+)\s+(.+?)\s*$/.exec(out.split('\n')[0] ?? '')
+      const secs = m ? etimeSeconds(m[2] as string) : null
+      return m && secs !== null ? { uid: Number(m[1]), exe: m[3] as string, startedAt: Date.now() - secs * 1000 } : null
     },
     signal: (pid, sig) => { process.kill(pid, sig) },
     alive: (pid) => { try { process.kill(pid, 0); return true } catch { return false } },
@@ -235,6 +253,8 @@ export function scanZip(file: string, limits: { maxEntries?: number; maxUnpacked
     let unpacked = 0
     const names: string[] = []
     const links = new Set<string>()
+    /** Начало и конец каждой локальной записи (заголовок, имя, extra, данные, дескриптор). */
+    const spans: Array<{ start: number; end: number; name: string }> = []
     for (let i = 0; i < count; i++) {
       if (p + 46 > cd.length || cd.readUInt32LE(p) !== 0x02014b50) bad('каталог испорчен')
       const madeBy = cd.readUInt16LE(p + 4)
@@ -266,7 +286,19 @@ export function scanZip(file: string, limits: { maxEntries?: number; maxUnpacked
       // Бит 3 — размеры в дескрипторе после данных (так пишет ditto): в заголовке нули или те же числа.
       const sizesOk = (lcs === csize && lus === usize) || ((lflags & 8) !== 0 && (flags & 8) !== 0 && lcs === 0 && lus === 0)
       if (!sizesOk) bad(`запись «${name.slice(0, 120)}»: размеры в локальном заголовке другие`)
-      if (localOff + 30 + lnlen + lxlen + csize > cdOff) bad(`запись «${name.slice(0, 120)}» заходит на каталог`)
+      let end = localOff + 30 + lnlen + lxlen + csize
+      if (lflags & 8) {
+        // Дескриптор данных: необязательная подпись 0x08074b50, затем crc, сжатый и полный размеры (не ZIP64).
+        const dd = Buffer.alloc(16)
+        const got = readSync(fd, dd, 0, 16, end)
+        const signed = got >= 4 && dd.readUInt32LE(0) === 0x08074b50
+        const base = signed ? 4 : 0
+        if (got < base + 12) bad(`запись «${name.slice(0, 120)}»: нет дескриптора данных`)
+        if (dd.readUInt32LE(base + 4) !== csize || dd.readUInt32LE(base + 8) !== usize) bad(`запись «${name.slice(0, 120)}»: размеры в дескрипторе другие`)
+        end += base + 12
+      }
+      if (end > cdOff) bad(`запись «${name.slice(0, 120)}» заходит на каталог`)
+      spans.push({ start: localOff, end, name })
       if (usize === 0xffffffff) bad('ZIP64 не принимается')
       unpacked += usize
       if (unpacked > maxUnpacked) bad(`распакованный размер больше потолка ${maxUnpacked} байт`)
@@ -281,6 +313,15 @@ export function scanZip(file: string, limits: { maxEntries?: number; maxUnpacked
       if (mode & 0o6000) bad(`запись «${name.slice(0, 120)}» с setuid/setgid`)
       names.push(segs.join('/'))
     }
+    // Локальные записи — встык, от нуля до каталога: запись, которой нет в каталоге (её распакует ditto, но не
+    // проверим мы), или две записи поверх друг друга — отказ.
+    spans.sort((a, b) => a.start - b.start)
+    let at = 0
+    for (const sp of spans) {
+      if (sp.start !== at) bad(sp.start > at ? `перед записью «${sp.name.slice(0, 120)}» лишние байты (запись не из каталога?)` : `запись «${sp.name.slice(0, 120)}» наложена на предыдущую`)
+      at = sp.end
+    }
+    if (at !== cdOff) bad('между записями и каталогом лишние байты (запись не из каталога?)')
     if (links.size) {
       for (const n of names) {
         const segs = n.split('/')
@@ -315,10 +356,11 @@ export function checkTree(root: string, maxEntries = APP_MAX_ENTRIES): number {
         if (path.isAbsolute(target)) throw new AppUpdateError(`бандл окна: ссылка ${rel} → абсолютный путь ${target.slice(0, 200)}`)
         if (!within(path.resolve(path.dirname(p), target), root)) throw new AppUpdateError(`бандл окна: ссылка ${rel} выходит из бандла (${target.slice(0, 200)})`)
         // Цепочка ссылок (`D -> ..`, `C -> D/..`) по буквам внутри, а на деле — снаружи: сверяем настоящий путь.
-        let real: string | null = null
-        // `.native` — realpath(3) системы: JS-вариант Node сводит «D/..» по буквам и цепочку не видит.
-        try { real = realpathSync.native(p) } catch { /* ссылка в никуда — по буквам уже проверена */ }
-        if (real !== null && !within(real, rootReal)) throw new AppUpdateError(`бандл окна: ссылка ${rel} выходит из бандла через цепочку ссылок`)
+        // `.native` — realpath(3) системы: JS-вариант Node сводит «D/..» по буквам и цепочку не видит. Ссылка в никуда
+        // — отказ: по буквам её не проверить (`F -> D/../nonexist` укажет наружу, когда цель появится).
+        let real: string
+        try { real = realpathSync.native(p) } catch { throw new AppUpdateError(`бандл окна: ссылка ${rel} ведёт в никуда (${target.slice(0, 200)})`) }
+        if (!within(real, rootReal)) throw new AppUpdateError(`бандл окна: ссылка ${rel} выходит из бандла через цепочку ссылок`)
         continue
       }
       if (st.mode & 0o6000) throw new AppUpdateError(`бандл окна: ${rel} с setuid/setgid`)
@@ -330,7 +372,7 @@ export function checkTree(root: string, maxEntries = APP_MAX_ENTRIES): number {
   return n
 }
 
-/** Список дерева для сверки копии между томами: путь, тип, размер или цель ссылки. */
+/** Список дерева для сверки копии между томами: путь, тип, права, размер или цель ссылки. */
 function treeListing(root: string): string[] {
   const out: string[] = []
   const walk = (dir: string): void => {
@@ -339,7 +381,7 @@ function treeListing(root: string): string[] {
       const rel = path.relative(root, p)
       const st = lstatSync(p)
       if (st.isSymbolicLink()) out.push(`${rel}\tl\t${readlinkSync(p)}`)
-      else if (st.isDirectory()) { out.push(`${rel}\td`); walk(p) } else out.push(`${rel}\tf\t${st.size}`)
+      else if (st.isDirectory()) { out.push(`${rel}\td\t${(st.mode & 0o7777).toString(8)}`); walk(p) } else out.push(`${rel}\tf\t${(st.mode & 0o7777).toString(8)}\t${st.size}`)
     }
   }
   walk(root)
@@ -444,6 +486,10 @@ export interface AppUpdaterOptions {
   pollMs?: number
   /** Сколько `stop()` ждёт работу, начавшую менять бандл. */
   stopWaitMs?: number
+  /** Сколько старт демона после обрыва на пробе ждёт готовность нового окна, прежде чем откатить. */
+  recoverWaitMs?: number
+  /** Сколько первый запуск окна, заменённого закрытым, ждёт готовности после hello. */
+  firstRunWaitMs?: number
 }
 
 export interface AppApplyRequest {
@@ -451,6 +497,8 @@ export interface AppApplyRequest {
   expect?: string
   /** Поставить и версию, помеченную bad (`pult update --app --force`). */
   allowBad?: boolean
+  /** Вернуть прежнее окно: новое, заменённое закрытым, не заработало при первом запуске. */
+  rollback?: boolean
 }
 
 export interface AppUpdater {
@@ -462,6 +510,8 @@ export interface AppUpdater {
    * Так видно, что новое окно не только запустилось, но и работает с этим пакетом.
    */
   onShellReady(h: ShellHello): void
+  /** Оболочка поздоровалась (main): первый запуск окна, заменённого закрытым, — пошёл отсчёт готовности. */
+  onShellHello(h: ShellHello): void
   busy(): boolean
   /** Восстановление после обрыва прошлой замены (журнал apps/swap.json) — при старте. */
   ready: Promise<void>
@@ -487,6 +537,8 @@ interface SwapJournal {
   phase: 'swap' | 'swapped' | 'health' | 'rollback'
   wasRunning: boolean
   at: string
+  /** Когда новое окно встало на место (мс): готовым считается только процесс, запущенный после. */
+  swapAt?: number
 }
 
 /** Шаги, после которых бандл уже меняется: остановка демона их дожидается. */
@@ -501,6 +553,10 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
   const killWait = o.killWaitMs ?? KILL_WAIT_MS
   const poll = o.pollMs ?? POLL_MS
   const stopWait = o.stopWaitMs ?? STOP_WAIT_MS
+  const recoverWait = o.recoverWaitMs ?? RECOVER_WAIT_MS
+  const firstRunWait = o.firstRunWaitMs ?? FIRST_RUN_WAIT_MS
+  const tag = homeTag(o.paths.home)
+  const near = (dir: string, kind: 'incoming' | 'old' | 'failed', v: string): string => path.join(dir, `.Pult.app.${kind}-${v}-${tag}`)
   const keys = o.keys ?? trustedKeys(env)
   const myUid = process.getuid?.() ?? -1
   const shells = (): ShellHello[] => o.shells?.() ?? []
@@ -513,6 +569,9 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
   let job: { to: string; from: string | null; step: AppUpdateStep; since: string; done: Promise<void> } | null = null
   let preflight: Promise<{ applying: true; to: string; target: 'app' }> | null = null
   let stopped = false
+  /** Остановка демона будит ожидания пробы: оборванную пробу доведёт старт по журналу, а не таймер в умирающем процессе. */
+  let wakeStop: () => void = () => {}
+  const stopSignal = new Promise<void>((r) => { wakeStop = r })
   const readyWaiters = new Set<(h: ShellHello) => void>()
 
   /** Уборка не роняет демона: ошибка — в журнал, и всё. */
@@ -545,14 +604,16 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
       bad,
       applying: job ? { to: job.to, from: job.from, step: job.step, since: job.since } : null,
       last: st.last,
+      firstRun: st.pending ? { to: st.pending.to, from: st.pending.from, state: st.pending.failed ? 'failed' : 'waiting' } : null,
     }
   }
 
-  const record = (last: AppUpdateAttempt, markBad = false): void => {
+  const record = (last: AppUpdateAttempt | null, markBad = false, pending?: AppPending | null): void => {
     try {
       const st = readAppState(o.paths)
-      st.last = last
-      if (markBad && !st.bad.includes(last.to)) st.bad = [...st.bad, last.to].slice(-20)
+      if (last) st.last = last
+      if (last && markBad && !st.bad.includes(last.to)) st.bad = [...st.bad, last.to].slice(-20)
+      if (pending !== undefined) st.pending = pending
       writeAppState(o.paths, st)
     } catch (e) { o.logger.warn('app-update.json не записался', { error: (e as Error).message }) }
   }
@@ -580,13 +641,30 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
     }
   }
 
-  /** Положить бандл в `dst` (рядом с местом окна): тот же том — rename, другой — проверенная копия. */
+  /**
+   * Положить бандл в `dst` (рядом с местом окна): тот же том — rename, другой — копия, сверка дерева (пути, типы,
+   * права, размеры, ссылки) и `codesign --verify` копии: запускаться будет она.
+   */
   const stageNear = async (src: string, dst: string): Promise<void> => {
     rmSync(dst, { recursive: true, force: true })
     try { tools.rename(src, dst); return } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'EXDEV') throw e
     }
     await copyVerified(src, dst)
+    try { await tools.codesignVerify(dst) } catch (e) {
+      safe('копия с неверной подписью не убрана', () => rmSync(dst, { recursive: true, force: true }))
+      throw new AppUpdateError(`подпись копии ${dst} не сходится: ${(e as Error).message}`)
+    }
+  }
+
+  /** Годное прежнее окно: та версия, дерево без ссылок наружу, подпись сходится (кандидата при восстановлении). */
+  const validPrev = async (p: string, from: string): Promise<boolean> => {
+    try {
+      if (readBundle(p)?.version !== from) return false
+      checkTree(p)
+      await tools.codesignVerify(p)
+      return true
+    } catch { return false }
   }
 
   const waitGone = async (pids: number[], ms: number): Promise<boolean> => {
@@ -617,8 +695,8 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
     if (h.pid === null || (h.version !== null && h.version !== to)) return false
     const info = await tools.procInfo(h.pid).catch(() => null)
     if (!info || info.uid !== myUid || !insideApp(info.exe, app)) return false
-    // lstart — с точностью до секунды.
-    if (info.startedAt < swapAt - 1000) return false
+    // etime — с точностью до секунды.
+    if (info.startedAt < swapAt - 2000) return false
     return readBundle(app)?.version === to
   }
 
@@ -632,9 +710,10 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
     readyWaiters.add(fn)
     return {
       wait: (ms) => new Promise<boolean>((resolve) => {
-        if (seen) { resolve(true); return }
+        if (seen || stopped) { resolve(seen); return }
         const t = setTimeout(() => { wake = null; resolve(seen) }, ms)
         wake = (v) => { clearTimeout(t); wake = null; resolve(v) }
+        void stopSignal.then(() => { if (wake) { clearTimeout(t); wake = null; resolve(seen) } })
       }),
       seen: () => seen,
       cancel: () => { readyWaiters.delete(fn) },
@@ -658,8 +737,8 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
    * в `.failed-<to>`, прежнее — на место. Живое окно между томами не копируется никогда.
    */
   const putBack = async (j: Pick<SwapJournal, 'app' | 'dir' | 'prev' | 'from' | 'to'>): Promise<void> => {
-    const back = path.join(j.dir, `.Pult.app.incoming-${j.from}`)
-    const failed = path.join(j.dir, `.Pult.app.failed-${j.to}`)
+    const back = near(j.dir, 'incoming', j.from)
+    const failed = near(j.dir, 'failed', j.to)
     if (j.prev !== back) await stageNear(j.prev, back)
     rmSync(failed, { recursive: true, force: true })
     let movedNew = false
@@ -676,6 +755,91 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
     safe('previous не удалён', () => rmSync(path.join(o.paths.apps, `previous-${j.from}`), { recursive: true, force: true }))
   }
 
+  /** Где прежнее окно сейчас: после оборванного отката оно могло уже лежать рядом (`.incoming-<from>`). */
+  const whereNow = (prev: string, dir: string, from: string): string => {
+    const back = near(dir, 'incoming', from)
+    for (const p of [prev, back]) { try { lstatSync(p); return p } catch { /* нет */ } }
+    return prev
+  }
+
+  /** Убрать apps/previous-* кроме прежнего окна этого цикла и (если есть) прежнего окна, ждущего первого запуска. */
+  const cleanPrevious = (keepFrom: string, alsoKeep: string | null): void => {
+    safe('старые previous не убраны', () => {
+      for (const n of readdirSync(o.paths.apps)) {
+        if (n.startsWith('previous-') && n !== `previous-${keepFrom}` && (alsoKeep === null || n !== `previous-${alsoKeep}`)) {
+          rmSync(path.join(o.paths.apps, n), { recursive: true, force: true })
+        }
+      }
+    })
+  }
+
+  // --- окно, заменённое закрытым: первый запуск -------------------------------------------------------
+  let pendingWatch: ((h: ShellHello) => void) | null = null
+  const pendingTimers = new Map<number, NodeJS.Timeout>()
+  const clearPendingTimers = (): void => { for (const t of pendingTimers.values()) clearTimeout(t); pendingTimers.clear() }
+
+  /** Следить за первым запуском: готовность нового окна — прежнее больше не держим. */
+  const armPending = (): void => {
+    if (pendingWatch) readyWaiters.delete(pendingWatch)
+    pendingWatch = null
+    const pd = readAppState(o.paths).pending
+    if (!pd) return
+    const fn = (h: ShellHello): void => {
+      void readyOk(h, pd.to, pd.app, pd.swapAt).then((ok) => {
+        if (!ok) return
+        const cur = readAppState(o.paths).pending
+        if (!cur || cur.to !== pd.to || cur.swapAt !== pd.swapAt) return
+        record(null, false, null)
+        clearPendingTimers()
+        readyWaiters.delete(fn)
+        if (pendingWatch === fn) pendingWatch = null
+        // Прежнее лежало рядом с окном (в PULT_HOME не уехало) — больше не нужно.
+        if (path.basename(pd.prev).startsWith('.Pult.app.old-')) safe('прежнее окно рядом не удалено', () => rmSync(pd.prev, { recursive: true, force: true }))
+        cleanPrevious(pd.from, null)
+        o.logger.info('первый запуск нового окна — готово', { to: pd.to })
+      })
+    }
+    pendingWatch = fn
+    readyWaiters.add(fn)
+  }
+
+  /** Hello из нового бандла при первом запуске: не готово за firstRunWait — «не заработало», предложить вернуть. */
+  const firstRunHello = async (h: ShellHello): Promise<void> => {
+    const pd = readAppState(o.paths).pending
+    if (!pd || pd.failed || h.pid === null || pendingTimers.has(h.pid)) return
+    const info = await tools.procInfo(h.pid).catch(() => null)
+    if (!info || info.uid !== myUid || !insideApp(info.exe, pd.app) || info.startedAt < pd.swapAt - 2000) return
+    const t = setTimeout(() => {
+      pendingTimers.delete(h.pid as number)
+      const cur = readAppState(o.paths).pending
+      if (!cur || cur.failed || cur.to !== pd.to || cur.swapAt !== pd.swapAt) return
+      record({
+        to: pd.to, from: pd.from, at: new Date().toISOString(), result: 'failed',
+        message: `окно ${pd.to} не заработало при первом запуске за ${Math.round(firstRunWait / 1000)} с — вернуть ${pd.from}: «Вернуть ${pd.from}» в «Настройках» или pult update --app --rollback`,
+      }, false, { ...cur, failed: true })
+      o.logger.warn('первый запуск нового окна не заработал', { to: pd.to })
+    }, firstRunWait)
+    t.unref?.()
+    pendingTimers.set(h.pid, t)
+  }
+
+  /** Вернуть прежнее окно, ждущее первого запуска нового (по просьбе человека). */
+  const rollbackPending = async (pd: AppPending): Promise<void> => {
+    const at = (): string => new Date().toISOString()
+    try {
+      if (!(await validPrev(pd.prev, pd.from))) throw new AppUpdateError(`прежнее окно ${pd.from} в ${pd.prev} не годится (нет, другая версия или подпись не сходится)`)
+      const exe = readBundle(pd.app)?.executable ?? 'Pult'
+      await killApp(path.join(pd.app, 'Contents', 'MacOS', exe))
+      await putBack({ app: pd.app, dir: path.dirname(pd.app), prev: pd.prev, from: pd.from, to: pd.to })
+      clearPendingTimers()
+      if (pendingWatch) { readyWaiters.delete(pendingWatch); pendingWatch = null }
+      record({ to: pd.to, from: pd.from, at: at(), result: 'rolled_back', message: `вернул окно ${pd.from} по просьбе — ${pd.to} больше не предлагается само` }, true, null)
+      await tools.open(pd.app, openEnv()).catch(() => { /* откроет человек */ })
+    } catch (e) {
+      record({ to: pd.to, from: pd.from, at: at(), result: 'failed', message: `вернуть окно ${pd.from} не вышло: ${(e as Error).message} — прежнее окно в ${whereNow(pd.prev, path.dirname(pd.app), pd.from)}` })
+    }
+  }
+
   /** Сама работа. Итог — в `record`; наружу не бросает ничего. */
   const work = async (loc: InstalledApp & { version: string; executable: string }, to: string, asset: ReleaseAsset): Promise<void> => {
     const from = loc.version
@@ -683,8 +847,8 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
     const zip = path.join(o.paths.downloads, `Pult-${to}-arm64.zip`)
     const partial = `${zip}.partial-${process.pid}`
     const staging = path.join(o.paths.apps, `staging-${to}`)
-    const incoming = path.join(loc.dir, `.Pult.app.incoming-${to}`)
-    const old = path.join(loc.dir, `.Pult.app.old-${from}`)
+    const incoming = near(loc.dir, 'incoming', to)
+    const old = near(loc.dir, 'old', from)
     const prevDir = path.join(o.paths.apps, `previous-${from}`)
     const prevApp = path.join(prevDir, 'Pult.app')
     let swapped = false
@@ -775,7 +939,8 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
         throw new AppUpdateError(`новое окно не встало на место (${(e as Error).message}) — прежнее вернул`)
       }
       swapped = true
-      writeJournal({ ...jr, phase: 'swapped' })
+      const swapAt0 = Date.now()
+      writeJournal({ ...jr, phase: 'swapped', swapAt: swapAt0 })
       // Прежнее — в PULT_HOME (между томами — копия: живое окно уже на месте). Не вышло — остаётся рядом.
       let prev = old
       try {
@@ -785,33 +950,37 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
           if ((e as NodeJS.ErrnoException).code !== 'EXDEV') throw e
           await copyVerified(old, prevApp)
           prev = prevApp
+          // Журнал — ДО удаления `.old`: обрыв между ними оставит журнал на живой копии.
+          writeJournal({ ...jr, phase: 'swapped', prev })
           safe('прежнее окно рядом не удалено после копии', () => rmSync(old, { recursive: true, force: true }))
         }
       } catch (e) {
         o.logger.warn('прежнее окно осталось рядом с новым', { at: old, error: (e as Error).message })
       }
-      writeJournal({ ...jr, phase: 'swapped', prev })
+      writeJournal({ ...jr, phase: 'swapped', prev, swapAt: swapAt0 })
       await tools.lsregister(['-f', loc.app]).catch((e: unknown) => { o.logger.warn('lsregister -f не прошёл', { error: (e as Error).message }) })
       await tools.lsregister(['-u', prev]).catch(() => { /* не был на учёте */ })
-      const finishDone = (message: string): void => {
+      const finishDone = (message: string, pending: AppPending | null): void => {
         dropJournal()
-        // Прежнее не уехало в PULT_HOME — скрытая копия рядом с окном не нужна: новое встало.
-        if (prev === old) safe('прежнее окно рядом не удалено', () => rmSync(old, { recursive: true, force: true }))
-        record({ to, from, at: new Date().toISOString(), result: 'done', message })
-        // Прежнее окно держим один цикл; более старые — убрать.
-        safe('старые previous не убраны', () => {
-          for (const n of readdirSync(o.paths.apps)) {
-            if (n.startsWith('previous-') && n !== `previous-${from}`) rmSync(path.join(o.paths.apps, n), { recursive: true, force: true })
-          }
-        })
+        // Новое уже работало — скрытая копия прежнего рядом с окном не нужна. Не запускалось — держим до первой готовности.
+        if (prev === old && !pending) safe('прежнее окно рядом не удалено', () => rmSync(old, { recursive: true, force: true }))
+        const keep = readAppState(o.paths).pending
+        record({ to, from, at: new Date().toISOString(), result: 'done', message }, false, pending)
+        // Прежнее окно держим один цикл; более старые — убрать (кроме прежнего окна, которое ждёт первого запуска).
+        // Новое снова не запускалось, а прошлое «ждущее» тоже не запускалось — держим и последнее проверенное окно.
+        cleanPrevious(from, pending && keep ? keep.from : null)
+        if (pending) armPending()
         o.logger.info('окно обновлено', { from, to })
       }
 
       // 7. Окно не было открыто — не открываем (проверит первый запуск); было — открыть и ждать готовое новое.
-      if (!wasRunning) { finishDone(`${from} → ${to}; окно не было открыто — открой его: pult ui`); return }
+      if (!wasRunning) {
+        finishDone(`${from} → ${to}; окно не было открыто — ещё не запускалось, открой его: pult ui`, { to, from, prev, app: loc.app, swapAt: swapAt0, failed: false })
+        return
+      }
       step('launch')
-      writeJournal({ ...jr, phase: 'health', prev })
       const swapAt = Date.now()
+      writeJournal({ ...jr, phase: 'health', prev, swapAt })
       const ready = watchReady(to, loc.app, swapAt)
       let launched = true
       try { await tools.open(loc.app, openEnv()) } catch (e) {
@@ -820,24 +989,31 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
       }
       step('health')
       let ok = launched && await ready.wait(helloWait)
+      if (!ok && stopped) {
+        // Демон останавливается посреди пробы: не гасить окно в спешке — журнал (фаза health) остаётся, старт
+        // подождёт новое окно и только потом решит.
+        ready.cancel()
+        o.logger.info('остановка посреди пробы окна — доведёт старт по журналу', { to })
+        throw new Recorded('журнал оставлен')
+      }
       if (!ok) {
         step('rollback')
         writeJournal({ ...jr, phase: 'rollback', prev })
         // Последняя сверка: готовность, пришедшая до того, как гасим, — засчитывается.
         ok = ready.seen()
       }
-      if (ok) { ready.cancel(); finishDone(`${from} → ${to}`); return }
+      if (ok) { ready.cancel(); finishDone(`${from} → ${to}`, null); return }
 
       // 8. Откат: новое окно (оно наше) гасится, прежнее возвращается и открывается, версия — bad.
       const why = launched ? `окно ${to} не подключилось к демону за ${Math.round(helloWait / 1000)} с` : `окно ${to} не открылось`
       const newExe = path.join(loc.app, 'Contents', 'MacOS', exe)
       const newPids = await tools.findPids(newExe)
       // Готовность, проверка которой ещё шла, пока искали процессы, — засчитывается: годное окно не гасим.
-      if (ready.seen()) { finishDone(`${from} → ${to}`); return }
+      if (ready.seen()) { finishDone(`${from} → ${to}`, null); return }
       ready.cancel()
       await killApp(newExe, newPids)
       try { await putBack({ app: loc.app, dir: loc.dir, prev, from, to }) } catch (e) {
-        record(fail(`${why}; откат не прошёл (${(e as Error).message}) — прежнее окно в ${prev}: перетащи его в ${loc.app}`), true)
+        record(fail(`${why}; откат не прошёл (${(e as Error).message}) — прежнее окно в ${whereNow(prev, loc.dir, from)}: перетащи его в ${loc.app}`), true)
         throw new Recorded('итог записан')
       }
       dropJournal()
@@ -860,9 +1036,14 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
   }
 
   /**
-   * Старт демона: журнал замены есть — прошлая замена оборвалась (демон убит, сбой питания). Первый rename был, а
-   * второго нет — прежнее на место. Новое уже стоит, а «готово» не записано — откат на прежнее, версия bad. Потом
-   * уборка: staging-*, failed-*, а рядом с окном — .Pult.app.incoming-* и .Pult.app.failed-*.
+   * Старт демона: журнал замены есть — прошлая замена оборвалась (демон убит, сбой питания).
+   *   * места пусто между двумя rename — прежнее на место (`failed`, не bad);
+   *   * новое стоит и окно уже открывали (фаза health) — до RECOVER_WAIT_MS ждём, не поднимется ли оно (окно само
+   *     переподключится к демону): поднялось — `done`; нет — откат и bad (проба честно не прошла);
+   *   * новое стоит, а окно ещё не открывали (обрыв наш) — откат БЕЗ bad (повторить можно);
+   *   * оборван откат — довести, bad.
+   * Прежнее окно ищется везде, где оно может быть, и проверяется (версия, дерево, подпись). Потом уборка своих
+   * (метка PULT_HOME) `.Pult.app.{incoming,failed,old}-*` рядом с окном и `staging-*`, `failed-*` в apps/.
    */
   const recover = async (): Promise<void> => {
     const j = readJournal()
@@ -870,34 +1051,47 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
       o.logger.warn('обновление окна оборвалось — восстанавливаю', { phase: j.phase, to: j.to, from: j.from })
       try {
         const exists = (p: string): boolean => { try { lstatSync(p); return true } catch { return false } }
-        const versionAt = (p: string): string | null => (exists(p) ? readBundle(p)?.version ?? null : null)
         const at = new Date().toISOString()
-        const appV = versionAt(j.app)
-        // Где может лежать прежнее окно на любом шаге, включая оборванный откат.
-        const prev = [j.prev, j.old, path.join(o.paths.apps, `previous-${j.from}`, 'Pult.app'), path.join(j.dir, `.Pult.app.incoming-${j.from}`)]
-          .find((p) => p !== j.app && versionAt(p) === j.from) ?? null
+        const appV = exists(j.app) ? readBundle(j.app)?.version ?? null : null
+        let prev: string | null = null
+        for (const c of [j.prev, j.old, path.join(o.paths.apps, `previous-${j.from}`, 'Pult.app'), near(j.dir, 'incoming', j.from)]) {
+          if (c !== j.app && exists(c) && await validPrev(c, j.from)) { prev = c; break }
+        }
+        const rollBack = async (bad: boolean, message: string, result: 'rolled_back' | 'failed' = 'rolled_back'): Promise<void> => {
+          if (!prev) throw new AppUpdateError(`прежнего окна ${j.from} не нашёл (стоит ${appV ?? 'ничего'})`)
+          if (appV !== null) await killApp(path.join(j.app, 'Contents', 'MacOS', readBundle(j.app)?.executable ?? 'Pult'))
+          await putBack({ app: j.app, dir: j.dir, prev, from: j.from, to: j.to })
+          // Окно было открыто до замены — открыть прежнее (и только тогда).
+          if (j.wasRunning) await tools.open(j.app, openEnv()).catch(() => { /* откроет человек */ })
+          record({ to: j.to, from: j.from, at, result, message }, bad)
+        }
         if (appV === j.from) {
           // Замены не было или откат дошёл до конца — окно прежнее.
           record(j.phase === 'rollback'
             ? { to: j.to, from: j.from, at, result: 'rolled_back', message: `окно ${j.to} не встало — вернул ${j.from}; ${j.to} больше не предлагается само` }
             : { to: j.to, from: j.from, at, result: 'failed', message: 'обновление окна оборвалось до замены — окно прежнее' }, j.phase === 'rollback')
-        } else if (prev) {
-          // Новое стоит без «готово» или места пусто посреди замены/отката — прежнее на место.
-          const killed = appV !== null ? await killApp(path.join(j.app, 'Contents', 'MacOS', readBundle(j.app)?.executable ?? 'Pult')) : 0
-          await putBack({ app: j.app, dir: j.dir, prev, from: j.from, to: j.to })
-          // Окно было открыто до замены — открыть прежнее (только тогда: п. «открывать, только если было открыто»).
-          void killed
-          if (j.wasRunning) await tools.open(j.app, openEnv()).catch(() => { /* откроет человек */ })
-          const midSwap = j.phase === 'swap' && appV === null
-          record(midSwap
-            ? { to: j.to, from: j.from, at, result: 'failed', message: 'обновление окна оборвалось посреди замены — прежнее окно вернул на место' }
-            : { to: j.to, from: j.from, at, result: 'rolled_back', message: `обновление окна до ${j.to} оборвалось (демон остановлен) — вернул ${j.from}; ${j.to} больше не предлагается само` }, !midSwap)
+        } else if (appV === null && j.phase === 'swap') {
+          await rollBack(false, 'обновление окна оборвалось посреди замены — прежнее окно вернул на место', 'failed')
+        } else if (appV === j.to && j.phase === 'health') {
+          const w = watchReady(j.to, j.app, j.swapAt ?? Date.parse(j.at))
+          const ok = await w.wait(recoverWait)
+          w.cancel()
+          if (ok) {
+            record({ to: j.to, from: j.from, at, result: 'done', message: `${j.from} → ${j.to} (окно поднялось после перезапуска демона)` })
+            if (prev && path.basename(prev).startsWith('.Pult.app.old-')) safe('прежнее окно рядом не удалено', () => rmSync(prev as string, { recursive: true, force: true }))
+            cleanPrevious(j.from, null)
+          } else {
+            await rollBack(true, `окно ${j.to} не подключилось к демону и после его перезапуска — вернул ${j.from}; ${j.to} больше не предлагается само`)
+          }
+        } else if (j.phase === 'rollback') {
+          await rollBack(true, `окно ${j.to} не встало — вернул ${j.from}; ${j.to} больше не предлагается само`)
         } else {
-          throw new AppUpdateError(`прежнего окна ${j.from} не нашёл (стоит ${appV ?? 'ничего'})`)
+          // Новое встало, но окно ещё не открывали: обрыв наш, версия не виновата.
+          await rollBack(false, `обновление окна до ${j.to} оборвалось (демон остановлен) до запуска нового окна — вернул ${j.from}; можно повторить`)
         }
         dropJournal()
       } catch (e) {
-        record({ to: j.to, from: j.from, at: new Date().toISOString(), result: 'failed', message: `восстановление после обрыва не прошло (${(e as Error).message}) — проверь ${j.app}; прежнее окно: ${j.prev}` })
+        record({ to: j.to, from: j.from, at: new Date().toISOString(), result: 'failed', message: `восстановление после обрыва не прошло (${(e as Error).message}) — проверь ${j.app}; прежнее окно: ${whereNow(j.prev, j.dir, j.from)}` })
         o.logger.error('восстановление обновления окна не прошло', { error: (e as Error).message })
         return // журнал и файлы оставлены: человеку и следующему старту есть от чего оттолкнуться
       }
@@ -907,21 +1101,51 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
         if (n.startsWith('staging-') || n.startsWith('failed-')) rmSync(path.join(o.paths.apps, n), { recursive: true, force: true })
       }
     })
+    // Рядом с окном — только СВОИ (метка этого PULT_HOME) и не прежнее окно, ждущее первого запуска нового.
+    const keep = readAppState(o.paths).pending?.prev ?? null
+    const mine = new RegExp(`^\\.Pult\\.app\\.(incoming|failed|old)-.+-${tag}$`)
     for (const dir of tools.appDirs()) {
       safe(`уборка ${dir}`, () => {
         for (const n of readdirSync(dir)) {
-          if (n.startsWith('.Pult.app.incoming-') || n.startsWith('.Pult.app.failed-')) rmSync(path.join(dir, n), { recursive: true, force: true })
+          const p = path.join(dir, n)
+          if (mine.test(n) && p !== keep) rmSync(p, { recursive: true, force: true })
         }
       })
     }
   }
   const ready: Promise<void> = (existsSync(o.paths.apps) ? recover() : Promise.resolve())
     .catch((e: unknown) => { o.logger.error('восстановление обновления окна упало', { error: (e as Error).message }) })
+    .then(() => { armPending() })
+
+  const takeLock = (): LockHandle => {
+    const got = acquireLock(o.paths.updateLock)
+    if (!got.ok) throw new AppUpdateError(`идёт обновление пакета (pid ${got.holderPid ?? '?'}) — дождись его конца`)
+    return got.lock
+  }
+  const runJob = (j: { to: string; from: string | null; step: AppUpdateStep; since: string; done: Promise<void> }, lock: LockHandle, fn: () => Promise<void>): void => {
+    job = j
+    j.done = fn()
+      .catch((e: unknown) => { o.logger.error('обновление окна упало', { error: (e as Error).message }) })
+      .finally(() => {
+        safe('update.lock не снят', () => lock.release())
+        if (job === j) job = null
+      })
+  }
 
   const start = async (req: AppApplyRequest): Promise<{ applying: true; to: string; target: 'app' }> => {
     await ready
+    // Журнал прошлой замены не разобран (восстановление не прошло) — поверх него не начинаем.
+    if (existsSync(journalFile)) throw new AppUpdateError(`прошлое обновление окна не доведено (${journalFile}) — перезапусти демона (pult daemon stop): старт доведёт или откатит его; итог — в «Настройки» → «Обновления»`)
     const busy = o.packageBusy()
     if (busy) throw new AppUpdateError(busy)
+    if (req.rollback) {
+      const pd = readAppState(o.paths).pending
+      if (!pd) throw new AppUpdateError('возвращать нечего: новое окно уже запускалось (или обновления не было)')
+      if (stopped) throw new AppUpdateError('демон останавливается')
+      const lock = takeLock()
+      runJob({ to: pd.to, from: pd.from, step: 'rollback', since: new Date().toISOString(), done: Promise.resolve() }, lock, () => rollbackPending(pd))
+      return { applying: true, to: pd.to, target: 'app' }
+    }
     const loc0 = locateInstalledApp(tools.appDirs(), preferred())
     const no = unsupported(loc0)
     if (no) throw new AppUpdateError(no)
@@ -951,19 +1175,12 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
     // Пока шла проверка канала, могло начаться обновление пакета.
     const busy2 = o.packageBusy()
     if (busy2) throw new AppUpdateError(busy2)
-    const got = acquireLock(o.paths.updateLock)
-    if (!got.ok) throw new AppUpdateError(`идёт обновление пакета (pid ${got.holderPid ?? '?'}) — дождись его конца`)
-    const lock: LockHandle = got.lock
-    const since = new Date().toISOString()
-    const j = { to, from: loc.version, step: 'download' as AppUpdateStep, since, done: Promise.resolve() }
-    job = j
+    const lock = takeLock()
     o.logger.info('обновление окна', { from: loc.version, to, app: loc.app })
-    j.done = work({ ...loc, version: loc.version, executable: loc.executable }, to, asset)
-      .catch((e: unknown) => { o.logger.error('обновление окна упало', { error: (e as Error).message }) })
-      .finally(() => {
-        safe('update.lock не снят', () => lock.release())
-        if (job === j) job = null
-      })
+    const version = loc.version
+    const executable = loc.executable
+    runJob({ to, from: loc.version, step: 'download', since: new Date().toISOString(), done: Promise.resolve() }, lock,
+      () => work({ ...loc, version, executable }, to, asset))
     return { applying: true, to, target: 'app' }
   }
 
@@ -977,10 +1194,13 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
       return preflight
     },
     onShellReady(h) { for (const fn of [...readyWaiters]) fn(h) },
+    onShellHello(h) { void firstRunHello(h).catch(() => { /* не важно */ }) },
     busy: () => job !== null || preflight !== null,
     idle: async () => { await ready; if (preflight) await preflight.catch(() => {}); if (job) await job.done },
     async stop() {
       stopped = true
+      wakeStop()
+      clearPendingTimers()
       const j = job
       // Бандл уже меняется — дать довести (не дольше stopWaitMs); иначе — журнал и восстановление при старте.
       if (j && PAST_QUIT.has(j.step)) {

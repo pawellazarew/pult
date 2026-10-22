@@ -24,6 +24,8 @@ export const APP_UPDATE_MAC_ONLY = 'окно само обновляется т�
 export interface AppUpdateCliOptions {
   /** Поставить и версию, помеченную bad. */
   force?: boolean
+  /** Вернуть прежнее окно: новое, заменённое закрытым, не заработало при первом запуске. */
+  rollback?: boolean
   platform?: NodeJS.Platform
   /** Соединение с демоном (поднимается по требованию). */
   connect: () => Promise<Client>
@@ -49,13 +51,13 @@ export async function updateAppCli(io: Io, opts: AppUpdateCliOptions): Promise<n
     // Итог — только попытки, начатой этим вызовом (`at` не раньше старта), а не прошлой с той же версией.
     const startedAt = new Date(Date.now() - 1000).toISOString()
     try {
-      const r = await client.request('update.apply', { target: 'app', ...(opts.force ? { allowBad: true } : {}) }) as { to?: unknown }
+      const r = await client.request('update.apply', { target: 'app', ...(opts.force ? { allowBad: true } : {}), ...(opts.rollback ? { rollback: true } : {}) }) as { to?: unknown }
       to = typeof r?.to === 'string' ? r.to : '?'
     } catch (e) {
       if (e instanceof ClientError && e.code === 'invalid_params') { io.err(`pult update --app: ${e.message}`); return 1 }
       throw e
     }
-    io.out(`обновляю окно до ${to}: окно закроется и откроется само, сессии работают дальше`)
+    io.out(opts.rollback ? `возвращаю прежнее окно вместо ${to}; сессии работают дальше` : `обновляю окно до ${to}: окно закроется и откроется само, сессии работают дальше`)
     let lastStep: AppUpdateStep | null = null
     let app: AppUpdateStatus | undefined
     for (;;) {
@@ -70,6 +72,7 @@ export async function updateAppCli(io: Io, opts: AppUpdateCliOptions): Promise<n
     const last = app?.last ?? null
     if (!last || last.to !== to || last.at < startedAt) { io.err('pult update --app: итог не записан — смотри logs/pultd.log'); return 1 }
     if (last.result === 'done') { io.out(`окно обновлено: ${last.message}`); return 0 }
+    if (opts.rollback && last.result === 'rolled_back') { io.out(last.message); return 0 }
     io.err(`pult update --app: ${last.message}`)
     return 1
   } catch (e) {
