@@ -108,7 +108,10 @@ describe('окно: рабочие сценарии', () => {
     writeFileSync(fileB, 'b')
     const cdp = await h.win.context().newCDPSession(h.win)
     const dlg = h.win.getByTestId('new-agent-dialog')
+    // На маленьком экране (раннер CI) тело диалога прокручивается: цель сначала — в видимую часть, иначе точка
+    // броска попадёт мимо неё (boundingBox отдаёт и спрятанное прокруткой).
     const at = async (testId: string): Promise<{ x: number; y: number }> => {
+      await dlg.getByTestId(testId).scrollIntoViewIfNeeded()
       const box = await dlg.getByTestId(testId).boundingBox()
       assert.ok(box, `${testId}: нет на экране`)
       return { x: box.x + box.width / 2, y: box.y + box.height / 2 }
