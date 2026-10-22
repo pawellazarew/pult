@@ -2,20 +2,23 @@
 // в model/*.ts; здесь только отрисовка и фокус.
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import type { ReactElement, ReactNode } from 'react'
+import type { DragEvent, ReactElement, ReactNode } from 'react'
 import type { AgentView } from '../model/agents.js'
 import { agentLabel, ago, shortPath } from '../model/agents.js'
 import type { DoctorGroup } from '../model/health.js'
 import { attentionKeys, searchKeys } from '../model/hotkeys.js'
 import { ATTENTION_LABEL, INBOX_FILTERS } from '../model/inbox.js'
 import type { InboxFilter, InboxItem, SessionCard } from '../model/inbox.js'
-import { APPROVAL_FULL_WARNING, APPROVAL_LABEL, APPROVAL_ORDER, approvalHint, prefillForm, promptStats, providerPreset, suggestName, switchProviderPrefill, validateForm } from '../model/newAgent.js'
+import { APPROVAL_FULL_WARNING, APPROVAL_LABEL, APPROVAL_ORDER, approvalHint, prefillForm, promptStats, providerPreset, switchProviderPrefill, validateForm, withFolder } from '../model/newAgent.js'
 import type { NewAgentForm, SettingsReply } from '../model/newAgent.js'
 import type { NewSessionPrefill } from '../../../shell/src/contract.js'
 import type { AgentProvider, DoctorReport, ProviderCatalog } from '../model/types.js'
 import { mcpRows, toggleServer } from '../model/mcp.js'
 import type { McpListing } from '../model/mcp.js'
 import { plural } from '../lib/ru.js'
+import { FOLDER_DROP_HINT, folderFromDrop, hasFiles } from '../model/filePathsInput.js'
+import type { FilePathSource } from '../model/paths.js'
+import { useFilePaths } from './useFilePaths.js'
 import { CMD, hhmm, Icon, IS_MAC, Kbd, ProviderTag } from './common.js'
 import { PermCard } from './PermCard.js'
 
@@ -280,7 +283,7 @@ const LINK_SUBMIT_DELAY_MS = 1000
 /** Предел высоты поля реплики из ссылки; длиннее — прокрутка, счётчик строк под полем. */
 const LINK_PROMPT_MAX_PX = 360
 
-export function NewAgentDialog({ taken, pickFolder, onCreate, onClose, catalog, checking, onCheck, defaultCwd, prefill, settings }: {
+export function NewAgentDialog({ taken, pickFolder, onCreate, onClose, catalog, checking, onCheck, defaultCwd, prefill, settings, filePaths = null }: {
   /** Папка проекта, из которого позвали «+ сессия»: форма открывается уже с ней. */
   defaultCwd?: string | null
   /** M8f: умолчания и последний выбор (`settings.get`); нет — старый демон или оболочка: встроенные умолчания. */
@@ -292,6 +295,8 @@ export function NewAgentDialog({ taken, pickFolder, onCreate, onClose, catalog, 
   onCheck?(): void
   taken: readonly string[]
   pickFolder(): Promise<string | null>
+  /** Пути перетащенных и скопированных файлов; нет — старая оболочка: перетаскивание и ⌘V файлов как раньше. */
+  filePaths?: FilePathSource | null
   onCreate(form: NewAgentForm): Promise<string | null>
   onClose(): void
 }): ReactElement {
@@ -327,10 +332,44 @@ export function NewAgentDialog({ taken, pickFolder, onCreate, onClose, catalog, 
     }
   }, [form.provider, form.model, form.effort, preset.defaultEffort, preset.efforts.join(',')])
 
+  // Папка — системным выбором или перетаскиванием: одинаково, и имя из папки, пока его не трогали.
+  const applyFolder = (dir: string): void => {
+    setForm((f) => withFolder(f, dir, nameTouched, taken))
+  }
   const choose = async (): Promise<void> => {
     const dir = await pickFolder()
     if (!dir) return
-    setForm((f) => ({ ...f, cwd: dir, name: nameTouched ? f.name : suggestName(dir, taken) }))
+    setDropHint(null)
+    applyFolder(dir)
+  }
+  // Файлы в «первую реплику» — пути, как в поле ввода разговора; папка на остальную форму — папка сессии.
+  const prompt = useFilePaths({ source: filePaths, box: promptBox, text: form.prompt, setText: (v) => setForm((f) => ({ ...f, prompt: v })) })
+  const [folderOver, setFolderOver] = useState(false)
+  const [dropHint, setDropHint] = useState<string | null>(null)
+  const inPrompt = (e: DragEvent<HTMLElement>): boolean => !!promptBox.current?.contains(e.target as Node)
+  const folderOverHere = (e: DragEvent<HTMLDivElement>): void => {
+    if (inPrompt(e) || !filePaths || !hasFiles(e.dataTransfer.types)) { if (folderOver) setFolderOver(false); return }
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'copy'
+    if (!folderOver) setFolderOver(true)
+  }
+  const folderDrag = {
+    // Переход на элемент формы — dragenter, dragover Chromium шлёт со следующего движения: подсветка сразу.
+    onDragEnter: folderOverHere,
+    onDragOver: folderOverHere,
+    onDragLeave: (e: DragEvent<HTMLDivElement>): void => {
+      if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setFolderOver(false)
+    },
+    onDrop: (e: DragEvent<HTMLDivElement>): void => {
+      setFolderOver(false)
+      if (inPrompt(e) || !filePaths || !e.dataTransfer.files.length) return
+      e.preventDefault()
+      // Файлы и записи читаются синхронно, до первого await, — после события DataTransfer пуст.
+      void folderFromDrop(e.dataTransfer, filePaths).then((r) => {
+        if (r.kind === 'folder') { setDropHint(null); applyFolder(r.path) }
+        else if (r.kind === 'files') setDropHint(FOLDER_DROP_HINT)
+      })
+    },
   }
   const submit = async (): Promise<void> => {
     setTried(true)
@@ -355,7 +394,7 @@ export function NewAgentDialog({ taken, pickFolder, onCreate, onClose, catalog, 
           {busy ? 'Завожу…' : form.prompt.trim() ? 'Завести и отправить' : 'Завести'} <Kbd>{`${CMD}↵`}</Kbd>
         </button>
       </>}>
-      <div onKeyDown={onKey} className="form-stack">
+      <div onKeyDown={onKey} className="form-stack" {...folderDrag}>
         {prefill && (
           <div className="field" data-testid="new-agent-from-link">
             <span className="t-wait">Поля заполнены по ссылке pult:// — проверь папку и реплику. Без «Завести» ничего не запустится.</span>
@@ -391,12 +430,14 @@ export function NewAgentDialog({ taken, pickFolder, onCreate, onClose, catalog, 
           <span className="lbl">папка</span>
           <div className="folder">
             {/* Из ссылки — путь целиком, с переносом: сокращённый путь прячет, какая папка на самом деле. */}
-            <span className={`path${form.cwd ? ' set' : ''}${prefill ? ' full' : ''}`} data-testid="new-agent-cwd" data-path={form.cwd} title={form.cwd}>
+            <span className={`path${form.cwd ? ' set' : ''}${prefill ? ' full' : ''}${folderOver ? ' drop' : ''}`} data-testid="new-agent-cwd" data-path={form.cwd} title={form.cwd}
+              data-drop={folderOver ? '1' : undefined}>
               {form.cwd ? (prefill ? form.cwd : shortPath(form.cwd, 64)) : 'не выбрана'}
             </span>
             <button type="button" className="btn" onClick={() => void choose()} data-testid="pick-folder"><Icon name="folder" />Выбрать…</button>
           </div>
           {tried && errors.cwd && <span className="bad">{errors.cwd}</span>}
+          {dropHint && <span className="note" role="status" data-testid="new-agent-drop-hint">{dropHint}</span>}
         </div>
 
         <div className="field">
@@ -449,7 +490,9 @@ export function NewAgentDialog({ taken, pickFolder, onCreate, onClose, catalog, 
         <div className="field">
           <span className="lbl">первая реплика</span>
           <textarea ref={promptBox} value={form.prompt} placeholder="что сделать — можно оставить пустой и написать потом" data-testid="new-agent-prompt"
-            onChange={(e) => setForm({ ...form, prompt: e.target.value })} />
+            className={prompt.over ? 'drop' : undefined} data-drop={prompt.over ? '1' : undefined}
+            onChange={(e) => setForm({ ...form, prompt: e.target.value })}
+            onPaste={prompt.onPaste} onDragEnter={prompt.onDragEnter} onDragOver={prompt.onDragOver} onDragLeave={prompt.onDragLeave} onDrop={prompt.onDrop} />
           {prefill && form.prompt && (() => {
             const st = promptStats(form.prompt)
             return <span className="note" data-testid="new-agent-prompt-stats">{`${st.lines} ${plural(st.lines, 'строка', 'строки', 'строк')} · ${st.chars} ${plural(st.chars, 'знак', 'знака', 'знаков')}`}</span>

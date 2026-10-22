@@ -229,6 +229,11 @@ export function suggestName(folder: string, taken: readonly string[]): string {
   return `${s.slice(0, 20)}-${Date.now().toString(36).slice(-6)}`
 }
 
+/** Папка выбрана (системным диалогом или перетаскиванием): `cwd` и имя из папки, пока имя не трогали руками. */
+export function withFolder(form: NewAgentForm, dir: string, nameTouched: boolean, taken: readonly string[]): NewAgentForm {
+  return { ...form, cwd: dir, name: nameTouched ? form.name : suggestName(dir, taken) }
+}
+
 export type FormErrors = Partial<Record<'name' | 'cwd' | 'worktree' | 'approval', string>>
 
 export function validateForm(form: NewAgentForm, taken: readonly string[]): FormErrors {

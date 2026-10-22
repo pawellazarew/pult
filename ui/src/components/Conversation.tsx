@@ -2,7 +2,7 @@
 // здесь только отрисовка, прокрутка «прилипает» к низу, пока человек сам не отлистал вверх.
 
 import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import type { ClipboardEvent, DragEvent, KeyboardEvent, ReactElement } from 'react'
+import type { KeyboardEvent, ReactElement } from 'react'
 import type { ConnState, PultEvent } from '../../../shell/src/contract.js'
 import type { AgentView } from '../model/agents.js'
 import { AGENT_TITLE_MAX, agentLabel, shortPath, statusView } from '../model/agents.js'
@@ -16,7 +16,7 @@ import { obj } from '../model/types.js'
 import type { QueueItem } from '../model/types.js'
 import type { ProviderUsage } from '../model/usage.js'
 import { formatClock, formatResetIn, limitHolds, limitWindowsView } from '../model/usage.js'
-import { insertPaths } from '../model/paths.js'
+import { useFilePaths } from './useFilePaths.js'
 import type { FilePathSource } from '../model/paths.js'
 import { APPROVAL_FULL_WARNING, approvalFooter, approvalHint } from '../model/newAgent.js'
 import { Chip, CMD, hhmm, Icon, IS_MAC, Kbd, ProviderTag } from './common.js'
@@ -791,42 +791,8 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
       },
     })
   }
-  /** Вставить пути на место выделения и поставить каретку за ними. */
-  const putPaths = (paths: string[], start: number, end: number): void => {
-    // Каретку считаем здесь, от того, что сейчас в поле: функция-обновление setText может
-    // выполниться позже кадра, и позиция из неё к setSelectionRange не успела бы.
-    const r = insertPaths(ta.current?.value ?? text, start, end, paths)
-    setText(r.text)
-    requestAnimationFrame(() => { const el = ta.current; if (el) { el.focus(); el.setSelectionRange(r.caret, r.caret) } })
-  }
-  // ⌘V на файлах из Finder: Chromium отдаёт тип `Files` и только ПЕРВЫЙ файл, а в поле не кладёт
-  // ничего (замерено лидом 06.10.2026, Electron 44). Все пути знает main — читает их из буфера.
-  const onPaste = (e: ClipboardEvent<HTMLTextAreaElement>): void => {
-    if (!filePaths || !Array.from(e.clipboardData.types).includes('Files')) return
-    e.preventDefault()
-    const { selectionStart: start, selectionEnd: end, value: before } = e.currentTarget
-    const dropped = Array.from(e.clipboardData.files)
-    void (async () => {
-      let paths: string[] = []
-      try { paths = await filePaths.clipboard() } catch { /* старая оболочка или чужой буфер */ }
-      if (!paths.length) paths = filePaths.files(dropped)
-      if (!paths.length) return
-      // Пока main читал буфер, в поле могли допечатать — тогда вставляем туда, где каретка сейчас.
-      const el = ta.current
-      if (el && el.value !== before) putPaths(paths, el.selectionStart, el.selectionEnd)
-      else putPaths(paths, start, end)
-    })()
-  }
-  const onDragOver = (e: DragEvent<HTMLTextAreaElement>): void => {
-    if (filePaths && Array.from(e.dataTransfer.types).includes('Files')) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy' }
-  }
-  const onDrop = (e: DragEvent<HTMLTextAreaElement>): void => {
-    if (!filePaths || !e.dataTransfer.files.length) return
-    e.preventDefault()
-    const paths = filePaths.files(Array.from(e.dataTransfer.files))
-    const el = e.currentTarget
-    if (paths.length) putPaths(paths, el.selectionStart, el.selectionEnd)
-  }
+  // ⌘V на файлах из Finder и перетаскивание кладут в поле пути (model/filePathsInput.ts).
+  const { onPaste, onDragOver, onDrop } = useFilePaths({ source: filePaths, box: ta, text, setText })
   const onKey = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
     if (e.nativeEvent.isComposing || e.key !== 'Enter' || e.shiftKey || e.altKey) return
     const cmd = IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey

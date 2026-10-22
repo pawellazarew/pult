@@ -700,6 +700,8 @@ button { font: inherit; color: inherit; }
 .folder .path.set { color: var(--ink); border-style: solid; background: var(--ground); }
 /* Папка из ссылки pult:// — целиком, с переносом: сокращение прятало бы, какая это папка. */
 .folder .path.full { white-space: normal; overflow-wrap: anywhere; text-overflow: clip; }
+/* Над формой «+ Сессия» тащат файлы: папка встанет сюда, файлы — в «первую реплику» (тонкая подсветка цели). */
+.folder .path.drop, .field textarea.drop { border-color: var(--accent); border-style: dashed; background: var(--accent-soft); }
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 3px; overflow: hidden; width: fit-content; }
 .seg button { border: 0; border-right: 1px solid var(--line); background: var(--panel); padding: 5px 12px; font-family: var(--mono); font-size: 12px; color: var(--mut); cursor: pointer; }
 .seg button:last-child { border-right: 0; }

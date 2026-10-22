@@ -988,7 +988,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
 
       {modal?.type === 'new' && (
         <NewAgentDialog key={modal.seq ?? 0} taken={records.map((r) => r.name)} defaultCwd={modal.cwd ?? null} prefill={modal.prefill ?? null} catalog={providers} checking={providersChecking} onCheck={() => void checkProviders()}
-          settings={settings} pickFolder={() => bridge.pickFolder()} onCreate={(form) => createAgent(form, !(modal.cwd || modal.prefill?.path))} onClose={() => setModal(null)} />
+          settings={settings} pickFolder={() => bridge.pickFolder()} filePaths={filePaths} onCreate={(form) => createAgent(form, !(modal.cwd || modal.prefill?.path))} onClose={() => setModal(null)} />
       )}
       {modal?.type === 'external' && <ExternalSessions bridge={bridge} taken={records.map((r) => r.name)} onClose={() => setModal(null)}
         onImported={(name) => { select(name); setModal(null); void refreshAgents() }} />}

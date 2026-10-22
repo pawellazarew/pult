@@ -3,6 +3,8 @@
 // «Стоп» посреди хода; закрыть окно посреди хода — ход дошёл, после открытия история на месте.
 
 import assert from 'node:assert/strict'
+import { writeFileSync } from 'node:fs'
+import path from 'node:path'
 import { after, before, describe, it } from 'node:test'
 import type { Page } from 'playwright-core'
 import { launch, waitFor } from './harness.js'
@@ -94,6 +96,64 @@ describe('окно: рабочие сценарии', () => {
     assert.ok(await waitFor(async () => (await box.inputValue()) === "глянь '/srv/p/Отчёт 1.txt' /tmp/b.txt", 3000), `в поле: ${await box.inputValue()}`)
     await h.app.evaluate(() => { delete (globalThis as { __pultTestClipboardPaths?: string[] }).__pultTestClipboardPaths })
     await box.fill('')
+  })
+
+  it('«+ Сессия»: файлы, брошенные в первую реплику, — их пути; папка на форму — папка сессии; файл на папку — подсказка', async () => {
+    // Настоящий бросок из Finder: CDP `Input.dispatchDragEvent` с путями на диске — Chromium строит из них
+    // DataTransfer как от системы (File с путём, webkitGetAsEntry), чего синтетический DragEvent не умеет.
+    const dir = h.workDir('drop proj')
+    const fileA = path.join(dir, 'Отчёт 1.txt')
+    const fileB = path.join(dir, 'b.txt')
+    writeFileSync(fileA, 'a')
+    writeFileSync(fileB, 'b')
+    const cdp = await h.win.context().newCDPSession(h.win)
+    const dragTo = async (testId: string, files: string[], steps: ReadonlyArray<'dragEnter' | 'dragOver' | 'drop'>): Promise<void> => {
+      const box = await h.win.getByTestId('new-agent-dialog').getByTestId(testId).boundingBox()
+      assert.ok(box, `${testId}: нет на экране`)
+      const x = box.x + box.width / 2
+      const y = box.y + box.height / 2
+      const data = { items: [], files, dragOperationsMask: 1 }
+      for (const type of steps) await cdp.send('Input.dispatchDragEvent', { type, x, y, data })
+    }
+    const dropAt = (testId: string, files: string[]): Promise<void> => dragTo(testId, files, ['dragEnter', 'dragOver', 'drop'])
+    const lit = async (testId: string): Promise<string | null> => h.win.getByTestId('new-agent-dialog').getByTestId(testId).getAttribute('data-drop')
+    await h.win.keyboard.press('Meta+N')
+    const dlg = h.win.getByTestId('new-agent-dialog')
+    await dlg.waitFor({ timeout: 5000 })
+    const prompt = dlg.getByTestId('new-agent-prompt')
+    await prompt.fill('глянь ')
+    // Наведение подсвечивает цель: над репликой — поле, над остальной формой — папку; бросок гасит подсветку.
+    await dragTo('new-agent-prompt', [fileA], ['dragEnter', 'dragOver'])
+    assert.ok(await waitFor(async () => (await lit('new-agent-prompt')) === '1', 3000), 'поле реплики не подсвечено')
+    assert.equal(await lit('new-agent-cwd'), null)
+    // Переход на другой элемент — это dragenter (dragover Chromium шлёт со следующего движения): подсветка уже на нём.
+    await dragTo('new-agent-cwd', [fileA], ['dragOver'])
+    assert.ok(await waitFor(async () => (await lit('new-agent-cwd')) === '1', 3000), 'папка не подсвечена')
+    assert.equal(await lit('new-agent-prompt'), null)
+    // Увёл файл за пределы диалога — подсветка гаснет.
+    await cdp.send('Input.dispatchDragEvent', { type: 'dragOver', x: 4, y: 4, data: { items: [], files: [fileA], dragOperationsMask: 1 } })
+    assert.ok(await waitFor(async () => (await lit('new-agent-cwd')) === null, 3000), 'подсветка папки не погасла вне диалога')
+    await cdp.send('Input.dispatchDragEvent', { type: 'dragCancel', x: 4, y: 4, data: { items: [], files: [fileA], dragOperationsMask: 1 } })
+    await dropAt('new-agent-prompt', [fileA, fileB])
+    assert.equal(await lit('new-agent-prompt'), null, 'подсветка поля погасла после броска')
+    // Путь с пробелом — в одинарных кавычках, как в поле реплики разговора.
+    const want = `глянь '${fileA}' '${fileB}'`
+    assert.ok(await waitFor(async () => (await prompt.inputValue()) === want, 3000), `в поле: ${await prompt.inputValue()}`)
+    const cwd = dlg.getByTestId('new-agent-cwd')
+    const before = await cwd.getAttribute('data-path')
+    assert.notEqual(before, dir, 'бросок файлов в реплику папку не меняет')
+    await dropAt('new-agent-cwd', [fileB])
+    assert.ok(await waitFor(async () => (await dlg.getByTestId('new-agent-drop-hint').count()) === 1, 3000), 'нет подсказки про файл на папке')
+    assert.equal(await cwd.getAttribute('data-path'), before, 'файл не стал папкой сессии')
+
+    await dropAt('new-agent-cwd', [dir])
+    assert.ok(await waitFor(async () => (await cwd.getAttribute('data-path')) === dir, 3000), `папка: ${await cwd.getAttribute('data-path')}`)
+    assert.equal(await dlg.getByTestId('new-agent-name').inputValue(), 'drop-proj', 'имя из брошенной папки')
+    assert.equal(await dlg.getByTestId('new-agent-drop-hint').count(), 0, 'подсказка ушла')
+    assert.equal(await prompt.inputValue(), want, 'реплика не тронута')
+    await cdp.detach()
+    await h.win.keyboard.press('Escape')
+    await dlg.waitFor({ state: 'detached', timeout: 5000 })
   })
 
   it('разрешение из Inbox: ⌘Enter разрешает выделенный запрос, ход доходит до конца', async () => {

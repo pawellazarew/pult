@@ -185,6 +185,9 @@ Every question from every session goes to the Inbox (⌘I in the window, `pult p
   <img alt="The New session dialog: provider (claude or codex), session name, project folder, optional worktree branch, browser for the agent, approval mode, model and effort" src="docs/images/new-session-light.png" width="720">
 </picture>
 
+In the dialog, drop a folder onto the form to use it as the session folder; files dropped into the first message, or
+copied in Finder and pasted with ⌘V, become their full paths (quoted when they contain spaces), as in the chat input.
+
 | mode (window label) | Claude | Codex |
 |---|---|---|
 | `read-only` ("Только чтение") | no edits; every command asks | `read-only` sandbox; anything wider asks |
