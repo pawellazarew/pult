@@ -404,7 +404,9 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
   const killWait = o.killWaitMs ?? KILL_WAIT_MS
   const poll = o.pollMs ?? POLL_MS
   const keys = o.keys ?? trustedKeys(env)
-  const sleep = (ms: number): Promise<void> => new Promise((r) => { const t = setTimeout(r, ms); t.unref?.() })
+  // Таймеры ожидания НЕ unref: идущая работа обязана держать процесс (в демоне его держит сокет, а в CLI-тесте и
+  // на Node 22 цикл без ссылок выходил посреди ожидания окна).
+  const sleep = (ms: number): Promise<void> => new Promise((r) => { setTimeout(r, ms) })
 
   let job: { to: string; from: string | null; step: AppUpdateStep; since: string; done: Promise<void> } | null = null
   let preflight: Promise<{ applying: true; to: string; target: 'app' }> | null = null
@@ -490,7 +492,6 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
     const promise = new Promise<boolean>((resolve) => {
       fn = (h) => { if (helloMatches(h, to, app)) { cleanup(); resolve(true) } }
       timer = setTimeout(() => { cleanup(); resolve(false) }, ms)
-      timer.unref?.()
       helloWaiters.add(fn)
     })
     function cleanup(): void { if (fn) helloWaiters.delete(fn); if (timer) clearTimeout(timer) }
