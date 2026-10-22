@@ -299,6 +299,7 @@ function world(o: { installed?: string; release?: BundleOpts; running?: boolean 
         pollMs: 10,
         recoverWaitMs: 300,
         firstRunWaitMs: 300,
+        firstRunPollMs: 50,
         ...over,
       }
     },
@@ -1159,6 +1160,101 @@ describe('обновление окна: другие окна и строгая
       assert.equal(u.status().firstRun, null)
       assert.ok(w.signals.some(([p, sig]) => p === pid && sig === 'SIGTERM'), 'неработающее новое окно погашено')
       await assert.rejects(u.apply({ rollback: true }), /возвращать нечего/)
+    } finally { w.remove() }
+  })
+
+  it('пока новое окно не запускалось, «Обновить окно» отказывает: открой его или верни прежнее', async () => {
+    const w = world({ running: false })
+    try {
+      const u = updaterOf(w)
+      await u.apply()
+      await u.idle()
+      w.manifest.version = '0.1.17'
+      assert.equal(u.status().available, false)
+      await assert.rejects(u.apply(), /новое окно 0\.1\.16 ещё не запускалось: открой его \(pult ui\) или верни 0\.1\.15/)
+    } finally { w.remove() }
+  })
+
+  it('окно упало, не подключившись: процесс из нового бандла замечен ps — тот же отсчёт, «не заработало»', async () => {
+    const w = world({ running: false })
+    try {
+      const u = updaterOf(w)
+      await u.apply()
+      await u.idle()
+      // hello нет: процесс есть, но упал раньше, чем подключился к демону.
+      w.procs.set(nextPid++, { exe: join(w.app, 'Contents', 'MacOS', 'Pult'), alive: true, startedAt: Date.now() })
+      assert.ok(await waitFor(() => u.status().firstRun?.state === 'failed', 3000), 'отсчёт пошёл от ps')
+    } finally { w.remove() }
+  })
+
+  it('«Вернуть»: rename(прежнее → место) не прошёл — копия рядом переживает старт, и старт её возвращает', async () => {
+    const w = world({ running: false })
+    try {
+      const u = updaterOf(w)
+      await u.apply()
+      await u.idle()
+      let fail = true
+      w.renameFail = (src, dst) => (fail && src.includes(`.Pult.app.incoming-${OLD}-`) && dst === w.app ? errno('EIO') : null)
+      await u.apply({ rollback: true })
+      await u.idle()
+      assert.match(u.status().last?.message ?? '', /вернуть окно 0\.1\.15 не вышло.*\.Pult\.app\.incoming-0\.1\.15-.*перезапуск демона доведёт/)
+      assert.equal(versionAt(w.app), NEW, 'новое вернулось на место')
+      const back = join(w.appsDir, `.Pult.app.incoming-${OLD}-${homeTag(w.home.paths.home)}`)
+      assert.equal(versionAt(back), OLD)
+      assert.ok(existsSync(join(w.home.paths.apps, 'swap.json')), 'журнал возврата')
+      assert.equal(readAppState(w.home.paths).pending?.prev, back, 'pending знает, где прежнее')
+      await u.stop()
+      fail = false
+      const u2 = updaterOf(w)
+      await u2.ready
+      assert.equal(versionAt(w.app), OLD, 'старт довёл возврат')
+      assert.equal(u2.status().firstRun, null)
+      assert.deepEqual(readdirSync(w.appsDir), ['Pult.app'])
+    } finally { w.remove() }
+  })
+
+  it('«Вернуть»: обрыв между двумя rename (места пусто) — старт ставит прежнее, не удаляя его как мусор', async () => {
+    const w = world({ running: false })
+    try {
+      const u = updaterOf(w)
+      await u.apply()
+      await u.idle()
+      await u.stop()
+      const tg = homeTag(w.home.paths.home)
+      const pd = readAppState(w.home.paths).pending
+      assert.ok(pd)
+      // Состояние после «прежнее → .incoming-<from>» и «новое → .failed-<to>», до «.incoming → место».
+      const back = join(w.appsDir, `.Pult.app.incoming-${OLD}-${tg}`)
+      renameSync(pd.prev, back)
+      renameSync(w.app, join(w.appsDir, `.Pult.app.failed-${NEW}-${tg}`))
+      writeFileSync(join(w.home.paths.apps, 'swap.json'), JSON.stringify({
+        schema: 1, app: w.app, dir: w.appsDir, old: join(w.appsDir, `.Pult.app.old-${OLD}-${tg}`), incoming: join(w.appsDir, `.Pult.app.incoming-${NEW}-${tg}`),
+        prev: back, from: OLD, to: NEW, phase: 'rollback', wasRunning: true, at: new Date().toISOString(), swapAt: pd.swapAt,
+      }))
+      const u2 = updaterOf(w)
+      await u2.ready
+      assert.equal(versionAt(w.app), OLD)
+      assert.equal(u2.status().firstRun, null)
+      assert.deepEqual(readAppState(w.home.paths).bad, [NEW])
+      assert.deepEqual(readdirSync(w.appsDir), ['Pult.app'])
+    } finally { w.remove() }
+  })
+
+  it('без журнала уборка не трогает прежнее окно, ждущее первого запуска (и его место рядом с окном)', async () => {
+    const w = world({ running: false })
+    try {
+      const u = updaterOf(w)
+      await u.apply()
+      await u.idle()
+      await u.stop()
+      const tg = homeTag(w.home.paths.home)
+      const pd = readAppState(w.home.paths).pending
+      assert.ok(pd)
+      const back = join(w.appsDir, `.Pult.app.incoming-${OLD}-${tg}`)
+      renameSync(pd.prev, back)
+      const u2 = updaterOf(w)
+      await u2.ready
+      assert.equal(versionAt(back), OLD, 'копия рядом с окном сохранена')
     } finally { w.remove() }
   })
 

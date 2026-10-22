@@ -19,7 +19,11 @@ export function windowVersionFromUA(ua: string | undefined | null): string | nul
 }
 
 /** Кнопка обновления: пакет (`force` — не ждать ходов) или окно (`target: 'app'`, `expect` — версия, которую видел человек). */
-export interface UpdateAction { label: string; force: boolean; target?: 'app'; expect?: string; rollback?: true }
+export interface UpdateAction {
+  label: string; force: boolean; target?: 'app'; expect?: string; rollback?: true
+  /** Спросить перед действием (вернуть окно, пока новое ещё не запускалось). */
+  confirm?: string
+}
 
 export interface UpdateBannerView {
   /** data-testid и тон плашки. */
@@ -102,7 +106,13 @@ export function appUpdateView(u: UpdateStatus | undefined | null, windowVersion:
       : { state: 'failed', text: `Окно не обновилось: ${f.message}`, action: a.available ? appAction(a, 'Повторить') : null }
   }
   if (a.available && a.latest) return { state: 'available', text: `Окно: ${installed ?? '?'} → доступно ${a.latest}${elsewhere(a)}`, action: appAction(a) }
-  if (fr?.state === 'waiting') return { state: 'firstrun', text: `Окно обновлено до ${fr.to}, ещё не запускалось (прежнее ${fr.from} держу до первого запуска)`, action: null }
+  if (fr?.state === 'waiting') {
+    return {
+      state: 'firstrun',
+      text: `Окно обновлено до ${fr.to}, ещё не запускалось (прежнее ${fr.from} держу до первого запуска) · если окно не запускается — pult update --app --rollback`,
+      action: { ...backAction(fr.from), confirm: `Вернуть окно ${fr.from}? Новое ${fr.to} ещё не запускалось; оно будет закрыто и больше не предложится само.` },
+    }
+  }
   if (a.unsupported) return { state: 'unsupported', text: `Окно ${installed ?? ''}`.trim() + ` · ${a.unsupported}`, action: null }
   if (a.bad && a.latest) return { state: 'bad', text: `Окно ${a.latest} уже не встало на этой машине — само не ставится; повторить: pult update --app --force`, action: null }
   if (a.latest && installed && compareVersions(a.latest, installed) <= 0) return { state: 'uptodate', text: `Окно ${installed} — последнее`, action: null }

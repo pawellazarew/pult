@@ -389,8 +389,10 @@ describe('окно обновляется само (0.3.4): «Окно: 0.1.15 �
   it('окно заменено закрытым: «ещё не запускалось»; первый запуск не заработал — «Вернуть 0.1.15» (rollback)', () => {
     const wait = appUpdateView(st(app({ available: false, latest: '0.1.16', installed: '0.1.16', firstRun: { to: '0.1.16', from: '0.1.15', state: 'waiting' } })), null)
     assert.equal(wait.state, 'firstrun')
-    assert.match(wait.text, /обновлено до 0\.1\.16, ещё не запускалось/)
-    assert.equal(wait.action, null)
+    assert.match(wait.text, /обновлено до 0\.1\.16, ещё не запускалось.*если окно не запускается — pult update --app --rollback/)
+    assert.equal(wait.action?.rollback, true)
+    assert.equal(wait.action?.label, 'Вернуть 0.1.15')
+    assert.match(wait.action?.confirm ?? '', /Вернуть окно 0\.1\.15\?/)
     const failed = appUpdateView(st(app({ available: false, installed: '0.1.16', firstRun: { to: '0.1.16', from: '0.1.15', state: 'failed' } })), null)
     assert.equal(failed.state, 'firstrun-failed')
     assert.deepEqual(failed.action, { label: 'Вернуть 0.1.15', force: false, target: 'app', rollback: true })

@@ -140,7 +140,12 @@ export function UpdatesSection({ panel, auto, onAuto }: {
           <span className="grow">{w.text}</span>
           {w.action && (
             <button type="button" className="btn btn-sm btn-primary" disabled={panel.busy}
-              onClick={() => { if (w.action) panel.onApply(w.action) }} data-testid="settings-app-apply">{w.action.label}</button>
+              onClick={() => {
+                if (!w.action) return
+                // «Вернуть», пока новое окно не запускалось, — с вопросом: это откат по просьбе, а не по сбою.
+                if (w.action.confirm && !window.confirm(w.action.confirm)) return
+                panel.onApply(w.action)
+              }} data-testid="settings-app-apply">{w.action.label}</button>
           )}
         </div>
       )}
