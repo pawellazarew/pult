@@ -63,6 +63,7 @@ export async function startTestDaemon(
     browserInstall?: DaemonOptions['browserInstall']
     findChrome?: DaemonOptions['findChrome']
     updates?: DaemonOptions['updates']
+    appUpdate?: DaemonOptions['appUpdate']
     codexModels?: DaemonOptions['codexModels']
     queueEditHoldMs?: DaemonOptions['queueEditHoldMs']
   } = {},
@@ -81,6 +82,7 @@ export async function startTestDaemon(
     ...(opts.browserInstall !== undefined ? { browserInstall: opts.browserInstall } : {}),
     ...(opts.findChrome !== undefined ? { findChrome: opts.findChrome } : {}),
     ...(opts.updates !== undefined ? { updates: opts.updates } : {}),
+    ...(opts.appUpdate !== undefined ? { appUpdate: opts.appUpdate } : {}),
     ...(opts.codexModels !== undefined ? { codexModels: opts.codexModels } : {}),
     ...(opts.queueEditHoldMs !== undefined ? { queueEditHoldMs: opts.queueEditHoldMs } : {}),
   })

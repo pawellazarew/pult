@@ -201,6 +201,47 @@ export interface UpdateStatus {
   apply: UpdateApplyState
   /** Последняя попытка из канала не встала; null — встала или их не было. */
   failure: UpdateFailure | null
+  /** Окно (Pult.app) и его обновление (0.3.4); нет — демон старше. */
+  app?: AppUpdateStatus
+}
+
+/** Шаг обновления окна — что сейчас делает демон. */
+export type AppUpdateStep = 'download' | 'verify' | 'quit' | 'swap' | 'launch' | 'health' | 'rollback'
+
+/** Чем кончилась последняя попытка обновить окно (`app-update.json`). */
+export interface AppUpdateAttempt {
+  to: string
+  /** Версия окна до попытки; null — не прочитана. */
+  from: string | null
+  at: string
+  /**
+   * `done` — новое окно поднялось и подключилось; `failed` — прервано ДО замены (окно прежнее, ничего не тронуто,
+   * или не восстановлено — см. message); `rolled_back` — новое окно не подключилось, прежнее возвращено и запущено.
+   */
+  result: 'done' | 'failed' | 'rolled_back'
+  message: string
+}
+
+/**
+ * Окно и его обновление из канала (0.3.4): `update.apply {target: 'app'}`. Только macOS arm64; где нельзя —
+ * `unsupported` словами (Linux, не найден Pult.app).
+ */
+export interface AppUpdateStatus {
+  /** Почему окно само не обновляется; null — может. */
+  unsupported: string | null
+  /** CFBundleShortVersionString поставленного Pult.app; null — не найден. */
+  installed: string | null
+  /** Где он стоит (/Applications/Pult.app или ~/Applications/Pult.app). */
+  path: string | null
+  /** `app.version` из последнего подписанного latest.json. */
+  latest: string | null
+  /** Есть что ставить: latest строго новее installed, не bad, поддерживается. */
+  available: boolean
+  /** latest уже не встала на этой машине — сама не предлагается. */
+  bad: boolean
+  /** Идёт обновление окна. */
+  applying: { to: string; from: string | null; step: AppUpdateStep; since: string } | null
+  last: AppUpdateAttempt | null
 }
 
 export interface DaemonBrowser {

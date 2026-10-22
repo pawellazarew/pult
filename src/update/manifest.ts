@@ -25,7 +25,7 @@ export const MANIFEST_SCHEMA = 1
 export const MANIFEST_MAX_BYTES = 64 * 1024
 /** Тарбол пакета ~1–2 МБ; потолок с запасом, чтобы чужой «манифест» не залил диск. */
 export const PACKAGE_MAX_BYTES = 200 * 1024 * 1024
-/** Архив Pult.app ~120 МБ; сам он не качается (окно меняется руками до 0.3.1), но поле проверяется. */
+/** Потолок поля манифеста; сам архив окна демон качает с потолком APP_ZIP_MAX_BYTES (appUpdate.ts, 0.3.4). */
 export const APP_MAX_BYTES = 1024 * 1024 * 1024
 
 export class ManifestError extends Error {

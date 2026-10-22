@@ -34,6 +34,8 @@ import type { Manifest } from './manifest.js'
 import { installTarball, withUpdateLock } from './update.js'
 import type { UpdateOptions } from './update.js'
 import { currentName, packageIn, readState } from './versions.js'
+import { readAppState } from './appState.js'
+import { plistString } from './plist.js'
 
 /** `pult update --check`: есть что ставить. Не 1–5 (ошибки CLI) — скрипт отличит «есть обновление» от сбоя. */
 export const EXIT_UPDATE_AVAILABLE = 10
@@ -130,8 +132,8 @@ export function installedWindowVersion(env: NodeJS.ProcessEnv): string | null {
   for (const dir of appDirs(env)) {
     let text: string
     try { text = readFileSync(join(dir, 'Pult.app', 'Contents', 'Info.plist'), 'utf8') } catch { continue }
-    const m = /<key>CFBundleShortVersionString<\/key>\s*<string>([^<]{1,40})<\/string>/.exec(text)
-    if (m?.[1]) return m[1].trim()
+    const v = plistString(text, 'CFBundleShortVersionString')
+    if (v && v.length <= 40) return v
   }
   return null
 }
@@ -146,7 +148,11 @@ export interface CheckReport {
   available: boolean
   dev: boolean
   url: string
-  window: { installed: string | null; minVersion: string | null; outdated: boolean | null }
+  /**
+   * Окно: `outdated` — пакету релиза нужно окно новее стоящего; `latest` — окно релиза; `available` — его можно
+   * поставить `pult update --app` (новее стоящего и не bad); `bad` — оно уже не встало на этой машине.
+   */
+  window: { installed: string | null; minVersion: string | null; outdated: boolean | null; latest: string | null; available: boolean; bad: boolean }
 }
 
 function report(paths: PultPaths, m: Manifest, url: string, env: NodeJS.ProcessEnv): CheckReport {
@@ -156,6 +162,9 @@ function report(paths: PultPaths, m: Manifest, url: string, env: NodeJS.ProcessE
   const bad = readState(paths).bad.includes(m.version)
   const win = installedWindowVersion(env)
   const minVersion = m.app?.minVersion ?? null
+  const appLatest = m.app?.['darwin-arm64'] ? m.app.version : null
+  const appBad = appLatest !== null && readAppState(paths).bad.includes(appLatest)
+  const appNewer = appLatest !== null && win !== null && compareVersions(appLatest, win) > 0
   return {
     current,
     latest: releaseOf(m),
@@ -164,7 +173,10 @@ function report(paths: PultPaths, m: Manifest, url: string, env: NodeJS.ProcessE
     available: newer && !bad && !inst.dev,
     dev: inst.dev,
     url,
-    window: { installed: win, minVersion, outdated: win !== null && minVersion !== null ? compareVersions(win, minVersion) < 0 : null },
+    window: {
+      installed: win, minVersion, outdated: win !== null && minVersion !== null ? compareVersions(win, minVersion) < 0 : null,
+      latest: appLatest, available: appNewer && !appBad, bad: appBad,
+    },
   }
 }
 
@@ -205,9 +217,14 @@ export async function updateCheck(paths: PultPaths, io: Io, opts: ChannelOptions
     io.out(`pult ${r.current ?? v} — последняя версия`)
   }
   io.out(`что нового: ${r.latest.notes}`)
-  if (r.window.minVersion !== null) {
-    if (r.window.outdated) io.out(`окно: стоит ${r.window.installed}, релизу нужно не ниже ${r.window.minVersion} — новое окно на странице релиза (автозамена окна — в 0.3.1)`)
-    else if (r.window.installed !== null) io.out(`окно: ${r.window.installed} — годится (нужно не ниже ${r.window.minVersion})`)
+  const w = r.window
+  if (w.installed !== null && w.latest !== null && compareVersions(w.latest, w.installed) > 0) {
+    io.out(w.bad
+      ? `окно: ${w.installed} → в канале ${w.latest}, но оно уже не встало на этой машине — повторить: pult update --app --force`
+      : `окно: ${w.installed} → доступно ${w.latest}${w.outdated ? ` (релизу нужно не ниже ${w.minVersion})` : ''} — обновить: pult update --app или «Настройки» → «Обновления»`)
+  } else if (w.minVersion !== null) {
+    if (w.outdated) io.out(`окно: стоит ${w.installed}, релизу нужно не ниже ${w.minVersion} — новое окно на странице релиза`)
+    else if (w.installed !== null) io.out(`окно: ${w.installed} — годится (нужно не ниже ${w.minVersion})`)
   }
   return r.available ? EXIT_UPDATE_AVAILABLE : 0
 }
@@ -219,10 +236,12 @@ function cleanDownloads(paths: PultPaths): void {
   for (const n of names) rmSync(join(paths.downloads, n), { recursive: true, force: true })
 }
 
-/** Что сказать, когда новому пакету нужно окно новее стоящего (окно каналом пока не меняется). */
+/** Что сказать, когда новому пакету нужно окно новее стоящего. */
 function windowWarning(r: CheckReport): string | null {
   if (!r.window.outdated) return null
-  return `внимание: окно ${r.window.installed} старше нужного релизу (${r.window.minVersion}) — после обновления скачай новое со страницы релиза (${r.latest.notes}), Pult-<версия>-arm64.zip, и замени Pult.app; автозамена окна — в 0.3.1`
+  return r.window.available
+    ? `внимание: окно ${r.window.installed} старше нужного релизу (${r.window.minVersion}) — после обновления: pult update --app (или «Настройки» → «Обновления» → «Обновить окно»)`
+    : `внимание: окно ${r.window.installed} старше нужного релизу (${r.window.minVersion}) — после обновления скачай новое со страницы релиза (${r.latest.notes}), Pult-<версия>-arm64.zip, и замени Pult.app`
 }
 
 /**

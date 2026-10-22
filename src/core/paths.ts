@@ -57,6 +57,10 @@ export interface PultPaths {
   readonly updateLog: string
   /** `new-session-last.json` — последний выбор «+ Сессия» окна (M8f): провайдер, модель, усилие, режим, папка. */
   readonly newSessionLast: string
+  /** `apps/` — окно на время своего обновления (0.3.4): `staging-<v>`, `previous-<v>` (прежнее окно, один цикл). */
+  readonly apps: string
+  /** `app-update.json` — версии окна, не вставшие на этой машине (bad), и последняя попытка обновить окно. */
+  readonly appUpdateState: string
 }
 
 /**
@@ -108,6 +112,8 @@ export function layout(home: string): PultPaths {
     updateCheck: join(home, 'update-check.json'),
     updateLog: join(logs, 'update.log'),
     newSessionLast: join(home, 'new-session-last.json'),
+    apps: join(home, 'apps'),
+    appUpdateState: join(home, 'app-update.json'),
   }
 }
 

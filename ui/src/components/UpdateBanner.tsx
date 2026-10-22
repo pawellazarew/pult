@@ -2,28 +2,28 @@
 
 import type { ReactElement } from 'react'
 import { Icon } from './common.js'
-import type { UpdateBannerView } from '../model/update.js'
+import type { UpdateAction, UpdateBannerView } from '../model/update.js'
 
 export function UpdateBanner(p: {
   view: UpdateBannerView | null
   busy: boolean
-  onAction: (force: boolean) => void
+  onAction: (a: UpdateAction) => void
   onNotes: (url: string) => void
   onDismiss: (version: string) => void
 }): ReactElement | null {
   const v = p.view
   if (!v) return null
-  const tone = v.kind === 'failed' || v.kind === 'window' || v.kind === 'rolledback' ? 'banner-wait' : 'banner-update'
+  const tone = v.kind === 'failed' || v.kind === 'window' || v.kind === 'rolledback' || v.kind === 'app-failed' ? 'banner-wait' : 'banner-update'
   return (
     <div className={`banner ${tone}`} role="status" data-testid={`update-${v.kind}`}>
-      <Icon name={v.kind === 'failed' || v.kind === 'rolledback' ? 'alert' : v.kind === 'waiting' || v.kind === 'applying' ? 'clock' : 'info'} />
+      <Icon name={v.kind === 'failed' || v.kind === 'rolledback' || v.kind === 'app-failed' ? 'alert' : v.kind === 'waiting' || v.kind === 'applying' || v.kind === 'app-applying' ? 'clock' : 'info'} />
       <span className="grow">{v.text}</span>
       {v.notes && (
         <button type="button" className="btn btn-ghost btn-sm" onClick={() => p.onNotes(v.notes as string)} data-testid="update-notes">Что нового</button>
       )}
       {v.action && (
         <button type="button" className={`btn btn-sm${v.action.force ? '' : ' btn-primary'}`} disabled={p.busy}
-          onClick={() => p.onAction(v.action?.force === true)} data-testid="update-apply">{v.action.label}</button>
+          onClick={() => { if (v.action) p.onAction(v.action) }} data-testid={v.action.target === 'app' ? 'update-apply-app' : 'update-apply'}>{v.action.label}</button>
       )}
       {v.dismissKey && (
         <button type="button" className="btn btn-ghost btn-sm" title="Скрыть" aria-label="Скрыть"

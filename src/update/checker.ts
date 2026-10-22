@@ -88,6 +88,8 @@ export interface CheckerOptions {
   onApplyEnd?: () => void
   /** Запуск `pult update --expect <to>`; тест подставляет свой. */
   spawnApply?: (to: string) => ApplyChild
+  /** Почему «Обновить» пакет сейчас нельзя (идёт обновление окна, 0.3.4); null — можно. */
+  blocked?: () => string | null
   /**
    * Можно ли проверять самому (расписание и просьбы окна по фокусу) при `updates.check: true`. По умолчанию —
    * да; тестовый демон без шва канала — нет: сеть в тестах не трогается.
@@ -340,6 +342,8 @@ export function createUpdateChecker(o: CheckerOptions): UpdateChecker {
   const recount = (): void => {
     if (apply.state !== 'waiting') { stopWaitPoll(); return }
     const turns = o.runningTurns()
+    // Ходы кончились, но идёт обновление окна (0.3.4): пакет подождёт его конца — общий run/update.lock.
+    if (turns === 0 && o.blocked?.()) return
     if (turns === 0) { launch(apply.to); return }
     if (turns !== apply.turns) apply = { ...apply, turns }
   }
@@ -373,6 +377,8 @@ export function createUpdateChecker(o: CheckerOptions): UpdateChecker {
   /** Одно «Обновить» за раз: второй вызов, пришедший во время первого (там await проверки), получает тот же итог. */
   const applyOnce = async (force: boolean): Promise<{ waiting: number } | { applying: true; to: string }> => {
     if (apply.state === 'applying') return { applying: true, to: apply.to }
+    const blocked = o.blocked?.()
+    if (blocked) throw new ApplyError(blocked)
     let st = status()
     // Окно жмёт «Обновить» по тому, что видело; итог мог устареть или его ещё не было — проверить заново.
     if (!st.available) st = await check()
@@ -380,6 +386,8 @@ export function createUpdateChecker(o: CheckerOptions): UpdateChecker {
     if (stopped) throw new ApplyError('демон останавливается — обновление не запущено')
     // Пока ждали проверку, состояние могло смениться (запуск из poke) — второй ребёнок не нужен.
     if ((apply as UpdateApplyState).state === 'applying') return { applying: true, to: (apply as { to: string }).to }
+    const blocked2 = o.blocked?.()
+    if (blocked2) throw new ApplyError(blocked2)
     if (!st.available || !st.latest) {
       if (st.bad && st.latest) throw new ApplyError(`${st.latest.version} уже не прошла пробу на этой машине — сама не ставится; повторить: pult update --to ${st.latest.version}`)
       throw new ApplyError(st.error ? `проверить канал не вышло: ${st.error}` : `ставить нечего: ${o.current} — последняя`)

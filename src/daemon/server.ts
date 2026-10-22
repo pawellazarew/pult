@@ -70,6 +70,9 @@ import { MCP_SERVER_NAME_RE, MCP_SERVERS_MAX, writeMcpSelection, writeNewSession
 import type { SessionBrowser, SessionRecord, SessionStatus } from '../sessions/registry.js'
 import { ApplyError, createUpdateChecker } from '../update/checker.js'
 import type { CheckerOptions, UpdateChecker } from '../update/checker.js'
+import { AppUpdateError, createAppUpdater, shellHelloOf } from '../update/appUpdate.js'
+import type { AppTools, AppUpdater } from '../update/appUpdate.js'
+import type { UpdateStatus } from '../core/rpc.js'
 
 export const HANDSHAKE_TIMEOUT_MS = 2000
 /** Сколько байт ответа разрешено копить медленному клиенту, прежде чем его отцепят. */
@@ -122,6 +125,8 @@ export interface DaemonOptions {
    * расписания не заводит (сеть в тестах закрыта), кроме сквозных прогонов с PULT_TEST_UPDATE_DIR.
    */
   updates?: Pick<CheckerOptions, 'http' | 'keys' | 'spawnApply' | 'schedule' | 'firstDelayMs' | 'intervalMs' | 'jitterMs' | 'tickMs' | 'now' | 'random'>
+  /** 0.3.4: швы обновления окна — утилиты macOS, сроки ожидания. Тест не трогает настоящий Pult.app никогда. */
+  appUpdate?: { tools?: Partial<AppTools>; quitWaitMs?: number; helloWaitMs?: number; killWaitMs?: number; pollMs?: number }
   /** M8f: подмена живого списка моделей Codex для `agent.configure` (`null` — списка нет). */
   codexModels?: () => Promise<ProviderModel[] | null>
   /** Срок, на который открытая правка держит очередь реплик (мс). Тест ставит короче; по умолчанию 10 мин. */
@@ -361,6 +366,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
   // Канал обновлений заводится после менеджера (ему нужен список ходов), а менеджеру нужен ответ «ставится
   // ли обновление» — ссылка заполняется ниже, до первого запроса.
   let updaterRef: UpdateChecker | null = null
+  let appUpdaterRef: AppUpdater | null = null
   const manager: SessionManager = createManager({
     paths, config, logger, store,
     publish: emit,
@@ -387,12 +393,34 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     // Ход идёт по статусу ИЛИ заводится прямо сейчас (resume/send — статуса `working` ещё нет).
     runningTurns: () => new Set([...manager.list().filter((r) => RUNNING_TURN.has(r.lastStatus)).map((r) => r.name), ...manager.startingTurns()]).size,
     onApplyEnd: () => { manager.resumeQueues() },
+    blocked: () => (appUpdaterRef?.busy() ? 'идёт обновление окна — пакет обновится после него' : null),
     ...(opts.testMode && !opts.updates
       ? { schedule: !!process.env['PULT_TEST_UPDATE_DIR'], ...(Number.isFinite(testFirst) && testFirst >= 0 ? { firstDelayMs: testFirst } : {}) }
       : {}),
     ...(opts.updates ?? {}),
   })
   updaterRef = updater
+  // 0.3.4: окно обновляется само — демон качает, проверяет и меняет Pult.app, сессии не трогаются.
+  const appUpdater: AppUpdater = createAppUpdater({
+    paths, config, logger,
+    testMode: opts.testMode === true,
+    ...(opts.updates?.keys ? { keys: opts.updates.keys } : {}),
+    tools: { ...(opts.updates?.http ? { http: opts.updates.http } : {}), ...(opts.appUpdate?.tools ?? {}) },
+    latestApp: () => updater.status().latest?.app?.version ?? null,
+    packageBusy: () => {
+      const a = updater.status().apply
+      if (a.state === 'applying') return `идёт обновление пакета до ${a.to} — окно обновится после него`
+      if (a.state === 'waiting') return `обновление пакета до ${a.to} ждёт конца ходов — окно обновится после него`
+      return null
+    },
+    ...(opts.appUpdate?.quitWaitMs !== undefined ? { quitWaitMs: opts.appUpdate.quitWaitMs } : {}),
+    ...(opts.appUpdate?.helloWaitMs !== undefined ? { helloWaitMs: opts.appUpdate.helloWaitMs } : {}),
+    ...(opts.appUpdate?.killWaitMs !== undefined ? { killWaitMs: opts.appUpdate.killWaitMs } : {}),
+    ...(opts.appUpdate?.pollMs !== undefined ? { pollMs: opts.appUpdate.pollMs } : {}),
+  })
+  appUpdaterRef = appUpdater
+  /** Статус канала вместе с окном: одним объектом в `update.*` и `daemon.status.update`. */
+  const updateStatus = (u: UpdateStatus = updater.status()): UpdateStatus => ({ ...u, app: appUpdater.status() })
   // Каждое событие журнала — повод проверить, не кончился ли последний ход, которого ждёт «Обновить».
   bus.on(() => { updater.poke() })
 
@@ -470,7 +498,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     // Правила уведомлений окна (О2): порог длительности хода и звук. Сама команда `notifyCommand` наружу не уходит.
     notify: { ...config.notify },
     browser: browserStatus(),
-    update: updater.status(),
+    update: updateStatus(),
   })
   function browserStatus(): NonNullable<DaemonStatus['browser']> {
     const st = installer.state()
@@ -973,7 +1001,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
 
       // --- M8c: канал обновлений -------------------------------------------------------
       case 'update.status':
-        send({ id: req.id, result: updater.status() })
+        send({ id: req.id, result: updateStatus() })
         return
 
       case 'update.check': {
@@ -984,12 +1012,27 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
           fail(ERROR_CODES.invalidParams, 'update.check: ifOlderThanMs — неотрицательное число')
           return
         }
-        send({ id: req.id, result: await (older !== undefined ? updater.checkIfStale(older) : updater.check()) })
+        send({ id: req.id, result: updateStatus(await (older !== undefined ? updater.checkIfStale(older) : updater.check())) })
         return
       }
 
       case 'update.apply': {
         if (params['force'] !== undefined && typeof params['force'] !== 'boolean') { fail(ERROR_CODES.invalidParams, 'update.apply: force — true или false'); return }
+        const target = params['target']
+        if (target !== undefined && target !== 'package' && target !== 'app') { fail(ERROR_CODES.invalidParams, "update.apply: target — 'package' или 'app'"); return }
+        if (target === 'app') {
+          // 0.3.4: окно. Тот же метод моста, что «Обновить» пакета, — окну 0.1.15 новая оболочка не нужна.
+          const expect = params['expect']
+          if (expect !== undefined && (typeof expect !== 'string' || !expect || expect.length > 40)) { fail(ERROR_CODES.invalidParams, 'update.apply: expect — версия окна'); return }
+          if (params['allowBad'] !== undefined && typeof params['allowBad'] !== 'boolean') { fail(ERROR_CODES.invalidParams, 'update.apply: allowBad — true или false'); return }
+          try {
+            send({ id: req.id, result: await appUpdater.apply({ ...(typeof expect === 'string' ? { expect } : {}), allowBad: params['allowBad'] === true }) })
+          } catch (e) {
+            if (e instanceof AppUpdateError) { fail(ERROR_CODES.invalidParams, e.message); return }
+            throw e
+          }
+          return
+        }
         try {
           send({ id: req.id, result: await updater.apply(params['force'] === true) })
         } catch (e) {
@@ -1265,6 +1308,8 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
           conn.authed = true
           conn.client = typeof msg['client'] === 'string' ? msg['client'] : 'unknown'
           clearTimeout(timer)
+          // 0.3.4: оболочка называет свою версию и путь — обновление окна ждёт hello НОВОЙ версии.
+          if (conn.client === 'shell') appUpdater.onShellHello(shellHelloOf(msg['app']))
           socket.write(encodeLine({
             type: 'hello_ok',
             protocol: PROTOCOL_VERSION,
@@ -1319,6 +1364,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     stopping = true
     logger.info('остановка демона', { reason })
     updater.stop()
+    appUpdater.stop()
     // Сначала ОТКАЗ всем, кто ждёт решения, и только потом закрытие сокета: заглушка
     // `pult mcp-ask` иначе повисла бы на мёртвом сокете, а `claude` — на ней (инвариант 5).
     const denied = broker.shutdown('демон останавливается')

@@ -9,7 +9,7 @@
 // (окно сменяется руками до 0.3.1).
 
 import { compareVersions } from '../../../src/core/semver.js'
-import type { UpdateStatus } from '../../../src/core/rpc.js'
+import type { AppUpdateStatus, AppUpdateStep, UpdateStatus } from '../../../src/core/rpc.js'
 
 const UA_RE = /(?:^|\s)(?:Pult|pult-shell)\/(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?=\s|$)/
 
@@ -18,14 +18,17 @@ export function windowVersionFromUA(ua: string | undefined | null): string | nul
   return UA_RE.exec(ua ?? '')?.[1] ?? null
 }
 
+/** Кнопка обновления: пакет (`force` — не ждать ходов) или окно (`target: 'app'`, `expect` — версия, которую видел человек). */
+export interface UpdateAction { label: string; force: boolean; target?: 'app'; expect?: string }
+
 export interface UpdateBannerView {
   /** data-testid и тон плашки. */
-  kind: 'available' | 'window' | 'waiting' | 'applying' | 'failed' | 'rolledback'
+  kind: 'available' | 'window' | 'waiting' | 'applying' | 'failed' | 'rolledback' | 'app' | 'app-applying' | 'app-failed'
   text: string
   /** Страница релиза — «Что нового». */
   notes: string | null
-  /** Кнопка: «Обновить» (`apply`), «Сейчас» (`force`), «Повторить» (`retry`) или никакой. */
-  action: { label: string; force: boolean } | null
+  /** Кнопка: «Обновить» (`apply`), «Сейчас» (`force`), «Повторить» (`retry`), «Обновить окно» или никакой. */
+  action: UpdateAction | null
   /** Ключ «скрыть крестиком»: версия (до следующей) или `failure:<время>` (до следующей неудачи); null — не скрывается. */
   dismissKey: string | null
 }
@@ -35,6 +38,60 @@ const turnsText = (n: number): string => {
   const mod100 = n % 100
   const word = mod10 === 1 && mod100 !== 11 ? 'идёт' : 'идут'
   return `${n} ${word}`
+}
+
+// --- окно (0.3.4): «Окно: 0.1.15 → доступно 0.1.16 · Обновить окно» ----------------------------------------
+
+const APP_STEP: Record<AppUpdateStep, string> = {
+  download: 'качаю архив',
+  verify: 'проверяю архив и подпись',
+  quit: 'закрываю окно',
+  swap: 'меняю Pult.app',
+  launch: 'открываю новое окно',
+  health: 'жду новое окно',
+  rollback: 'новое окно не поднялось — возвращаю прежнее',
+}
+
+/** Последняя неудача окна, если её не заслонила вышедшая после неё версия. */
+function appFailure(a: AppUpdateStatus): AppUpdateStatus['last'] {
+  const f = a.last
+  if (!f || f.result === 'done') return null
+  if (a.available && a.latest !== null && compareVersions(a.latest, f.to) > 0) return null
+  return f
+}
+
+const appAction = (a: AppUpdateStatus, label = 'Обновить окно'): UpdateAction =>
+  ({ label, force: false, target: 'app', ...(a.latest ? { expect: a.latest } : {}) })
+
+export interface AppUpdateView {
+  /** data-state строки «Окно» в «Настройках». */
+  state: 'none' | 'available' | 'applying' | 'failed' | 'rolledback' | 'bad' | 'uptodate' | 'unsupported'
+  text: string
+  action: UpdateAction | null
+}
+
+/**
+ * Строка «Окно» раздела «Обновления». `none` — старый демон (поля `app` нет) или про окно сказать нечего.
+ * Версия окна — из Info.plist поставленного Pult.app (демон), а без него — из user agent.
+ */
+export function appUpdateView(u: UpdateStatus | undefined | null, windowVersion: string | null): AppUpdateView {
+  const a = u?.app
+  if (!a) return { state: 'none', text: '', action: null }
+  const installed = a.installed ?? windowVersion
+  if (a.applying) {
+    return { state: 'applying', text: `Обновляю окно до ${a.applying.to}: ${APP_STEP[a.applying.step]}… Окно закроется и откроется само, сессии работают дальше`, action: null }
+  }
+  const f = appFailure(a)
+  if (f) {
+    return f.result === 'rolled_back'
+      ? { state: 'rolledback', text: `Окно ${f.to} не встало: ${f.message}`, action: null }
+      : { state: 'failed', text: `Окно не обновилось: ${f.message}`, action: a.available ? appAction(a, 'Повторить') : null }
+  }
+  if (a.available && a.latest) return { state: 'available', text: `Окно: ${installed ?? '?'} → доступно ${a.latest}`, action: appAction(a) }
+  if (a.unsupported) return { state: 'unsupported', text: `Окно ${installed ?? ''}`.trim() + ` · ${a.unsupported}`, action: null }
+  if (a.bad && a.latest) return { state: 'bad', text: `Окно ${a.latest} уже не встало на этой машине — само не ставится; повторить: pult update --app --force`, action: null }
+  if (a.latest && installed && compareVersions(a.latest, installed) <= 0) return { state: 'uptodate', text: `Окно ${installed} — последнее`, action: null }
+  return { state: 'none', text: '', action: null }
 }
 
 /**
@@ -68,6 +125,22 @@ export function updateBanner(u: UpdateStatus | undefined | null, windowVersion: 
     case 'idle':
       break
   }
+  const a = u.app
+  if (a?.applying) {
+    return {
+      kind: 'app-applying',
+      text: `Обновляю окно до ${a.applying.to}: ${APP_STEP[a.applying.step]}… Окно закроется и откроется само, сессии работают дальше`,
+      notes: null, action: null, dismissKey: null,
+    }
+  }
+  const af = a ? appFailure(a) : null
+  if (a && af && !dismissed.includes(`app-failure:${af.at}`)) {
+    return {
+      kind: 'app-failed',
+      text: af.result === 'rolled_back' ? `Окно ${af.to} не встало: ${af.message}` : `Окно не обновилось: ${af.message}`,
+      notes: null, action: af.result === 'failed' && a.available ? appAction(a, 'Повторить') : null, dismissKey: `app-failure:${af.at}`,
+    }
+  }
   // Проба не прошла и откат — после него это уже другой демон, и только update.json помнит, что было.
   const f = u.failure ?? null
   // Старая неудача не заслоняет НОВУЮ версию: вышла версия новее не вставшей — показываем её.
@@ -82,13 +155,26 @@ export function updateBanner(u: UpdateStatus | undefined | null, windowVersion: 
       notes: null, action: null, dismissKey: `failure:${f.at}`,
     }
   }
-  if (!u.available || !latest || dismissed.includes(latest.version)) return null
+  const appBanner = (): UpdateBannerView | null => {
+    if (!a?.available || !a.latest || dismissed.includes(`app:${a.latest}`)) return null
+    return {
+      kind: 'app',
+      text: `Доступно новое окно ${a.latest} (стоит ${a.installed ?? windowVersion ?? '?'})`,
+      notes, action: appAction(a), dismissKey: `app:${a.latest}`,
+    }
+  }
+  if (!u.available || !latest || dismissed.includes(latest.version)) return appBanner()
   const min = latest.app?.minVersion ?? null
-  if (min !== null && windowVersion !== null && compareVersions(windowVersion, min) < 0) {
+  const win = a?.installed ?? windowVersion
+  if (min !== null && win !== null && compareVersions(win, min) < 0) {
+    // Окно обновляется само — сначала оно, потом пакет; нет — только страница релиза.
+    const canApp = a?.available === true && a.latest !== null && compareVersions(a.latest, min) >= 0
     return {
       kind: 'window',
-      text: `Доступна ${latest.version} · Нужна новая версия окна (стоит ${windowVersion}, нужна ${min} или новее) — скачай её на странице релиза`,
-      notes, action: null, dismissKey: latest.version,
+      text: canApp
+        ? `Доступна ${latest.version} · сначала обнови окно (стоит ${win}, нужна ${min} или новее)`
+        : `Доступна ${latest.version} · Нужна новая версия окна (стоит ${win}, нужна ${min} или новее) — скачай её на странице релиза`,
+      notes, action: canApp && a ? appAction(a) : null, dismissKey: latest.version,
     }
   }
   return {
@@ -105,9 +191,9 @@ export function addDismissed(list: readonly string[], key: string): string[] {
 }
 
 /** Отказ `update.apply` со старой оболочкой: метода нет в её белом списке — подсказка, как обновиться иначе. */
-export function applyErrorText(code: string | null, message: string): string {
-  if (code === 'method_not_allowed') return 'Это окно не умеет запускать обновление (оболочка старше 0.1.14) — в терминале: pult update'
-  return `Обновление не запустилось: ${message}`
+export function applyErrorText(code: string | null, message: string, target?: 'app'): string {
+  if (code === 'method_not_allowed') return `Это окно не умеет запускать обновление (оболочка старше 0.1.14) — в терминале: pult update${target === 'app' ? ' --app' : ''}`
+  return target === 'app' ? `Окно не обновилось: ${message}` : `Обновление не запустилось: ${message}`
 }
 
 // --- «Настройки» → «Обновления» (⌘,): версии, состояние канала, «Проверить сейчас», «Обновить до X» -------------
@@ -143,7 +229,7 @@ export interface UpdateSectionView {
   /** Страница релиза — «Что нового». */
   notes: string | null
   /** «Обновить до X», «Сейчас», «Повторить» — тот же путь, что у плашки (`update.apply`). */
-  action: { label: string; force: boolean } | null
+  action: UpdateAction | null
   /** Можно ли нажать «Проверить сейчас». */
   canCheck: boolean
   /** «последняя проверка: …». */
@@ -191,8 +277,10 @@ export function updateSection(
   const errNote = u.error ? `Последняя проверка не удалась: ${u.error}` : null
   if (u.available && latest) {
     const min = latest.app?.minVersion ?? null
-    if (min !== null && windowVersion !== null && compareVersions(windowVersion, min) < 0) {
-      return { ...base, state: 'window', text: `Доступна ${latest.version} · нужна новая версия окна (стоит ${windowVersion}, нужна ${min} или новее) — скачай её на странице релиза`, notes, checked, note: errNote }
+    const win = u.app?.installed ?? windowVersion
+    if (min !== null && win !== null && compareVersions(win, min) < 0) {
+      const how = u.app?.available ? 'сначала обнови окно (строка «Окно» ниже)' : 'скачай её на странице релиза'
+      return { ...base, state: 'window', text: `Доступна ${latest.version} · нужна новая версия окна (стоит ${win}, нужна ${min} или новее) — ${how}`, notes, checked, note: errNote }
     }
     return { ...base, state: 'available', text: `Доступна ${latest.version}`, notes, action: { label: `Обновить до ${latest.version}`, force: false }, checked, note: errNote }
   }

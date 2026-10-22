@@ -230,6 +230,7 @@ pult update              # check, download, verify, install, restart the daemon
 pult update --check      # only check: exit 0 — up to date, 10 — an update is available
 pult update --list       # versions on disk
 pult update --to <ver>   # switch back to a version from `pult update --list`
+pult update --app        # update the window (Pult.app, macOS) from the same channel
 ```
 
 - `latest.json` of the latest GitHub release is signed with Ed25519 (the public key is built into Pult); the package
@@ -237,8 +238,15 @@ pult update --to <ver>   # switch back to a version from `pult update --list`
 - The daemon checks a minute after start, then every 6 hours, and when the window comes back to the screen if the last
   check is older than an hour (at most once per 10 minutes). In the window a new version shows up as a quiet line at the
   top. Running turns are not cut off, and a version that fails its start-up check is rolled back automatically.
-- `Pult.app` is not replaced by `pult update` yet: download `Pult-arm64.zip` again as in [Install](#2-the-window-macos-apple-silicon).
-  Automatic window replacement is planned for a later release. If a new Pult needs a newer window, the window says so.
+- **The window updates itself (macOS, Apple Silicon).** When the release has a newer window, Settings → Обновления shows
+  «Окно: 0.1.15 → доступно 0.1.16 · Обновить окно» (Update window), and the banner says so too. The daemon downloads
+  the window zip, checks its size and sha256 against the same signed manifest, the bundle id, version, architecture and
+  code signature, then closes the window, swaps `Pult.app` in place and opens the new one. If the new window does not
+  connect within 20 seconds, the old one is put back and reopened, and that version is not offered again
+  (`pult update --app --force` retries it). Agents keep working the whole time; unsent text in the message box survives
+  the restart. If the window folder is not writable (for example, a non-admin user and `/Applications`), nothing is
+  touched and Pult tells you how to replace the window by hand (download `Pult-arm64.zip` as in
+  [Install](#2-the-window-macos-apple-silicon)). If a new Pult needs a newer window, the window says so.
 
 ## Network & privacy
 
@@ -254,8 +262,8 @@ Pult has no telemetry. Besides your agents' own traffic, it makes these requests
   Claude subscription. Turn it off with `"autoTitle": false` in `config.json`.
 - **Update check.** One `GET` of `latest.json` from github.com every 6 hours (and when the window returns after an hour
   or more, at most once per 10 minutes), with the header `user-agent: pult/<version>` and no identifiers. Turn it off in
-  Settings (⌘,) → Обновления or with `{ "updates": { "check": false } }`; «Проверить сейчас» still works. The package is
-  downloaded only when you update.
+  Settings (⌘,) → Обновления or with `{ "updates": { "check": false } }`; «Проверить сейчас» still works. The package and
+  the window are downloaded only when you update them.
 
 After editing `~/.pult/config.json`, run `pult daemon stop`; the next command starts the daemon with the new settings.
 
@@ -345,7 +353,7 @@ sandbox and all questions and requires an explicit confirmation. Pult runs every
 - Codex sandbox-widening requests, model questions to a human and MCP elicitation are not handled yet: they get an
   error, and the turn usually still finishes.
 - The event journal is not rotated.
-- `Pult.app` is updated by hand (see [Updates](#updates)).
+- The window updates itself only on macOS with Apple Silicon; on Linux the window runs from a working copy.
 - The Linux service is checked against the unit file only; it has not been run under a real systemd in CI.
 
 ## Troubleshooting

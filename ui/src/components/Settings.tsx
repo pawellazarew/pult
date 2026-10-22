@@ -10,7 +10,8 @@ import { DEFAULT_APPROVALS, draftError, effortOptions, setDefault, setDefaultPro
 import type { NewSessionSettings, Provider } from '../../../src/sessions/settings.js'
 import type { UpdateStatus } from '../../../src/core/rpc.js'
 import type { ProviderCatalog } from '../model/types.js'
-import { updateSection } from '../model/update.js'
+import { appUpdateView, updateSection } from '../model/update.js'
+import type { UpdateAction } from '../model/update.js'
 import { CMD, Kbd } from './common.js'
 import { Dialog } from './Panels.js'
 
@@ -91,7 +92,7 @@ export interface UpdatesPanel {
   applyError: string | null
   now: number
   onCheck(): void
-  onApply(force: boolean): void
+  onApply(a: UpdateAction): void
   onNotes(url: string): void
 }
 
@@ -103,12 +104,15 @@ export function UpdatesSection({ panel, auto, onAuto }: {
 }): ReactElement {
   const v = updateSection(panel.status, panel.windowVersion, { checking: panel.checking, error: panel.error }, panel.now)
   const tone = v.state === 'error' || v.state === 'failed' || v.state === 'window' || v.state === 'bad' ? ' upd-warn' : v.state === 'available' ? ' upd-new' : ''
+  // 0.3.4: окно обновляется само — своя строка с «Обновить окно».
+  const w = appUpdateView(panel.status, panel.windowVersion)
+  const wTone = w.state === 'failed' || w.state === 'rolledback' || w.state === 'bad' ? ' upd-warn' : w.state === 'available' ? ' upd-new' : ''
   return (
     <section className="settings-sec" aria-labelledby="settings-upd-h" data-testid="settings-updates">
       <h3 id="settings-upd-h">Обновления</h3>
       <div className="upd-versions" data-testid="settings-update-versions">
         <span>Пульт <span className="mono">{panel.packageVersion ?? '—'}</span></span>
-        <span>окно <span className="mono">{panel.windowVersion ?? 'неизвестно'}</span></span>
+        <span>окно <span className="mono">{panel.status?.app?.installed ?? panel.windowVersion ?? 'неизвестно'}</span></span>
       </div>
       <div className={`upd-state${tone}`} role="status" data-testid="settings-update-state" data-state={v.state}>
         {v.state === 'checking' && <span className="spin" aria-hidden="true" />}
@@ -127,9 +131,19 @@ export function UpdatesSection({ panel, auto, onAuto }: {
         </button>
         {v.action && (
           <button type="button" className={`btn btn-sm${v.action.force ? '' : ' btn-primary'}`} disabled={panel.busy}
-            onClick={() => panel.onApply(v.action?.force === true)} data-testid="settings-update-apply">{v.action.label}</button>
+            onClick={() => { if (v.action) panel.onApply(v.action) }} data-testid="settings-update-apply">{v.action.label}</button>
         )}
       </div>
+      {w.state !== 'none' && (
+        <div className={`upd-state${wTone}`} role="status" data-testid="settings-app-update" data-state={w.state}>
+          {w.state === 'applying' && <span className="spin" aria-hidden="true" />}
+          <span className="grow">{w.text}</span>
+          {w.action && (
+            <button type="button" className="btn btn-sm btn-primary" disabled={panel.busy}
+              onClick={() => { if (w.action) panel.onApply(w.action) }} data-testid="settings-app-apply">{w.action.label}</button>
+          )}
+        </div>
+      )}
       {auto !== null && (
         <label className="check">
           <input type="checkbox" checked={auto} data-testid="settings-update-auto" onChange={(e) => onAuto(e.target.checked)} />

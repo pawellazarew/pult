@@ -23,6 +23,7 @@ import type { NewSessionSettings } from '../../src/sessions/settings.js'
 import { APPROVAL_FULL_WARNING } from './model/newAgent.js'
 import { UpdateBanner } from './components/UpdateBanner.js'
 import { addDismissed, applyErrorText, checkErrorText, FOCUS_CHECK_STALE_MS, focusCheckWanted, updateBanner, upToDateNote, windowVersionFromUA } from './model/update.js'
+import type { UpdateAction } from './model/update.js'
 import type { UpdateStatus } from '../../src/core/rpc.js'
 import type { McpListing } from './model/mcp.js'
 import { connView } from './lib/conn.js'
@@ -798,12 +799,15 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   }
 
   // «Обновить» / «Сейчас» / «Повторить»: дальше демон сам — ждёт ходы или запускает `pult update` и перезапускается.
-  const applyUpdate = (force: boolean): void => {
+  // «Обновить окно» (0.3.4) — тот же `update.apply` с `target: 'app'`: демон закроет это окно, заменит Pult.app и
+  // откроет новое (черновики полей ввода переживут это — model/drafts.ts).
+  const applyUpdate = (a: UpdateAction): void => {
     setUpdBusy(true)
     setUpdCheck((c) => ({ ...c, applyError: null }))
-    bridge.call('update.apply', force ? { force: true } : {})
+    const params = a.target === 'app' ? { target: 'app', ...(a.expect ? { expect: a.expect } : {}) } : a.force ? { force: true } : {}
+    bridge.call('update.apply', params)
       .then(() => refreshStatus(), (e: unknown) => {
-        const text = isBridgeError(e) ? applyErrorText(e.code, e.message) : applyErrorText(null, errorText(e))
+        const text = isBridgeError(e) ? applyErrorText(e.code, e.message, a.target) : applyErrorText(null, errorText(e), a.target)
         setBannerError(text)
         setUpdCheck((c) => ({ ...c, applyError: text }))
       })

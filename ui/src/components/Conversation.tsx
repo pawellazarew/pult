@@ -27,6 +27,8 @@ import type { SettingsPick } from '../model/sessionSettings.js'
 import type { ProviderCatalog } from '../model/types.js'
 import { copyToClipboard, Markdown, MdBridgeContext, useFlash } from './Markdown.js'
 import { restoreDraft, sendFromComposer } from '../model/pending.js'
+import { peekDraft, saveDraft } from '../model/drafts.js'
+import type { DraftStore } from '../model/drafts.js'
 import { expireQueueEdit, queueEditKey, saveQueueEdit, startQueueEdit } from '../model/queueEdit.js'
 import type { QueueEditApi, QueueEditState, QueueEditStep } from '../model/queueEdit.js'
 import { errorText, isBridgeError } from '../bridge.js'
@@ -738,6 +740,12 @@ function useQueueEdit(api: QueueEditApi | undefined): { view: QueueEditView; not
   return { view, notice, inject, edit: state !== null }
 }
 
+/** localStorage окна для черновиков; недоступно — черновик просто не переживёт выход. */
+const draftStore: DraftStore = {
+  get(k) { try { return window.localStorage.getItem(k) } catch { return null } },
+  set(k, v) { try { window.localStorage.setItem(k, v) } catch { /* хранилище недоступно */ } },
+}
+
 function Composer({ busy, needsYou, permFocused, link, disabled, sending, error, onSend, agentName, label, filePaths, queueable, inject }: {
   /** В Inbox есть выделенный запрос (любой сессии): ⌘Enter — его «разрешить», а не «прервать и сказать». */
   permFocused: boolean
@@ -754,8 +762,24 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
    */
   inject?: { text: string; nonce: number } | null
 }): ReactElement {
-  const [text, setText] = useState('')
+  // 0.3.4: черновик сессии переживает закрытие окна (обновление окна закрывает его само) — model/drafts.ts.
+  const [text, setText] = useState(() => (typeof window === 'undefined' ? '' : peekDraft(draftStore, agentName, Date.now()) ?? ''))
   const ta = useRef<HTMLTextAreaElement>(null)
+  const textRef = useRef(text)
+  textRef.current = text
+  useEffect(() => {
+    const save = (): void => { saveDraft(draftStore, agentName, textRef.current, Date.now()) }
+    window.addEventListener('pagehide', save)
+    window.addEventListener('beforeunload', save)
+    return () => {
+      window.removeEventListener('pagehide', save)
+      window.removeEventListener('beforeunload', save)
+      save() // сессию сменили — черновик этой ждёт её
+    }
+  }, [agentName])
+  // Поле опустело (отправили, стёрли) — записи больше нет: после сбоя окна отправленное не вернётся в поле.
+  const empty = !text.trim()
+  useEffect(() => { if (empty) saveDraft(draftStore, agentName, '', Date.now()) }, [empty, agentName])
   const injected = inject?.nonce ?? 0
   useEffect(() => {
     if (!inject || !injected) return
