@@ -27,7 +27,7 @@ import type { SettingsPick } from '../model/sessionSettings.js'
 import type { ProviderCatalog } from '../model/types.js'
 import { copyToClipboard, Markdown, MdBridgeContext, useFlash } from './Markdown.js'
 import { restoreDraft, sendFromComposer } from '../model/pending.js'
-import { peekDraft, saveDraft } from '../model/drafts.js'
+import { DRAFT_SAVE_MS, peekDraft, saveDraft } from '../model/drafts.js'
 import type { DraftStore } from '../model/drafts.js'
 import { expireQueueEdit, queueEditKey, saveQueueEdit, startQueueEdit } from '../model/queueEdit.js'
 import type { QueueEditApi, QueueEditState, QueueEditStep } from '../model/queueEdit.js'
@@ -777,6 +777,12 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
       save() // сессию сменили — черновик этой ждёт её
     }
   }, [agentName])
+  // И по ходу набора (раз в полсекунды тишины): выход, при котором pagehide не успел, черновик не теряет.
+  useEffect(() => {
+    if (!text.trim()) return
+    const t = window.setTimeout(() => { saveDraft(draftStore, agentName, text, Date.now()) }, DRAFT_SAVE_MS)
+    return () => window.clearTimeout(t)
+  }, [text, agentName])
   // Поле опустело (отправили, стёрли) — записи больше нет: после сбоя окна отправленное не вернётся в поле.
   const empty = !text.trim()
   useEffect(() => { if (empty) saveDraft(draftStore, agentName, '', Date.now()) }, [empty, agentName])

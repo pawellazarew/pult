@@ -1,15 +1,15 @@
 // e2e 0.3.4, окно обновляется само. Демон с тестовым «релизом» (PULT_TEST_UPDATE_DIR, свой ключ): в канале окно
 // 0.1.16, «поставлено» фальшивое Pult.app 0.1.15 во временной папке (PULT_TEST_APP_DIRS — настоящий /Applications
-// тестовый демон не видит). Плашка «Доступно новое окно», ⌘, → «Окно: 0.1.15 → доступно 0.1.16 · Обновить окно» →
-// демон качает zip, проверяет (настоящий ditto, подпись — тестовая), меняет бандл и «открывает» его (в тестовом
-// режиме open, lsregister и сигналы только пишутся в журнал — окно теста никто не закрывает). Новое окно не
-// здоровается — откат: прежний бандл на месте, «вернул 0.1.15» в «Настройках». Плюс черновик поля реплики
-// переживает закрытие окна.
+// тестовый демон не видит). Окно теста — рабочая копия Electron, НЕ из поставленного бандла: «Доступно новое окно»
+// видно, но кнопки «Обновить окно» в нём нет (here: false). Обновление, запущенное из терминала (клиент теста),
+// доходит до настоящего ditto и сверки бандла, кладёт новое окно рядом со старым и отказывает «закрой окно из …»:
+// это окно пережило бы замену. Ничего не тронуто. Плюс черновик поля реплики переживает SIGTERM окна (так его
+// закрывает обновление) и запуск НОВОГО процесса окна с тем же userData.
 
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { createHash, createPublicKey, generateKeyPairSync, sign } from 'node:crypto'
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { after, before, describe, it } from 'node:test'
@@ -67,7 +67,7 @@ function release(dir: string, zip: Buffer): string {
   return raw.toString('base64')
 }
 
-describe('окно обновляется само: «Обновить окно» → новое не поднялось → откат', () => {
+describe('окно обновляется само: окно не из бандла — без кнопки, обновление отказывает «закрой окно из …»', () => {
   let h: Harness
   let root = ''
   let installed = ''
@@ -103,73 +103,78 @@ describe('окно обновляется само: «Обновить окно�
     rmSync(root, { recursive: true, force: true })
   })
 
-  it('плашка «Доступно новое окно 0.1.16», ⌘, → строка «Окно: 0.1.15 → доступно 0.1.16 · Обновить окно»', async () => {
+  it('плашка «Доступно новое окно 0.1.16» и строка «Окно» — без кнопки: это окно не из поставленного бандла', async () => {
     const banner = h.win.getByTestId('update-app')
     await banner.waitFor({ timeout: 25_000 })
-    assert.match(await banner.innerText(), /Доступно новое окно 0\.1\.16 \(стоит 0\.1\.15\)/)
-    await h.win.getByTestId('update-apply-app').waitFor({ timeout: 2000 })
+    assert.match(await banner.innerText(), /Доступно новое окно 0\.1\.16 \(стоит 0\.1\.15\) · обновить можно из окна .*Pult\.app или в терминале: pult update --app/)
+    assert.equal(await h.win.getByTestId('update-apply-app').count(), 0)
     await h.win.keyboard.press('Meta+,')
     await h.win.getByTestId('settings-dialog').waitFor({ timeout: 5000 })
     const row = h.win.getByTestId('settings-app-update')
     await row.waitFor({ timeout: 5000 })
     assert.equal(await row.getAttribute('data-state'), 'available')
-    assert.match((await row.innerText()).replace(/\s+/g, ' '), /Окно: 0\.1\.15 → доступно 0\.1\.16 Обновить окно/)
+    assert.match((await row.innerText()).replace(/\s+/g, ' '), /Окно: 0\.1\.15 → доступно 0\.1\.16 · обновить можно из окна/)
+    assert.equal(await h.win.getByTestId('settings-app-apply').count(), 0)
     assert.match((await h.win.getByTestId('settings-update-versions').innerText()).replace(/\s+/g, ' '), /окно 0\.1\.15/)
-    await h.shot('settings-app-available')
+    await h.shot('settings-app-elsewhere')
   })
 
-  it('«Обновить окно»: демон меняет бандл, новое не здоровается — откат, «вернул 0.1.15», окно и демон на месте', async () => {
+  it('pult update --app при открытом окне рабочей копии: ditto и проверки проходят, затем отказ «закрой окно из …», ничего не тронуто', async () => {
     const pid = h.daemonPid()
     const c = await h.client()
-    await h.win.getByTestId('settings-app-apply').click()
+    await c.request('update.apply', { target: 'app', expect: '0.1.16' })
     type St = { app?: { applying: unknown; last: { result: string; message: string } | null; bad: boolean } }
     assert.ok(await waitFor(async () => {
       const st = (await c.request('update.status')) as St
       return st.app?.applying === null && st.app.last !== null
     }, 30_000), 'обновление окна не завершилось')
     const st = (await c.request('update.status')) as St
-    assert.equal(st.app?.last?.result, 'rolled_back', st.app?.last?.message)
-    assert.match(st.app?.last?.message ?? '', /не подключилось.*вернул 0\.1\.15/)
-    assert.equal(st.app?.bad, true)
+    assert.equal(st.app?.last?.result, 'failed', st.app?.last?.message)
+    assert.match(st.app?.last?.message ?? '', /закрой окно из .*Electron\.app.*ничего не тронуто/)
+    assert.equal(st.app?.bad, false)
     assert.equal(versionAt(installed), '0.1.15', 'прежний бандл на месте')
+    assert.deepEqual(readdirSync(path.dirname(installed)), ['Pult.app'], 'новое окно рядом убрано')
     const tools = readFileSync(path.join(h.home, 'test-app-tools.log'), 'utf8')
-    assert.equal(tools.split('\n').filter((l) => l === `open ${installed}`).length, 2, tools)
-    assert.match(tools, new RegExp(`lsregister -f ${installed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))
+    assert.match(tools, /^codesign .*staging-0\.1\.16\/Pult\.app$/m, 'бандл из настоящего ditto дошёл до проверки подписи')
+    assert.doesNotMatch(tools, /^open /m, 'окно никто не открывал')
     assert.equal(h.daemonPid(), pid, 'демон не перезапускался')
-    // «Проверить сейчас» — свежий статус в окне без 15-секундного опроса.
     await h.win.getByTestId('settings-update-check').click()
     const row = h.win.getByTestId('settings-app-update')
-    assert.ok(await waitFor(async () => (await row.getAttribute('data-state')) === 'rolledback', 15_000), `строка окна: ${await row.getAttribute('data-state')} · ${await row.innerText()}`)
-    assert.match(await row.innerText(), /вернул 0\.1\.15/)
+    assert.ok(await waitFor(async () => (await row.getAttribute('data-state')) === 'failed', 15_000), `строка окна: ${await row.getAttribute('data-state')} · ${await row.innerText()}`)
+    assert.match(await row.innerText(), /закрой окно из/)
     assert.equal(await h.win.getAttribute('.app', 'data-conn'), 'up')
-    await h.shot('settings-app-rolledback')
   })
 })
 
-describe('черновик поля реплики переживает закрытие окна', () => {
-  let h: Harness
-
-  before(async () => {
-    h = await launch({ name: 'drafts' })
-    assert.ok(await waitFor(async () => (await h.win.getAttribute('.app', 'data-conn')) === 'up', 20_000), 'окно не подключилось')
+describe('черновик поля реплики переживает SIGTERM окна и новый процесс', () => {
+  let h1: Harness | null = null
+  let h2: Harness | null = null
+  after(async () => {
+    await h1?.close()
+    await h2?.close()
   })
-  after(async () => { await h?.close() })
 
-  it('набрал, окно закрыто (как при обновлении окна) — новое окно ставит черновик в поле той же сессии', async () => {
-    const c = await h.client()
-    await c.request('agent.start', { name: 'dr', kind: 'claude', cwd: h.workDir('dr') })
-    await h.win.locator('[data-testid="agent-row"][data-agent="dr"]').click()
-    await h.win.locator('[data-testid="conversation"][data-agent="dr"]').waitFor({ timeout: 10_000 })
-    const box = h.win.getByTestId('composer')
-    await box.fill('черновик до закрытия окна')
-    // Закрыть окно так, как его закрывает человек (⌘W) или выход приложения: BrowserWindow.close() — с pagehide.
-    const old = h.win
-    await h.app.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows()[0]?.close() })
-    assert.ok(await waitFor(() => old.isClosed(), 10_000), 'окно не закрылось')
-    const win = await h.reopen()
-    assert.ok(await waitFor(async () => (await win.getAttribute('.app', 'data-conn')) === 'up', 20_000))
-    await win.locator('[data-testid="agent-row"][data-agent="dr"]').click()
-    await win.locator('[data-testid="conversation"][data-agent="dr"]').waitFor({ timeout: 10_000 })
-    assert.equal(await win.getByTestId('composer').inputValue(), 'черновик до закрытия окна')
+  it('набрал → SIGTERM главному процессу Electron (как при обновлении окна) → новый процесс с тем же userData ставит черновик в поле', async () => {
+    h1 = await launch({ name: 'drafts', keepHome: true })
+    assert.ok(await waitFor(async () => (await h1!.win.getAttribute('.app', 'data-conn')) === 'up', 20_000), 'окно не подключилось')
+    const c = await h1.client()
+    await c.request('agent.start', { name: 'dr', kind: 'claude', cwd: h1.workDir('dr') })
+    await h1.win.locator('[data-testid="agent-row"][data-agent="dr"]').click()
+    await h1.win.locator('[data-testid="conversation"][data-agent="dr"]').waitFor({ timeout: 10_000 })
+    await h1.win.getByTestId('composer').fill('черновик до SIGTERM')
+    await new Promise((r) => setTimeout(r, 800)) // запись по ходу набора — через полсекунды тишины
+    const proc = h1.app.process()
+    const exited = new Promise<void>((r) => proc.once('exit', () => r()))
+    process.kill(proc.pid as number, 'SIGTERM')
+    await Promise.race([exited, new Promise((r) => setTimeout(r, 15_000))])
+    assert.ok(proc.exitCode !== null || proc.signalCode !== null, 'Electron не вышел по SIGTERM')
+    const home = h1.home
+    await h1.close()
+    h1 = null
+    h2 = await launch({ name: 'drafts-again', home })
+    assert.ok(await waitFor(async () => (await h2!.win.getAttribute('.app', 'data-conn')) === 'up', 20_000), 'новое окно не подключилось')
+    await h2.win.locator('[data-testid="agent-row"][data-agent="dr"]').click()
+    await h2.win.locator('[data-testid="conversation"][data-agent="dr"]').waitFor({ timeout: 10_000 })
+    assert.equal(await h2.win.getByTestId('composer').inputValue(), 'черновик до SIGTERM')
   })
 })

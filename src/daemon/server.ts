@@ -71,7 +71,8 @@ import type { SessionBrowser, SessionRecord, SessionStatus } from '../sessions/r
 import { ApplyError, createUpdateChecker } from '../update/checker.js'
 import type { CheckerOptions, UpdateChecker } from '../update/checker.js'
 import { AppUpdateError, createAppUpdater, shellHelloOf } from '../update/appUpdate.js'
-import type { AppTools, AppUpdater } from '../update/appUpdate.js'
+import type { AppTools, AppUpdater, ShellHello } from '../update/appUpdate.js'
+import { insideApp } from '../update/appUpdate.js'
 import type { UpdateStatus } from '../core/rpc.js'
 
 export const HANDSHAKE_TIMEOUT_MS = 2000
@@ -126,7 +127,7 @@ export interface DaemonOptions {
    */
   updates?: Pick<CheckerOptions, 'http' | 'keys' | 'spawnApply' | 'schedule' | 'firstDelayMs' | 'intervalMs' | 'jitterMs' | 'tickMs' | 'now' | 'random'>
   /** 0.3.4: швы обновления окна — утилиты macOS, сроки ожидания. Тест не трогает настоящий Pult.app никогда. */
-  appUpdate?: { tools?: Partial<AppTools>; quitWaitMs?: number; helloWaitMs?: number; killWaitMs?: number; pollMs?: number }
+  appUpdate?: { tools?: Partial<AppTools>; quitWaitMs?: number; helloWaitMs?: number; killWaitMs?: number; pollMs?: number; stopWaitMs?: number }
   /** M8f: подмена живого списка моделей Codex для `agent.configure` (`null` — списка нет). */
   codexModels?: () => Promise<ProviderModel[] | null>
   /** Срок, на который открытая правка держит очередь реплик (мс). Тест ставит короче; по умолчанию 10 мин. */
@@ -165,7 +166,14 @@ interface Connection {
   subs: SubscriptionManager
   /** Номер последнего `events.search` соединения: новый запрос отменяет прежний (окно ищет на каждый ввод). */
   searchGen: number
+  /** 0.3.4: оболочка — чем запущена (hello `app`): pid, путь, версия окна. */
+  app?: ShellHello
+  /** Интерфейс этой оболочки уже сделал первый вызов — окно готово (обновление окна ждёт этого). */
+  rendererSeen?: boolean
 }
+
+/** Вызовы, которые делает только интерфейс окна (main оболочки их не шлёт): первый из них — окно готово. */
+const RENDERER_METHODS: ReadonlySet<string> = new Set(['settings.get', 'events.snapshot', 'update.status', 'update.check', 'providers.check'])
 
 export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
   const { paths, config, logger } = opts
@@ -417,10 +425,18 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     ...(opts.appUpdate?.helloWaitMs !== undefined ? { helloWaitMs: opts.appUpdate.helloWaitMs } : {}),
     ...(opts.appUpdate?.killWaitMs !== undefined ? { killWaitMs: opts.appUpdate.killWaitMs } : {}),
     ...(opts.appUpdate?.pollMs !== undefined ? { pollMs: opts.appUpdate.pollMs } : {}),
+    ...(opts.appUpdate?.stopWaitMs !== undefined ? { stopWaitMs: opts.appUpdate.stopWaitMs } : {}),
+    shells: () => [...connections.values()].filter((c) => c.authed && c.client === 'shell' && c.app).map((c) => c.app as ShellHello),
   })
   appUpdaterRef = appUpdater
   /** Статус канала вместе с окном: одним объектом в `update.*` и `daemon.status.update`. */
-  const updateStatus = (u: UpdateStatus = updater.status()): UpdateStatus => ({ ...u, app: appUpdater.status() })
+  const updateStatus = (u: UpdateStatus = updater.status(), conn?: Connection): UpdateStatus => {
+    const app = appUpdater.status()
+    return { ...u, app: { ...app, here: hereOf(conn, app.path) } }
+  }
+  /** Спрашивающее окно — из поставленного бандла? Только для оболочки с путём. */
+  const hereOf = (conn: Connection | undefined, app: string | null): boolean | null =>
+    conn?.client === 'shell' && conn.app?.execPath && app ? insideApp(conn.app.execPath, app) : null
   // Каждое событие журнала — повод проверить, не кончился ли последний ход, которого ждёт «Обновить».
   bus.on(() => { updater.poke() })
 
@@ -983,11 +999,19 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     const fail = (code: string, message: string, data?: unknown): void =>
       send({ id: req.id, error: { code, message, ...(data !== undefined ? { data } : {}) } })
     const params = (req.params ?? {}) as Record<string, unknown>
+    // 0.3.4: первый вызов интерфейса окна — окно готово (обновление окна ждёт этого, а не одного hello main).
+    if (conn.client === 'shell' && conn.app && !conn.rendererSeen && RENDERER_METHODS.has(req.method)) {
+      conn.rendererSeen = true
+      appUpdater.onShellReady(conn.app)
+    }
 
     switch (req.method) {
-      case 'daemon.status':
-        send({ id: req.id, result: status() })
+      case 'daemon.status': {
+        const st = status()
+        if (st.update?.app) st.update = updateStatus(st.update, conn)
+        send({ id: req.id, result: st })
         return
+      }
 
       case 'daemon.stop':
         send({ id: req.id, result: { stopping: true } })
@@ -1001,7 +1025,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
 
       // --- M8c: канал обновлений -------------------------------------------------------
       case 'update.status':
-        send({ id: req.id, result: updateStatus() })
+        send({ id: req.id, result: updateStatus(undefined, conn) })
         return
 
       case 'update.check': {
@@ -1012,7 +1036,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
           fail(ERROR_CODES.invalidParams, 'update.check: ifOlderThanMs — неотрицательное число')
           return
         }
-        send({ id: req.id, result: updateStatus(await (older !== undefined ? updater.checkIfStale(older) : updater.check())) })
+        send({ id: req.id, result: updateStatus(await (older !== undefined ? updater.checkIfStale(older) : updater.check()), conn) })
         return
       }
 
@@ -1309,7 +1333,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
           conn.client = typeof msg['client'] === 'string' ? msg['client'] : 'unknown'
           clearTimeout(timer)
           // 0.3.4: оболочка называет свою версию и путь — обновление окна ждёт hello НОВОЙ версии.
-          if (conn.client === 'shell') appUpdater.onShellHello(shellHelloOf(msg['app']))
+          if (conn.client === 'shell') conn.app = shellHelloOf(msg['app'])
           socket.write(encodeLine({
             type: 'hello_ok',
             protocol: PROTOCOL_VERSION,
@@ -1364,7 +1388,8 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     stopping = true
     logger.info('остановка демона', { reason })
     updater.stop()
-    appUpdater.stop()
+    // Обновление окна, уже меняющее бандл, доводится (не дольше 25 с); иначе его доведёт старт по журналу.
+    await appUpdater.stop()
     // Сначала ОТКАЗ всем, кто ждёт решения, и только потом закрытие сокета: заглушка
     // `pult mcp-ask` иначе повисла бы на мёртвом сокете, а `claude` — на ней (инвариант 5).
     const denied = broker.shutdown('демон останавливается')

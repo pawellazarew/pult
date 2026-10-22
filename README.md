@@ -241,9 +241,11 @@ pult update --app        # update the window (Pult.app, macOS) from the same cha
 - **The window updates itself (macOS, Apple Silicon).** When the release has a newer window, Settings → Обновления shows
   «Окно: 0.1.15 → доступно 0.1.16 · Обновить окно» (Update window), and the banner says so too. The daemon downloads
   the window zip, checks its size and sha256 against the same signed manifest, the bundle id, version, architecture and
-  code signature, then closes the window, swaps `Pult.app` in place and opens the new one. If the new window does not
-  connect within 20 seconds, the old one is put back and reopened, and that version is not offered again
-  (`pult update --app --force` retries it). Agents keep working the whole time; unsent text in the message box survives
+  code signature, puts the new bundle next to the old one, then closes the window, swaps `Pult.app` in place with two
+  renames and opens the new one. If the new window is not up and working within 60 seconds, the old one is put back
+  and reopened, and that version is not offered again (`pult update --app --force` retries it). If the daemon is
+  stopped mid-swap, the next start finishes or rolls back. Another open window (a second copy of `Pult.app`, a
+  development window) has to be closed first; the button is shown only in the installed window. Agents keep working the whole time; unsent text in the message box survives
   the restart. If the window folder is not writable (for example, a non-admin user and `/Applications`), nothing is
   touched and Pult tells you how to replace the window by hand (download `Pult-arm64.zip` as in
   [Install](#2-the-window-macos-apple-silicon)). If a new Pult needs a newer window, the window says so.

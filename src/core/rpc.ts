@@ -206,7 +206,7 @@ export interface UpdateStatus {
 }
 
 /** Шаг обновления окна — что сейчас делает демон. */
-export type AppUpdateStep = 'download' | 'verify' | 'quit' | 'swap' | 'launch' | 'health' | 'rollback'
+export type AppUpdateStep = 'download' | 'verify' | 'stage' | 'quit' | 'swap' | 'launch' | 'health' | 'rollback'
 
 /** Чем кончилась последняя попытка обновить окно (`app-update.json`). */
 export interface AppUpdateAttempt {
@@ -242,6 +242,11 @@ export interface AppUpdateStatus {
   /** Идёт обновление окна. */
   applying: { to: string; from: string | null; step: AppUpdateStep; since: string } | null
   last: AppUpdateAttempt | null
+  /**
+   * Спрашивающее окно — из поставленного бандла (`path`)? false — другое окно (рабочая копия, вторая копия
+   * Pult.app): «Обновить окно» в нём не показывается. null — не окно или не известно.
+   */
+  here?: boolean | null
 }
 
 export interface DaemonBrowser {

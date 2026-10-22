@@ -8,6 +8,8 @@ export const DRAFTS_KEY = 'pult.drafts'
 export const DRAFT_TTL_MS = 7 * 24 * 3_600_000
 /** Сессий с черновиком в хранилище — не больше; лишние, самые старые, вытесняются. */
 export const DRAFTS_MAX = 50
+/** Черновик пишется и по ходу набора — через столько тишины после последнего изменения. */
+export const DRAFT_SAVE_MS = 500
 /** Длиннее — обрезается: localStorage общий на окно (~5 МБ), поле реплики так много не держит. */
 export const DRAFT_MAX_CHARS = 100_000
 

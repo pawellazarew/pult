@@ -71,6 +71,17 @@ export function shellAppInfo(
   }
 }
 
+/**
+ * Окно запоминается при загрузке модуля (в main оболочки — при её старте): переподключения после рестарта демона
+ * шлют то же самое, а Info.plist, который обновление окна уже заменило под работающим процессом, не перечитывается.
+ * `pid` — свой: по нему демон сверяет, что поднялся процесс из нового бандла.
+ */
+const SHELL_APP: ({ execPath: string; version?: string; pid: number }) | null = (() => {
+  const info = shellAppInfo()
+  return info ? { ...info, pid: process.pid } : null
+})()
+const shellApp = (): typeof SHELL_APP => SHELL_APP
+
 export async function connectClient(paths: PultPaths, opts: ConnectOptions = {}): Promise<Client> {
   const timeoutMs = opts.timeoutMs ?? 10_000
   const token = readToken(paths.token)
@@ -179,7 +190,7 @@ export async function connectClient(paths: PultPaths, opts: ConnectOptions = {})
       reject(new ClientError('connection_closed', 'демон закрыл соединение на рукопожатии'))
     })
     const client = opts.client ?? 'cli'
-    const app = client === 'shell' ? shellAppInfo() : null
+    const app = client === 'shell' ? shellApp() : null
     socket.write(encodeLine({ type: 'hello', token, client, protocol: PROTOCOL_VERSION, ...(app ? { app } : {}) }))
   })
 

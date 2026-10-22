@@ -92,8 +92,14 @@ export interface Harness {
   close(): Promise<void>
 }
 
-export async function launch(opts: { backoff?: string; name: string; args?: string[]; env?: Record<string, string> }): Promise<Harness> {
-  const home = mkdtempSync(path.join(tmpdir(), 'pe-'))
+export async function launch(opts: {
+  backoff?: string; name: string; args?: string[]; env?: Record<string, string>
+  /** Тот же PULT_HOME (и userData окна), что у прошлого запуска: «перезапуск» окна новым процессом. */
+  home?: string
+  /** close() не удаляет PULT_HOME — его возьмёт следующий launch({home}). */
+  keepHome?: boolean
+}): Promise<Harness> {
+  const home = opts.home ?? mkdtempSync(path.join(tmpdir(), 'pe-'))
   const svcDir = path.join(home, 'svc')
   mkdirSync(svcDir, { recursive: true })
   const pathsMod = await pkg<PathsModule>('core/paths.js')
@@ -249,7 +255,7 @@ export async function launch(opts: { backoff?: string; name: string; args?: stri
       await waitFor(() => [...pids].every((p) => !alive(p)), 5000)
       for (const pid of pids) { try { process.kill(pid, 'SIGKILL') } catch { /* уже нет */ } }
       for (const c of children) { if (c.exitCode === null && c.signalCode === null) c.kill('SIGKILL') }
-      rmSync(home, { recursive: true, force: true })
+      if (!opts.keepHome) rmSync(home, { recursive: true, force: true })
     },
   }
   return h

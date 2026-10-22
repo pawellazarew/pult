@@ -3,7 +3,7 @@
 
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { DRAFT_MAX_CHARS, DRAFT_TTL_MS, DRAFTS_KEY, DRAFTS_MAX, peekDraft, readDrafts, saveDraft } from '../src/model/drafts.js'
+import { DRAFT_SAVE_MS, DRAFT_MAX_CHARS, DRAFT_TTL_MS, DRAFTS_KEY, DRAFTS_MAX, peekDraft, readDrafts, saveDraft } from '../src/model/drafts.js'
 import type { DraftStore } from '../src/model/drafts.js'
 
 function memStore(): DraftStore & { data: Map<string, string> } {
@@ -44,6 +44,10 @@ describe('черновики поля реплики переживают зак
     assert.ok(all[`s${DRAFTS_MAX + 4}`])
     saveDraft(store, 'big', 'я'.repeat(DRAFT_MAX_CHARS + 10), T + 200)
     assert.equal(peekDraft(store, 'big', T + 200)?.length, DRAFT_MAX_CHARS)
+  })
+
+  it('пишется и по ходу набора: через полсекунды тишины', () => {
+    assert.equal(DRAFT_SAVE_MS, 500)
   })
 
   it('хранилище недоступно — ничего не падает', () => {

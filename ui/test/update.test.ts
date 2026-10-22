@@ -374,6 +374,18 @@ describe('окно обновляется само (0.3.4): «Окно: 0.1.15 �
     assert.match(old?.text ?? '', /скачай её на странице релиза/)
   })
 
+  it('окно не из поставленного бандла (here: false) — без кнопки, с подсказкой, где обновить', () => {
+    const v = appUpdateView(st(app({ here: false })), '0.1.15')
+    assert.equal(v.state, 'available')
+    assert.equal(v.action, null)
+    assert.match(v.text, /обновить можно из окна \/Applications\/Pult\.app или в терминале: pult update --app/)
+    const b = updateBanner(st(app({ here: false })), '0.1.15')
+    assert.equal(b?.action, null)
+    assert.match(b?.text ?? '', /pult update --app/)
+    assert.doesNotMatch(section(st(app({ here: false }))), /settings-app-apply/)
+    assert.equal(appUpdateView(st(app({ here: true })), '0.1.15').action?.target, 'app')
+  })
+
   it('отказ «Обновить окно» словами; старая оболочка — подсказка pult update --app', () => {
     assert.equal(applyErrorText('invalid_params', 'нет прав на запись в /Applications', 'app'), 'Окно не обновилось: нет прав на запись в /Applications')
     assert.match(applyErrorText('method_not_allowed', 'x', 'app'), /pult update --app$/)

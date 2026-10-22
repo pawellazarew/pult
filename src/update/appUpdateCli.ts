@@ -10,6 +10,7 @@ import type { Io } from '../service/install.js'
 const STEP_TEXT: Record<AppUpdateStep, string> = {
   download: 'качаю архив окна',
   verify: 'проверяю архив и подпись бандла',
+  stage: 'кладу новое окно рядом со старым',
   quit: 'закрываю окно',
   swap: 'меняю Pult.app',
   launch: 'открываю новое окно',
@@ -45,6 +46,8 @@ export async function updateAppCli(io: Io, opts: AppUpdateCliOptions): Promise<n
   }
   try {
     let to: string
+    // Итог — только попытки, начатой этим вызовом (`at` не раньше старта), а не прошлой с той же версией.
+    const startedAt = new Date(Date.now() - 1000).toISOString()
     try {
       const r = await client.request('update.apply', { target: 'app', ...(opts.force ? { allowBad: true } : {}) }) as { to?: unknown }
       to = typeof r?.to === 'string' ? r.to : '?'
@@ -65,8 +68,8 @@ export async function updateAppCli(io: Io, opts: AppUpdateCliOptions): Promise<n
       await new Promise((r) => setTimeout(r, pollMs))
     }
     const last = app?.last ?? null
-    if (!last || last.to !== to) { io.err('pult update --app: итог не записан — смотри logs/pultd.log'); return 1 }
-    if (last.result === 'done') { io.out(`окно обновлено: ${last.from ?? '?'} → ${last.to}`); return 0 }
+    if (!last || last.to !== to || last.at < startedAt) { io.err('pult update --app: итог не записан — смотри logs/pultd.log'); return 1 }
+    if (last.result === 'done') { io.out(`окно обновлено: ${last.message}`); return 0 }
     io.err(`pult update --app: ${last.message}`)
     return 1
   } catch (e) {

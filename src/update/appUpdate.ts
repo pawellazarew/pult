@@ -5,10 +5,13 @@
 //   размер и sha256 = манифест (байты на диске) → разбор каталога zip (только Pult.app/…, без «..», без записей
 //   внутри символической ссылки, потолки) → `ditto -x -k` в PULT_HOME/apps/staging-<v> → проверки бандла
 //   (ровно один Pult.app, CFBundleIdentifier = стоящего = APP_BUNDLE_ID, версия = манифест, Mach-O arm64, ссылки
-//   не выходят из бандла, `codesign --verify --deep --strict`) → окно закрывается SIGTERM (≤ 10 с, не закрылось —
-//   отказ, ничего не тронуто) → прежнее окно уезжает в apps/previous-<старая>/Pult.app, новое встаёт на его место
-//   (rename; другой том — копия, сверка, rename) → `lsregister -f` → `open` → проба: за 20 с к демону подключается
-//   оболочка НОВОЙ версии (hello). Нет — новое окно гасится, прежнее возвращается и запускается, версия — bad.
+//   не выходят из бандла, `codesign --verify --deep --strict`) → новое окно кладётся РЯДОМ со старым
+//   (`<папка>/.Pult.app.incoming-<v>`, тот же том; другой — копия со сверкой) → другое открытое окно (не из этого
+//   бандла) — отказ → окно закрывается SIGTERM (≤ 10 с, не закрылось — отказ, ничего не тронуто) → журнал
+//   apps/swap.json → два rename на одном томе (старое → `.Pult.app.old-<v>`, новое → на место) → старое уезжает в
+//   apps/previous-<v> → `lsregister -f` → окно было открыто — `open` и проба: за 60 с готово окно НОВОГО бандла
+//   (hello с pid, процесс из нового бандла, запущен после замены, интерфейс сделал первый вызов). Нет — новое окно
+//   гасится, прежнее возвращается и открывается, версия — bad. Оборвалось (демон убит) — старт доводит по журналу.
 //
 // ЧЕГО НЕ ДЕЛАЕТ: не трогает демона и сессии (агенты работают дальше), не ставит версию старше или равную
 // стоящей, не ставит bad без явного `allowBad`, не идёт вместе с обновлением пакета (общий run/update.lock).
@@ -16,11 +19,11 @@
 // доверие; доверие — подпись latest.json ключом релизов и sha256 zip из него (docs/DEV.md, модель угроз 0.3.4).
 
 import { execFile } from 'node:child_process'
-import { appendFileSync, accessSync, closeSync, constants as fsConstants, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, chmodSync } from 'node:fs'
+import { appendFileSync, accessSync, existsSync, closeSync, constants as fsConstants, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, chmodSync } from 'node:fs'
 import path from 'node:path'
 import { appDirs } from '../cli/ui.js'
 import type { PultConfig } from '../core/config.js'
-import { acquireLock, isAlive } from '../core/lock.js'
+import { acquireLock } from '../core/lock.js'
 import type { LockHandle } from '../core/lock.js'
 import type { Logger } from '../core/log.js'
 import type { PultPaths } from '../core/paths.js'
@@ -33,6 +36,7 @@ import type { TrustedKey } from './keys.js'
 import type { ReleaseAsset } from './manifest.js'
 import { bundleStrings, isBinaryPlist } from './plist.js'
 import { readAppState, writeAppState } from './appState.js'
+import { atomicWrite } from '../service/fsutil.js'
 
 /** CFBundleIdentifier окна (shell/package.json → build.appId). Другой id в архиве или на месте — отказ. */
 export const APP_BUNDLE_ID = 'io.github.pawellazarew.pult'
@@ -43,8 +47,13 @@ export const APP_UNPACKED_MAX_BYTES = 1024 * 1024 * 1024
 export const APP_MAX_ENTRIES = 50_000
 /** Сколько ждать, пока окно закроется по SIGTERM. Дольше — отказ: окно человека не добивается SIGKILL. */
 export const QUIT_WAIT_MS = 10_000
-/** Сколько ждать hello от оболочки новой версии после `open`. */
-export const HELLO_WAIT_MS = 20_000
+/**
+ * Сколько ждать готовое новое окно после `open`: сессии от окна не зависят, а первый запуск свежего бандла macOS
+ * держит долго (проверка подписи) — лучше подождать, чем откатить годное.
+ */
+export const HELLO_WAIT_MS = 60_000
+/** Сколько остановка демона ждёт работу, уже меняющую бандл. */
+export const STOP_WAIT_MS = 25_000
 /** Сколько ждать выхода НОВОГО окна при откате, прежде чем SIGKILL (оно наше, данных человека в нём нет). */
 export const KILL_WAIT_MS = 5_000
 const POLL_MS = 100
@@ -74,16 +83,19 @@ export interface AppTools {
   copyTree(src: string, dest: string): Promise<void>
   /** `codesign --verify --deep --strict`; провал — исключение с причиной. */
   codesignVerify(app: string): Promise<void>
-  /** Бинарный plist → XML (`plutil -convert xml1`); не вышло — null. */
-  plistXml(file: string): Promise<string | null>
-  /** pid процессов, чей исполняемый файл — ровно `exe`. */
+  /** pid процессов ЭТОГО пользователя, чей исполняемый файл — ровно `exe`. */
   findPids(exe: string): Promise<number[]>
+  /** Владелец, исполняемый файл и время старта процесса (`ps`); нет процесса — null. */
+  procInfo(pid: number): Promise<{ uid: number; exe: string; startedAt: number } | null>
   signal(pid: number, sig: NodeJS.Signals): void
+  /** Жив ли процесс; чужой (EPERM) — не «жив»: он не наш и закрытия окна не задерживает. */
   alive(pid: number): boolean
   /** `open -a <app> [--env K=V…]`. */
   open(app: string, env: Record<string, string>): Promise<void>
   /** lsregister с аргументами (`-f <app>`, `-u <app>`). */
   lsregister(args: string[]): Promise<void>
+  /** rename(2) — шов, чтобы тест ронял отдельные шаги замены (EXDEV, EACCES). */
+  rename(src: string, dst: string): void
 }
 
 const SYS_PATH = '/usr/bin:/bin:/usr/sbin:/sbin'
@@ -99,7 +111,7 @@ function run(bin: string, args: string[], timeoutMs = 120_000): Promise<string> 
   })
 }
 
-const realpathOr = (p: string): string => { try { return realpathSync(p) } catch { return p } }
+const realpathOr = (p: string): string => { try { return realpathSync.native(p) } catch { return p } }
 
 /** Настоящие утилиты macOS. Только по абсолютным путям: PATH демона под launchd не наш. */
 export function systemTools(env: NodeJS.ProcessEnv): AppTools {
@@ -111,25 +123,35 @@ export function systemTools(env: NodeJS.ProcessEnv): AppTools {
     unzip: async (zip, dest) => { await run('/usr/bin/ditto', ['-x', '-k', zip, dest], 10 * 60_000) },
     copyTree: async (src, dest) => { await run('/usr/bin/ditto', [src, dest], 10 * 60_000) },
     codesignVerify: async (app) => { await run('/usr/bin/codesign', ['--verify', '--deep', '--strict', app], 5 * 60_000) },
-    plistXml: (file) => run('/usr/bin/plutil', ['-convert', 'xml1', '-o', '-', file]).catch(() => null),
     findPids: async (exe) => {
-      const out = await run('/bin/ps', ['-axww', '-o', 'pid=,comm='], 15_000)
+      const out = await run('/bin/ps', ['-axww', '-o', 'pid=,uid=,comm='], 15_000)
       const want = new Set([exe, realpathOr(exe)])
+      const uid = process.getuid?.() ?? -1
       const pids: number[] = []
       for (const line of out.split('\n')) {
-        const m = /^\s*(\d+)\s+(.+?)\s*$/.exec(line)
-        if (m && want.has(m[2] as string)) pids.push(Number(m[1]))
+        const m = /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/.exec(line)
+        if (m && Number(m[2]) === uid && want.has(m[3] as string)) pids.push(Number(m[1]))
       }
       return pids.filter((p) => p !== process.pid)
     },
+    procInfo: async (pid) => {
+      if (!Number.isInteger(pid) || pid <= 0) return null
+      const out = await run('/bin/ps', ['-ww', '-o', 'uid=,lstart=,comm=', '-p', String(pid)], 15_000).catch(() => '')
+      // lstart в локали C: «Thu Oct 22 22:38:00 2026».
+      const m = /^\s*(\d+)\s+(\S+\s+\S+\s+\d+\s+[\d:]+\s+\d{4})\s+(.+?)\s*$/.exec(out.split('\n')[0] ?? '')
+      if (!m) return null
+      const startedAt = Date.parse(m[2] as string)
+      return Number.isFinite(startedAt) ? { uid: Number(m[1]), exe: m[3] as string, startedAt } : null
+    },
     signal: (pid, sig) => { process.kill(pid, sig) },
-    alive: isAlive,
+    alive: (pid) => { try { process.kill(pid, 0); return true } catch { return false } },
     open: async (app, e) => {
       const args = ['-a', app]
       for (const [k, v] of Object.entries(e)) args.push('--env', `${k}=${v}`)
       await run('/usr/bin/open', args, 60_000)
     },
     lsregister: async (args) => { await run(LSREGISTER, args, 60_000) },
+    rename: (src, dst) => { renameSync(src, dst) },
   }
 }
 
@@ -146,8 +168,8 @@ export function testTools(paths: PultPaths, env: NodeJS.ProcessEnv): Partial<App
     appDirs: () => (env['PULT_TEST_APP_DIRS'] ?? '').split(':').filter(Boolean),
     http: dir ? dirHttpGet(dir) : async () => { throw new FetchError('PULT_TEST=1: сеть в тестах не трогается — нужен PULT_TEST_UPDATE_DIR') },
     codesignVerify: async (app) => { log(`codesign ${app}`); if (env['PULT_TEST_APP_CODESIGN'] === 'fail') throw new Error('codesign: тестовый провал подписи') },
-    plistXml: async () => null,
     findPids: async () => [],
+    procInfo: async () => null,
     signal: () => { /* тест не шлёт сигналов */ },
     alive: () => false,
     open: async (app) => { log(`open ${app}`) },
@@ -216,14 +238,35 @@ export function scanZip(file: string, limits: { maxEntries?: number; maxUnpacked
     for (let i = 0; i < count; i++) {
       if (p + 46 > cd.length || cd.readUInt32LE(p) !== 0x02014b50) bad('каталог испорчен')
       const madeBy = cd.readUInt16LE(p + 4)
+      const flags = cd.readUInt16LE(p + 8)
+      const method = cd.readUInt16LE(p + 10)
+      const csize = cd.readUInt32LE(p + 20)
       const usize = cd.readUInt32LE(p + 24)
+      const localOff = cd.readUInt32LE(p + 42)
       const nlen = cd.readUInt16LE(p + 28)
       const xlen = cd.readUInt16LE(p + 30)
       const clen = cd.readUInt16LE(p + 32)
       const ext = cd.readUInt32LE(p + 38)
       if (p + 46 + nlen > cd.length) bad('каталог испорчен')
-      const name = cd.subarray(p + 46, p + 46 + nlen).toString('utf8')
+      const rawName = cd.subarray(p + 46, p + 46 + nlen)
+      const name = rawName.toString('utf8')
       p += 46 + nlen + xlen + clen
+      // Локальный заголовок — то, что прочтёт распаковщик: то же имя, метод и размеры, что в каталоге (каталог
+      // проверяем мы, а ditto идёт по локальным записям — расхождение и есть подмена).
+      const lh = Buffer.alloc(30)
+      if (localOff + 30 > cdOff || readSync(fd, lh, 0, 30, localOff) !== 30 || lh.readUInt32LE(0) !== 0x04034b50) bad(`запись «${name.slice(0, 120)}»: нет локального заголовка`)
+      const lnlen = lh.readUInt16LE(26)
+      const lxlen = lh.readUInt16LE(28)
+      const lname = Buffer.alloc(lnlen)
+      if (lnlen !== nlen || readSync(fd, lname, 0, lnlen, localOff + 30) !== lnlen || !lname.equals(rawName)) bad(`запись «${name.slice(0, 120)}»: имя в локальном заголовке другое`)
+      if (lh.readUInt16LE(8) !== method) bad(`запись «${name.slice(0, 120)}»: метод сжатия в локальном заголовке другой`)
+      const lflags = lh.readUInt16LE(6)
+      const lcs = lh.readUInt32LE(18)
+      const lus = lh.readUInt32LE(22)
+      // Бит 3 — размеры в дескрипторе после данных (так пишет ditto): в заголовке нули или те же числа.
+      const sizesOk = (lcs === csize && lus === usize) || ((lflags & 8) !== 0 && (flags & 8) !== 0 && lcs === 0 && lus === 0)
+      if (!sizesOk) bad(`запись «${name.slice(0, 120)}»: размеры в локальном заголовке другие`)
+      if (localOff + 30 + lnlen + lxlen + csize > cdOff) bad(`запись «${name.slice(0, 120)}» заходит на каталог`)
       if (usize === 0xffffffff) bad('ZIP64 не принимается')
       unpacked += usize
       if (unpacked > maxUnpacked) bad(`распакованный размер больше потолка ${maxUnpacked} байт`)
@@ -260,6 +303,7 @@ const within = (p: string, root: string): boolean => p === root || p.startsWith(
  */
 export function checkTree(root: string, maxEntries = APP_MAX_ENTRIES): number {
   let n = 0
+  const rootReal = realpathSync.native(root)
   const walk = (dir: string): void => {
     for (const name of readdirSync(dir)) {
       if (++n > maxEntries) throw new AppUpdateError(`бандл окна: больше ${maxEntries} файлов`)
@@ -270,6 +314,11 @@ export function checkTree(root: string, maxEntries = APP_MAX_ENTRIES): number {
         const target = readlinkSync(p)
         if (path.isAbsolute(target)) throw new AppUpdateError(`бандл окна: ссылка ${rel} → абсолютный путь ${target.slice(0, 200)}`)
         if (!within(path.resolve(path.dirname(p), target), root)) throw new AppUpdateError(`бандл окна: ссылка ${rel} выходит из бандла (${target.slice(0, 200)})`)
+        // Цепочка ссылок (`D -> ..`, `C -> D/..`) по буквам внутри, а на деле — снаружи: сверяем настоящий путь.
+        let real: string | null = null
+        // `.native` — realpath(3) системы: JS-вариант Node сводит «D/..» по буквам и цепочку не видит.
+        try { real = realpathSync.native(p) } catch { /* ссылка в никуда — по буквам уже проверена */ }
+        if (real !== null && !within(real, rootReal)) throw new AppUpdateError(`бандл окна: ссылка ${rel} выходит из бандла через цепочку ссылок`)
         continue
       }
       if (st.mode & 0o6000) throw new AppUpdateError(`бандл окна: ${rel} с setuid/setgid`)
@@ -307,39 +356,54 @@ export interface InstalledApp {
   executable: string | null
 }
 
-async function readBundle(app: string, tools: Pick<AppTools, 'plistXml'>): Promise<{ id: string | null; version: string | null; executable: string | null } | null> {
+/**
+ * Строки Info.plist бандла. Только XML (так пишет electron-builder): бинарный plist — «не читается», без plutil,
+ * одинаково для статуса и для работы. Нет файла — null.
+ */
+function readBundle(app: string): { id: string | null; version: string | null; executable: string | null } | null {
   const file = path.join(app, 'Contents', 'Info.plist')
   let text: string
   try {
     if (!lstatSync(file).isFile()) return null
     text = readFileSync(file, 'utf8')
   } catch { return null }
-  if (isBinaryPlist(text)) {
-    const xml = await tools.plistXml(file)
-    if (xml === null) return { id: null, version: null, executable: null }
-    text = xml
-  }
-  return bundleStrings(text)
+  return isBinaryPlist(text) ? { id: null, version: null, executable: null } : bundleStrings(text)
 }
 
-/** Поставленный Pult.app — первый в `appDirs` (как у `pult ui`); синхронно, только XML-plist (для статуса). */
-export function locateInstalledApp(dirs: string[]): InstalledApp | null {
+/** Бандл, которому принадлежит исполняемый файл (`…/X.app/Contents/MacOS/…` → `…/X.app`); не бандл — сам путь. */
+export function bundleOf(exe: string): string {
+  return /^(.+?\.app)\/Contents\/MacOS\/[^/]+$/.exec(exe)?.[1] ?? exe
+}
+
+/** Лежит ли `p` внутри бандла `app` (по буквам или по настоящему пути). */
+export function insideApp(p: string, app: string): boolean {
+  return within(p, app) || within(realpathOr(p), realpathOr(app))
+}
+
+/**
+ * Поставленный Pult.app — первый в `appDirs` (как у `pult ui`). Стоят два (в /Applications и ~/Applications) — тот,
+ * чьё окно сейчас открыто (`prefer` — пути исполняемых файлов подключённых окон).
+ */
+export function locateInstalledApp(dirs: string[], prefer: readonly string[] = []): InstalledApp | null {
+  const found: InstalledApp[] = []
   for (const dir of dirs) {
     const app = path.join(dir, 'Pult.app')
     let st
     try { st = lstatSync(app) } catch { continue }
     if (!st.isDirectory()) continue
-    let text = ''
-    try { text = readFileSync(path.join(app, 'Contents', 'Info.plist'), 'utf8') } catch { /* нет plist */ }
-    const b = text && !isBinaryPlist(text) ? bundleStrings(text) : { id: null, version: null, executable: null }
-    return { dir, app, ...b }
+    found.push({ dir, app, ...(readBundle(app) ?? { id: null, version: null, executable: null }) })
   }
-  return null
+  return found.find((f) => prefer.some((e) => insideApp(e, f.app))) ?? found[0] ?? null
 }
 
 /** Чем обновить окно руками, если демону нельзя (нет прав на папку). */
 export function manualSteps(url: string | null, dir: string): string {
-  return `обнови окно вручную: скачай ${url ?? 'Pult-arm64.zip со страницы релиза'}, распакуй, закрой Пульт (⌘Q) и перетащи Pult.app в ${dir} с заменой (нужен пароль администратора) — или положи его в ~/Applications`
+  const zip = url ?? 'Pult-arm64.zip со страницы релиза'
+  // `pult ui` и обновление ищут окно сначала в /Applications: положить новое в ~/Applications мало — старое надо убрать.
+  const alt = dir === '/Applications'
+    ? ' — или удали /Applications/Pult.app (тоже нужен пароль администратора) и положи новое в ~/Applications'
+    : ''
+  return `обнови окно вручную: скачай ${zip}, распакуй, закрой Пульт (⌘Q) и перетащи Pult.app в ${dir} с заменой (нужен пароль администратора)${alt}`
 }
 
 /** Можно ли демону заменить бандл: запись в папку и в сам бандл (переезд папки меняет её «..»). */
@@ -355,6 +419,8 @@ export function writeProblem(app: string): string | null {
 export interface ShellHello {
   version: string | null
   execPath: string | null
+  /** pid главного процесса оболочки — демон сверяет по нему, что поднялось окно из НОВОГО бандла. */
+  pid: number | null
 }
 
 export interface AppUpdaterOptions {
@@ -370,10 +436,14 @@ export interface AppUpdaterOptions {
   latestApp(): string | null
   /** Почему нельзя сейчас из-за обновления пакета (ставится или ждёт ходов); null — можно. */
   packageBusy(): string | null
+  /** Подключённые окна (hello клиентов `shell`): другое окно не из поставленного бандла — отказ до закрытия. */
+  shells?(): ShellHello[]
   quitWaitMs?: number
   helloWaitMs?: number
   killWaitMs?: number
   pollMs?: number
+  /** Сколько `stop()` ждёт работу, начавшую менять бандл. */
+  stopWaitMs?: number
 }
 
 export interface AppApplyRequest {
@@ -387,13 +457,40 @@ export interface AppUpdater {
   status(): AppUpdateStatus
   /** Проверки до первого байта на диске — синхронно с ответом; дальше работа идёт в фоне. */
   apply(req?: AppApplyRequest): Promise<{ applying: true; to: string; target: 'app' }>
-  /** Оболочка подключилась (hello): так видно, что новое окно поднялось. */
-  onShellHello(h: ShellHello): void
+  /**
+   * Окно готово: оболочка поздоровалась И её интерфейс сделал первый вызов (`settings.get`, `events.snapshot`…).
+   * Так видно, что новое окно не только запустилось, но и работает с этим пакетом.
+   */
+  onShellReady(h: ShellHello): void
   busy(): boolean
-  /** Дождаться конца идущей работы (тесты, остановка). */
+  /** Восстановление после обрыва прошлой замены (журнал apps/swap.json) — при старте. */
+  ready: Promise<void>
+  /** Дождаться конца идущей работы (тесты). */
   idle(): Promise<void>
-  stop(): void
+  /** Остановка демона: новых шагов нет; работа, уже меняющая бандл, дожидается (не дольше stopWaitMs). */
+  stop(): Promise<void>
 }
+
+/** Журнал замены: пишется ДО первого rename и по каждому шагу; по нему старт демона доводит или откатывает. */
+interface SwapJournal {
+  schema: 1
+  app: string
+  dir: string
+  /** Прежнее окно рядом с местом (`<dir>/.Pult.app.old-<from>`), пока не уехало в PULT_HOME. */
+  old: string
+  /** Новое окно рядом с местом до замены (`<dir>/.Pult.app.incoming-<to>`). */
+  incoming: string
+  /** Где прежнее окно сейчас (old или apps/previous-<from>/Pult.app). */
+  prev: string
+  from: string
+  to: string
+  phase: 'swap' | 'swapped' | 'health' | 'rollback'
+  wasRunning: boolean
+  at: string
+}
+
+/** Шаги, после которых бандл уже меняется: остановка демона их дожидается. */
+const PAST_QUIT: ReadonlySet<AppUpdateStep> = new Set<AppUpdateStep>(['swap', 'launch', 'health', 'rollback'])
 
 export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
   const env = o.env ?? process.env
@@ -403,27 +500,37 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
   const helloWait = o.helloWaitMs ?? (Number.isFinite(testHello) && testHello > 0 ? testHello : HELLO_WAIT_MS)
   const killWait = o.killWaitMs ?? KILL_WAIT_MS
   const poll = o.pollMs ?? POLL_MS
+  const stopWait = o.stopWaitMs ?? STOP_WAIT_MS
   const keys = o.keys ?? trustedKeys(env)
+  const myUid = process.getuid?.() ?? -1
+  const shells = (): ShellHello[] => o.shells?.() ?? []
+  const preferred = (): string[] => shells().map((h) => h.execPath).filter((x): x is string => x !== null)
   // Таймеры ожидания НЕ unref: идущая работа обязана держать процесс (в демоне его держит сокет, а в CLI-тесте и
   // на Node 22 цикл без ссылок выходил посреди ожидания окна).
   const sleep = (ms: number): Promise<void> => new Promise((r) => { setTimeout(r, ms) })
+  const journalFile = path.join(o.paths.apps, 'swap.json')
 
   let job: { to: string; from: string | null; step: AppUpdateStep; since: string; done: Promise<void> } | null = null
   let preflight: Promise<{ applying: true; to: string; target: 'app' }> | null = null
   let stopped = false
-  const helloWaiters = new Set<(h: ShellHello) => void>()
+  const readyWaiters = new Set<(h: ShellHello) => void>()
+
+  /** Уборка не роняет демона: ошибка — в журнал, и всё. */
+  const safe = (what: string, fn: () => void): void => {
+    try { fn() } catch (e) { o.logger.warn(`обновление окна: ${what} не вышло`, { error: (e as Error).message }) }
+  }
 
   const unsupported = (loc: InstalledApp | null): string | null => {
     if (tools.platform !== 'darwin') return 'окно само обновляется только на macOS; на Linux окно — из рабочей копии (pult ui --dev)'
     if (tools.arch !== 'arm64') return `окно собирается только под Apple Silicon (arm64), а здесь ${tools.arch}`
     if (!loc) return 'Pult.app не найден в /Applications и ~/Applications — окно ставится руками (README)'
-    if (loc.id !== APP_BUNDLE_ID) return `в ${loc.app} не окно Пульта (CFBundleIdentifier ${loc.id ?? 'не прочитан'})`
+    if (loc.id !== APP_BUNDLE_ID) return `в ${loc.app} не окно Пульта (CFBundleIdentifier ${loc.id ?? 'не прочитан'}; бинарный Info.plist не читается)`
     if (loc.version === null || !isStableVersion(loc.version)) return `версия окна в ${loc.app} не читается`
     return null
   }
 
   const status = (): AppUpdateStatus => {
-    const loc = locateInstalledApp(tools.appDirs())
+    const loc = locateInstalledApp(tools.appDirs(), preferred())
     const why = unsupported(loc)
     const st = readAppState(o.paths)
     const latest = o.latestApp()
@@ -442,30 +549,44 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
   }
 
   const record = (last: AppUpdateAttempt, markBad = false): void => {
-    const st = readAppState(o.paths)
-    st.last = last
-    if (markBad && !st.bad.includes(last.to)) st.bad = [...st.bad, last.to].slice(-20)
-    try { writeAppState(o.paths, st) } catch (e) { o.logger.warn('app-update.json не записался', { error: (e as Error).message }) }
+    try {
+      const st = readAppState(o.paths)
+      st.last = last
+      if (markBad && !st.bad.includes(last.to)) st.bad = [...st.bad, last.to].slice(-20)
+      writeAppState(o.paths, st)
+    } catch (e) { o.logger.warn('app-update.json не записался', { error: (e as Error).message }) }
   }
 
-  /** Переезд папки: тот же том — rename; другой — копия рядом с целью, сверка, rename, удаление исходной. */
-  const moveDir = async (src: string, dst: string): Promise<void> => {
-    try { renameSync(src, dst); return } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== 'EXDEV') throw e
-    }
-    const tmp = path.join(path.dirname(dst), `.${path.basename(dst)}.incoming-${process.pid}`)
-    rmSync(tmp, { recursive: true, force: true })
+  const writeJournal = (j: SwapJournal): void => { atomicWrite(journalFile, JSON.stringify(j, null, 2) + '\n', 0o600) }
+  const readJournal = (): SwapJournal | null => {
     try {
-      await tools.copyTree(src, tmp)
+      const j = JSON.parse(readFileSync(journalFile, 'utf8')) as SwapJournal
+      return j && typeof j.app === 'string' && typeof j.prev === 'string' && typeof j.to === 'string' && typeof j.from === 'string' ? j : null
+    } catch { return null }
+  }
+  const dropJournal = (): void => { safe('журнал замены не удалён', () => rmSync(journalFile, { force: true })) }
+
+  /** Копия бандла с проверкой дерева; не совпала — копии нет. Никогда не для живого окна: только staging и прежнее. */
+  const copyVerified = async (src: string, dst: string): Promise<void> => {
+    rmSync(dst, { recursive: true, force: true })
+    try {
+      await tools.copyTree(src, dst)
       const a = treeListing(src)
-      const b = treeListing(tmp)
+      const b = treeListing(dst)
       if (a.length !== b.length || a.some((x, i) => x !== b[i])) throw new AppUpdateError(`копия ${src} → ${dst} не совпала с исходной`)
-      renameSync(tmp, dst)
     } catch (e) {
-      rmSync(tmp, { recursive: true, force: true })
+      safe('неудачная копия не убрана', () => rmSync(dst, { recursive: true, force: true }))
       throw e
     }
-    rmSync(src, { recursive: true, force: true })
+  }
+
+  /** Положить бандл в `dst` (рядом с местом окна): тот же том — rename, другой — проверенная копия. */
+  const stageNear = async (src: string, dst: string): Promise<void> => {
+    rmSync(dst, { recursive: true, force: true })
+    try { tools.rename(src, dst); return } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EXDEV') throw e
+    }
+    await copyVerified(src, dst)
   }
 
   const waitGone = async (pids: number[], ms: number): Promise<boolean> => {
@@ -477,25 +598,47 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
     }
   }
 
-  const helloMatches = (h: ShellHello, to: string, app: string): boolean => {
-    const appReal = realpathOr(app)
-    const inside = h.execPath !== null && (within(h.execPath, app) || within(realpathOr(h.execPath), appReal))
-    if (h.version !== null) return h.version === to && (h.execPath === null || inside)
-    if (!inside) return false
-    const loc = locateInstalledApp([path.dirname(app)])
-    return loc?.version === to
+  /** Погасить окна из бандла (они наши — новое окно или осиротевшее после обрыва): SIGTERM, потом SIGKILL. */
+  const killApp = async (exe: string, found?: number[]): Promise<number> => {
+    const pids = found ?? await tools.findPids(exe)
+    for (const pid of pids) { try { tools.signal(pid, 'SIGTERM') } catch { /* уже вышел */ } }
+    if (!(await waitGone(pids, killWait))) {
+      for (const pid of pids) { try { tools.signal(pid, 'SIGKILL') } catch { /* уже вышел */ } }
+      await waitGone(pids, 2000)
+    }
+    return pids.length
   }
 
-  const waitHello = (to: string, app: string, ms: number): { promise: Promise<boolean>; cancel(): void } => {
-    let fn: ((h: ShellHello) => void) | null = null
-    let timer: NodeJS.Timeout | null = null
-    const promise = new Promise<boolean>((resolve) => {
-      fn = (h) => { if (helloMatches(h, to, app)) { cleanup(); resolve(true) } }
-      timer = setTimeout(() => { cleanup(); resolve(false) }, ms)
-      helloWaiters.add(fn)
-    })
-    function cleanup(): void { if (fn) helloWaiters.delete(fn); if (timer) clearTimeout(timer) }
-    return { promise, cancel: cleanup }
+  /**
+   * Готовое окно — НОВОЕ: pid из hello — процесс этого пользователя, его исполняемый файл внутри поставленного
+   * бандла, запущен после замены; бандл на месте — новой версии. Версия из hello (если есть) — та же.
+   */
+  const readyOk = async (h: ShellHello, to: string, app: string, swapAt: number): Promise<boolean> => {
+    if (h.pid === null || (h.version !== null && h.version !== to)) return false
+    const info = await tools.procInfo(h.pid).catch(() => null)
+    if (!info || info.uid !== myUid || !insideApp(info.exe, app)) return false
+    // lstart — с точностью до секунды.
+    if (info.startedAt < swapAt - 1000) return false
+    return readBundle(app)?.version === to
+  }
+
+  /** Ждать готовое новое окно. Подождать можно дважды: проба и последняя сверка перед тем, как гасить. */
+  const watchReady = (to: string, app: string, swapAt: number): { wait(ms: number): Promise<boolean>; seen(): boolean; cancel(): void } => {
+    let seen = false
+    let wake: ((v: boolean) => void) | null = null
+    const fn = (h: ShellHello): void => {
+      void readyOk(h, to, app, swapAt).then((ok) => { if (ok) { seen = true; wake?.(true) } })
+    }
+    readyWaiters.add(fn)
+    return {
+      wait: (ms) => new Promise<boolean>((resolve) => {
+        if (seen) { resolve(true); return }
+        const t = setTimeout(() => { wake = null; resolve(seen) }, ms)
+        wake = (v) => { clearTimeout(t); wake = null; resolve(v) }
+      }),
+      seen: () => seen,
+      cancel: () => { readyWaiters.delete(fn) },
+    }
   }
 
   const openEnv = (): Record<string, string> => {
@@ -510,24 +653,51 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
     o.logger.info('обновление окна', { step: s, to: job?.to })
   }
 
-  /** Сама работа. Бросает AppUpdateError с итогом для человека; `record` пишется здесь же. */
+  /**
+   * Вернуть прежнее окно на место: прежнее — рядом (`.incoming-<from>`: rename или копия из PULT_HOME), новое —
+   * в `.failed-<to>`, прежнее — на место. Живое окно между томами не копируется никогда.
+   */
+  const putBack = async (j: Pick<SwapJournal, 'app' | 'dir' | 'prev' | 'from' | 'to'>): Promise<void> => {
+    const back = path.join(j.dir, `.Pult.app.incoming-${j.from}`)
+    const failed = path.join(j.dir, `.Pult.app.failed-${j.to}`)
+    if (j.prev !== back) await stageNear(j.prev, back)
+    rmSync(failed, { recursive: true, force: true })
+    let movedNew = false
+    try { lstatSync(j.app); tools.rename(j.app, failed); movedNew = true } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e
+    }
+    try { tools.rename(back, j.app) } catch (e) {
+      if (movedNew) safe('новое окно не вернулось на место', () => tools.rename(failed, j.app))
+      throw e
+    }
+    await tools.lsregister(['-f', j.app]).catch(() => { /* не страшно */ })
+    await tools.lsregister(['-u', failed]).catch(() => { /* не страшно */ })
+    safe('неудачное окно не удалено', () => rmSync(failed, { recursive: true, force: true }))
+    safe('previous не удалён', () => rmSync(path.join(o.paths.apps, `previous-${j.from}`), { recursive: true, force: true }))
+  }
+
+  /** Сама работа. Итог — в `record`; наружу не бросает ничего. */
   const work = async (loc: InstalledApp & { version: string; executable: string }, to: string, asset: ReleaseAsset): Promise<void> => {
     const from = loc.version
     const fail = (message: string): AppUpdateAttempt => ({ to, from, at: new Date().toISOString(), result: 'failed', message })
-    mkdirSync(o.paths.downloads, { recursive: true, mode: 0o700 })
-    chmodSync(o.paths.downloads, 0o700)
-    mkdirSync(o.paths.apps, { recursive: true, mode: 0o700 })
-    chmodSync(o.paths.apps, 0o700)
     const zip = path.join(o.paths.downloads, `Pult-${to}-arm64.zip`)
     const partial = `${zip}.partial-${process.pid}`
     const staging = path.join(o.paths.apps, `staging-${to}`)
+    const incoming = path.join(loc.dir, `.Pult.app.incoming-${to}`)
+    const old = path.join(loc.dir, `.Pult.app.old-${from}`)
+    const prevDir = path.join(o.paths.apps, `previous-${from}`)
+    const prevApp = path.join(prevDir, 'Pult.app')
     let swapped = false
     try {
+      for (const d of [o.paths.downloads, o.paths.apps]) {
+        mkdirSync(d, { recursive: true, mode: 0o700 })
+        chmodSync(d, 0o700)
+      }
       // 1. Загрузка: https, потолки, размер и sha256 из ПОДПИСАННОГО манифеста — по байтам на диске.
       rmSync(partial, { force: true })
       rmSync(zip, { force: true })
       await downloadTo(asset.url, partial, { http: tools.http, size: asset.size, sha256: asset.sha256, what: `Pult-${to}-arm64.zip` })
-      renameSync(partial, zip)
+      tools.rename(partial, zip)
 
       // 2. Проверки: каталог zip до распаковки, распаковка в свежую папку, бандл целиком.
       step('verify')
@@ -540,7 +710,7 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
       const staged = path.join(staging, 'Pult.app')
       const sst = lstatSync(staged)
       if (sst.isSymbolicLink() || !sst.isDirectory()) throw new AppUpdateError('Pult.app в архиве — не папка')
-      const b = await readBundle(staged, tools)
+      const b = readBundle(staged)
       if (!b) throw new AppUpdateError('в архиве нет Contents/Info.plist')
       if (b.id !== APP_BUNDLE_ID || b.id !== loc.id) throw new AppUpdateError(`в архиве чужое приложение: CFBundleIdentifier ${b.id ?? 'не прочитан'}, а у окна ${loc.id ?? '?'}`)
       if (b.version !== to) throw new AppUpdateError(`версия в архиве ${b.version ?? 'не прочитана'}, а в подписанном манифесте ${to}`)
@@ -559,88 +729,119 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
       if (!archs.includes('arm64')) throw new AppUpdateError(`Contents/MacOS/${exe} без arm64 (${archs.join(', ')})`)
       checkTree(staged)
       try { await tools.codesignVerify(staged) } catch (e) { throw new AppUpdateError(`подпись бандла не сходится: ${(e as Error).message}`) }
-      // LaunchServices мог заметить бандл в staging — снять, пока путь существует (иначе претендент на pult://).
-      await tools.lsregister(['-u', staged]).catch(() => { /* не был на учёте */ })
 
-      // 3. Окно закрывается само (SIGTERM → Electron выходит штатно, окно успевает сохранить черновики).
+      // 3. Новое окно — рядом со старым, на том же томе, ДО закрытия окна: замена потом — два rename, и живое окно
+      //    между томами не копируется никогда. Копия сверяется деревом.
+      step('stage')
+      await stageNear(staged, incoming)
+      await tools.lsregister(['-u', staged]).catch(() => { /* не был на учёте */ })
+      await tools.lsregister(['-u', incoming]).catch(() => { /* не был на учёте */ })
+
+      // 4. Другое окно (из ~/Applications, рабочей копии) пережило бы замену и заняло замок одного экземпляра —
+      //    новое окно не поднялось бы, а откат пометил бы годную версию bad. Пусть его закроют.
+      const other = shells().find((h) => h.execPath !== null && !insideApp(h.execPath, loc.app))
+      if (other?.execPath) throw new AppUpdateError(`закрой окно из ${bundleOf(other.execPath)} и повтори — пока оно открыто, новое окно не запустится; ничего не тронуто`)
+
+      // 5. Окно закрывается само (SIGTERM → Electron выходит штатно, окно успевает сохранить черновики).
       if (stopped) throw new AppUpdateError('демон останавливается — окно не тронуто')
       step('quit')
       const oldExe = path.join(loc.app, 'Contents', 'MacOS', loc.executable)
       const pids = await tools.findPids(oldExe)
+      const wasRunning = pids.length > 0
       for (const pid of pids) { try { tools.signal(pid, 'SIGTERM') } catch { /* уже вышел */ } }
       if (!(await waitGone(pids, quitWait))) {
         throw new AppUpdateError(`окно не закрылось за ${Math.round(quitWait / 1000)} с — закрой его сам (⌘Q) и повтори; ничего не тронуто`)
       }
-      const relaunchOld = async (): Promise<void> => { if (pids.length) await tools.open(loc.app, openEnv()).catch(() => { /* ниже — в сообщении */ }) }
+      const relaunchOld = async (): Promise<void> => { if (wasRunning) await tools.open(loc.app, openEnv()).catch(() => { /* ниже — в сообщении */ }) }
+      if (stopped) { await relaunchOld(); throw new AppUpdateError('демон останавливается — окно не тронуто') }
 
-      // 4. Замена. Прежнее окно — в apps/previous-<версия> (один цикл), новое — на его место.
+      // 6. Замена: два rename на одном томе; журнал — до первого.
       step('swap')
-      const prevDir = path.join(o.paths.apps, `previous-${from}`)
-      const prevApp = path.join(prevDir, 'Pult.app')
-      rmSync(prevDir, { recursive: true, force: true })
-      mkdirSync(prevDir, { mode: 0o700 })
-      try { await moveDir(loc.app, prevApp) } catch (e) {
+      const jr: SwapJournal = { schema: 1, app: loc.app, dir: loc.dir, old, incoming, prev: old, from, to, phase: 'swap', wasRunning, at: new Date().toISOString() }
+      writeJournal(jr)
+      rmSync(old, { recursive: true, force: true })
+      try { tools.rename(loc.app, old) } catch (e) {
+        dropJournal()
         await relaunchOld()
         throw new AppUpdateError(`прежнее окно не сдвинуть (${(e as Error).message}) — ничего не тронуто`)
       }
-      try { await moveDir(staged, loc.app) } catch (e) {
-        try { await moveDir(prevApp, loc.app) } catch (e2) {
-          record(fail(`новое окно не встало (${(e as Error).message}), а прежнее не вернулось (${(e2 as Error).message}) — оно лежит в ${prevApp}: перетащи его в ${loc.dir}`))
+      try { tools.rename(incoming, loc.app) } catch (e) {
+        try { tools.rename(old, loc.app) } catch (e2) {
+          record(fail(`новое окно не встало (${(e as Error).message}), а прежнее не вернулось (${(e2 as Error).message}) — оно лежит в ${old}: переименуй его обратно в ${loc.app}`))
           throw new Recorded('итог записан')
         }
+        dropJournal()
         await relaunchOld()
         throw new AppUpdateError(`новое окно не встало на место (${(e as Error).message}) — прежнее вернул`)
       }
       swapped = true
+      writeJournal({ ...jr, phase: 'swapped' })
+      // Прежнее — в PULT_HOME (между томами — копия: живое окно уже на месте). Не вышло — остаётся рядом.
+      let prev = old
+      try {
+        rmSync(prevDir, { recursive: true, force: true })
+        mkdirSync(prevDir, { mode: 0o700 })
+        try { tools.rename(old, prevApp); prev = prevApp } catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== 'EXDEV') throw e
+          await copyVerified(old, prevApp)
+          prev = prevApp
+          safe('прежнее окно рядом не удалено после копии', () => rmSync(old, { recursive: true, force: true }))
+        }
+      } catch (e) {
+        o.logger.warn('прежнее окно осталось рядом с новым', { at: old, error: (e as Error).message })
+      }
+      writeJournal({ ...jr, phase: 'swapped', prev })
       await tools.lsregister(['-f', loc.app]).catch((e: unknown) => { o.logger.warn('lsregister -f не прошёл', { error: (e as Error).message }) })
-      await tools.lsregister(['-u', prevApp]).catch(() => { /* не был на учёте */ })
+      await tools.lsregister(['-u', prev]).catch(() => { /* не был на учёте */ })
+      const finishDone = (message: string): void => {
+        dropJournal()
+        // Прежнее не уехало в PULT_HOME — скрытая копия рядом с окном не нужна: новое встало.
+        if (prev === old) safe('прежнее окно рядом не удалено', () => rmSync(old, { recursive: true, force: true }))
+        record({ to, from, at: new Date().toISOString(), result: 'done', message })
+        // Прежнее окно держим один цикл; более старые — убрать.
+        safe('старые previous не убраны', () => {
+          for (const n of readdirSync(o.paths.apps)) {
+            if (n.startsWith('previous-') && n !== `previous-${from}`) rmSync(path.join(o.paths.apps, n), { recursive: true, force: true })
+          }
+        })
+        o.logger.info('окно обновлено', { from, to })
+      }
 
-      // 5. Запуск и проба: оболочка новой версии здоровается с демоном.
+      // 7. Окно не было открыто — не открываем (проверит первый запуск); было — открыть и ждать готовое новое.
+      if (!wasRunning) { finishDone(`${from} → ${to}; окно не было открыто — открой его: pult ui`); return }
       step('launch')
-      const hello = waitHello(to, loc.app, helloWait)
+      writeJournal({ ...jr, phase: 'health', prev })
+      const swapAt = Date.now()
+      const ready = watchReady(to, loc.app, swapAt)
       let launched = true
       try { await tools.open(loc.app, openEnv()) } catch (e) {
         launched = false
-        hello.cancel()
         o.logger.warn('новое окно не открылось', { error: (e as Error).message })
       }
       step('health')
-      const ok = launched && await hello.promise
-      if (ok) {
-        record({ to, from, at: new Date().toISOString(), result: 'done', message: `окно ${from} → ${to}` })
-        // Прежнее окно держим один цикл; более старые — убрать.
-        for (const n of readdirSync(o.paths.apps)) {
-          if (n.startsWith('previous-') && n !== `previous-${from}`) rmSync(path.join(o.paths.apps, n), { recursive: true, force: true })
-        }
-        o.logger.info('окно обновлено', { from, to })
-        return
+      let ok = launched && await ready.wait(helloWait)
+      if (!ok) {
+        step('rollback')
+        writeJournal({ ...jr, phase: 'rollback', prev })
+        // Последняя сверка: готовность, пришедшая до того, как гасим, — засчитывается.
+        ok = ready.seen()
       }
+      if (ok) { ready.cancel(); finishDone(`${from} → ${to}`); return }
 
-      // 6. Откат: новое окно (оно наше) гасится, прежнее возвращается и запускается, версия — bad.
-      step('rollback')
+      // 8. Откат: новое окно (оно наше) гасится, прежнее возвращается и открывается, версия — bad.
       const why = launched ? `окно ${to} не подключилось к демону за ${Math.round(helloWait / 1000)} с` : `окно ${to} не открылось`
-      const newPids = await tools.findPids(path.join(loc.app, 'Contents', 'MacOS', exe))
-      for (const pid of newPids) { try { tools.signal(pid, 'SIGTERM') } catch { /* уже вышел */ } }
-      if (!(await waitGone(newPids, killWait))) {
-        for (const pid of newPids) { try { tools.signal(pid, 'SIGKILL') } catch { /* уже вышел */ } }
-        await waitGone(newPids, 2000)
-      }
-      const failedDir = path.join(o.paths.apps, `failed-${to}`)
-      const failedApp = path.join(failedDir, 'Pult.app')
-      rmSync(failedDir, { recursive: true, force: true })
-      mkdirSync(failedDir, { mode: 0o700 })
-      try {
-        await moveDir(loc.app, failedApp)
-        await moveDir(prevApp, loc.app)
-      } catch (e) {
-        record(fail(`${why}; откат не прошёл (${(e as Error).message}) — прежнее окно в ${prevApp}: перетащи его в ${loc.dir}`), true)
+      const newExe = path.join(loc.app, 'Contents', 'MacOS', exe)
+      const newPids = await tools.findPids(newExe)
+      // Готовность, проверка которой ещё шла, пока искали процессы, — засчитывается: годное окно не гасим.
+      if (ready.seen()) { finishDone(`${from} → ${to}`); return }
+      ready.cancel()
+      await killApp(newExe, newPids)
+      try { await putBack({ app: loc.app, dir: loc.dir, prev, from, to }) } catch (e) {
+        record(fail(`${why}; откат не прошёл (${(e as Error).message}) — прежнее окно в ${prev}: перетащи его в ${loc.app}`), true)
         throw new Recorded('итог записан')
       }
-      await tools.lsregister(['-f', loc.app]).catch(() => { /* не страшно */ })
-      await tools.lsregister(['-u', failedApp]).catch(() => { /* не страшно */ })
-      rmSync(failedDir, { recursive: true, force: true })
-      rmSync(prevDir, { recursive: true, force: true })
-      await tools.open(loc.app, openEnv()).catch((e: unknown) => { o.logger.warn('прежнее окно не открылось', { error: (e as Error).message }) })
+      dropJournal()
+      await relaunchOld()
       record({ to, from, at: new Date().toISOString(), result: 'rolled_back', message: `${why} — вернул ${from}; ${to} больше не предлагается само` }, true)
       o.logger.warn('обновление окна откатано', { to, from, why })
     } catch (e) {
@@ -651,22 +852,81 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
       }
       o.logger.warn('обновление окна не удалось', { to, error: msg })
     } finally {
-      rmSync(partial, { force: true })
-      rmSync(zip, { force: true })
-      rmSync(staging, { recursive: true, force: true })
+      safe('недокачанный zip не убран', () => rmSync(partial, { force: true }))
+      safe('zip не убран', () => rmSync(zip, { force: true }))
+      safe('staging не убран', () => rmSync(staging, { recursive: true, force: true }))
+      safe('новое окно рядом не убрано', () => rmSync(incoming, { recursive: true, force: true }))
     }
   }
 
+  /**
+   * Старт демона: журнал замены есть — прошлая замена оборвалась (демон убит, сбой питания). Первый rename был, а
+   * второго нет — прежнее на место. Новое уже стоит, а «готово» не записано — откат на прежнее, версия bad. Потом
+   * уборка: staging-*, failed-*, а рядом с окном — .Pult.app.incoming-* и .Pult.app.failed-*.
+   */
+  const recover = async (): Promise<void> => {
+    const j = readJournal()
+    if (j) {
+      o.logger.warn('обновление окна оборвалось — восстанавливаю', { phase: j.phase, to: j.to, from: j.from })
+      try {
+        const exists = (p: string): boolean => { try { lstatSync(p); return true } catch { return false } }
+        const versionAt = (p: string): string | null => (exists(p) ? readBundle(p)?.version ?? null : null)
+        const at = new Date().toISOString()
+        const appV = versionAt(j.app)
+        // Где может лежать прежнее окно на любом шаге, включая оборванный откат.
+        const prev = [j.prev, j.old, path.join(o.paths.apps, `previous-${j.from}`, 'Pult.app'), path.join(j.dir, `.Pult.app.incoming-${j.from}`)]
+          .find((p) => p !== j.app && versionAt(p) === j.from) ?? null
+        if (appV === j.from) {
+          // Замены не было или откат дошёл до конца — окно прежнее.
+          record(j.phase === 'rollback'
+            ? { to: j.to, from: j.from, at, result: 'rolled_back', message: `окно ${j.to} не встало — вернул ${j.from}; ${j.to} больше не предлагается само` }
+            : { to: j.to, from: j.from, at, result: 'failed', message: 'обновление окна оборвалось до замены — окно прежнее' }, j.phase === 'rollback')
+        } else if (prev) {
+          // Новое стоит без «готово» или места пусто посреди замены/отката — прежнее на место.
+          const killed = appV !== null ? await killApp(path.join(j.app, 'Contents', 'MacOS', readBundle(j.app)?.executable ?? 'Pult')) : 0
+          await putBack({ app: j.app, dir: j.dir, prev, from: j.from, to: j.to })
+          // Окно было открыто до замены — открыть прежнее (только тогда: п. «открывать, только если было открыто»).
+          void killed
+          if (j.wasRunning) await tools.open(j.app, openEnv()).catch(() => { /* откроет человек */ })
+          const midSwap = j.phase === 'swap' && appV === null
+          record(midSwap
+            ? { to: j.to, from: j.from, at, result: 'failed', message: 'обновление окна оборвалось посреди замены — прежнее окно вернул на место' }
+            : { to: j.to, from: j.from, at, result: 'rolled_back', message: `обновление окна до ${j.to} оборвалось (демон остановлен) — вернул ${j.from}; ${j.to} больше не предлагается само` }, !midSwap)
+        } else {
+          throw new AppUpdateError(`прежнего окна ${j.from} не нашёл (стоит ${appV ?? 'ничего'})`)
+        }
+        dropJournal()
+      } catch (e) {
+        record({ to: j.to, from: j.from, at: new Date().toISOString(), result: 'failed', message: `восстановление после обрыва не прошло (${(e as Error).message}) — проверь ${j.app}; прежнее окно: ${j.prev}` })
+        o.logger.error('восстановление обновления окна не прошло', { error: (e as Error).message })
+        return // журнал и файлы оставлены: человеку и следующему старту есть от чего оттолкнуться
+      }
+    }
+    safe('уборка apps/', () => {
+      for (const n of readdirSync(o.paths.apps)) {
+        if (n.startsWith('staging-') || n.startsWith('failed-')) rmSync(path.join(o.paths.apps, n), { recursive: true, force: true })
+      }
+    })
+    for (const dir of tools.appDirs()) {
+      safe(`уборка ${dir}`, () => {
+        for (const n of readdirSync(dir)) {
+          if (n.startsWith('.Pult.app.incoming-') || n.startsWith('.Pult.app.failed-')) rmSync(path.join(dir, n), { recursive: true, force: true })
+        }
+      })
+    }
+  }
+  const ready: Promise<void> = (existsSync(o.paths.apps) ? recover() : Promise.resolve())
+    .catch((e: unknown) => { o.logger.error('восстановление обновления окна упало', { error: (e as Error).message }) })
+
   const start = async (req: AppApplyRequest): Promise<{ applying: true; to: string; target: 'app' }> => {
+    await ready
     const busy = o.packageBusy()
     if (busy) throw new AppUpdateError(busy)
-    const loc0 = locateInstalledApp(tools.appDirs())
+    const loc0 = locateInstalledApp(tools.appDirs(), preferred())
     const no = unsupported(loc0)
     if (no) throw new AppUpdateError(no)
     const loc = loc0 as InstalledApp
-    // Бинарный Info.plist — дочитать через plutil (статус его пропускает).
-    const b = await readBundle(loc.app, tools)
-    if (!b || b.id !== APP_BUNDLE_ID || !b.version || !b.executable) throw new AppUpdateError(`Info.plist окна ${loc.app} не читается`)
+    if (!loc.version || !loc.executable) throw new AppUpdateError(`Info.plist окна ${loc.app} не читается`)
     let m
     try {
       m = await fetchManifest({ env, url: updateUrl(o.config, env), keys, http: tools.http })
@@ -678,8 +938,8 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
     if (!m.app || !asset) throw new AppUpdateError(`в релизе ${m.version} нет окна для macOS arm64`)
     const to = m.app.version
     if (asset.size > APP_ZIP_MAX_BYTES) throw new AppUpdateError(`архив окна ${asset.size} байт — больше потолка ${APP_ZIP_MAX_BYTES}`)
-    if (compareVersions(to, b.version) <= 0) {
-      throw new AppUpdateError(compareVersions(to, b.version) < 0 ? `окно ${b.version} новее канала (${to}) — ставить нечего` : `окно ${b.version} — последнее`)
+    if (compareVersions(to, loc.version) <= 0) {
+      throw new AppUpdateError(compareVersions(to, loc.version) < 0 ? `окно ${loc.version} новее канала (${to}) — ставить нечего` : `окно ${loc.version} — последнее`)
     }
     if (req.expect !== undefined && req.expect !== to) throw new AppUpdateError(`в канале уже окно ${to}, а ставить просили ${req.expect} — проверь заново`)
     if (!req.allowBad && readAppState(o.paths).bad.includes(to)) {
@@ -695,26 +955,41 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
     if (!got.ok) throw new AppUpdateError(`идёт обновление пакета (pid ${got.holderPid ?? '?'}) — дождись его конца`)
     const lock: LockHandle = got.lock
     const since = new Date().toISOString()
-    const j = { to, from: b.version, step: 'download' as AppUpdateStep, since, done: Promise.resolve() }
+    const j = { to, from: loc.version, step: 'download' as AppUpdateStep, since, done: Promise.resolve() }
     job = j
-    o.logger.info('обновление окна', { from: b.version, to, app: loc.app })
-    j.done = work({ ...loc, version: b.version, executable: b.executable }, to, asset)
-      .finally(() => { lock.release(); if (job === j) job = null })
+    o.logger.info('обновление окна', { from: loc.version, to, app: loc.app })
+    j.done = work({ ...loc, version: loc.version, executable: loc.executable }, to, asset)
+      .catch((e: unknown) => { o.logger.error('обновление окна упало', { error: (e as Error).message }) })
+      .finally(() => {
+        safe('update.lock не снят', () => lock.release())
+        if (job === j) job = null
+      })
     return { applying: true, to, target: 'app' }
   }
 
   return {
     status,
+    ready,
     apply(req = {}) {
       if (job) return Promise.resolve({ applying: true, to: job.to, target: 'app' })
       if (preflight) return preflight
       preflight = start(req).finally(() => { preflight = null })
       return preflight
     },
-    onShellHello(h) { for (const fn of [...helloWaiters]) fn(h) },
+    onShellReady(h) { for (const fn of [...readyWaiters]) fn(h) },
     busy: () => job !== null || preflight !== null,
-    idle: async () => { if (preflight) await preflight.catch(() => {}); if (job) await job.done },
-    stop() { stopped = true },
+    idle: async () => { await ready; if (preflight) await preflight.catch(() => {}); if (job) await job.done },
+    async stop() {
+      stopped = true
+      const j = job
+      // Бандл уже меняется — дать довести (не дольше stopWaitMs); иначе — журнал и восстановление при старте.
+      if (j && PAST_QUIT.has(j.step)) {
+        o.logger.info('остановка ждёт обновление окна', { step: j.step, to: j.to })
+        let t: NodeJS.Timeout | null = null
+        await Promise.race([j.done, new Promise<void>((r) => { t = setTimeout(r, stopWait) })])
+        if (t) clearTimeout(t)
+      }
+    },
   }
 }
 
@@ -722,7 +997,8 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
 export function shellHelloOf(raw: unknown): ShellHello {
   const o = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {}
   const s = (v: unknown, max: number): string | null => (typeof v === 'string' && v.length > 0 && v.length <= max ? v : null)
-  return { version: s(o['version'], 40), execPath: s(o['execPath'], 4096) }
+  const pid = o['pid']
+  return { version: s(o['version'], 40), execPath: s(o['execPath'], 4096), pid: typeof pid === 'number' && Number.isInteger(pid) && pid > 0 ? pid : null }
 }
 
 /** Для `pult update --check`: есть ли у окна обновление по манифесту (без сети — по уже прочитанному). */

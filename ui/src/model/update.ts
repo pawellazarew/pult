@@ -45,6 +45,7 @@ const turnsText = (n: number): string => {
 const APP_STEP: Record<AppUpdateStep, string> = {
   download: 'качаю архив',
   verify: 'проверяю архив и подпись',
+  stage: 'кладу новое окно рядом со старым',
   quit: 'закрываю окно',
   swap: 'меняю Pult.app',
   launch: 'открываю новое окно',
@@ -60,8 +61,13 @@ function appFailure(a: AppUpdateStatus): AppUpdateStatus['last'] {
   return f
 }
 
-const appAction = (a: AppUpdateStatus, label = 'Обновить окно'): UpdateAction =>
-  ({ label, force: false, target: 'app', ...(a.latest ? { expect: a.latest } : {}) })
+/**
+ * Кнопка «Обновить окно» — только в окне из поставленного бандла: окно рабочей копии или вторая копия Pult.app
+ * пережили бы замену и не дали новому окну подняться (демон всё равно откажет — «закрой окно из …»).
+ */
+const appAction = (a: AppUpdateStatus, label = 'Обновить окно'): UpdateAction | null =>
+  (a.here === false ? null : { label, force: false, target: 'app', ...(a.latest ? { expect: a.latest } : {}) })
+const elsewhere = (a: AppUpdateStatus): string => (a.here === false ? ` · обновить можно из окна ${a.path ?? 'Pult.app'} или в терминале: pult update --app` : '')
 
 export interface AppUpdateView {
   /** data-state строки «Окно» в «Настройках». */
@@ -87,7 +93,7 @@ export function appUpdateView(u: UpdateStatus | undefined | null, windowVersion:
       ? { state: 'rolledback', text: `Окно ${f.to} не встало: ${f.message}`, action: null }
       : { state: 'failed', text: `Окно не обновилось: ${f.message}`, action: a.available ? appAction(a, 'Повторить') : null }
   }
-  if (a.available && a.latest) return { state: 'available', text: `Окно: ${installed ?? '?'} → доступно ${a.latest}`, action: appAction(a) }
+  if (a.available && a.latest) return { state: 'available', text: `Окно: ${installed ?? '?'} → доступно ${a.latest}${elsewhere(a)}`, action: appAction(a) }
   if (a.unsupported) return { state: 'unsupported', text: `Окно ${installed ?? ''}`.trim() + ` · ${a.unsupported}`, action: null }
   if (a.bad && a.latest) return { state: 'bad', text: `Окно ${a.latest} уже не встало на этой машине — само не ставится; повторить: pult update --app --force`, action: null }
   if (a.latest && installed && compareVersions(a.latest, installed) <= 0) return { state: 'uptodate', text: `Окно ${installed} — последнее`, action: null }
@@ -159,7 +165,7 @@ export function updateBanner(u: UpdateStatus | undefined | null, windowVersion: 
     if (!a?.available || !a.latest || dismissed.includes(`app:${a.latest}`)) return null
     return {
       kind: 'app',
-      text: `Доступно новое окно ${a.latest} (стоит ${a.installed ?? windowVersion ?? '?'})`,
+      text: `Доступно новое окно ${a.latest} (стоит ${a.installed ?? windowVersion ?? '?'})${elsewhere(a)}`,
       notes, action: appAction(a), dismissKey: `app:${a.latest}`,
     }
   }
@@ -168,7 +174,7 @@ export function updateBanner(u: UpdateStatus | undefined | null, windowVersion: 
   const win = a?.installed ?? windowVersion
   if (min !== null && win !== null && compareVersions(win, min) < 0) {
     // Окно обновляется само — сначала оно, потом пакет; нет — только страница релиза.
-    const canApp = a?.available === true && a.latest !== null && compareVersions(a.latest, min) >= 0
+    const canApp = a?.available === true && a.here !== false && a.latest !== null && compareVersions(a.latest, min) >= 0
     return {
       kind: 'window',
       text: canApp
