@@ -5,7 +5,13 @@ import { describe, it } from 'node:test'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { UpdateBanner } from '../src/components/UpdateBanner.js'
-import { addDismissed, applyErrorText, DISMISSED_MAX, updateBanner, windowVersionFromUA } from '../src/model/update.js'
+import { SettingsDialog, UpdatesSection } from '../src/components/Settings.js'
+import type { UpdatesPanel } from '../src/components/Settings.js'
+import {
+  addDismissed, applyErrorText, checkedAgoText, checkErrorText, DISMISSED_MAX, FOCUS_CHECK_STALE_MS, focusCheckWanted, updateBanner, updateSection,
+  upToDateNote, windowVersionFromUA,
+} from '../src/model/update.js'
+import { settingsParams } from '../src/model/sessionSettings.js'
 import type { UpdateStatus } from '../../src/core/rpc.js'
 
 const text = (s: string): string => s.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
@@ -145,5 +151,144 @@ describe('плашка обновления: состояния', () => {
   it('старая оболочка отвергла update.apply — подсказка про pult update', () => {
     assert.match(applyErrorText('method_not_allowed', 'метод update.apply окну не разрешён'), /оболочка старше 0\.1\.14\) — в терминале: pult update/)
     assert.equal(applyErrorText('invalid_params', 'ставить нечего'), 'Обновление не запустилось: ставить нечего')
+  })
+})
+
+describe('«Настройки» → «Обновления»: состояния раздела', () => {
+  const NOW = Date.parse('2026-10-19T10:05:00Z') // через 5 мин после checkedAt
+  const upToDate = (over: Partial<UpdateStatus> = {}): UpdateStatus =>
+    status({ current: '1.0.3', available: false, ...over })
+  const panel = (u: UpdateStatus | null, over: Partial<UpdatesPanel> = {}): UpdatesPanel => ({
+    status: u, packageVersion: u?.current ?? '0.3.3', windowVersion: '0.1.15', checking: false, error: null, applyError: null, busy: false, now: NOW,
+    onCheck: noop, onApply: noop, onNotes: noop, ...over,
+  })
+  const section = (p: UpdatesPanel, auto: boolean | null = true): string =>
+    renderToStaticMarkup(createElement(UpdatesSection, { panel: p, auto, onAuto: noop }))
+  const state = (out: string): string | undefined => /data-state="([a-z]+)"/.exec(out)?.[1]
+
+  it('последняя версия: «Установлена последняя версия (X)», версии пакета и окна, время проверки, «Проверить сейчас»', () => {
+    const out = section(panel(upToDate()))
+    assert.equal(state(out), 'uptodate')
+    assert.match(text(out), /Пульт 1\.0\.3 окно 0\.1\.15/)
+    assert.match(text(out), /Установлена последняя версия \(1\.0\.3\)/)
+    assert.match(text(out), /последняя проверка: 5 мин назад/)
+    assert.match(out, /data-testid="settings-update-check"/)
+    assert.doesNotMatch(out, /<button[^>]*disabled=""[^>]*data-testid="settings-update-check"/)
+    assert.doesNotMatch(out, /settings-update-apply/)
+    assert.match(out, /data-testid="settings-update-auto"[^>]*checked/)
+    assert.match(text(out), /Проверять обновления автоматически/)
+  })
+
+  it('доступна: «Доступна X · Что нового» и «Обновить до X» — тот же apply, что у плашки', () => {
+    const v = updateSection(status(), '0.1.15', { checking: false, error: null }, NOW)
+    assert.equal(v.state, 'available')
+    assert.deepEqual(v.action, { label: 'Обновить до 1.0.3', force: false })
+    const out = section(panel(status()))
+    assert.match(text(out), /Доступна 1\.0\.3 Что нового/)
+    assert.match(out, /data-testid="settings-update-apply"[^>]*>Обновить до 1\.0\.3</)
+    assert.match(out, /data-testid="settings-update-notes"/)
+    // Окну нужна версия новее — кнопки нет, только страница релиза.
+    const win = section(panel(status(), { windowVersion: '0.1.12' }))
+    assert.equal(state(win), 'window')
+    assert.doesNotMatch(win, /settings-update-apply/)
+    // Известное обновление пережило сбой сети — показываем и его, и сбой второй строкой.
+    const withErr = section(panel(status({ error: 'getaddrinfo ENOTFOUND' })))
+    assert.equal(state(withErr), 'available')
+    assert.match(text(withErr), /Последняя проверка не удалась: getaddrinfo ENOTFOUND/)
+  })
+
+  it('идёт проверка: крутилка, «Проверяю канал…»; кнопку держит только свой вызов окна', () => {
+    for (const p of [panel(upToDate(), { checking: true }), panel(upToDate({ checking: true }))]) {
+      const out = section(p)
+      assert.equal(state(out), 'checking')
+      assert.match(out, /class="spin"/)
+      assert.match(text(out), /Проверяю канал обновлений…/)
+    }
+    assert.match(section(panel(upToDate(), { checking: true })), /<button[^>]*disabled=""[^>]*data-testid="settings-update-check"/)
+    // Снимок статуса демона мог устареть — нажатие просто дождётся его проверки.
+    assert.doesNotMatch(section(panel(upToDate({ checking: true }))), /<button[^>]*disabled=""[^>]*data-testid="settings-update-check"/)
+  })
+
+  it('ошибка: текст канала с нейтральной подсказкой 404; отказ самого вызова; старая оболочка', () => {
+    const hint = 'latest.json: ответил HTTP 404 — релизов в канале нет или адрес недоступен — проверь updates.url; поставить вручную: pult update --from <тарбол>'
+    const out = section(panel(upToDate({ latest: null, error: hint })))
+    assert.equal(state(out), 'error')
+    assert.match(text(out), /Проверить не вышло: latest\.json: ответил HTTP 404 — релизов в канале нет или адрес недоступен/)
+    assert.doesNotMatch(out, /<button[^>]*disabled=""[^>]*data-testid="settings-update-check"/, 'после ошибки можно проверить снова')
+    const call = section(panel(upToDate(), { error: checkErrorText('method_not_allowed', 'x') }))
+    assert.equal(state(call), 'error')
+    assert.match(text(call), /оболочка старше 0\.1\.14\) — в терминале: pult update --check/)
+    assert.equal(checkErrorText('timeout', 'демон не ответил'), 'демон не ответил')
+    // Старый демон: статуса нет — раздел говорит про терминал.
+    assert.equal(state(section(panel(null))), 'unsupported')
+  })
+
+  it('ставится и ждёт ходы: «Обновляю до X…» без кнопок; «Обновлю … после окончания ходов» и «Сейчас»; провал — «Повторить»', () => {
+    const applying = section(panel(status({ apply: { state: 'applying', since: 'x', to: '1.0.3' } })))
+    assert.equal(state(applying), 'applying')
+    assert.match(text(applying), /Обновляю до 1\.0\.3…/)
+    assert.doesNotMatch(applying, /settings-update-apply/)
+    assert.match(applying, /<button[^>]*disabled=""[^>]*data-testid="settings-update-check"/)
+    const waiting = updateSection(status({ apply: { state: 'waiting', turns: 2, since: 'x', to: '1.0.3' } }), '0.1.15', { checking: false, error: null }, NOW)
+    assert.equal(waiting.state, 'waiting')
+    assert.match(waiting.text, /после окончания ходов \(2 идут\)/)
+    assert.deepEqual(waiting.action, { label: 'Сейчас', force: true })
+    const failed = section(panel(status({ apply: { state: 'failed', at: 'x', error: 'pult update вышел с кодом 1' } })))
+    assert.equal(state(failed), 'failed')
+    assert.match(failed, /data-testid="settings-update-apply"[^>]*>Повторить</)
+    // Отказ «Обновить» — строкой в разделе (диалог закрывает плашку окна).
+    assert.match(section(panel(status(), { applyError: 'Обновление не запустилось: ставить нечего' })), /data-testid="settings-update-error"/)
+  })
+
+  it('ещё не проверял, bad, рабочая копия; без флага от демона переключателя нет', () => {
+    assert.equal(updateSection(upToDate({ latest: null, checkedAt: null }), null, { checking: false, error: null }, NOW).state, 'unknown')
+    assert.equal(updateSection(upToDate({ latest: { ...status().latest!, version: '1.0.4' }, bad: true }), null, { checking: false, error: null }, NOW).state, 'bad')
+    assert.equal(updateSection(upToDate({ latest: { ...status().latest!, version: '1.0.4' } }), null, { checking: false, error: null }, NOW).state, 'local')
+    assert.doesNotMatch(section(panel(upToDate()), null), /settings-update-auto/)
+  })
+
+  it('диалог «Настройки» показывает раздел «Обновления», когда окно его передало', () => {
+    const settings = { rememberLast: true, defaults: { claude: {}, codex: {} } }
+    const withUpd = renderToStaticMarkup(createElement(SettingsDialog, { settings, catalog: null, updates: panel(upToDate()), autoCheck: false, onSave: async () => null, onClose: noop }))
+    assert.match(withUpd, /data-testid="settings-updates"/)
+    assert.doesNotMatch(withUpd, /data-testid="settings-update-auto"[^>]*checked/)
+    const without = renderToStaticMarkup(createElement(SettingsDialog, { settings, catalog: null, onSave: async () => null, onClose: noop }))
+    assert.doesNotMatch(without, /settings-updates/)
+  })
+})
+
+describe('«Обновления»: время проверки, проверка по фокусу, короткая плашка, settings.set', () => {
+  const T = Date.parse('2026-10-19T10:00:00Z')
+
+  it('«последняя проверка: …»', () => {
+    assert.equal(checkedAgoText(null, T), 'последняя проверка: ещё не было')
+    assert.equal(checkedAgoText('2026-10-19T10:00:00Z', T + 20_000), 'последняя проверка: только что')
+    assert.equal(checkedAgoText('2026-10-19T10:00:00Z', T + 7 * 60_000), 'последняя проверка: 7 мин назад')
+    assert.equal(checkedAgoText('2026-10-19T10:00:00Z', T + 3 * 3_600_000), 'последняя проверка: 3 ч назад')
+    assert.equal(checkedAgoText('2026-10-19T10:00:00Z', T + 50 * 3_600_000), 'последняя проверка: 2 дн назад')
+  })
+
+  it('по фокусу: просим демона, только если автопроверка включена, ничего не ставится и проверка старше часа', () => {
+    assert.equal(FOCUS_CHECK_STALE_MS, 3_600_000)
+    assert.equal(focusCheckWanted(status(), T + 30 * 60_000), false, 'моложе часа')
+    assert.equal(focusCheckWanted(status(), T + 61 * 60_000), true)
+    assert.equal(focusCheckWanted(status({ checkedAt: null }), T), true, 'ещё не проверяли')
+    assert.equal(focusCheckWanted(status({ enabled: false }), T + 5 * 3_600_000), false, 'автопроверка выключена')
+    assert.equal(focusCheckWanted(status({ checking: true }), T + 5 * 3_600_000), false)
+    assert.equal(focusCheckWanted(status({ apply: { state: 'applying', since: 'x', to: '1.0.3' } }), T + 5 * 3_600_000), false)
+    assert.equal(focusCheckWanted(null, T), false)
+  })
+
+  it('короткая плашка после ручной проверки: нечего ставить — «Установлена последняя версия (X)»; иначе нет', () => {
+    assert.equal(upToDateNote(status({ current: '1.0.3', available: false })), 'Установлена последняя версия (1.0.3)')
+    assert.equal(upToDateNote(status()), null, 'есть что ставить — это плашка «Доступна»')
+    assert.equal(upToDateNote(status({ current: '1.0.3', available: false, error: 'ENOTFOUND' })), null)
+    assert.equal(upToDateNote(status({ available: false, latest: null })), null)
+  })
+
+  it('settings.set: флаг автопроверки — только когда передан', () => {
+    const ns = { rememberLast: true, defaults: { claude: {}, codex: {} } }
+    assert.deepEqual(settingsParams(ns), { newSession: ns })
+    assert.deepEqual(settingsParams(ns, false), { newSession: ns, updates: { check: false } })
   })
 })

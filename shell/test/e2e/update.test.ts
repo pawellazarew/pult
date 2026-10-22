@@ -7,6 +7,7 @@
 import assert from 'node:assert/strict'
 import { createHash, createPublicKey, generateKeyPairSync, sign } from 'node:crypto'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import type { KeyObject } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { after, before, describe, it } from 'node:test'
@@ -16,13 +17,13 @@ import type { Harness } from './harness.js'
 const SHELL_VERSION = (JSON.parse(readFileSync(path.join(SHELL_DIR, 'package.json'), 'utf8')) as { version: string }).version
 
 /** Подписанный latest.json — формат src/update/manifest.ts, собранный здесь руками, без кода пакета. */
-function release(dir: string): string {
-  const { privateKey } = generateKeyPairSync('ed25519')
+function release(dir: string, version = '9.9.9', key = generateKeyPairSync('ed25519').privateKey): string {
+  const privateKey = key
   const raw = Buffer.from((createPublicKey(privateKey).export({ format: 'jwk' }) as { x: string }).x, 'base64url')
   const manifest = Buffer.from(JSON.stringify({
-    schema: 1, version: '9.9.9', released: '2026-10-19T10:00:00.000Z',
-    notes: 'https://github.com/pawellazarew/pult/releases/tag/v9.9.9',
-    package: { url: 'https://example.invalid/v9.9.9/pult-9.9.9.tgz', sha256: 'e'.repeat(64), size: 100 },
+    schema: 1, version, released: '2026-10-19T10:00:00.000Z',
+    notes: `https://github.com/pawellazarew/pult/releases/tag/v${version}`,
+    package: { url: `https://example.invalid/v${version}/pult-${version}.tgz`, sha256: 'e'.repeat(64), size: 100 },
     app: { version: SHELL_VERSION, minVersion: '0.1.13' },
   }))
   writeFileSync(path.join(dir, 'latest.json'), JSON.stringify({
@@ -149,5 +150,72 @@ describe('окно: пока ставится обновление, реплик
     await h.shot('applying')
     // Дождаться конца ребёнка (тарбола нет — код 1), чтобы он не писал в дом теста после его удаления.
     assert.ok(await waitFor(async () => ((await c.request('update.status')) as { apply: { state: string } }).apply.state === 'failed', 30_000))
+  })
+})
+
+// «Настройки» (⌘,) → «Обновления»: ручная проверка без перезапуска окна. Плановая первая проверка отодвинута на
+// час — всё, что видно в разделе, пришло от «Проверить сейчас». Канал сначала отдаёт версию не новее стоящей
+// («последняя версия»), потом — 9.9.9 тем же ключом («Доступна 9.9.9», плашка сразу, «Обновить до 9.9.9»).
+describe('окно: «Настройки» → «Обновления» — проверить и обновить без терминала', () => {
+  let h: Harness
+  let rel = ''
+  let key: KeyObject
+
+  before(async () => {
+    rel = mkdtempSync(path.join(tmpdir(), 'pe-rel-'))
+    key = generateKeyPairSync('ed25519').privateKey
+    const pub = release(rel, '0.0.1', key)
+    h = await launch({
+      name: 'update-settings',
+      env: {
+        PULT_UPDATE_URL: 'https://example.invalid/latest.json',
+        PULT_TEST_UPDATE_DIR: rel,
+        PULT_TEST_RELEASE_KEY: pub,
+        PULT_TEST_UPDATE_FIRST_MS: '3600000',
+      },
+    })
+    assert.ok(await waitFor(async () => (await h.win.getAttribute('.app', 'data-conn')) === 'up', 20_000), 'окно не подключилось')
+  })
+  after(async () => {
+    await h?.close()
+    rmSync(rel, { recursive: true, force: true })
+  })
+
+  it('⌘, → «Проверить сейчас»: ставить нечего — «Установлена последняя версия», короткая плашка в окне', async () => {
+    await h.win.keyboard.press('Meta+,')
+    await h.win.getByTestId('settings-dialog').waitFor({ timeout: 5000 })
+    const sec = h.win.getByTestId('settings-updates')
+    await sec.waitFor({ timeout: 5000 })
+    assert.match((await h.win.getByTestId('settings-update-versions').innerText()).replace(/\s+/g, ' '), /Пульт \d+\.\d+\.\d+.* окно \d+\.\d+\.\d+/)
+    await h.win.getByTestId('settings-update-check').click()
+    const st = h.win.getByTestId('settings-update-state')
+    assert.ok(await waitFor(async () => (await st.getAttribute('data-state')) === 'uptodate', 15_000), `состояние: ${await st.getAttribute('data-state')} · ${await st.innerText()}`)
+    assert.match(await st.innerText(), /Установлена последняя версия \(\d+\.\d+\.\d+\)/)
+    assert.match(await h.win.getByTestId('settings-update-checked').innerText(), /последняя проверка: только что/)
+    assert.equal(await h.win.getByTestId('settings-update-apply').count(), 0)
+    await h.win.getByTestId('update-latest').waitFor({ timeout: 2000 })
+    await h.shot('settings-uptodate')
+  })
+
+  it('вышла 9.9.9 — «Проверить сейчас» → «Доступна 9.9.9», плашка сразу; «Обновить до 9.9.9» запускает обновление', async () => {
+    release(rel, '9.9.9', key)
+    await h.win.getByTestId('settings-update-check').click()
+    const st = h.win.getByTestId('settings-update-state')
+    assert.ok(await waitFor(async () => (await st.getAttribute('data-state')) === 'available', 15_000), `состояние: ${await st.getAttribute('data-state')} · ${await st.innerText()}`)
+    assert.match(await st.innerText(), /Доступна 9\.9\.9/)
+    await h.win.getByTestId('settings-update-notes').waitFor({ timeout: 2000 })
+    // Плашка в окне — без перезагрузки и без 15-секундного опроса статуса.
+    assert.equal(await h.win.getByTestId('update-available').count(), 1, 'плашка «Доступна» не появилась сразу')
+    const apply = h.win.getByTestId('settings-update-apply')
+    assert.equal((await apply.innerText()).trim(), 'Обновить до 9.9.9')
+    await h.shot('settings-available')
+    const pid = h.daemonPid()
+    const c = await h.client()
+    await apply.click()
+    // Тот же путь, что у плашки: демон запускает настоящий `pult update --expect 9.9.9`; тарбола нет — код 1.
+    assert.ok(await waitFor(async () => ['applying', 'failed'].includes(((await c.request('update.status')) as { apply: { state: string } }).apply.state), 10_000), 'обновление не запустилось')
+    assert.ok(await waitFor(async () => ((await c.request('update.status')) as { apply: { state: string } }).apply.state === 'failed', 30_000), 'pult update не завершился')
+    assert.match(readFileSync(path.join(h.home, 'logs', 'update.log'), 'utf8'), /9\.9\.9/)
+    assert.equal(h.daemonPid(), pid, 'демон не должен был перезапуститься')
   })
 })

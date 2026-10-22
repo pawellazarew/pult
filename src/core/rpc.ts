@@ -185,7 +185,7 @@ export interface UpdateFailure {
 }
 
 export interface UpdateStatus {
-  /** `updates.check` в config.json: демон проверяет сам (через минуту после старта, потом раз в сутки). */
+  /** `updates.check` в config.json: демон проверяет сам (через минуту после старта, потом раз в 6 ч). */
   enabled: boolean
   /** Версия этого демона. */
   current: string

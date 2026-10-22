@@ -110,6 +110,8 @@ export function defaultForm(provider: AgentProvider = 'claude'): NewAgentForm {
 export interface SettingsReply {
   newSession: NewSessionSettings
   lastUsed: LastUsed
+  /** Флаг автопроверки обновлений (с 0.3.3); нет — старый демон. */
+  updates?: { check: boolean }
 }
 
 /** Поля провайдера поверх формы: модель, усилие, режим, процесс, браузер, предложенная ветка. */

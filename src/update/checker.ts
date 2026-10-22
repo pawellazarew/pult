@@ -1,11 +1,17 @@
 // Демон и канал обновлений (M8c): сам проверяет latest.json и по «Обновить» в окне запускает `pult update`.
 //
 // РАСПИСАНИЕ: первая проверка через минуту после старта (демон под launchd поднимается вместе с входом
-// в систему — сеть к этому моменту обычно уже есть), дальше раз в сутки ± час. Сутки считаются по
-// СТЕННЫМ часам и сверяются раз в 10 минут, а не одним setTimeout на 24 ч: таймер Node идёт по
-// монотонным часам, которые на macOS стоят, пока ноутбук спит, — сутки «сна» откладывали бы проверку
-// ещё на сутки. `updates.check: false` в config.json — ни одного запроса сам; ручная проверка из окна
-// (`update.check`) работает всё равно: её попросил человек.
+// в систему — сеть к этому моменту обычно уже есть), дальше раз в 6 ч ± 30 мин. Срок считается по
+// СТЕННЫМ часам и сверяется раз в 10 минут, а не одним setTimeout на 6 ч: таймер Node идёт по
+// монотонным часам, которые на macOS стоят, пока ноутбук спит, — часы «сна» откладывали бы проверку.
+// Удачная проверка по любой причине (окно, человек) сдвигает следующую плановую на полный срок.
+// `updates.check: false` в config.json — ни одного запроса сам; ручная проверка из окна (`update.check`)
+// работает всё равно: её попросил человек. Окно меняет флаг на лету (`settings.set` → `setEnabled`).
+//
+// ПО ФОКУСУ ОКНА (`update.check {ifOlderThanMs}`): окно вернулось на экран, а последняя проверка старше
+// часа — проверить. Сколько бы окон и событий фокуса ни пришло, демон ходит в сеть по таким просьбам не
+// чаще раза в 10 минут (`MIN_AUTO_GAP_MS`) и только при включённой автопроверке. Ручная «Проверить сейчас»
+// предела не знает: человек нажал — значит, ему нужен свежий ответ, а не прошлый.
 //
 // «ОБНОВИТЬ» (`update.apply`): обновление перезапускает демона, а с ним обрываются идущие ходы. Поэтому:
 // ходы идут — ответ `{waiting: N}`, и обновление начнётся само, когда кончится последний (`poke` на
@@ -38,13 +44,15 @@ import type { TrustedKey } from './keys.js'
 import { PROBE_PENDING, readState } from './versions.js'
 
 export const FIRST_CHECK_MS = 60_000
-export const CHECK_INTERVAL_MS = 24 * 3_600_000
-export const CHECK_JITTER_MS = 3_600_000
+export const CHECK_INTERVAL_MS = 6 * 3_600_000
+export const CHECK_JITTER_MS = 30 * 60_000
+/** Проверки по просьбе окна (фокус) — не чаще этого, сколько бы окон ни просило. */
+export const MIN_AUTO_GAP_MS = 10 * 60_000
 /** Как часто сверяться со стенными часами между проверками. */
 export const CHECK_TICK_MS = 10 * 60_000
 /** Страховка ожидания ходов: пересчитать их, даже если событие конца хода прошло мимо. */
 export const WAIT_POLL_MS = 5_000
-/** Повторы неудачной проверки; дальше — обычные сутки. */
+/** Повторы неудачной проверки; дальше — обычный срок. */
 export const CHECK_RETRY_MS: readonly number[] = [15 * 60_000, 3_600_000, 6 * 3_600_000]
 /** logs/update.log больше этого — старый уходит в update.log.1 (одна копия), новый начинается с нуля. */
 export const UPDATE_LOG_MAX = 1024 * 1024
@@ -80,7 +88,10 @@ export interface CheckerOptions {
   onApplyEnd?: () => void
   /** Запуск `pult update --expect <to>`; тест подставляет свой. */
   spawnApply?: (to: string) => ApplyChild
-  /** Включить ли расписание. По умолчанию — `config.updates.check`. */
+  /**
+   * Можно ли проверять самому (расписание и просьбы окна по фокусу) при `updates.check: true`. По умолчанию —
+   * да; тестовый демон без шва канала — нет: сеть в тестах не трогается.
+   */
   schedule?: boolean
   firstDelayMs?: number
   intervalMs?: number
@@ -93,8 +104,15 @@ export interface CheckerOptions {
 
 export interface UpdateChecker {
   status(): UpdateStatus
-  /** Проверить сейчас (повторный вызов во время проверки ждёт ту же). */
+  /** Проверить сейчас (повторный вызов во время проверки ждёт ту же). Ручная — без предела частоты. */
   check(): Promise<UpdateStatus>
+  /**
+   * Просьба окна по фокусу: проверить, если последняя попытка старше `olderThanMs` (не меньше
+   * `MIN_AUTO_GAP_MS`) и автопроверка включена; иначе — текущий статус без сети.
+   */
+  checkIfStale(olderThanMs: number): Promise<UpdateStatus>
+  /** `updates.check` сменился на лету: включить или снять расписание. */
+  setEnabled(on: boolean): void
   apply(force: boolean): Promise<{ waiting: number } | { applying: true; to: string }>
   /** Что-то в журнале случилось — может быть, кончился последний ход, которого ждёт «Обновить». */
   poke(): void
@@ -211,8 +229,9 @@ export function createUpdateChecker(o: CheckerOptions): UpdateChecker {
   const env = o.env ?? process.env
   const now = o.now ?? Date.now
   const random = o.random ?? Math.random
-  const enabled = o.config.updates.check
-  const schedule = o.schedule ?? enabled
+  let enabled = o.config.updates.check
+  const scheduleAllowed = o.schedule ?? true
+  const firstDelay = o.firstDelayMs ?? FIRST_CHECK_MS
   const interval = o.intervalMs ?? CHECK_INTERVAL_MS
   const jitter = o.jitterMs ?? CHECK_JITTER_MS
   const tick = o.tickMs ?? CHECK_TICK_MS
@@ -230,8 +249,13 @@ export function createUpdateChecker(o: CheckerOptions): UpdateChecker {
   /** Ребёнок, чей выход что-то значит: выход прежнего (повтор после провала) состояние не трогает. */
   let child: ApplyChild | null = null
   let applyInflight: Promise<{ waiting: number } | { applying: true; to: string }> | null = null
-  let nextAt = now() + (o.firstDelayMs ?? FIRST_CHECK_MS)
+  let nextAt = now() + firstDelay
   let stopped = false
+  /** Когда последний раз ходили в сеть (удачно или нет) — предел частоты проверок по фокусу. */
+  const savedAt = saved.checkedAt !== null ? Date.parse(saved.checkedAt) : Number.NaN
+  let lastAttemptAt: number | null = Number.isFinite(savedAt) ? savedAt : null
+  const auto = (): boolean => enabled && scheduleAllowed && !stopped
+  const regularDelay = (): number => interval + Math.round((random() * 2 - 1) * jitter)
 
   const status = (): UpdateStatus => {
     const latest = saved.latest
@@ -263,12 +287,16 @@ export function createUpdateChecker(o: CheckerOptions): UpdateChecker {
 
   const check = (): Promise<UpdateStatus> => {
     if (checking) return checking
+    lastAttemptAt = now()
     checking = (async () => {
       try {
         const url = updateUrl(o.config, env)
         const m = await fetchManifest({ env, url, keys, ...(o.http ? { http: o.http } : {}) })
         saved = { checkedAt: new Date(now()).toISOString(), error: null, latest: releaseOf(m) }
         o.logger.info('канал обновлений проверен', { latest: m.version, current: o.current })
+        // Удача вне расписания (окно, человек) — плановая сдвигается на полный срок. Во время плановой
+        // `nextAt` — бесконечность, срок ставит само расписание.
+        if (Number.isFinite(nextAt)) { failures = 0; nextAt = now() + regularDelay() }
       } catch (e) {
         if (!(e instanceof ChannelError)) o.logger.error('проверка обновлений упала', { error: (e as Error).message })
         // Прежний `latest` остаётся: сбой сети не должен прятать уже известное обновление.
@@ -283,17 +311,18 @@ export function createUpdateChecker(o: CheckerOptions): UpdateChecker {
   }
 
   const arm = (): void => {
-    if (stopped || !schedule) return
+    if (timer) { clearTimeout(timer); timer = null }
+    if (!auto()) return
     const wait = Math.max(0, Math.min(nextAt - now(), tick))
     timer = setTimeout(() => {
       timer = null
       if (now() >= nextAt) {
         nextAt = Number.POSITIVE_INFINITY // пока идёт проверка, второй не будет
         void check().then((st) => {
-          // Удача — сутки ± час; провал — 15 мин, 1 ч, 6 ч, потом снова сутки.
+          // Удача — 6 ч ± 30 мин; провал — 15 мин, 1 ч, 6 ч, потом снова обычный срок.
           if (st.error === null) failures = 0
           const backoff = st.error !== null ? retry[failures++] : undefined
-          nextAt = now() + (backoff ?? interval + Math.round((random() * 2 - 1) * jitter))
+          nextAt = now() + (backoff ?? regularDelay())
         }).finally(arm)
         return
       }
@@ -370,6 +399,20 @@ export function createUpdateChecker(o: CheckerOptions): UpdateChecker {
   return {
     status,
     check,
+    checkIfStale(olderThanMs) {
+      if (checking) return checking
+      if (!auto()) return Promise.resolve(status())
+      const gap = Math.max(MIN_AUTO_GAP_MS, Number.isFinite(olderThanMs) ? olderThanMs : 0)
+      if (lastAttemptAt !== null && now() - lastAttemptAt < gap) return Promise.resolve(status())
+      return check()
+    },
+    setEnabled(on) {
+      if (on === enabled) return
+      enabled = on
+      o.logger.info(on ? 'автопроверка обновлений включена' : 'автопроверка обновлений выключена')
+      if (on) nextAt = now() + firstDelay
+      arm()
+    },
     apply(force) {
       if (applyInflight) return applyInflight
       applyInflight = applyOnce(force).finally(() => { applyInflight = null })

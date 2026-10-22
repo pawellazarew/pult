@@ -73,7 +73,7 @@ export interface PultConfig {
   mcp: { servers: string[] }
   /**
    * M8c, канал обновлений: `check` — демон сам проверяет latest.json (через минуту после старта, потом
-   * раз в сутки); `url` — откуда (только https; PULT_UPDATE_URL перебивает). Одна проверка — один GET
+   * раз в 6 ч и по возвращении окна на экран; окно меняет флаг в «Настройках»); `url` — откуда (только https; PULT_UPDATE_URL перебивает). Одна проверка — один GET
    * к GitHub, ничего не ставится без «Обновить» в окне или `pult update`.
    */
   updates: { check: boolean; url: string }
@@ -364,6 +364,14 @@ export function writeMcpSelection(file: string, servers: readonly string[]): voi
  */
 export function writeNewSession(file: string, value: NewSessionSettings): void {
   writeConfigSubtree(file, 'newSession', () => JSON.parse(JSON.stringify(value)) as Record<string, unknown>, 'настройки новой сессии не записаны')
+}
+
+/**
+ * `settings.set` из окна: флаг автопроверки обновлений. Пишется ТОЛЬКО `updates.check` — адрес канала
+ * (`updates.url`) и прочие поля раздела остаются как были в файле.
+ */
+export function writeUpdatesCheck(file: string, check: boolean): void {
+  writeConfigSubtree(file, 'updates', (prev) => ({ ...prev, check }), 'флаг проверки обновлений не записан')
 }
 
 function writeConfigSubtree(file: string, key: string, next: (prev: Record<string, unknown>) => Record<string, unknown>, what: string): void {
