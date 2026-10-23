@@ -382,6 +382,7 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
         try { native = JSON.parse(line) } catch { continue }
         const mapped = mapper.push(native)
         for (const draft of mapped.drafts) if (!gone()) emit(draft)
+        if (mapped.live && !gone()) for (const sig of mapped.live) opts.live?.(name, sig)
         for (const sig of mapped.signals) onSig(sig)
       }
     }
@@ -951,6 +952,7 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
           restLines = lines.slice(i + 1)
           const mapped = theMapper.push(native)
           for (const draft of mapped.drafts) emitL(draft)
+          if (mapped.live && !gone()) for (const sig of mapped.live) opts.live?.(name, sig)
           for (const sig of mapped.signals) {
             if (settled) break
             onSignal(sig)

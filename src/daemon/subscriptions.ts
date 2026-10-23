@@ -15,6 +15,7 @@
 
 import type { PultEvent } from '../core/events.js'
 import type { EventStore } from '../core/store.js'
+import type { LiveChannel } from './live.js'
 
 export interface EventBus {
   emit(ev: PultEvent): void
@@ -56,6 +57,11 @@ export interface SubscriptionSink {
 export interface SubscribeParams {
   since?: number
   sessionId?: string
+  /**
+   * Живой канал фаз хода (0.3.5, src/daemon/live.ts): журнал не доигрывается, приходят только кадры `turn.phase`
+   * — снимок текущих фаз, затем перемены. Сервер ставит его по `since >= LIVE_CURSOR_BASE` (или `live: true`).
+   */
+  live?: boolean
 }
 
 export interface SubscriptionHandle {
@@ -76,7 +82,7 @@ export interface SubscriptionManager {
   dispose(reason?: { code: string; message: string }): void
 }
 
-export function createSubscriptions(bus: EventBus, store: EventStore): SubscriptionManager {
+export function createSubscriptions(bus: EventBus, store: EventStore, live?: LiveChannel): SubscriptionManager {
   let seq = 0
   const off = new Map<number, () => void>()
   const sinks = new Map<number, SubscriptionSink>()
@@ -98,6 +104,15 @@ export function createSubscriptions(bus: EventBus, store: EventStore): Subscript
     subscribe(params, sink) {
       const sub = ++seq
       const since = Number.isFinite(params.since) ? Number(params.since) : 0
+      if (params.live) {
+        // Живой канал: ни журнала, ни буфера — снимок фаз на `start` новее всего, что пришло бы до него.
+        sinks.set(sub, sink)
+        const ch = live?.subscribe(since, (frame) => {
+          if (!sink.write({ sub, event: frame })) drop(sub, { code: 'slow_consumer', message: 'клиент не успевает читать поток событий' })
+        })
+        off.set(sub, () => { ch?.stop() })
+        return { sub, start: async () => { if (sinks.has(sub)) ch?.start(); return { replayed: 0 } } }
+      }
       const buffered: PultEvent[] = []
       let replaying = true
 

@@ -30,6 +30,9 @@
 //   net-dead                   три `error` с `willRetry: true` подряд (сеть умерла)
 //   usage-limit                `error` с `codexErrorInfo: "usageLimitExceeded"`
 //   hang                       ход, который сам никогда не кончится
+//   reasoning                  0.3.5, фаза хода: элемент `reasoning` и 200 `summaryTextDelta` (в одной — «секрет»
+//                              sk-ant-…), пауза; `commandExecution` (пауза); дельты ответа; конец. Формы — по схеме
+//                              0.163 (ReasoningSummaryTextDeltaNotification), записи живого хода с размышлениями нет
 //   simple                     обычный ход с ответом «OK»
 //
 // Запросы разрешений он ЖДЁТ: ответ клиента логируется, и ход продолжается только после него
@@ -223,6 +226,30 @@ async function runTurn(scenario, threadId, turnId) {
     }
     case 'hang':
       return
+    case 'reasoning': {
+      const pause = Number(cfg.phasePauseMs ?? 400)
+      const rid = `rs-${turnId}`
+      out({ jsonrpc: '2.0', method: 'item/started', params: { threadId, turnId, item: { type: 'reasoning', id: rid, summary: [], content: [] } } })
+      out({ jsonrpc: '2.0', method: 'item/reasoning/summaryPartAdded', params: { threadId, turnId, itemId: rid, summaryIndex: 0 } })
+      for (let i = 0; i < 200; i++) {
+        const delta = i === 7 ? ` ключ ${'sk-'}ant-api03-${'A'.repeat(40)} ` : `шаг ${i}. `
+        out({ jsonrpc: '2.0', method: 'item/reasoning/summaryTextDelta', params: { threadId, turnId, itemId: rid, summaryIndex: 0, delta } })
+      }
+      out({ jsonrpc: '2.0', method: 'item/reasoning/summaryPartAdded', params: { threadId, turnId, itemId: rid, summaryIndex: 1 } })
+      out({ jsonrpc: '2.0', method: 'item/reasoning/summaryTextDelta', params: { threadId, turnId, itemId: rid, summaryIndex: 1, delta: 'ИТОГ-РАЗМЫШЛЕНИЙ' } })
+      await sleep(pause)
+      out({ jsonrpc: '2.0', method: 'item/completed', params: { threadId, turnId, item: { type: 'reasoning', id: rid, summary: [], content: [] } } })
+      const cid = `cmd-${turnId}`
+      out({ jsonrpc: '2.0', method: 'item/started', params: { threadId, turnId, item: { type: 'commandExecution', id: cid, command: 'npm test', cwd: '/tmp', status: 'inProgress' } } })
+      await sleep(pause)
+      out({ jsonrpc: '2.0', method: 'item/completed', params: { threadId, turnId, item: { type: 'commandExecution', id: cid, command: 'npm test', cwd: '/tmp', status: 'completed', exitCode: 0 } } })
+      const mid = `msg-${turnId}`
+      out({ jsonrpc: '2.0', method: 'item/started', params: { threadId, turnId, item: { type: 'agentMessage', id: mid, text: '', phase: 'final_answer' } } })
+      for (const delta of ['O', 'K']) out({ jsonrpc: '2.0', method: 'item/agentMessage/delta', params: { threadId, turnId, itemId: mid, delta } })
+      await sleep(pause)
+      await finish()
+      return
+    }
     default:
       await sleep(30)
       await finish()

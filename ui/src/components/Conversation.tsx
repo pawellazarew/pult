@@ -33,6 +33,8 @@ import { expireQueueEdit, queueEditKey, saveQueueEdit, startQueueEdit } from '..
 import type { QueueEditApi, QueueEditState, QueueEditStep } from '../model/queueEdit.js'
 import { errorText, isBridgeError } from '../bridge.js'
 import { PermCard } from './PermCard.js'
+import { phaseAnnouncement, phaseElapsed, phaseText } from '../model/phase.js'
+import type { TurnPhase } from '../model/phase.js'
 import { takeAutoFocus } from '../lib/linkGuard.js'
 
 export interface ConversationProps {
@@ -98,6 +100,8 @@ export interface ConversationProps {
   onAnswer?(permId: string, answers: Record<string, { answers: string[] }>): void
   onDeny(permId: string, reason: string): void
   onFocusPerm(permId: string): void
+  /** 0.3.5: «ждёт тебя» в строке фазы — открыть Inbox и выделить этот запрос. */
+  onOpenInbox?(permId: string): void
   /**
    * M8f: подвал «opus · high · спрашивать» — кнопка меню настроек сессии (модель, усилие, режим — со следующего хода).
    * Нет — старая оболочка без `agent.configure` в мосте: подвал как раньше, без меню.
@@ -124,10 +128,12 @@ export function Conversation(p: ConversationProps): ReactElement {
   // Своя реплика ушла — лента едет вниз к ней, даже если человек перед этим листал вверх.
   const pendingText = p.pending?.text
   useLayoutEffect(() => { if (pendingText !== undefined) stick.current = true }, [pendingText])
+  // Строка фазы растёт и меняется (размышления, подпись инструмента) — прилипшая лента едет за ней.
+  const phaseKey = agent.phase ? `${agent.phase.phase}:${agent.phase.since}:${agent.phase.reasoning?.length ?? 0}` : ''
   useLayoutEffect(() => {
     const el = feed.current
     if (el && stick.current) el.scrollTop = el.scrollHeight
-  }, [p.items, agent.name, pendingText])
+  }, [p.items, agent.name, pendingText, phaseKey])
   useLayoutEffect(() => { stick.current = true }, [agent.name])
 
   const onScroll = (): void => {
@@ -248,6 +254,7 @@ export function Conversation(p: ConversationProps): ReactElement {
                 </div>
               </div>
             )}
+            {!p.pending && agent.phase && <PhaseLine phase={agent.phase} onOpenInbox={p.onOpenInbox} />}
           </div>
         )}
       </div>
@@ -952,5 +959,43 @@ function QueueEditor({ n, st, edit }: { n: number | null; st: QueueEditState; ed
       <button type="button" className="btn btn-sm btn-primary" onClick={edit.onSave} disabled={st.saving} data-testid="queue-edit-save">Сохранить</button>
       <button type="button" className="btn btn-sm btn-ghost" onClick={edit.onCancel} disabled={st.saving} data-testid="queue-edit-cancel">Отмена</button>
     </li>
+  )
+}
+
+/**
+ * 0.3.5: одна живая строка под последней репликой — что ход делает сейчас («думает… 12 с», «выполняет: Bash npm test…
+ * 8 с», «ждёт тебя»). Фазу выводит демон (src/sessions/phaseTracker.ts) и шлёт живым каналом; секунды строка считает
+ * сама от `since` демона — событий раз в секунду нет. Диктору — только смена фазы (`aria-live` на подписи без секунд),
+ * не каждая секунда и не каждый кусок размышлений. Размышления (если провайдер их дал) — свёрнутым «Размышления».
+ */
+export function PhaseLine({ phase, onOpenInbox, now: fixedNow }: { phase: TurnPhase; onOpenInbox?: ((permId: string) => void) | undefined; now?: number }): ReactElement {
+  const [tick, setTick] = useState(() => Date.now())
+  useEffect(() => {
+    if (fixedNow !== undefined) return
+    const t = window.setInterval(() => setTick(Date.now()), 1000)
+    return () => clearInterval(t)
+  }, [fixedNow])
+  const now = fixedNow ?? tick
+  const waiting = phase.phase === 'waiting' ? phase.waiting : undefined
+  return (
+    <div className={`phase-line ph-${phase.phase}`} data-testid="turn-phase" data-phase={phase.phase}>
+      <div className="phase-row">
+        <span className="phase-dot" aria-hidden="true" />
+        <span className="phase-text" data-testid="turn-phase-text">{phaseText(phase)}</span>
+        <span className="phase-time mono" data-testid="turn-phase-time" aria-hidden="true">{phaseElapsed(phase, now)}</span>
+        {waiting && onOpenInbox && (
+          <button type="button" className="btn btn-ghost btn-sm phase-inbox" data-testid="turn-phase-inbox" onClick={() => onOpenInbox(waiting.permId)}>
+            открыть в Inbox
+          </button>
+        )}
+        <span className="sr-only" role="status" aria-live="polite" data-testid="turn-phase-live">{phaseAnnouncement(phase)}</span>
+      </div>
+      {phase.reasoning && (
+        <details className="phase-reasoning" data-testid="turn-phase-reasoning">
+          <summary>Размышления</summary>
+          <pre className="mono">{phase.reasoning}</pre>
+        </details>
+      )}
+    </div>
   )
 }

@@ -32,6 +32,7 @@
 //   PULT_FAKE_SPEED      делитель пауз (по умолчанию 60; 0 — без пауз)
 //   PULT_FAKE_HANG       мс: подождать столько перед первым событием (тест таймаутов)
 //   PULT_FAKE_HANG_AFTER_INIT  мс: подождать столько СРАЗУ ПОСЛЕ `system/init`
+//   PULT_FAKE_HANG_AFTER_TOOL  мс: подождать столько после строки с `tool_use` (инструмент «работает» — фаза хода, 0.3.5)
 //   PULT_FAKE_DEAF       1: НЕ реагировать ни на SIGINT, ни на SIGTERM — так ведёт себя
 //                        процесс, застрявший в сисколле. Уходит только по SIGKILL.
 //   PULT_FAKE_KEEPALIVE  1: НЕ выходить по закрытию stdin — проверка добивающего сигнала.
@@ -55,6 +56,7 @@ const cfg = {
   speed: Number(process.env.PULT_FAKE_SPEED ?? fileCfg.speed ?? 60) || 0,
   hang: Number(process.env.PULT_FAKE_HANG ?? fileCfg.hang ?? 0) || 0,
   hangAfterInit: Number(process.env.PULT_FAKE_HANG_AFTER_INIT ?? fileCfg.hangAfterInit ?? 0) || 0,
+  hangAfterTool: Number(process.env.PULT_FAKE_HANG_AFTER_TOOL ?? fileCfg.hangAfterTool ?? 0) || 0,
   oneshot: (process.env.PULT_FAKE_ONESHOT ?? String(fileCfg.oneshot ?? '')) === '1',
   deaf: (process.env.PULT_FAKE_DEAF ?? String(fileCfg.deaf ?? '')) === '1',
   keepAlive: (process.env.PULT_FAKE_KEEPALIVE ?? String(fileCfg.keepAlive ?? '')) === '1',
@@ -338,6 +340,7 @@ async function playTurn(uuid = null) {
     // Этим ловится разница, из-за которой ломался `--resume`: стоп до init разговора не
     // оставляет, стоп после init — оставляет.
     if (cfg.hangAfterInit > 0 && isInit(line)) await sleep(cfg.hangAfterInit)
+    if (cfg.hangAfterTool > 0 && toolUseOf(line)) await sleep(cfg.hangAfterTool)
   }
   // Ход-уведомление: приходит сам, без реплики пользователя.
   if ((def.auto || (def.autoFrom !== undefined && turnIndex >= def.autoFrom)) && turnIndex < total) await playTurn(uuid)

@@ -6,6 +6,7 @@
 
 import { isUnread, parseAttention } from '../../../src/sessions/attention.js'
 import type { SessionContext } from './context.js'
+import type { TurnPhase } from './phase.js'
 import type { AgentProvider, AgentRecord, Attention, QueueItem, SessionStatus, Tone } from './types.js'
 
 export interface StatusView {
@@ -77,6 +78,8 @@ export interface AgentView {
   approval?: 'read-only' | 'workspace' | 'full'
   /** M8d: Claude в `ask` — действующий режим из настроек владельца (`auto`, `default`, …). */
   claudeMode?: string
+  /** 0.3.5: фаза хода из живого канала демона — строка «думает… 12 с» и подпись в дереве. */
+  phase?: TurnPhase
 }
 
 /** Как агент подписан в окне: название, а без него — имя. */
@@ -108,7 +111,7 @@ export function sortAgents(list: readonly AgentView[]): AgentView[] {
  */
 export function buildAgents(
   records: readonly AgentRecord[],
-  live: Readonly<Record<string, { status?: SessionStatus; lastTs?: string; pending?: number; background?: { count: number; tasks: readonly string[] }; context?: SessionContext }>>,
+  live: Readonly<Record<string, { status?: SessionStatus; lastTs?: string; pending?: number; background?: { count: number; tasks: readonly string[] }; context?: SessionContext; phase?: TurnPhase }>>,
 ): AgentView[] {
   return sortAgents(records.map((r) => {
     const l = live[r.name] ?? {}
@@ -140,6 +143,7 @@ export function buildAgents(
       ...(r.browser && typeof r.browserDownloads === 'string' ? { browserDownloads: r.browserDownloads } : {}),
       ...(r.approval === 'read-only' || r.approval === 'workspace' || r.approval === 'full' ? { approval: r.approval } : {}),
       ...(typeof r.claudeMode === 'string' && r.claudeMode ? { claudeMode: r.claudeMode } : {}),
+      ...(l.phase ? { phase: l.phase } : {}),
     }
   }))
 }

@@ -148,7 +148,10 @@ pult agent wait w                                             # wait for the res
 ```
 
 **Same session in the window.** Run `pult ui`: the session shows up under its project folder on the left, with the
-whole conversation. Closing the window does not stop the agent.
+whole conversation. Closing the window does not stop the agent. While a turn runs, one live line under your last message says what
+it is doing right now, with a seconds counter — starting, thinking, writing, running `Bash npm test`, or waiting for
+you (with a link to the Inbox card); reasoning text, when the provider streams it, sits under a collapsed
+"Размышления". The line is never written to the event journal.
 
 More: `pult agent list`, `pult agent stop w` (stop the current turn), `pult agent rm w`, `pult usage` (your 5-hour and
 7-day subscription windows), `pult --help` for everything.

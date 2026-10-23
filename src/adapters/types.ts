@@ -18,6 +18,7 @@
 
 import type { EventDraft } from '../core/events.js'
 import type { SessionMode, SessionProvider, SessionRecord } from '../sessions/registry.js'
+import type { LiveSignal } from '../sessions/phaseTracker.js'
 
 /**
  * M8d (решение владельца 19.10.2026, пересмотр инварианта 5 Ф1): насколько широко «да».
@@ -124,6 +125,11 @@ export interface StartedSession {
 export interface AdapterDeps {
   /** Единственная дверь в журнал: адаптер сам не пишет файлы. */
   emit(draft: EventDraft): void
+  /**
+   * 0.3.5: живой сигнал хода — провайдер отозвался, новое обращение к модели, размышления (src/sessions/phaseTracker.ts).
+   * МИМО журнала: по нему окно рисует строку «думает…», а текст размышлений эфемерен. Нет функции — сигналов нет.
+   */
+  live?(sessionId: string, sig: LiveSignal): void
   /** Спросить человека. Резолвится решением; таймаут и отказ — забота брокера. */
   askPermission(req: {
     sessionId: string

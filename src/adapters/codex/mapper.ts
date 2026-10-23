@@ -23,6 +23,7 @@
 import { stripBlobs } from '../../core/blobs.js'
 import type { EventDraft } from '../../core/events.js'
 import { redact, redactString } from '../../core/log.js'
+import type { LiveSignal } from '../../sessions/phaseTracker.js'
 
 /**
  * Тред не возобновляем, пока на нём не было ни одного хода. ИЗМЕРЕНО 21.09.2026 пробой В3:
@@ -77,6 +78,13 @@ export type CodexSignal =
 export interface MapOutput {
   drafts: EventDraft[]
   signals: CodexSignal[]
+  /**
+   * 0.3.5: живые сигналы фазы хода (src/sessions/phaseTracker.ts) — только своего треда. В журнал не идут: начало
+   * хода на сервере, начало элемента `reasoning` и текст СВОДКИ размышлений (`summaryTextDelta`, сырой — редакция при
+   * отдаче окну). Сырой текст размышлений (`item/reasoning/textDelta`) не показывается: окну хватает сводки, а
+   * два потока одного элемента задвоили бы текст. Поле есть, только когда не пусто.
+   */
+  live?: LiveSignal[]
 }
 
 export interface CodexMapperOptions {
@@ -168,6 +176,19 @@ export function createCodexMapper(opts: CodexMapperOptions): CodexMapper {
         const turn = obj(params['turn'])
         const id = turn ? str(turn['id']) : null
         if (id) out.signals.push({ kind: 'turn_started', providerTurnId: id })
+        if (!ctx.parentId) out.live = [{ kind: 'active' }]
+        return out
+      }
+
+      case 'item/reasoning/summaryTextDelta': {
+        const delta = str(params['delta'])
+        if (!ctx.parentId && delta) out.live = [{ kind: 'reasoning', text: delta }]
+        return out
+      }
+
+      // Новая часть сводки — с новой строки, а не впритык к прошлой.
+      case 'item/reasoning/summaryPartAdded': {
+        if (!ctx.parentId && num(params['summaryIndex']) !== 0) out.live = [{ kind: 'reasoning', text: '\n\n' }]
         return out
       }
 
@@ -199,6 +220,7 @@ export function createCodexMapper(opts: CodexMapperOptions): CodexMapper {
         const done = method === 'item/completed'
         const type = str(item['type']) ?? '?'
         const id = str(item['id'])
+        if (type === 'reasoning' && !done && !ctx.parentId) out.live = [{ kind: 'thinking' }]
         if (QUIET_ITEM_TYPES.has(type)) return out
 
         if (type === 'agentMessage') {

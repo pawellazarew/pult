@@ -10,6 +10,7 @@ import { ContextMenu } from './ContextMenu.js'
 import type { MenuEntry } from './ContextMenu.js'
 import type { AgentView } from '../model/agents.js'
 import { agentLabel, ago, shortPath, statusView } from '../model/agents.js'
+import { treePhaseLabel } from '../model/phase.js'
 import { contextRowView } from '../model/context.js'
 import type { ProjectGroup } from '../model/projects.js'
 import { projectRemoval } from '../model/projects.js'
@@ -180,6 +181,8 @@ function SessionRow({ a, project, selected, now, onSelect, onMenu }: {
 }): ReactElement {
   const sv = statusView(a.status)
   const needs = sv.needsYou || a.pending > 0
+  // 0.3.5: вместо «идёт» — что именно делает ход («думает», «пишет», «Bash»).
+  const phaseLabel = sv.busy && !needs ? treePhaseLabel(a.phase) : null
   // Папку пишем, только если сессия не в корне проекта: корень уже виден в строке проекта.
   const sub = (a.repo ?? a.cwd) === project ? null : a.cwd
   // Контекст в строке — только когда окно занято хотя бы наполовину: иначе строка шумит.
@@ -193,7 +196,7 @@ function SessionRow({ a, project, selected, now, onSelect, onMenu }: {
       </span>
       <span className="ag-right" title={a.pending > 0 ? `${a.pending} ${plural(a.pending, 'запрос', 'запроса', 'запросов')} в Inbox` : undefined}>
         {/* Счёт — словами в самом чипе: отдельное «1?» читалось загадкой. */}
-        <Chip tone={needs ? 'wait' : sv.tone} label={`${needs && !sv.needsYou ? 'ждёт тебя' : sv.label}${a.pending > 0 ? ` · ${a.pending}` : ''}`} />
+        <Chip tone={needs ? 'wait' : sv.tone} label={`${needs && !sv.needsYou ? 'ждёт тебя' : phaseLabel ?? sv.label}${a.pending > 0 ? ` · ${a.pending}` : ''}`} testId="row-status" />
         <button type="button" className="row-btn" data-testid="row-menu" title="Действия с сессией" aria-label={`Действия с сессией ${agentLabel(a)}`}
           onClick={(e) => onMenu(e, a)}><span className="dots" aria-hidden="true">⋯</span></button>
       </span>

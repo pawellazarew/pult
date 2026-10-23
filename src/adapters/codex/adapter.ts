@@ -1362,6 +1362,7 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
     const own = owner.parentNodeId === undefined
     const mapped = l.mapper.push(method, params, own ? {} : { parentId: owner.parentNodeId as string })
     for (const draft of mapped.drafts) { if (!l.closing && live.get(owner.name) === l) emit(draft) }
+    if (mapped.live && !l.closing && live.get(owner.name) === l) for (const sig of mapped.live) opts.live?.(owner.name, sig)
     for (const sig of mapped.signals) applySignal(l, sig, own)
   }
 

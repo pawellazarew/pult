@@ -21,6 +21,7 @@
 import { stripBlobs } from '../../core/blobs.js'
 import type { EventDraft } from '../../core/events.js'
 import { redact, redactString } from '../../core/log.js'
+import type { LiveSignal } from '../../sessions/phaseTracker.js'
 
 /**
  * Решающая строка «аккаунт или регион» (DELTA v0.5 §1). Повторы по ней запрещены.
@@ -95,6 +96,11 @@ export type TurnSignal =
 export interface MapOutput {
   drafts: EventDraft[]
   signals: TurnSignal[]
+  /**
+   * 0.3.5: живые сигналы фазы хода (src/sessions/phaseTracker.ts) — только своего разговора (без `parent_tool_use_id`).
+   * В журнал не идут; текст размышлений — СЫРОЙ (редакция — при отдаче окну). Поле есть, только когда не пусто.
+   */
+  live?: LiveSignal[]
 }
 
 export interface MapperOptions {
@@ -223,6 +229,7 @@ export function createClaudeMapper(opts: MapperOptions): ClaudeMapper {
           const id = str(ev['session_id'])
           if (id) out.signals.push({ kind: 'session_id', id })
           out.signals.push({ kind: 'turn_started' })
+          if (!parentId) out.live = [{ kind: 'active' }]
           if (sessionStartedEmitted) return out
           sessionStartedEmitted = true
           out.drafts.push({
@@ -272,6 +279,22 @@ export function createClaudeMapper(opts: MapperOptions): ClaudeMapper {
       case 'stream_event': {
         const inner = obj(ev['event'])
         if (!inner) return out
+        // 0.3.5: фаза хода. Новое обращение к модели, начало блока размышлений и их текст — живыми сигналами:
+        // в журнал они не пишутся. Пустой `thinking_delta` (размышления скрыты) — без текста: строка просто «думает».
+        if (!parentId) {
+          const it = str(inner['type'])
+          if (it === 'message_start') { out.live = [{ kind: 'request' }]; return out }
+          if (it === 'content_block_start') {
+            const bt = str(obj(inner['content_block'])?.['type'])
+            if (bt === 'thinking' || bt === 'redacted_thinking') out.live = [{ kind: 'thinking' }]
+            return out
+          }
+          if (it === 'content_block_delta') {
+            const dl = obj(inner['delta'])
+            const thought = dl && dl['type'] === 'thinking_delta' ? str(dl['thinking']) : null
+            if (thought) { out.live = [{ kind: 'reasoning', text: thought }]; return out }
+          }
+        }
         if (inner['type'] !== 'content_block_delta') return out
         const delta = obj(inner['delta'])
         if (!delta || delta['type'] !== 'text_delta') return out

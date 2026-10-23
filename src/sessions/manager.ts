@@ -28,6 +28,9 @@ import type { SessionContext } from './context.js'
 import { createRegistry, isSessionName, normalizeTitle, QUEUE_MAX, SESSION_TITLE_MAX, titleLength } from './registry.js'
 import type { QueueItem, SessionBrowser, SessionMode, SessionRecord, SessionRegistry, SessionStatus, SessionWorktree } from './registry.js'
 import { approvalBrowserRefusal, removeBrowserProfile, resetBrowserDirs } from '../mcp/browser.js'
+import { createPhaseTracker } from './phaseTracker.js'
+import type { LiveSignal } from './phaseTracker.js'
+import type { TurnPhase } from './turnPhase.js'
 import { claudeChoices, ConfigureError, hasChanges, modelWindows, planConfigure } from './settings.js'
 import type { ConfigureChanges, ConfigureRequest, ConfigureWhen, ModelChoice } from './settings.js'
 import { HUMAN_STATUSES, reduceStatusEvent, TERMINAL_STATUSES } from './status.js'
@@ -257,8 +260,20 @@ export interface SessionManager {
   retry(name: string): Promise<{ turnId: string }>
   wait(params: WaitParams): Promise<WaitResult>
   read(name: string, since: number, format: 'text' | 'json'): { cursor: number; text?: string; events?: PultEvent[]; worktree?: SessionWorktree }
-  /** Строки реестра с живым статусом, числом запросов в Inbox и последним известным контекстом. */
-  list(): Array<SessionRecord & { pendingPermissions: number }>
+  /**
+   * Строки реестра с живым статусом, числом запросов в Inbox, последним известным контекстом и фазой хода (0.3.5,
+   * без текста размышлений).
+   */
+  list(): Array<SessionRecord & { pendingPermissions: number; phase?: TurnPhase }>
+  /**
+   * Фаза хода сессии (0.3.5, src/sessions/phaseTracker.ts) — с текстом размышлений: её отдаёт живой канал окна.
+   * `null` — хода нет.
+   */
+  phase(name: string): TurnPhase | null
+  /** Сессии, у которых сейчас есть фаза. */
+  phaseNames(): string[]
+  /** Живой сигнал адаптера (провайдер отозвался, размышления): в журнал не пишется. */
+  live(name: string, sig: LiveSignal): void
   /** Стоп хода. `turnId` — только если идёт именно этот ход (иначе `false`, ничего не делается). */
   stop(name: string, turnId?: string): Promise<boolean>
   rm(name: string, opts?: RmOptions): Promise<RmResult>
@@ -313,6 +328,8 @@ export interface ManagerOptions {
   modelChoices?(provider: 'claude' | 'codex'): Promise<ModelChoice[] | null>
   /** Срок удержания очереди открытой правкой (мс); по умолчанию `QUEUE_EDIT_HOLD_MS`. Тесты ставят короче. */
   queueEditHoldMs?: number
+  /** 0.3.5: фаза хода сессии сменилась — демон шлёт кадр живого канала (src/daemon/live.ts). Синхронно. */
+  onPhase?(name: string): void
 }
 
 /** Отказ хода, пока ставится обновление: окно оставляет текст в поле ввода. */
@@ -368,6 +385,9 @@ export function createManager(opts: ManagerOptions): SessionManager {
 
   // Рестарт демона: ни один процесс провайдера не жив, поэтому всё незавершённое — `cold`.
   // Ни одного перезапуска отсюда не делается (шторм на старте — худшее, что может случиться).
+  // 0.3.5: фаза хода — из событий, которые идут через `emit`, начала хода в `prompt` и живых сигналов адаптеров.
+  const phases = createPhaseTracker({ ...(opts.onPhase ? { onChange: opts.onPhase } : {}) })
+
   const cooled = registry.coolDown()
   if (cooled) opts.logger.info('сессии остужены после рестарта', { count: cooled })
   // О2: записи до 0.2.21 отметки «видел» не знают — всё прошлое считается прочитанным (см. seedSeen).
@@ -491,6 +511,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
       }
     }
     if (ev.kind === 'usage.updated') trackUsage(ev)
+    if (statuses.has(ev.sessionId) || ev.kind === 'session.ended') phases.event(ev)
     return ev
   }
 
@@ -984,6 +1005,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
       // статус сессии и текст ответа (`agent read`) реплика человека менять не должна.
       // Текст — через ту же редакцию, что и ответы модели (инвариант 7).
       emit({ sessionId: name, provider: rec.provider, kind: 'message.user', data: { text: redactString(text) } })
+      phases.accepted(name)
       // Реплика в архивную сессию — она снова в работе: из архива её возвращает сама реплика.
       if (rec.archived) registry.update(name, { archived: undefined })
       maybeAutoTitle(name, text)
@@ -1005,6 +1027,8 @@ export function createManager(opts: ManagerOptions): SessionManager {
         await adapter.resume(name, rec)
       } catch (e) {
         releasePrompting(name)
+        // Ход не завёлся, а события конца нет: строка «запускается…» не должна висеть.
+        phases.abandoned(name)
         throw e
       }
       // Пока шёл resume (секунды), могло начаться обновление (`update.apply {force}`): ход, отправленный
@@ -1296,14 +1320,22 @@ export function createManager(opts: ManagerOptions): SessionManager {
       return registry.list().map((rec) => {
         // Живое значение свежее записанного: в реестр контекст попадает только со сменой статуса.
         const context = contexts.get(rec.name)
+        const phase = phases.get(rec.name, { reasoning: false })
         return {
           ...rec,
           lastStatus: currentStatus(rec.name),
           pendingPermissions: opts.broker.list(rec.name).length,
           ...(context ? { context } : {}),
+          ...(phase ? { phase } : {}),
         }
       })
     },
+
+    phase(name) { return registry.get(name) ? phases.get(name) : null },
+
+    phaseNames() { return phases.names().filter((n) => registry.get(n)) },
+
+    live(name, sig) { if (statuses.has(name)) phases.live(name, sig) },
 
     async stop(name, turnId) {
       const rec = needRec(name)
@@ -1369,6 +1401,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
         lastEventAt.delete(name)
         stalledFor.delete(name)
         stopRequested.delete(name)
+        phases.forget(name)
         // О3: профиль браузера сессии (куки входа) уходит вместе с ней — даже если браузер уже выключили:
         // после выхода Chrome (до 5 с), rename и удаление в фоне. Скачивания остаются до нового старта с этим именем.
         try { await removeBrowserProfile(opts.paths, name) } catch (e) { opts.logger.warn('профиль браузера не удалён', { session: name, error: (e as Error).message }) }

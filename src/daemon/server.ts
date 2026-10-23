@@ -59,6 +59,9 @@ import type { SessionManager } from '../sessions/manager.js'
 import { formatTree } from '../sessions/tree.js'
 import type { EventBus, SubscriptionManager } from './subscriptions.js'
 import { createBus, createSubscriptions } from './subscriptions.js'
+import { createLiveChannel } from './live.js'
+import type { LiveChannel } from './live.js'
+import { LIVE_CURSOR_BASE } from '../sessions/turnPhase.js'
 import {
   approvalBrowserRefusal, browserDirs, BYPASS_REFUSAL, claudeDefaultMode, createBrowserInstaller, ensureBrowserDirs, findChrome, PLAYWRIGHT_MCP_VERSION, sweepDeadBrowserDirs,
 } from '../mcp/browser.js'
@@ -334,6 +337,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     paths, config, logger, bin: claudeBin,
     ...(opts.cliEntry !== undefined ? { cliEntry: opts.cliEntry } : {}),
     emit: (draft) => { manager.emit(draft) },
+    live: (name, sig) => { manager.live(name, sig) },
     askPermission: (req) => broker.request(req),
     ...(netCheck ? { netCheck } : {}),
     mcpExtras: (name, nodeBin, at) => mcpExtras(name, nodeBin, at),
@@ -345,6 +349,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
   const codex: ProviderAdapter = createCodexAdapter({
     paths, config, logger, bin: codexBin,
     emit: (draft) => { manager.emit(draft) },
+    live: (name, sig) => { manager.live(name, sig) },
     askPermission: (req) => broker.request(req),
     // Разрешения Codex живут в ОБЩЕМ процессе app-server: когда он умирает, отвечать по их
     // id уже некому, и вопрос обязан уйти из Inbox отказом, а не висеть (инвариант 5).
@@ -375,9 +380,12 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
   // ли обновление» — ссылка заполняется ниже, до первого запроса.
   let updaterRef: UpdateChecker | null = null
   let appUpdaterRef: AppUpdater | null = null
+  // 0.3.5: живой канал фаз хода — кадры мимо журнала (src/daemon/live.ts). Заводится после менеджера: фазу знает он.
+  let liveRef: LiveChannel | null = null
   const manager: SessionManager = createManager({
     paths, config, logger, store,
     publish: emit,
+    onPhase: (name) => { liveRef?.touch(name) },
     holdTurns: () => updaterRef?.applying() ?? false,
     adapters: { claude, codex },
     broker,
@@ -408,6 +416,8 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     ...(opts.updates ?? {}),
   })
   updaterRef = updater
+  const liveChannel: LiveChannel = createLiveChannel({ phase: (name) => manager.phase(name), names: () => manager.phaseNames() })
+  liveRef = liveChannel
   // 0.3.4: окно обновляется само — демон качает, проверяет и меняет Pult.app, сессии не трогаются.
   const appUpdater: AppUpdater = createAppUpdater({
     paths, config, logger,
@@ -1182,8 +1192,11 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
             s.once('close', onClose)
           }),
         }
+        // 0.3.5: курсор от LIVE_CURSOR_BASE — живой канал фаз хода (src/sessions/turnPhase.ts): так его открывает и
+        // окно 0.1.15, у которого в подписке нет ничего, кроме `since`.
+        const live = params['live'] === true || since >= LIVE_CURSOR_BASE
         const handle = conn.subs.subscribe(
-          { since, ...(sessionId !== undefined ? { sessionId } : {}) },
+          { since, ...(sessionId !== undefined ? { sessionId } : {}), ...(live ? { live: true } : {}) },
           sink,
         )
         // Сначала ответ с номером подписки, потом кадры: обратный порядок клиент не разберёт.
@@ -1274,7 +1287,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
 
   server.on('connection', (socket) => {
     const id = ++connSeq
-    const conn: Connection = { id, socket, authed: false, client: 'unknown', subs: createSubscriptions(bus, store), searchGen: 0 }
+    const conn: Connection = { id, socket, authed: false, client: 'unknown', subs: createSubscriptions(bus, store, liveChannel), searchGen: 0 }
     connections.set(id, conn)
     const splitter = createLineSplitter()
 
@@ -1414,6 +1427,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
       try { conn.socket.destroy() } catch { /* уже закрыт */ }
     }
     connections.clear()
+    liveChannel.close()
     await new Promise<void>((resolve) => server.close(() => resolve()))
     store.close()
     // LOCK СНИМАЕТСЯ ПОСЛЕДНИМ. Он — единственный арбитр «демон здесь один», и пока он держан,

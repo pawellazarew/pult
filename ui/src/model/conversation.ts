@@ -508,22 +508,8 @@ export function messageSource(it: ConvItem): string | null {
   return null
 }
 
-/** Короткая подпись инструмента для свёрнутой строки: что именно он трогает. */
-export function toolSummary(name: string, input: Record<string, unknown>): string {
-  const pick = (...keys: string[]): string | undefined => {
-    for (const k of keys) { const v = input[k]; if (typeof v === 'string' && v) return v }
-    return undefined
-  }
-  const cmd = input['command']
-  if (Array.isArray(cmd)) return cmd.filter((x) => typeof x === 'string').join(' ')
-  // Поиск: что ищем важнее, где ищем.
-  const pattern = pick('pattern')
-  if (pattern) { const where = pick('path'); return where ? `${pattern}  в ${where}` : pattern }
-  const s = pick('command', 'file_path', 'notebook_path', 'path', 'pattern', 'url', 'query', 'description', 'prompt')
-  if (s) return s.length > 160 ? `${s.slice(0, 160)}…` : s
-  void name
-  return ''
-}
+/** Короткая подпись инструмента для свёрнутой строки — та же, что у строки фазы хода (демон считает её сам). */
+export { toolSummary } from '../../../src/sessions/turnPhase.js'
 
 /** Длительность в секундах по-русски: «0,3 с», а не «0.3 с» (`toFixed` всегда пишет точку). */
 export function formatSeconds(ms: number): string {

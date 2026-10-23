@@ -57,6 +57,8 @@ import type { AgentRecord, DaemonStatus, DoctorReport, PendingPermission } from 
 import type { ProviderCatalog } from './model/types.js'
 import type { FilePathSource } from './model/paths.js'
 import { isQuestionTool } from './model/questions.js'
+import { applyPhaseFrame, EMPTY_PHASES, LIVE_CURSOR_BASE } from './model/phase.js'
+import type { PhaseMap } from './model/phase.js'
 import type { SessionContext } from './model/context.js'
 import { closeTab, groupByProject, openTab, projectName, pruneTabs } from './model/projects.js'
 import { plural } from './lib/ru.js'
@@ -93,6 +95,8 @@ function withEarlier(ui: UiState, name: string): readonly ConvItem[] {
 export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   const [conn, setConn] = useState<ConnState>({ state: 'connecting', attempt: 0 })
   const [ui, setUi] = useState<UiState>(EMPTY_STATE)
+  // 0.3.5: фазы ходов из живого канала демона (кадры `turn.phase` мимо журнала).
+  const [phases, setPhases] = useState<PhaseMap>(EMPTY_PHASES)
   const [records, setRecords] = useState<AgentRecord[]>([])
   // Имя → подпись (название или само имя): и «знаком ли агент окну», и текст уведомлений.
   const known = useRef<Map<string, string>>(new Map())
@@ -371,6 +375,17 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     return () => { off(); if (timer !== null) clearTimeout(timer) }
   }, [bridge, scheduleRefresh, bootSince, notify])
 
+  // 0.3.5: живой канал фаз хода — отдельная подписка с курсором от LIVE_CURSOR_BASE (src/sessions/turnPhase.ts).
+  // Журнал по ней не идёт; первый кадр — `reset`, следом текущие фазы, дальше перемены (не чаще ~7 в секунду на
+  // сессию). Рестарт демона оболочка переживает сама: переподписка с последним номером, демон снова шлёт `reset`.
+  // Старый демон таких кадров не знает — карта просто пустая, строки фазы нет.
+  useEffect(() => {
+    const off = bridge.subscribe(LIVE_CURSOR_BASE, (ev) => { setPhases((m) => applyPhaseFrame(m, ev)) })
+    return () => { off() }
+  }, [bridge])
+  // Связь упала — фазы устарели; поднимется — придут заново с `reset`.
+  useEffect(() => { if (conn.state !== 'up') setPhases(EMPTY_PHASES) }, [conn.state])
+
   // Ссылка `pult://session/<имя>` на сессию, которой нет, — строка в шапке, а не молчание. Пока список
   // не пришёл (холодный старт по ссылке), судить рано: переход как есть, лишняя вкладка уйдёт сама.
   const loadedRef = useRef(false)
@@ -419,13 +434,14 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   // --- вид ---------------------------------------------------------------------------
   const pending = useMemo(() => pendingBySession(ui.inbox), [ui.inbox])
   const agents = useMemo(() => {
-    const live: Record<string, { status?: AgentRecord['lastStatus']; lastTs?: string; pending: number; context?: SessionContext }> = {}
+    const live: Record<string, { status?: AgentRecord['lastStatus']; lastTs?: string; pending: number; context?: SessionContext; phase?: PhaseMap[string] }> = {}
     for (const r of records) {
       const s = ui.sessions[r.name]
-      live[r.name] = { ...(s ? { status: s.status, lastTs: s.lastTs, ...(s.background ? { background: s.background } : {}) } : {}), ...(s?.context ? { context: s.context } : {}), pending: pending[r.name] ?? 0 }
+      const ph = phases[r.name]
+      live[r.name] = { ...(s ? { status: s.status, lastTs: s.lastTs, ...(s.background ? { background: s.background } : {}) } : {}), ...(s?.context ? { context: s.context } : {}), pending: pending[r.name] ?? 0, ...(ph ? { phase: ph } : {}) }
     }
     return buildAgents(records, live)
-  }, [records, ui.sessions, pending])
+  }, [records, ui.sessions, pending, phases])
   // Удалённые сессии уходят из вкладок — но только после первого `agent.list`, иначе пустой
   // список на старте стёр бы сохранённые вкладки.
   useEffect(() => { if (loaded) setTabs((t) => { const n = pruneTabs(t, new Set(records.map((r) => r.name))); return n.length === t.length ? t : n }) }, [records, loaded])
@@ -1031,6 +1047,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
             onRemove={() => setModal({ type: 'rm', name: current.name })}
             onReveal={(p) => void bridge.revealPath(p)}
             onApprove={approve} onDeny={deny} onAnswer={answer} onFocusPerm={setFocusChosen}
+            onOpenInbox={(permId) => { setInboxOpen(true); setFocusChosen(permId) }}
             {...(settingsOk && conn.state === 'up' ? { onConfigure: (pick: SettingsPick) => configureAgent(current.name, pick) } : {})}
             catalog={providers} windows={windows} />
         ) : (
