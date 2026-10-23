@@ -126,7 +126,9 @@ How Pult is built and tested: [`docs/DEV.md`](docs/DEV.md) (in Russian).
 
 ## Quick start
 
-Pick a project folder — a git repository is recommended, so you can review and undo what the agent changed.
+Pick a project folder — a git repository is recommended, so you can review and undo what the agent changed. It can't
+be `PULT_HOME` (`~/.pult`) or a folder above it such as `~`: an agent that edits files without asking would be able to
+rewrite Pult's own `config.json`.
 
 ```sh
 pult doctor                                                   # everything in place?
@@ -177,6 +179,11 @@ Every question from every session goes to the Inbox (⌘I in the window, `pult p
   only Pult's. The same works for network access to a host. These rules are written to `~/.codex/rules/default.rules`;
   Pult never removes them for you.
 - **Claude** doesn't offer reusable rules to Pult today, so Claude cards only offer "once".
+- **A card says when it shows less than will run.** The secret filter masks e-mails, tokens and URL credentials on
+  the card (`<email>`, `<token>`, `<redacted>`), and Codex fields are clipped; the ORIGINAL command still runs, so
+  `ssh root@prod.example.com` shows as `ssh <email>`. Such a card is marked "Показано не всё" ("not everything is
+  shown") and `pult perm list` prints `ВНИМАНИЕ: показано не всё`; if unsure, deny. ⌘Enter only approves a card you can
+  see: the open session's own request or one in the open Inbox.
 - **Silence is a no.** Nobody answered within 10 minutes, the daemon went away, the agent was stopped — the answer is
   "deny".
 

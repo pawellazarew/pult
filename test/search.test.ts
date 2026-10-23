@@ -4,7 +4,7 @@
 
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { describe, it } from 'node:test'
@@ -449,7 +449,10 @@ describe('agent.export на демоне и pult agent export', () => {
     })
     let c: Client | null = null
     try {
-      assert.equal((await run(['agent', 'start', 'w', '--kind', 'claude', '--cwd', dir])).code, 0)
+      // Папка сессии — рядом с PULT_HOME, не над ним (`coversPultHome`, src/sessions/manager.ts).
+      const work = join(dir, 'work')
+      mkdirSync(work)
+      assert.equal((await run(['agent', 'start', 'w', '--kind', 'claude', '--cwd', work])).code, 0)
       c = await connectClient(paths)
       await c.request('events.emit', { kind: 'message.user', sessionId: 'w', provider: 'claude', data: { text: 'Привет из CLI' } })
       const p = await run(['agent', 'export', 'w'])

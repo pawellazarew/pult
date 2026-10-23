@@ -12,7 +12,7 @@ import type { EventDraft } from '../dist/core/events.js'
 import { PROTOCOL_VERSION } from '../dist/core/rpc.js'
 import { readToken } from '../dist/core/token.js'
 import type { DaemonHandle } from '../dist/daemon/server.js'
-import { CLI_ENTRY, rawConnect, sleep, startTestDaemon, tempHome, waitFor } from './helpers.js'
+import { CLI_ENTRY, rawConnect, sleep, startTestDaemon, tempHome, waitFor, workIn } from './helpers.js'
 import type { TempHome } from './helpers.js'
 
 /**
@@ -21,7 +21,7 @@ import type { TempHome } from './helpers.js'
  * начинается с настоящей сессии, а не с имени, взятого из воздуха.
  */
 const register = async (daemon: DaemonHandle, home: TempHome, name: string): Promise<void> => {
-  await daemon.manager.start({ name, kind: 'claude', cwd: home.paths.home, mode: 'turn' })
+  await daemon.manager.start({ name, kind: 'claude', cwd: workIn(home), mode: 'turn' })
 }
 
 // --- брокер -------------------------------------------------------------------
@@ -145,6 +145,27 @@ describe('брокер разрешений', () => {
     const decision = await answer
     // Правка обязана примениться дословно: подставить `<email>` — значит сломать её.
     assert.deepEqual(decision.updatedInput, input)
+  })
+
+  it('РЕДАКЦИЯ ВИДНА: карточка знает, что показанное ≠ исполняемому (`concealed`), чистый вход — без флага', async () => {
+    const drafts: EventDraft[] = []
+    const broker = createBroker({ emit: (d) => drafts.push(d) })
+    const requested = (): Record<string, unknown> => drafts.filter((d) => d.kind === 'permission.requested').at(-1)!.data as Record<string, unknown>
+    // Адресат команды выглядит как почта: человек видит `ssh <email>`, исполнится `ssh root@prod.example.com`.
+    const hidden = broker.request({ sessionId: 'w', toolName: 'Bash', input: { command: 'ssh root@prod.example.com uptime' } })
+    assert.match(JSON.stringify(requested()['input']), /<email>/)
+    assert.equal(requested()['concealed'], true)
+    assert.equal(broker.list()[0]?.concealed, true)
+    // Адаптер сам подрезал вход (Codex) — брокер верит его флагу.
+    void broker.request({ sessionId: 'w', toolName: 'execCommand', input: { command: 'ls' }, concealed: true })
+    assert.equal(requested()['concealed'], true)
+    // Ничего не скрыто — флага нет ни в событии, ни в `perm.list`.
+    void broker.request({ sessionId: 'w', toolName: 'Bash', input: { command: 'npm test' } })
+    assert.equal('concealed' in requested(), false)
+    assert.equal('concealed' in broker.list().at(-1)!, false)
+    broker.resolve(broker.list()[0]!.id, { behavior: 'allow' })
+    assert.deepEqual((await hidden).updatedInput, { command: 'ssh root@prod.example.com uptime' })
+    broker.shutdown()
   })
 })
 

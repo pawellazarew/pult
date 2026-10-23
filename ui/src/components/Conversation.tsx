@@ -534,7 +534,7 @@ function Item({ it, ...p }: { it: ConvItem } & ConversationProps): ReactElement 
           <Gutter who="запрос" cls="t-wait" ts={it.ts} />
           <PermCard permId={it.permId} toolName={it.toolName} input={it.input} state={it.state} createdAt={it.ts} now={p.now}
             focused={p.focusedPerm === it.permId} {...(it.message ? { message: it.message } : {})} {...(it.by ? { by: it.by } : {})}
-            {...(it.offers ? { offers: it.offers } : {})} {...(it.scope ? { scope: it.scope } : {})} {...(it.rule ? { rule: it.rule } : {})}
+            {...(it.offers ? { offers: it.offers } : {})} {...(it.concealed ? { concealed: true } : {})} {...(it.scope ? { scope: it.scope } : {})} {...(it.rule ? { rule: it.rule } : {})}
             busy={p.permBusy.has(it.permId)}
             onFocus={() => p.onFocusPerm(it.permId)} onApprove={(scope) => p.onApprove(it.permId, scope)} onAnswer={(answers) => p.onAnswer?.(it.permId, answers)} onDeny={(r) => p.onDeny(it.permId, r)} />
         </div>

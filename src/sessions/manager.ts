@@ -14,7 +14,8 @@
 // `agent.wait`, и его можно позвать хоть из другого процесса.
 
 import { randomUUID } from 'node:crypto'
-import { statSync } from 'node:fs'
+import { realpathSync, statSync } from 'node:fs'
+import { relative, sep } from 'node:path'
 import type { PultConfig } from '../core/config.js'
 import type { EventDraft, PultEvent } from '../core/events.js'
 import type { Logger } from '../core/log.js'
@@ -41,6 +42,18 @@ import type { AgentTree } from './tree.js'
 import { prepareWorktree, removeWorktree, WorktreeError } from './worktree.js'
 import type { PreparedWorktree } from './worktree.js'
 import type { ExternalMessage } from './external.js'
+
+/**
+ * Папка сессии — сам `PULT_HOME` или его предок (`--cwd ~`). Отказ: режимы `workspace` (Claude, `acceptEdits`) и
+ * `ask` (Codex, `workspace-write`) дают агенту править файлы под `cwd` без вопроса, а под `PULT_HOME` лежат
+ * `config.json` (`notifyCommand` демон исполняет через `/bin/sh -c` вне песочницы агента), лаунчеры службы и
+ * `run/token`, которым отвечают на запросы Inbox. Папка ВНУТРИ `PULT_HOME` до них не дотягивается — её пускаем.
+ */
+export function coversPultHome(cwd: string, home: string): boolean {
+  const real = (p: string): string => { try { return realpathSync.native(p) } catch { return p } }
+  const rel = relative(real(cwd), real(home))
+  return rel !== '..' && !rel.startsWith(`..${sep}`)
+}
 
 export class ManagerError extends Error {
   readonly code: string
@@ -759,6 +772,9 @@ export function createManager(opts: ManagerOptions): SessionManager {
         let cwdOk = false
         try { cwdOk = statSync(params.cwd).isDirectory() } catch { cwdOk = false }
         if (!cwdOk) throw new ManagerError('invalid_params', `--cwd ${params.cwd}: такой папки нет`)
+        if (coversPultHome(params.cwd, opts.paths.home)) {
+          throw new ManagerError('invalid_params', `--cwd ${params.cwd}: внутри папки сессии лежит ${opts.paths.home} — возьми папку проекта`)
+        }
         const adapter = adapterFor(params.kind)
         const blocked = adapter.blocked()
         if (blocked.blocked) {

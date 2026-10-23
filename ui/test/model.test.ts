@@ -216,6 +216,16 @@ describe('Inbox', () => {
     assert.deepEqual(inboxList(s).map((p) => p.id), ['p3'])
   })
 
+  it('`concealed` из события и из perm.list доезжает до карточки; без флага — поля нет', () => {
+    let s = applyInbox(EMPTY_INBOX, ev('permission.requested', { id: 'p1', toolName: 'Bash', input: { command: 'ssh <email>' }, concealed: true },
+      { sessionId: 'a', provider: 'pult', ts: '2026-09-28T10:00:00Z' }))
+    assert.equal(s['p1']?.concealed, true)
+    s = applyInbox(s, req('p2', 'a', '2026-09-28T10:00:01Z'))
+    assert.equal('concealed' in s['p2']!, false)
+    s = reconcileInbox(EMPTY_INBOX, [{ id: 'p9', sessionId: 'c', toolName: 'Bash', input: { command: 'ssh <email>' }, concealed: true, createdAt: '2026-09-28T10:01:00Z', waitingMs: 5 }])
+    assert.equal(s['p9']?.concealed, true)
+  })
+
   it('сверка с perm.list: снятое без окна исчезает, неизвестное появляется', () => {
     let s = applyInbox(EMPTY_INBOX, req('p1', 'a', '2026-09-28T10:00:00Z'))
     s = reconcileInbox(s, [{ id: 'p9', sessionId: 'c', toolName: 'Bash', input: { command: 'ls' }, createdAt: '2026-09-28T10:01:00Z', waitingMs: 5 }])
@@ -235,6 +245,23 @@ describe('Inbox', () => {
     assert.equal(focusedRequest(list, 'нет', 'b')?.id, 'p2')
     assert.equal(focusedRequest(list, null, null)?.id, 'p1')
     assert.equal(focusedRequest([], null, 'a'), null)
+  })
+
+  it('выделенный запрос — только видимый: закрытый Inbox не отдаёт ⌘↵ запрос чужой сессии', () => {
+    const list = [
+      { id: 'p1', sessionId: 'b', toolName: 'Bash', input: {}, createdAt: '1' },
+      { id: 'p2', sessionId: 'a', toolName: 'Bash', input: {}, createdAt: '2' },
+    ]
+    // Inbox закрыт, у текущего агента запроса нет — выделять нечего.
+    assert.equal(focusedRequest(list.slice(0, 1), null, 'a', []), null)
+    assert.equal(focusedRequest(list.slice(0, 1), null, null, []), null)
+    // Выбранный раньше запрос чужой сессии после закрытия Inbox не выделен.
+    assert.equal(focusedRequest(list, 'p1', 'a', [])?.id, 'p2')
+    assert.equal(focusedRequest(list.slice(0, 1), 'p1', 'a', []), null)
+    // Свой запрос виден в разговоре и при закрытом Inbox.
+    assert.equal(focusedRequest(list, null, 'a', [])?.id, 'p2')
+    // Inbox открыт — чужой запрос виден, откат на самый старый прежний.
+    assert.equal(focusedRequest(list.slice(0, 1), null, 'a', list.slice(0, 1))?.id, 'p1')
   })
 })
 

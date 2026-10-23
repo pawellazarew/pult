@@ -269,6 +269,32 @@ describe('M8d: адаптер codex — ширина «да» доезжает �
     })
   }
 
+  it('КАРТОЧКА ПРИЗНАЁТСЯ: длинный массив команды — с хвостом «…(ещё N)» и `concealed`, короткий — как есть', async () => {
+    const argv = Array.from({ length: 45 }, (_, i) => `a${i}`)
+    const r = rig({ approval: { params: { command: argv, availableDecisions: ['accept', 'cancel'] } } })
+    try {
+      await r.adapter.startSession(spec(r))
+      const turn = await r.adapter.send('w', 'делай [[approval-custom]]')
+      assert.ok(await waitFor(() => r.broker.list('w').length === 1, 5000))
+      const pending = r.broker.list('w')[0]!
+      assert.deepEqual(pending.input['command'], [...argv.slice(0, 40), '…(ещё 5)'], 'хвост команды не пропадает молча')
+      assert.equal(pending.concealed, true)
+      const requested = r.drafts.find((d) => d.kind === 'permission.requested')?.data as Record<string, unknown>
+      assert.equal(requested['concealed'], true, 'окно узнаёт это событием')
+      r.broker.resolve(pending.id, { behavior: 'deny' })
+      await turn.done
+    } finally { await r.adapter.shutdown(); r.remove() }
+    const clean = rig({ approval: { params: { command: 'echo hi', availableDecisions: ['accept', 'cancel'] } } })
+    try {
+      await clean.adapter.startSession(spec(clean))
+      const turn = await clean.adapter.send('w', 'делай [[approval-custom]]')
+      assert.ok(await waitFor(() => clean.broker.list('w').length === 1, 5000))
+      assert.equal(clean.broker.list('w')[0]!.concealed, undefined)
+      clean.broker.resolve(clean.broker.list('w')[0]!.id, { behavior: 'deny' })
+      await turn.done
+    } finally { await clean.adapter.shutdown(); clean.remove() }
+  })
+
   it('НЕ ПРЕДЛОЖЕНО: кнопок нет, брокер отвергает scope, а прямой ответ сужается до одного раза', async () => {
     // Измеренная форма без объекта поправки: правило выдумывать нельзя, acceptForSession не предложен.
     const r = rig({ approval: { params: { command: 'echo hi', proposedExecpolicyAmendment: AMEND, availableDecisions: ['accept', 'cancel'] } } })
