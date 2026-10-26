@@ -3,7 +3,7 @@
 
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { buildClaudeArgv, claudeGuardPermissions, mcpConfigBody, PERMISSION_TOOL, userTurnLine } from '../dist/adapters/claude/argv.js'
+import { buildClaudeArgv, claudeGuardPermissions, escapeRulePath, mcpConfigBody, PERMISSION_TOOL, userTurnLine } from '../dist/adapters/claude/argv.js'
 
 const UUID = '94357d2d-8c5c-46b3-9a4c-2176726d3521'
 
@@ -108,5 +108,11 @@ describe('argv claude', () => {
     assert.deepEqual(settings(ro), { permissions: { ask: ['Bash'], deny } })
     assert.deepEqual(claudeGuardPermissions(['/a', '/b'], 'read-only'), { ask: ['Bash'], deny: ['Read(//a/**)', 'Edit(//a/**)', 'Read(//b/**)', 'Edit(//b/**)'] })
     assert.equal(settings(buildClaudeArgv({ sessionId: UUID, resume: false })), null, 'без папок и read-only — флага нет')
+  })
+
+  it('ревью #16: метасимволы глоба в пути правила экранируются (S12 T6: без этого правило мимо)', () => {
+    assert.equal(escapeRulePath('/h/m[a]{b}(c)*?\\x'), '/h/m\\[a\\]\\{b\\}\\(c\\)\\*\\?\\\\x')
+    assert.equal(escapeRulePath('/Users/you/.pult/run'), '/Users/you/.pult/run')
+    assert.deepEqual(claudeGuardPermissions(['/p (1)/run']).deny, ['Read(//p \\(1\\)/run/**)', 'Edit(//p \\(1\\)/run/**)'])
   })
 })

@@ -14,7 +14,7 @@ import { claudeSubscription, codexLoginLine, formatDoctor, parseClaudeAuth, runD
 import type { LocateDeps, LocatedTool, ToolName } from '../dist/env/locate.js'
 import { locateAllAsync, locateTool, TOOLS } from '../dist/env/locate.js'
 import type { NetCheck } from '../dist/env/net.js'
-import { codexConfigPath, codexNetworkAccess, codexNetworkItems } from '../dist/env/codexConfig.js'
+import { codexConfigPath, codexNetworkAccess, codexNetworkItems, codexSandboxNetwork, parseTomlLite } from '../dist/env/codexConfig.js'
 import { tempHome } from './helpers.js'
 
 const tool = (name: ToolName, path: string | null, realpath?: string): LocatedTool => ({
@@ -631,6 +631,37 @@ describe('доктор: сеть в песочнице Codex (0.3.7)', () => {
     assert.equal(codexNetworkAccess('model = "gpt"\n'), null)
   })
 
+  it('ревью #16: профиль, профиль разрешений с unix-сокетами, ложные срабатывания из строк и вложенных таблиц', () => {
+    // profile = "x" перекрывает верхний уровень — в обе стороны.
+    assert.equal(codexNetworkAccess('profile = "dev"\n[profiles.dev.sandbox_workspace_write]\nnetwork_access = true'), true)
+    assert.equal(codexNetworkAccess('profile = "dev"\n[sandbox_workspace_write]\nnetwork_access = true\n[profiles.dev.sandbox_workspace_write]\nnetwork_access = false'), false)
+    assert.equal(codexNetworkAccess('[profiles.dev.sandbox_workspace_write]\nnetwork_access = true'), null, 'профиль не выбран')
+    assert.equal(codexNetworkAccess('profile = "a.b"\n[profiles."a.b".sandbox_workspace_write]\nnetwork_access = true'), true)
+    // Текст строк — не настройки.
+    assert.equal(codexNetworkAccess('notes = """\n[sandbox_workspace_write]\nnetwork_access = true\n"""'), null)
+    assert.equal(codexNetworkAccess("notes = '''\nsandbox_workspace_write.network_access = true\n'''"), null)
+    assert.equal(codexNetworkAccess('x = "a # [sandbox_workspace_write]"\n'), null)
+    assert.equal(codexNetworkAccess("x = \"don't\" # [y]\n[sandbox_workspace_write]\nnetwork_access = true"), true)
+    // Вложенная встроенная таблица — не тот ключ; многострочная встроенная (TOML 1.1) — тот.
+    assert.equal(codexNetworkAccess('sandbox_workspace_write = { foo = { network_access = true } }'), null)
+    assert.equal(codexNetworkAccess('sandbox_workspace_write = {\n  network_access = true\n}'), true)
+    assert.equal(codexNetworkAccess('[sandbox_workspace_write.x]\nnetwork_access = true'), null)
+    assert.equal(codexNetworkAccess('[sandbox_workspace_write]\r\nnetwork_access = true\r\n'), true)
+    assert.equal(codexNetworkAccess('d = 1979-05-27 07:32:00Z\n[sandbox_workspace_write]\nnetwork_access = true'), true)
+    assert.equal(codexNetworkAccess('[[mcp]]\nname = "a"\n[[mcp]]\nname = "b"\n[sandbox_workspace_write]\nnetwork_access = true'), true)
+    // Профиль разрешений (codex 0.163+): только выбранный default_permissions.
+    const perm = (body: string): string[] => codexSandboxNetwork(`default_permissions = "p"\n[permissions.p.network]\n${body}`).unixSockets
+    assert.deepEqual(perm('dangerously_allow_all_unix_sockets = true'), ['permissions.p.network.dangerously_allow_all_unix_sockets = true'])
+    assert.deepEqual(perm('allow_unix_sockets = ["/tmp/x.sock"]'), ['permissions.p.network.allow_unix_sockets'])
+    assert.deepEqual(perm('allow_unix_sockets = []'), [])
+    assert.deepEqual(perm('[permissions.p.network.unix_sockets]\n"/tmp/x.sock" = "allow"'), ['permissions.p.network.unix_sockets'])
+    assert.deepEqual(perm('enabled = true'), [])
+    assert.deepEqual(codexSandboxNetwork('[permissions.q.network]\ndangerously_allow_all_unix_sockets = true').unixSockets, [], 'профиль не выбран')
+    // Кривой TOML — бросок разбора; совместимый вход — null.
+    assert.throws(() => parseTomlLite('[sandbox_workspace_write\nnetwork_access = true'))
+    assert.equal(codexNetworkAccess('x = "незакрыта'), null)
+  })
+
   it('network_access = true — warn с подсказкой; false или нет ключа — ok; нет файла — пункта нет', async () => {
     const home = tempHome()
     try {
@@ -641,7 +672,17 @@ describe('доктор: сеть в песочнице Codex (0.3.7)', () => {
       assert.match(warn.detail, /песочница Codex с сетью: агент сможет обратиться к демону Пульта/)
       assert.ok(warn.fix)
       writeFileSync(file, 'model = "x"\n')
-      assert.equal(find((await runDoctor(deps(home, { codexConfig: file }))).items, 'codex.network').status, 'ok')
+      const ok = find((await runDoctor(deps(home, { codexConfig: file }))).items, 'codex.network')
+      assert.equal(ok.status, 'ok')
+      assert.match(ok.detail, /«Только чтение», «Спрашивать» и «Правки в папке без вопросов».*не достанет сокет демона.*«Полном доступе»/)
+      writeFileSync(file, 'default_permissions = "p"\n[permissions.p.network]\ndangerously_allow_all_unix_sockets = true\n')
+      const sock = find((await runDoctor(deps(home, { codexConfig: file }))).items, 'codex.network')
+      assert.equal(sock.status, 'warn')
+      assert.match(sock.detail, /dangerously_allow_all_unix_sockets/)
+      writeFileSync(file, '[sandbox_workspace_write\n')
+      const broken = find((await runDoctor(deps(home, { codexConfig: file }))).items, 'codex.network')
+      assert.equal(broken.status, 'warn')
+      assert.match(broken.detail, /не разобран/)
       const none = (await runDoctor(deps(home, { codexConfig: join(home.paths.home, 'нет.toml') }))).items
       assert.equal(none.some((i) => i.id === 'codex.network'), false)
       assert.equal((await runDoctor(deps(home))).items.some((i) => i.id === 'codex.network'), false, 'без пути файл машины не читается')

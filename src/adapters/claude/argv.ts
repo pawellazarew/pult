@@ -41,7 +41,9 @@ export interface ClaudePermissionRules { allow?: readonly string[]; ask?: readon
  * 0.3.7: правила, которые Пульт ставит КАЖДОЙ сессии Claude поверх правил владельца (у Claude deny > ask > allow, и
  * разрешающее правило владельца их не перебьёт):
  *   * `deny Read/Edit(//<папка>/**)` — папка `PULT_HOME/run` (токен хозяина, mcp-config с ключом вопросов): `//` —
- *     абсолютный путь в правилах Claude Code; правило Edit закрывает и Write/MultiEdit/NotebookEdit;
+ *     абсолютный путь в правилах Claude Code; правило Edit закрывает и Write/MultiEdit/NotebookEdit. Закрывает инструменты
+ *     Read/Edit и простые чтения через Bash (`cat <run>/token` — отказ без вопроса даже при `Bash(cat:*)`, S12 T4), но НЕ
+ *     Bash целиком: разрешённый интерпретатор или `grep -r` по родителю папки читают токен (S12 T4e, T5a);
  *   * `read-only` — `ask: ["Bash"]`: правило владельца вроде `Bash(python3:*)` иначе исполнило бы интерпретатор в
  *     «Только чтение» без вопроса (`manual` уважает allow-правила). ИЗМЕРЕНО спайком S12 (CLI 2.1.310, haiku): с `ask`
  *     вопрос пришёл, без него — команда прошла молча; Read файла в папке вне cwd под deny — отказ без вопроса.
@@ -49,8 +51,17 @@ export interface ClaudePermissionRules { allow?: readonly string[]; ask?: readon
 export function claudeGuardPermissions(protectDirs: readonly string[], approval?: ApprovalMode): ClaudePermissionRules {
   return {
     ...(approval === 'read-only' ? { ask: ['Bash'] } : {}),
-    deny: protectDirs.flatMap((d) => [`Read(/${d}/**)`, `Edit(/${d}/**)`]),
+    deny: protectDirs.map(escapeRulePath).flatMap((d) => [`Read(/${d}/**)`, `Edit(/${d}/**)`]),
   }
+}
+
+/**
+ * Путь в правиле Claude — шаблон в духе gitignore: `[`, `]`, `{`, `}`, `(`, `)`, `*`, `?` в имени папки иначе читаются как
+ * шаблон, и правило мимо. ИЗМЕРЕНО S12 (T6, CLI 2.1.310): папка `m[a]{b}(c)` — без экранирования Read прочёл файл, с `\`
+ * перед каждым таким знаком — отказ правилом.
+ */
+export function escapeRulePath(p: string): string {
+  return p.replace(/[[\]{}()*?\\]/g, '\\$&')
 }
 
 /** Слить наборы правил: списки по видам, без повторов, порядок первого появления. Пустые виды не пишутся. */
