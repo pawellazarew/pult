@@ -26,6 +26,7 @@ import { codexInsideChatGPTApp, locateAllAsync } from './locate.js'
 import { loginShellPath } from './loginShell.js'
 import type { NetCheck } from './net.js'
 import { checkNetwork, netLine } from './net.js'
+import { guardLine, guardOff } from '../core/guard.js'
 
 export type DoctorStatus = 'ok' | 'warn' | 'fail'
 
@@ -415,11 +416,27 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
   })
 
   // --- сеть ------------------------------------------------------------------
+  // Правило стража — из конфига, без сети: видно и при `--no-net`. allow без стран запрещает все ходы.
+  const rule = deps.config.guard
+  const emptyAllow = rule.mode === 'allow' && rule.countries.length === 0
+  items.push({
+    id: 'guard.rule',
+    title: 'Страж сети',
+    status: emptyAllow ? 'fail' : guardOff(rule) ? 'warn' : 'ok',
+    detail: emptyAllow
+      ? `${guardLine(rule)} — все ходы запрещены: в режиме allow нет ни одной страны (config.json → network.guard)`
+      : guardOff(rule)
+      ? `${guardLine(rule)} — страж выключен: ходы идут из любой известной страны (неизвестная — по-прежнему отказ)`
+      : `${guardLine(rule)} — для claude, codex и opencode; неизвестная страна — отказ`,
+    ...(emptyAllow ? { fix: 'добавь страну в «Настройки» (⌘,) → «Страж сети» или: pult net guard --allow DE' }
+      : guardOff(rule) ? { fix: 'верни страны в «Настройки» (⌘,) → «Страж сети» или: pult net guard --deny RU,BY' } : {}),
+    data: { mode: rule.mode, countries: [...rule.countries] },
+  })
   if (!deps.skipNet) {
     // Провайдеры проверяются разом: у каждого своя проба (и свой прокси), ждать их очередью незачем.
     const checks = await Promise.all(PROVIDERS.map((provider) => (deps.net
       ? deps.net(provider)
-      : checkNetwork(provider, deps.config.network[provider], deps.config.guardCountries, { fresh: true }))))
+      : checkNetwork(provider, deps.config.network[provider], deps.config.guard, { fresh: true }))))
     for (const [i, provider] of PROVIDERS.entries()) {
       const check = checks[i] as NetCheck
       items.push({
@@ -435,6 +452,8 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
             ? (check.proxy
               ? `подними прокси ${redactString(check.proxy)} или поставь network.${provider}.mode = "auto" в ${deps.paths.config}`
               : `укажи network.${provider}.proxy или поставь network.${provider}.mode = "off" в ${deps.paths.config}`)
+            : check.reason === 'not_allowed_country'
+            ? `выход ${check.loc ?? 'неизвестен'} не в списке разрешённых (${check.guard.join(',')}): смени выход VPN или правило — «Настройки» → «Страж сети», pult net guard`
             : `подними VPN: выход ${check.loc ?? 'неизвестен'}, список-страж ${check.guard.join(',')}`,
         }),
         data: { mode: check.mode, path: check.path, loc: check.loc, reason: check.reason, ms: check.ms, checkedAt: check.checkedAt },

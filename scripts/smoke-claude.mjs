@@ -100,7 +100,7 @@ function sandbox() {
 
 async function guard() {
   const cfg = defaultConfig()
-  const check = await checkNetwork('claude', cfg.network.claude, cfg.guardCountries, { fresh: true })
+  const check = await checkNetwork('claude', cfg.network.claude, cfg.guard, { fresh: true })
   say(`страж: ${netLine(check)}`)
   if (!check.ok) {
     console.error(`ОТКАЗ (страж сети): ${check.reason}. Ни один ход не сделан.`)

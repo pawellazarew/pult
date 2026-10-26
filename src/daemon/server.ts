@@ -35,7 +35,7 @@ import { runDoctor } from '../env/doctor.js'
 import type { DoctorDeps, DoctorReport } from '../env/doctor.js'
 import { serviceDoctorItemsAsync } from '../service/doctor.js'
 import { versionDoctorItems } from '../update/doctor.js'
-import { checkNetwork } from '../env/net.js'
+import { checkNetwork, clearNetCache, lastNetExits, netGeneration, recordNetCheck } from '../env/net.js'
 import type { NetCheck } from '../env/net.js'
 import { locateToolPath, testLocate } from '../env/locate.js'
 import { buildChildEnv } from '../env/allowlist.js'
@@ -69,7 +69,9 @@ import type { BrowserInstaller, InstallResult } from '../mcp/browser.js'
 import { browserDoctorItems, bypassDoctorItems, mcpDoctorItems } from '../mcp/doctor.js'
 import { createMcpExtras } from '../mcp/session.js'
 import { listServers, RESERVED_MCP_NAMES } from '../mcp/servers.js'
-import { MCP_SERVER_NAME_RE, MCP_SERVERS_MAX, writeMcpSelection, writeNewSession, writeUpdatesCheck } from '../core/config.js'
+import { MCP_SERVER_NAME_RE, MCP_SERVERS_MAX, writeMcpSelection, writeNetworkGuard, writeNewSession, writeUpdatesCheck } from '../core/config.js'
+import { GuardError, guardLine, guardVerdict, parseGuardShape, parseGuardStrict, sameGuard } from '../core/guard.js'
+import type { GuardRule } from '../core/guard.js'
 import type { SessionBrowser, SessionRecord, SessionStatus } from '../sessions/registry.js'
 import { ApplyError, createUpdateChecker } from '../update/checker.js'
 import type { CheckerOptions, UpdateChecker } from '../update/checker.js'
@@ -248,25 +250,35 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     if (!opts.testMode) return null
     const mode = process.env['PULT_TEST_NET']
     if (mode !== 'ok' && mode !== 'blocked') return null
-    const ok = mode === 'ok'
+    // 0.3.6: `ok` — выход `PULT_TEST_NET_LOC` (две буквы; по умолчанию XX — «страна, которой нет ни в одном списке»), и
+    // решение принимает НАСТОЯЩЕЕ правило стража из конфига (режим allow с e2e окна отказывает так же, как в бою).
+    // `blocked` — всегда отказ с выходом RU, какое бы правило ни стояло.
+    const forced = mode === 'blocked'
+    const envLoc = (process.env['PULT_TEST_NET_LOC'] ?? '').trim().toUpperCase()
+    const testLoc = /^[A-Z]{2}$/.test(envLoc) ? envLoc : 'XX'
     // M8e: `PULT_TEST_NET_DELAY_MS` — страж «думает» столько, как настоящий curl до api.anthropic.com
     // (0,25–0,4 с, висящий прокси — до 8 с): e2e окна видит реплику «отправляется…», пока ход заводится.
     const delayMs = Math.min(30_000, Math.max(0, Number(process.env['PULT_TEST_NET_DELAY_MS']) || 0))
     return async (provider: ProviderName): Promise<NetCheck> => {
       if (delayMs) await new Promise<void>((r) => { const t = setTimeout(r, delayMs); t.unref?.() })
-      return netResult(provider)
+      const check = netResult(provider)
+      recordNetCheck(check)
+      return check
     }
     function netResult(provider: ProviderName): NetCheck {
+      const loc = forced ? 'RU' : testLoc
+      const v = forced ? { ok: false, reason: 'blocked_country' as const } : guardVerdict(config.guard, loc)
       return {
         provider,
         mode: 'auto',
-        path: ok ? 'direct' : 'none',
+        path: v.ok ? 'direct' : 'none',
         proxy: null,
-        loc: ok ? 'XX' : 'RU',
-        ok,
-        reason: ok ? 'ok' : 'blocked_country',
+        loc,
+        ok: v.ok,
+        reason: v.reason,
         fellBack: false,
-        guard: config.guardCountries,
+        guard: [...config.guard.countries],
+        guardMode: config.guard.mode,
         attempts: [],
         ms: 0,
         checkedAt: new Date().toISOString(),
@@ -373,7 +385,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     bin: claudeBin,
     cwd: paths.home,
     env: async () => {
-      const check = await (netCheck ?? ((p: 'claude') => checkNetwork(p, config.network[p], config.guardCountries, {})))('claude')
+      const check = await (netCheck ?? ((p: 'claude') => checkNetwork(p, config.network[p], config.guard, {})))('claude')
       return check.ok ? buildChildEnv(process.env, { network: claudeNetworkEnv(check), extra: {} }) : null
     },
     run: (bin, args, o) => execAsync(bin, args, { env: o.env, cwd: o.cwd, timeoutMs: o.timeoutMs }),
@@ -464,7 +476,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
   // и идут тем же стражем сети, что и ходы: `model/list` ходит в сеть, а прямой путь из страны под
   // запретом закрыт для него так же, как для реплики (инвариант 2).
   const codexEnv = async (): Promise<Record<string, string>> => {
-    const check = await (netCheck ?? ((p: 'codex') => checkNetwork(p, config.network[p], config.guardCountries, {})))('codex')
+    const check = await (netCheck ?? ((p: 'codex') => checkNetwork(p, config.network[p], config.guard, {})))('codex')
     if (!check.ok) throw new ManagerError('provider_unavailable', `страж сети не пускает Codex: ${check.reason}${check.loc ? ` (выход ${check.loc})` : ''}`)
     return buildChildEnv(process.env, { network: codexNetworkEnv(check), extra: {} })
   }
@@ -494,7 +506,12 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     try { return parseLastUsed(JSON.parse(readFileSync(paths.newSessionLast, 'utf8'))) } catch { return {} }
   }
   // `updates` — только флаг автопроверки: адрес канала окну не нужен и окном не пишется.
-  const settingsReply = (): Record<string, unknown> => ({ newSession: config.newSession, lastUsed: readLastUsed(), updates: { check: config.updates.check } })
+  // `network` — только правило стража и последние известные выходы (из кэша проверок, без новой пробы): прокси,
+  // профили и noProxy окну не отдаются.
+  const settingsReply = (): Record<string, unknown> => ({
+    newSession: config.newSession, lastUsed: readLastUsed(), updates: { check: config.updates.check },
+    network: { guard: { mode: config.guard.mode, countries: [...config.guard.countries] }, exits: lastNetExits() },
+  })
   const projects = createProjectStore(join(paths.home, 'projects.json'))
   // `PULT_TEST_PROVIDERS=run` (только вместе с PULT_TEST=1): проверка входа идёт по-настоящему — в фальшивые CLI
   // из PULT_CLAUDE_BIN / PULT_CODEX_BIN. Нужна кадрам README (shell/test/readme): шапка «готов», а не «ошибка».
@@ -557,6 +574,18 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
    * владельца 30.09.2026 два прогона легли друг за другом, и каждый запускал свой десяток процессов
    * (семь `--version`, два входа, схема codex, curl на каждого провайдера).
    */
+  // «Проверить сеть» из окна и `doctor.run {net: true}` не чаще раза в 15 с: проверка каждого провайдера — проба по его
+  // пути. Свежее — прежний ответ (`cached: true`). Смена правила стража (поколение) делает прежний ответ негодным.
+  const DOCTOR_NET_MIN_MS = 15_000
+  const doctorNetLast = new Map<ProviderName, { at: number; gen: number; check: NetCheck }>()
+  const doctorNet = async (provider: ProviderName): Promise<NetCheck> => {
+    const hit = doctorNetLast.get(provider)
+    if (hit && hit.gen === netGeneration() && Date.now() - hit.at < DOCTOR_NET_MIN_MS) return { ...hit.check, cached: true }
+    const gen = netGeneration()
+    const check = await (netCheck ? netCheck(provider) : checkNetwork(provider, config.network[provider], config.guard, { fresh: true }))
+    doctorNetLast.set(provider, { at: Date.now(), gen, check })
+    return check
+  }
   const doctorRuns = new Map<boolean, Promise<DoctorReport>>()
   const doctorOnce = (skipNet: boolean): Promise<DoctorReport> => {
     const running = doctorRuns.get(skipNet)
@@ -584,7 +613,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
       ...(opts.testMode ? { locate: testLocate, pathEntries: (process.env['PATH'] ?? '').split(':').filter(Boolean) } : {}),
       // …и в сеть не ходит, если страж подменён (PULT_TEST_NET или инъекция теста): иначе
       // `doctor.run {net: true}` из окна дёргал настоящий curl посреди герметичного e2e.
-      ...(netCheck ? { net: netCheck } : {}),
+      net: doctorNet,
       ...(opts.doctor ?? {}),
     }).finally(() => { doctorRuns.delete(skipNet) })
     doctorRuns.set(skipNet, run)
@@ -662,12 +691,12 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
       case 'settings.get':
         return settingsReply()
       case 'settings.set': {
-        // Окно пишет ТОЛЬКО раздел `newSession` и флаг `updates.check` (автопроверка обновлений): сеть, прокси,
-        // команды, адрес канала (`updates.url`) и всё прочее config.json отсюда не достать. Разбор строгий —
-        // кривое поле отказывает целиком, и тогда файл не трогается вовсе.
+        // Окно пишет ТОЛЬКО раздел `newSession`, флаг `updates.check` (автопроверка обновлений) и правило стража
+        // `network.guard` (0.3.6): профили сети, прокси, noProxy, команды, адрес канала (`updates.url`) и всё прочее
+        // config.json отсюда не достать. Разбор строгий — кривое поле отказывает целиком, и тогда файл не трогается вовсе.
         const keys = Object.keys(p)
-        if (!keys.length || keys.some((k) => k !== 'newSession' && k !== 'updates')) {
-          throw new ManagerError(ERROR_CODES.invalidParams, 'settings.set: можно менять только newSession и updates.check')
+        if (!keys.length || keys.some((k) => k !== 'newSession' && k !== 'updates' && k !== 'network')) {
+          throw new ManagerError(ERROR_CODES.invalidParams, 'settings.set: можно менять только newSession, updates.check и network.guard')
         }
         let ns: NewSessionSettings | undefined
         if (p['newSession'] !== undefined) {
@@ -685,9 +714,30 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
           }
           check = (u as { check: boolean }).check
         }
+        let guard: GuardRule | undefined
+        let expect: GuardRule | undefined
+        if (p['network'] !== undefined) {
+          const n = p['network']
+          const nk = n !== null && typeof n === 'object' && !Array.isArray(n) ? Object.keys(n) : null
+          if (!nk || !nk.includes('guard') || nk.some((k) => k !== 'guard' && k !== 'expect')) {
+            throw new ManagerError(ERROR_CODES.invalidParams, 'settings.set: network — только {guard: {mode, countries}, expect?}; прокси и профили сети — в config.json руками')
+          }
+          try {
+            guard = parseGuardStrict((n as Record<string, unknown>)['guard'])
+            // `expect` — правило, которое видело окно (сравнить-и-записать): оно может быть и закрытым (allow без стран).
+            if (nk.includes('expect')) expect = parseGuardShape((n as Record<string, unknown>)['expect'], 'network.expect')
+          } catch (e) {
+            if (e instanceof GuardError) throw new ManagerError(ERROR_CODES.invalidParams, `settings.set: ${e.message}`)
+            throw e
+          }
+          if (expect && !sameGuard(expect, config.guard)) {
+            throw new ManagerError(ERROR_CODES.guardChanged, `settings.set: правило стража изменилось снаружи (сейчас: ${guardLine(config.guard)}) — открой «Настройки» заново`)
+          }
+        }
         try {
           if (ns !== undefined) writeNewSession(paths.config, ns)
           if (check !== undefined) writeUpdatesCheck(paths.config, check)
+          if (guard !== undefined) writeNetworkGuard(paths.config, guard)
         } catch (e) { throw new ManagerError(ERROR_CODES.internal, (e as Error).message) }
         if (ns !== undefined) {
           config.newSession = ns
@@ -696,6 +746,13 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
         if (check !== undefined) {
           config.updates.check = check
           updater.setEnabled(check)
+        }
+        if (guard !== undefined) {
+          // Сразу, без рестарта демона: адаптеры читают `config.guard` на каждой проверке, а сброс кэша двигает
+          // поколение правил — следующий ход КАЖДОЙ сессии проверит выход заново. Идущий ход не прерывается.
+          config.guard = guard
+          clearNetCache()
+          logger.info('правило стража сети сменено', { guard: guardLine(guard) })
         }
         return settingsReply()
       }

@@ -71,7 +71,8 @@ export function guardView(checks: readonly GuardCheck[]): GuardView {
       tone: 'fail',
       label: `выход ${b.loc ?? '??'} — стоп`,
       checkedAt: b.checkedAt,
-      detail: `${bad.map((c) => c.provider).join(', ')}: ${b.reason === 'blocked_country' ? 'страна в списке-страже' : b.reason} — подними VPN`,
+      detail: `${bad.map((c) => c.provider).join(', ')}: ${b.reason === 'blocked_country' ? 'страна в списке-страже — подними VPN'
+        : b.reason === 'not_allowed_country' ? 'страны нет в списке разрешённых — смени выход или «Настройки» → «Страж сети»' : `${b.reason} — подними VPN`}`,
     }
   }
   return { tone: 'ok', label: `выход ${locs}`, checkedAt: newest.checkedAt, detail: all.map((c) => `${c.provider}: ${c.loc ?? '??'}`).join(' · ') }
@@ -94,7 +95,7 @@ export interface DoctorGroup { title: string; items: DoctorItem[] }
 
 const GROUPS: Array<[string, (id: string) => boolean]> = [
   ['Требует внимания', () => false],
-  ['Сеть', (id) => id.startsWith('net.')],
+  ['Сеть', (id) => id.startsWith('net.') || id === 'guard.rule'],
   ['CLI, вход и подписки', (id) => id.startsWith('cli.') || id.startsWith('login.') || id.startsWith('subscription.') || id.startsWith('codex.')],
   ['Демон, служба, версии', (id) => id.startsWith('daemon') || id.startsWith('service') || id.startsWith('version.') || id.startsWith('node.') || id.startsWith('home.')],
 ]

@@ -13,6 +13,8 @@
 
 import { spawn } from 'node:child_process'
 import type { NetMode, ProviderName } from '../core/config.js'
+import { guardVerdict } from '../core/guard.js'
+import type { GuardMode, GuardRule } from '../core/guard.js'
 import { buildChildEnv } from './allowlist.js'
 
 export const EGRESS_URLS = [
@@ -32,7 +34,7 @@ export const PROBE_TIMEOUT_MS = 8000
 export const CACHE_TTL_MS = 60_000
 
 export type NetPath = 'proxy' | 'direct' | 'none'
-export type NetReason = 'ok' | 'proxy_dead' | 'blocked_country' | 'unknown_location' | 'no_proxy'
+export type NetReason = 'ok' | 'proxy_dead' | 'blocked_country' | 'not_allowed_country' | 'unknown_location' | 'no_proxy'
 
 export interface ProbeResult {
   status: number | null
@@ -64,7 +66,9 @@ export interface NetCheck {
   fellBack: boolean
   /** `network.<провайдер>.noProxy` профиля — добавка к localhost в `NO_PROXY` ребёнка. */
   noProxy?: string[]
+  /** Список стража и его режим (0.3.6): deny — список запрещённых, allow — разрешённых. */
   guard: string[]
+  guardMode?: GuardMode
   attempts: NetAttempt[]
   ms: number
   checkedAt: string
@@ -125,8 +129,52 @@ interface CacheEntry {
 
 const cache = new Map<string, CacheEntry>()
 
+/**
+ * Поколение правил сети. `clearNetCache` его двигает: правило стража сменилось (`settings.set` из окна), и адаптеры
+ * проверяют выход перед СЛЕДУЮЩИМ ходом каждой сессии, даже если она работала меньше минуты назад. Идущий ход не
+ * трогается — проверка стоит только перед ходом.
+ */
+let generation = 0
+
+export function netGeneration(): number {
+  return generation
+}
+
 export function clearNetCache(): void {
   cache.clear()
+  generation++
+}
+
+/** Последний известный выход провайдера — для «Настройки» → «Страж сети» (без новой пробы). */
+export interface NetExit {
+  loc: string | null
+  path: NetPath
+  reason: NetReason
+  checkedAt: string
+}
+
+const exits = new Map<ProviderName, NetExit>()
+
+/** Записать итог проверки (настоящей или тестовой подмены) как последний выход провайдера. */
+export function recordNetCheck(c: Pick<NetCheck, 'provider' | 'loc' | 'path' | 'reason' | 'checkedAt'>): void {
+  exits.set(c.provider, { loc: c.loc, path: c.path, reason: c.reason, checkedAt: c.checkedAt })
+}
+
+export function lastNetExits(): Partial<Record<ProviderName, NetExit>> {
+  return Object.fromEntries(exits)
+}
+
+/** Тестам: забыть и кэш, и последние выходы. */
+export function resetNetState(): void {
+  clearNetCache()
+  exits.clear()
+}
+
+/** Прежняя форма третьего аргумента — список запрещённых стран — это режим deny. */
+export function toGuardRule(guard: GuardRule | readonly string[]): GuardRule {
+  return Array.isArray(guard)
+    ? { mode: 'deny', countries: (guard as readonly string[]).map((c) => c.toUpperCase()) }
+    : { mode: (guard as GuardRule).mode, countries: (guard as GuardRule).countries.map((c) => c.toUpperCase()) }
 }
 
 async function traceVia(
@@ -157,14 +205,15 @@ async function traceVia(
 export async function checkNetwork(
   provider: ProviderName,
   profile: { mode: NetMode; proxy: string; noProxy?: string[] },
-  guardCountries: string[],
+  guardRule: GuardRule | readonly string[],
   opts: NetOptions = {},
 ): Promise<NetCheck> {
   const now = opts.now ?? Date.now
   const noProxy = profile.noProxy ?? []
+  const rule = toGuardRule(guardRule)
   // noProxy в ключе: проба от него не зависит, но результат несёт его ребёнку — правка конфига
   // не должна ждать минуту, пока истечёт кэш.
-  const key = `${provider}|${profile.mode}|${profile.proxy}|${guardCountries.join(',')}|${noProxy.join(',')}`
+  const key = `${provider}|${profile.mode}|${profile.proxy}|${rule.mode}:${rule.countries.join(',')}|${noProxy.join(',')}`
   if (!opts.fresh) {
     const hit = cache.get(key)
     if (hit && now() - hit.at < CACHE_TTL_MS) return { ...hit.check, cached: true }
@@ -173,7 +222,8 @@ export async function checkNetwork(
   const probe = opts.probe ?? curlProbe
   const timeoutMs = opts.timeoutMs ?? PROBE_TIMEOUT_MS
   const urls = opts.urls ?? EGRESS_URLS
-  const guard = guardCountries.map((c) => c.toUpperCase())
+  const guard = rule.countries
+  const guardMode = rule.mode
   const t0 = now()
   const attempts: NetAttempt[] = []
 
@@ -193,10 +243,11 @@ export async function checkNetwork(
     if (profile.mode === 'required' && !profile.proxy) {
       const check: NetCheck = {
         provider, mode: profile.mode, path: 'none', proxy: null, loc: null,
-        ok: false, reason: 'no_proxy', fellBack: false, guard, attempts, noProxy,
+        ok: false, reason: 'no_proxy', fellBack: false, guard, guardMode, attempts, noProxy,
         ms: now() - t0, checkedAt: new Date().toISOString(), cached: false,
       }
       cache.set(key, { at: now(), check })
+      recordNetCheck(check)
       return check
     }
     // И в auto, и в required сначала пробуем прокси — НАСТОЯЩИМ запросом.
@@ -207,10 +258,11 @@ export async function checkNetwork(
     } else if (profile.mode === 'required') {
       const check: NetCheck = {
         provider, mode: profile.mode, path: 'none', proxy: profile.proxy, loc: null,
-        ok: false, reason: 'proxy_dead', fellBack: false, guard, attempts, noProxy,
+        ok: false, reason: 'proxy_dead', fellBack: false, guard, guardMode, attempts, noProxy,
         ms: now() - t0, checkedAt: new Date().toISOString(), cached: false,
       }
       cache.set(key, { at: now(), check })
+      recordNetCheck(check)
       return check
     } else {
       // auto: прокси не отвечает — идём напрямую, но страж действует и здесь.
@@ -221,24 +273,26 @@ export async function checkNetwork(
     }
   }
 
-  const blocked = loc === null || guard.includes(loc)
+  const verdict = guardVerdict(rule, loc)
   const check: NetCheck = {
     provider,
     mode: profile.mode,
-    path: blocked ? 'none' : path,
+    path: verdict.ok ? path : 'none',
     proxy,
     loc,
-    ok: !blocked,
-    reason: loc === null ? 'unknown_location' : guard.includes(loc) ? 'blocked_country' : 'ok',
+    ok: verdict.ok,
+    reason: verdict.reason,
     fellBack,
     noProxy,
     guard,
+    guardMode,
     attempts,
     ms: now() - t0,
     checkedAt: new Date().toISOString(),
     cached: false,
   }
   cache.set(key, { at: now(), check })
+  recordNetCheck(check)
   return check
 }
 

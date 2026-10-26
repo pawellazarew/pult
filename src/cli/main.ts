@@ -38,6 +38,8 @@ import { ensureDaemon } from './startOnDemand.js'
 import { describePlan, launchUi, planUi } from './ui.js'
 import { browserInstalled, BrowserInstallError, browserPrefix, claudeDefaultMode, findChrome, installBrowser, PLAYWRIGHT_MCP_PACKAGE, PLAYWRIGHT_MCP_VERSION } from '../mcp/browser.js'
 import { browserDoctorItems, bypassDoctorItems, installStateOf, mcpDoctorItems } from '../mcp/doctor.js'
+import { GuardError, guardLine, guardVerdict, parseGuardStrict } from '../core/guard.js'
+import type { GuardRule } from '../core/guard.js'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -128,6 +130,9 @@ const HELP = `pult ${VERSION} — диспетчерская над claude, code
   pult browser install              поставить Playwright MCP ${PLAYWRIGHT_MCP_VERSION} в PULT_HOME/mcp (npm ci по lock-файлу пакета)
   pult mcp list [--json]            свои MCP-серверы из ~/.claude.json (● — подключён); .mcp.json — позже
   pult mcp select <имя> [<имя>…] | --none   какие из них подключать к сессиям Claude
+  pult net guard [--json]           правило стража страны выхода (одно на claude, codex и opencode)
+  pult net guard --deny RU,BY | --allow DE,FI   сменить: запрещать страны из списка / разрешать только их
+                                    (коды ISO 3166-1; через демона — со следующего хода, без рестарта)
 
   pult --help | --version
 
@@ -150,7 +155,7 @@ export interface ParsedArgs {
 const VALUE_FLAGS = new Set([
   'since', 'session', 'limit', 'n', 'lines', 'timeout',
   'kind', 'cwd', 'model', 'effort', 'until', 'format', 'reason', 'setting-sources', 'worktree',
-  'from', 'to', 'base', 'title', 'expect', 'approval',
+  'from', 'to', 'base', 'title', 'expect', 'approval', 'deny', 'allow',
 ])
 
 /**
@@ -884,7 +889,7 @@ async function cmdDoctor(paths: PultPaths, args: ParsedArgs): Promise<number> {
   })
   out(args.flags.has('json') ? JSON.stringify(report, null, 2) : formatDoctor(report))
   if (report.ok) return EXIT.ok
-  const netFail = report.items.some((i) => i.id.startsWith('net.') && i.status === 'fail')
+  const netFail = report.items.some((i) => (i.id.startsWith('net.') || i.id === 'guard.rule') && i.status === 'fail')
   return netFail ? EXIT.netBlocked : EXIT.error
 }
 
@@ -989,6 +994,51 @@ async function cmdBrowser(paths: PultPaths, args: ParsedArgs): Promise<number> {
 }
 
 /** `pult mcp list|select` (О3, src/mcp/servers.ts) — через демона: выбор живёт в его config.json. */
+/**
+ * `pult net guard` (0.3.6): показать или сменить правило стража страны выхода. Смена идёт через `settings.set`
+ * демона — тот же строгий разбор, что у окна, запись только `network.guard`, действует со следующего хода.
+ */
+async function cmdNet(paths: PultPaths, args: ParsedArgs): Promise<number> {
+  if (args.sub !== 'guard') { err('pult net: есть только guard — pult net guard [--deny RU,BY | --allow DE,FI] [--json]'); return EXIT.error }
+  const deny = args.flags.get('deny')
+  const allow = args.flags.get('allow')
+  if (deny !== undefined && allow !== undefined) { err('pult net guard: либо --deny, либо --allow'); return EXIT.error }
+  const raw = deny ?? allow
+  if (raw === true) { err(`pult net guard: --${deny !== undefined ? 'deny' : 'allow'} — список кодов стран через запятую, например DE,FI`); return EXIT.error }
+  let next: GuardRule | null = null
+  if (typeof raw === 'string') {
+    const countries = raw.split(',').map((c) => c.trim().toUpperCase()).filter(Boolean)
+    try { next = parseGuardStrict({ mode: deny !== undefined ? 'deny' : 'allow', countries }) } catch (e) {
+      if (e instanceof GuardError) { err(`pult net guard: ${e.message}`); return EXIT.error }
+      throw e
+    }
+  }
+  const { client } = await ensureDaemon(paths)
+  try {
+    const r = (next
+      ? await client.request('settings.set', { network: { guard: next } })
+      : await client.request('settings.get')) as { network?: { guard?: GuardRule; exits?: Record<string, { loc?: string | null; reason?: string } | undefined> } }
+    const rule = r.network?.guard
+    if (!rule) { err('pult net guard: демон старше 0.3.6 не знает правила стража — перезапусти его новой версией'); return EXIT.error }
+    const exits = r.network?.exits ?? {}
+    if (args.flags.has('json')) { out(JSON.stringify({ guard: rule, exits })); return EXIT.ok }
+    out(`страж сети: ${guardLine(rule)}${next ? ' — со следующего хода' : ''}`)
+    // Последний известный выход провайдеров (из уже сделанных проверок, без новой пробы) — под этим правилом.
+    for (const [provider, e] of Object.entries(exits)) {
+      if (!e) continue
+      out(e.loc
+        ? `  ${provider}: выход ${e.loc} — ${guardVerdict(rule, e.loc).ok ? 'проходит' : 'не проходит'}`
+        : `  ${provider}: выход неизвестен (${e.reason ?? 'нет ответа'}) — не проходит`)
+    }
+    return EXIT.ok
+  } catch (e) {
+    if (e instanceof ClientError) { err(`pult net guard: ${e.code} — ${e.message}`); return exitForError(e.code) }
+    throw e
+  } finally {
+    client.close()
+  }
+}
+
 async function cmdMcp(paths: PultPaths, args: ParsedArgs): Promise<number> {
   const asJson = args.flags.has('json')
   if (args.sub !== 'list' && args.sub !== 'select') { err('pult mcp: нужен один из list|select'); return EXIT.error }
@@ -1098,6 +1148,8 @@ export async function run(argv: string[]): Promise<number> {
       return cmdBrowser(paths, args)
     case 'mcp':
       return cmdMcp(paths, args)
+    case 'net':
+      return cmdNet(paths, args)
     default:
       err(`неизвестная команда: ${args.verb}\n\n${HELP}`)
       return EXIT.error

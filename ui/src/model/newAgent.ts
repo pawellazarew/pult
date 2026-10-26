@@ -1,6 +1,7 @@
 // Форма «+ Агент» (docs/12 §3 п.5): пресеты модели и усилия, имя из папки, проверка, параметры
 // `agent.start`. Чистые функции.
 
+import type { GuardRule } from '../../../src/core/guard.js'
 import type { NewSessionPrefill } from '../../../shell/src/contract.js'
 import type { ApprovalMode } from '../../../src/adapters/types.js'
 import { CLAUDE_DEFAULT_EFFORT, CLAUDE_DEFAULT_MODEL, CLAUDE_EFFORTS, CLAUDE_MODELS, CODEX_EFFORTS_FALLBACK, HOME_CWD_WARNING, modeBlocksBrowser } from '../../../src/sessions/settings.js'
@@ -130,6 +131,11 @@ export interface SettingsReply {
   lastUsed: LastUsed
   /** Флаг автопроверки обновлений (с 0.3.3); нет — старый демон. */
   updates?: { check: boolean }
+  /** Страж сети (с 0.3.6): правило и последние известные выходы провайдеров; нет — старый демон. */
+  network?: {
+    guard: GuardRule
+    exits?: Record<string, { loc?: string | null; path?: string; reason?: string; checkedAt?: string } | undefined>
+  }
 }
 
 /** Поля провайдера поверх формы: модель, усилие, режим, процесс, браузер, предложенная ветка. */

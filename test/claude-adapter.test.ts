@@ -261,7 +261,7 @@ describe('адаптер claude: защиты', () => {
     let probes = 0
     const r = rig({
       scenario: 'simple',
-      net: (p) => checkNetwork(p, config.network[p], config.guardCountries, { fresh: true, probe: async () => { probes++; return { status: 0, stdout: 'loc=FI', stderr: '' } } }),
+      net: (p) => checkNetwork(p, config.network[p], config.guard, { fresh: true, probe: async () => { probes++; return { status: 0, stdout: 'loc=FI', stderr: '' } } }),
     })
     try {
       await r.adapter.startSession(spec(r))

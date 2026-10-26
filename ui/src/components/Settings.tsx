@@ -1,6 +1,7 @@
 // M8f: «Настройки» (⌘,). Раздел «Новая сессия» — умолчания по провайдерам и «Подставлять последний выбор»;
 // «Обновления» — версии, состояние канала, «Проверить сейчас», «Обновить до X» и флаг автопроверки (что писать —
-// model/update.ts); «Внешний вид» пока пустой (темы и цвета — после редизайна, docs/15). Логика черновика —
+// model/update.ts); «Страж сети» (0.3.6) — режим deny/allow, страны, выходы провайдеров под черновиком
+// (model/netGuard.ts); «Внешний вид» пока пустой (темы и цвета — после редизайна, docs/15). Логика черновика —
 // model/sessionSettings.ts.
 
 import { useEffect, useRef, useState } from 'react'
@@ -12,6 +13,9 @@ import type { UpdateStatus } from '../../../src/core/rpc.js'
 import type { ProviderCatalog } from '../model/types.js'
 import { appUpdateView, updateSection } from '../model/update.js'
 import type { UpdateAction } from '../model/update.js'
+import { addCountry, canCheckNet, guardOff, sameGuard, countryLabel, exitRows, guardDraftError, NET_CHECK_COOLDOWN_MS, refusedWarning, removeCountry, searchCountries, switchGuardMode } from '../model/netGuard.js'
+import type { GuardMode, GuardRule, GuardStash } from '../model/netGuard.js'
+import type { GuardCheck } from '../model/health.js'
 import { CMD, Kbd } from './common.js'
 import { Dialog } from './Panels.js'
 
@@ -160,29 +164,160 @@ export function UpdatesSection({ panel, auto, onAuto }: {
   )
 }
 
-export function SettingsDialog({ settings, catalog, updates, autoCheck = null, onSave, onClose }: {
+/** Раздел «Страж сети»: правило — в черновике (пишется по «Сохранить»), «Проверить сеть» — сразу. */
+export interface NetGuardPanel {
+  /** `settings.get` → `network.guard`. */
+  rule: GuardRule
+  /** Известные проверки выхода: `network.exits`, пункты `net.*` доктора, события `net.blocked`. */
+  checks: readonly GuardCheck[]
+  /** Идёт проверка (`doctor.run`). */
+  checking: boolean
+  onCheck(): void
+}
+
+/** Сколько найденных стран показывать под полем поиска. */
+const FOUND_SHOWN = 8
+
+export function NetGuardSection({ panel, rule, onChange }: {
+  panel: NetGuardPanel
+  /** Черновик правила. */
+  rule: GuardRule
+  onChange(r: GuardRule): void
+}): ReactElement {
+  const [q, setQ] = useState('')
+  const [stash, setStash] = useState<GuardStash>({})
+  const [coolUntil, setCoolUntil] = useState(0)
+  const [, setTick] = useState(0)
+  useEffect(() => {
+    if (!coolUntil) return
+    const t = window.setTimeout(() => setTick((n) => n + 1), Math.max(0, coolUntil - Date.now()) + 50)
+    return () => window.clearTimeout(t)
+  }, [coolUntil])
+  const found = q.trim() ? searchCountries(q, rule.countries, FOUND_SHOWN) : []
+  const rows = exitRows(rule, panel.checks)
+  const warn = refusedWarning(rows)
+  const newest = rows.reduce<string | null>((a, r) => (r.checkedAt && (!a || Date.parse(r.checkedAt) > Date.parse(a)) ? r.checkedAt : a), null)
+  const canCheck = canCheckNet(panel.checking, coolUntil, Date.now())
+  const add = (code: string): void => { onChange(addCountry(rule, code)); setQ('') }
+  const mode = (m: GuardMode): void => {
+    const next = switchGuardMode(rule, m, stash)
+    setStash(next.stash)
+    onChange(next.rule)
+  }
+  return (
+    <section className="settings-sec" aria-labelledby="settings-guard-h" data-testid="settings-net-guard">
+      <h3 id="settings-guard-h">Страж сети</h3>
+      <span className="note">Перед ходом Пульт проверяет страну выхода тем путём, которым пойдёт агент. Правило одно для claude, codex и opencode; страну определить не удалось — ход не идёт. У каждого режима свой список. Действует со следующего хода, идущий ход не прерывается.</span>
+      {panel.rule.mode === 'allow' && !panel.rule.countries.length && (
+        <div className="upd-state upd-warn" role="alert" data-testid="guard-closed">
+          <span className="grow">Сейчас все ходы запрещены: в config.json режим «Разрешать только» без стран. Добавь страну и сохрани — или выбери «Запрещать страны из списка».</span>
+        </div>
+      )}
+      {guardOff(rule) && (
+        <div className="upd-state upd-warn" role="status" data-testid="guard-off">
+          <span className="grow">Страж выключен: список запрета пуст — ходы пойдут из любой известной страны (неизвестная — по-прежнему отказ).</span>
+        </div>
+      )}
+      <div className="guard-modes" role="radiogroup" aria-label="Режим стража">
+        <label className="check">
+          <input type="radio" name="guard-mode" checked={rule.mode === 'deny'} data-testid="guard-mode-deny" onChange={() => mode('deny')} />
+          <span>Запрещать страны из списка</span>
+        </label>
+        <label className="check">
+          <input type="radio" name="guard-mode" checked={rule.mode === 'allow'} data-testid="guard-mode-allow" onChange={() => mode('allow')} />
+          <span>Разрешать только страны из списка</span>
+        </label>
+      </div>
+      <div className="guard-chips" data-testid="guard-chips" aria-label="Страны в списке">
+        {rule.countries.map((c) => (
+          <span key={c} className="guard-chip" data-testid="guard-chip" data-code={c}>
+            {countryLabel(c)}
+            <button type="button" aria-label={`Убрать ${countryLabel(c)}`} title="Убрать из списка" data-testid={`guard-chip-remove-${c}`}
+              onClick={() => onChange(removeCountry(rule, c))}>×</button>
+          </span>
+        ))}
+        {!rule.countries.length && <span className="note" data-testid="guard-empty">список пуст</span>}
+      </div>
+      <label className="field" htmlFor="guard-search">
+        <span className="lbl">добавить страну</span>
+        <input id="guard-search" type="search" value={q} placeholder="Германия, DE…" autoComplete="off" data-testid="guard-search"
+          aria-controls="guard-found"
+          onChange={(e) => setQ(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !(e.metaKey || e.ctrlKey) && found[0]) { e.preventDefault(); e.stopPropagation(); add(found[0]) }
+            if (e.key === 'Escape' && q) { e.preventDefault(); e.stopPropagation(); setQ('') }
+          }} />
+      </label>
+      {q.trim() !== '' && (
+        <ul className="guard-found" id="guard-found" data-testid="guard-found">
+          {found.map((c) => (
+            <li key={c}><button type="button" className="btn btn-ghost btn-sm" data-testid={`guard-add-${c}`} onClick={() => add(c)}>{countryLabel(c)}</button></li>
+          ))}
+          {!found.length && <li className="note">ничего не нашлось</li>}
+        </ul>
+      )}
+      <div className="guard-exits" data-testid="guard-exits" role="status">
+        {rows.map((r) => (
+          <div key={r.provider} className={`guard-exit ${r.ok === null ? 't-mut' : r.ok ? 't-ok' : 't-fail'}`} data-testid={`guard-exit-${r.provider}`}
+            data-ok={r.ok === null ? 'unknown' : String(r.ok)}>{r.text}</div>
+        ))}
+      </div>
+      {warn && <div className="upd-state upd-warn" role="alert" data-testid="guard-warning"><span className="grow">{warn}</span></div>}
+      <div className="upd-actions">
+        <span className="note" data-testid="guard-checked">{newest ? `проверено ${new Date(newest).toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' })}` : 'выход ещё не проверялся'}</span>
+        <span className="grow" />
+        <button type="button" className="btn btn-sm" disabled={!canCheck} data-testid="guard-check"
+          onClick={() => { setCoolUntil(Date.now() + NET_CHECK_COOLDOWN_MS); panel.onCheck() }}>
+          {panel.checking ? 'Проверяю…' : 'Проверить сеть'}
+        </button>
+      </div>
+    </section>
+  )
+}
+
+export function SettingsDialog({ settings, catalog, updates, autoCheck = null, netGuard, onSave, onClose }: {
   settings: NewSessionSettings | null
   catalog: ProviderCatalog | null
   /** Раздел «Обновления»; нет — раздела нет. */
   updates?: UpdatesPanel
   /** `updates.check` из `settings.get`; null — старый демон. */
   autoCheck?: boolean | null
-  /** `null` — записано; строка — отказ демона. `autoCheck` — флаг автопроверки (null — не трогать). */
-  onSave(next: NewSessionSettings, autoCheck: boolean | null): Promise<string | null>
+  /** Раздел «Страж сети»; нет — демон старше 0.3.6, раздела нет. */
+  netGuard?: NetGuardPanel
+  /**
+   * `null` — записано; строка — отказ демона. `autoCheck` — флаг автопроверки (null — не трогать); `guard` — новое
+   * правило стража и то, на котором стоял черновик (null — не менялось или раздела нет).
+   */
+  onSave(next: NewSessionSettings, autoCheck: boolean | null, guard: { rule: GuardRule; expect: GuardRule } | null): Promise<string | null>
   onClose(): void
 }): ReactElement {
   const [draft, setDraft] = useState<NewSessionSettings>(() => settingsDraft(settings))
   const [auto, setAuto] = useState<boolean | null>(autoCheck)
+  // Правило, на котором стоит черновик: на «Сохранить» уходит только СМЕНА, и с ним же как `expect` — демон откажет
+  // (`guard_changed`), если правило тем временем поменяли из терминала. Свежее правило пришло (окно перечитывает
+  // настройки при открытии), а черновик не тронут — черновик встаёт на него.
+  const seed = (r: GuardRule): GuardRule => ({ mode: r.mode, countries: [...r.countries] })
+  const [initialGuard, setInitialGuard] = useState<GuardRule | null>(() => (netGuard ? seed(netGuard.rule) : null))
+  const [guard, setGuard] = useState<GuardRule | null>(initialGuard)
+  const [guardKey, setGuardKey] = useState(0)
+  const fetched = netGuard?.rule
+  useEffect(() => {
+    if (!fetched || !initialGuard || sameGuard(fetched, initialGuard)) return
+    if (guard && !sameGuard(guard, initialGuard)) return
+    setInitialGuard(seed(fetched))
+    setGuard(seed(fetched))
+    setGuardKey((k) => k + 1)
+  }, [fetched?.mode, fetched?.countries.join(',')])
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const first = useRef<HTMLSelectElement>(null)
   useEffect(() => { first.current?.focus() }, [])
-  const invalid = draftError(draft)
+  const invalid = draftError(draft) ?? (guard ? guardDraftError(guard) : null)
   const save = async (): Promise<void> => {
     if (busy || invalid) return
     setBusy(true)
     setErr(null)
-    const e = await onSave(draft, auto)
+    const e = await onSave(draft, auto, guard && initialGuard && !sameGuard(guard, initialGuard) ? { rule: guard, expect: initialGuard } : null)
     setBusy(false)
     if (e) setErr(e)
   }
@@ -217,6 +352,7 @@ export function SettingsDialog({ settings, catalog, updates, autoCheck = null, o
             {PROVIDERS.map((p) => <ProviderDefaultsBox key={p} provider={p} draft={draft} catalog={catalog} onChange={setDraft} />)}
           </div>
         </section>
+        {netGuard && guard && <NetGuardSection key={guardKey} panel={netGuard} rule={guard} onChange={setGuard} />}
         {updates && <UpdatesSection panel={updates} auto={auto} onAuto={setAuto} />}
         <section className="settings-sec" aria-labelledby="settings-look-h" data-testid="settings-appearance">
           <h3 id="settings-look-h">Внешний вид</h3>

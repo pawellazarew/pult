@@ -16,6 +16,8 @@ import { followLink, MdBridgeContext } from './components/Markdown.js'
 import { Confirm, DoctorPanel, HotkeysHelp, Inbox, McpServersDialog, NewAgentDialog, RenameDialog } from './components/Panels.js'
 import { SearchDialog } from './components/Search.js'
 import { SettingsDialog } from './components/Settings.js'
+import { guardFromExits } from './model/netGuard.js'
+import type { GuardRule } from './model/netGuard.js'
 import { configureParams, confirmNeeded, isNoop, modelWindows, settingsErrorText, settingsParams, shellHasSettings } from './model/sessionSettings.js'
 import type { SettingsPick } from './model/sessionSettings.js'
 import type { SettingsReply } from './model/newAgent.js'
@@ -248,6 +250,10 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     catch (e) { setBannerError(errorText(e)) }
     finally { setProvidersChecking(false) }
   }, [bridge])
+
+  // «Настройки» открылись — перечитать (правило стража могли сменить из терминала): диалог встанет на свежее.
+  const settingsOpen = modal?.type === 'settings'
+  useEffect(() => { if (settingsOpen) void refreshSettings() }, [settingsOpen, refreshSettings])
 
   const refreshTimer = useRef<number | null>(null)
   const scheduleRefresh = useCallback((): void => {
@@ -800,12 +806,15 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
       setBannerError(settingsErrorText(isBridgeError(e) ? e.code : null, errorText(e)))
     })
   }
-  const saveSettings = async (next: NewSessionSettings, autoCheck: boolean | null): Promise<string | null> => {
-    // Флаг автопроверки — только если сменился: старый демон `updates` не принимает, и зря трогать файл незачем.
+  const saveSettings = async (next: NewSessionSettings, autoCheck: boolean | null, guardRule: { rule: GuardRule; expect: GuardRule } | null): Promise<string | null> => {
+    // Флаг автопроверки и правило стража — только если сменились: старый демон их не принимает, и зря трогать файл незачем.
     const updates = autoCheck !== null && settings?.updates && autoCheck !== settings.updates.check ? autoCheck : undefined
+    const guardNext = guardRule && settings?.network ? guardRule : undefined
     try {
-      setSettings(await bridge.call('settings.set', settingsParams(next, updates)) as SettingsReply)
+      setSettings(await bridge.call('settings.set', settingsParams(next, updates, guardNext?.rule, guardNext?.expect)) as SettingsReply)
     } catch (e) {
+      // Правило сменили снаружи — свежее в окне сразу; диалог открывается заново на нём.
+      if (isBridgeError(e) && e.code === 'guard_changed') void refreshSettings()
       return settingsErrorText(isBridgeError(e) ? e.code : null, errorText(e))
     }
     if (updates !== undefined) void refreshStatus()
@@ -1106,6 +1115,14 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
       {modal?.type === 'settings' && (
         <SettingsDialog settings={settings?.newSession ?? null} catalog={providers} onSave={saveSettings} onClose={() => setModal(null)}
           autoCheck={settings?.updates?.check ?? null}
+          {...(settings?.network ? {
+            netGuard: {
+              rule: settings.network.guard,
+              checks: [...guardFromExits(settings.network.exits), ...guardFromDoctor(doctor.report), ...ui.guard],
+              checking: doctor.loading,
+              onCheck: () => { void runDoctor().then(() => refreshSettings()) },
+            },
+          } : {})}
           updates={{
             status: status?.update, packageVersion: status?.update?.current ?? (conn.state === 'up' ? conn.daemon.version : null), windowVersion,
             checking: updCheck.checking, error: updCheck.error, applyError: updCheck.applyError, busy: updBusy, now,
