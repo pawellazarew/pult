@@ -335,6 +335,42 @@ proxy, set `network.<provider>.proxy` (the address below is only an example):
   `"noProxy": [".corp.example", "10.0.0.0/8"]`. Write domains as `.domain`.
 - `pult doctor` shows the chosen path per provider.
 
+## Security
+
+Pult runs agents as your user. Its daemon listens on a unix socket in `~/.pult/run` (mode 0600), and whoever holds the
+token in `~/.pult/run/token` controls every session. What Pult does about that, and what it can't do:
+
+**What Pult protects**
+
+- **A sandboxed Codex can't reach the daemon.** Codex `workspace-write` and `read-only` without network block even the
+  connection to the socket (not in `full`, which has no sandbox). `pult doctor` warns when your Codex config opens it:
+  `sandbox_workspace_write.network_access = true` (also in the selected `profile`), or a permission profile that allows
+  unix sockets.
+- **Ask keys instead of the token.** The permission helper of each `claude` process (`pult mcp-ask`) gets its own key,
+  bound to one session and revoked when that process exits. With it, the helper can only ask questions for its session;
+  it never reads the token file. The token can't ask questions on an agent's behalf.
+- **Claude's Read and Edit tools are denied for Pult's run folder.** Every Claude session gets `deny` rules for `Read` and
+  `Edit` on `~/.pult/run`; Claude applies deny before your own allow rules, and it also refuses simple Bash reads of that
+  folder such as `cat ~/.pult/run/token`. **Bash is not covered as a whole:** an allowed interpreter
+  (`Bash(python3:*)`) or an allowed recursive search over a parent folder (`grep -r ~/.pult`) can still read the token.
+  In `read-only`, every Bash command asks, even if your settings allow it.
+- **An approval can't swap the command.** Approving a card runs exactly the request the agent made; `perm.resolve`
+  refuses a replaced input. The journal records which client answered (`shell#3`, `cli#7`).
+- **Cards say when they hide something** (masked secrets, clipped fields), and ⌘Enter approves only a card you can see.
+- **Session folders can't cover `~/.pult`**, so an agent with write access to its folder can't rewrite Pult's config.
+- **Network guard.** Turns don't start from refused exit countries (see [Network guard](#network-guard)).
+
+**What Pult doesn't protect**
+
+- **Code running as your user can do anything Pult can:** read the token, connect to the socket, or edit `~/.pult`
+  directly. Any command an agent runs outside a sandbox is such code.
+- **One approved escalation is full control.** Approving a command outside the sandbox (or a Claude Bash command) gives
+  the agent everything your user has, including Pult. Read commands before approving them.
+- **Don't allow interpreters or recursive readers in Claude allow rules** (`Bash(python3:*)`, `Bash(node:*)`,
+  `Bash(sh:*)`, `Bash(grep:*)`, `Bash(find:*)`): in `ask` and `workspace` they run without a question and can read the token.
+- **Keep Codex network off** in the sandbox unless you need it.
+- **`--yes` / `confirm: true` for `full` guards against typos, not against an attacker.** It is not a second factor.
+
 ## Where data lives
 
 Everything Pult keeps is in `~/.pult` (or `PULT_HOME`), readable only by you:

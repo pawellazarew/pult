@@ -190,7 +190,9 @@ describe('окно: рабочие сценарии', () => {
     assert.ok(await waitFor(async () => (await inboxCount()) === '0', 10_000), 'Inbox не опустел')
     assert.ok(await waitFor(async () => (await statusOf('beta')) === 'idle', 15_000))
     const resolved = (await journal('beta')).filter((e) => e.kind === 'permission.resolved')
-    assert.deepEqual(resolved.map((e) => [e.data['decision'], e.data['by'], e.data['scope']]), [['allow', 'human', 'once']])
+    // 0.3.7: `by` — клиент и номер соединения, ответившего на вопрос (окно — `shell#N`).
+    assert.deepEqual(resolved.map((e) => [e.data['decision'], e.data['scope']]), [['allow', 'once']])
+    assert.match(String(resolved[0]?.data['by']), /^shell#\d+$/)
     await select('beta')
     assert.ok(await waitFor(async () => (await feedText()).includes('99 %'), 10_000), 'ход после разрешения не дошёл до ленты')
     assert.match(await feedText(), /Разрешено/)

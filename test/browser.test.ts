@@ -4,7 +4,7 @@
 
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
@@ -178,18 +178,25 @@ describe('argv и --mcp-config: браузер и свои серверы', () =
     assert.ok(permissions.deny.includes(`mcp__${B}__browser_run_code_unsafe`) && permissions.deny.includes(`mcp__${B}__browser_evaluate`))
     const argv = buildClaudeArgv({ sessionId: 'u', resume: false, mcpConfigPath: '/x/mcp.json', permissions })
     assert.deepEqual(JSON.parse(argv[argv.indexOf('--settings') + 1] as string), { permissions })
+    // 0.3.7: правила папки run сливаются с правилами браузера в один --settings.
+    const merged = buildClaudeArgv({ sessionId: 'u', resume: false, mcpConfigPath: '/x/mcp.json', permissions, protectDirs: ['/h/run'] })
+    assert.equal(merged.filter((a) => a === '--settings').length, 1)
+    assert.deepEqual(JSON.parse(merged[merged.indexOf('--settings') + 1] as string), { permissions: {
+      allow: permissions.allow, ask: permissions.ask, deny: ['Read(//h/run/**)', 'Edit(//h/run/**)', ...permissions.deny],
+    } })
     assert.ok(argv.includes('--strict-mcp-config'), 'набор серверов остаётся явным')
     assert.ok(!argv.includes('--add-dir'), 'папку скачиваний не даём целиком — только чтение правилом')
     assert.ok(!buildClaudeArgv({ sessionId: 'u', resume: false, permissions }).includes('--settings'), 'без брокера браузера нет')
+    assert.ok(!buildClaudeArgv({ sessionId: 'u', resume: false, permissions, protectDirs: ['/h/run'] }).includes(`mcp__${B}`), 'без брокера правил браузера нет и при защите run')
     assert.ok(!buildClaudeArgv({ sessionId: 'u', resume: false, mcpConfigPath: '/x', permissions: {} }).includes('--settings'), 'пустые правила — без флага')
 
     const body = JSON.parse(mcpConfigBody({
-      nodeBin: '/n/node', cliEntry: '/p/main.js', home: '/h', sessionName: 'w',
+      nodeBin: '/n/node', cliEntry: '/p/main.js', home: '/h', sessionName: 'w', askKey: 'k',
       servers: { pult: { command: 'подмена' }, [B]: { type: 'stdio', command: '/bin/sh', args: [] }, github: { command: 'gh' } },
     })) as { mcpServers: Record<string, { command: string; args?: string[] }> }
     assert.deepEqual(Object.keys(body.mcpServers), ['pult', B, 'github'])
     assert.deepEqual(body.mcpServers['pult']?.args, ['/p/main.js', 'mcp-ask'], 'заглушку разрешений не перебить')
-    assert.deepEqual(Object.keys((JSON.parse(mcpConfigBody({ nodeBin: 'n', cliEntry: 'c', home: 'h', sessionName: 's' })) as { mcpServers: object }).mcpServers), ['pult'])
+    assert.deepEqual(Object.keys((JSON.parse(mcpConfigBody({ nodeBin: 'n', cliEntry: 'c', home: 'h', sessionName: 's', askKey: 'k' })) as { mcpServers: object }).mcpServers), ['pult'])
   })
 
   it('Playwright MCP: свой профиль, скачивания, абсолютные пути, без окна по умолчанию, cwd — папка скачиваний', () => {
@@ -617,7 +624,10 @@ describe('демон: agent.browser, mcp.list, mcp.select, ход с брауз�
       assert.equal(ba[3], dirs.downloads, 'cwd сервера — папка скачиваний')
       assert.equal(ba[ba.indexOf('--user-data-dir') + 1], dirs.profile)
       assert.ok(ba.includes('--headless'))
-      assert.deepEqual(JSON.parse(argv[argv.indexOf('--settings') + 1] as string), { permissions: browserPermissions(dirs) })
+      const bp = browserPermissions(dirs)
+      const run = realpathSync(home.paths.run)
+      const runRules = [...new Set([home.paths.run, run])].flatMap((x) => [`Read(/${x}/**)`, `Edit(/${x}/**)`])
+      assert.deepEqual(JSON.parse(argv[argv.indexOf('--settings') + 1] as string), { permissions: { allow: bp.allow, ask: bp.ask, deny: [...runRules, ...bp.deny] } })
       assert.ok(!argv.includes('--add-dir'))
       await c.request('perm.resolve', { id: pending[0]?.id, decision: 'deny', message: 'нет' })
       await c.request('agent.wait', { name: 'w', timeoutMs: 8000 })

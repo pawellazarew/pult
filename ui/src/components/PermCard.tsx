@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
-import { concealedNote, describePermission, gutterNo, optionsLine, scopeButtons, scopeText } from '../model/permissions.js'
+import { byHuman, concealedNote, describePermission, gutterNo, optionsLine, scopeButtons, scopeText } from '../model/permissions.js'
 import type { PermKind } from '../model/permissions.js'
 import type { PermissionOffers, PermissionScope } from '../../../src/adapters/types.js'
 import type { DiffBlock } from '../model/permissions.js'
@@ -130,7 +130,7 @@ export function PermCard(p: PermCardProps): ReactElement {
           <Icon name={p.state === 'allow' ? 'check' : 'x'} />
           {p.state === 'allow' ? 'Разрешено' : 'Отказано'}
           {p.state === 'allow' && scopeText(p.scope, p.rule) && <span className="why" data-testid="perm-scope">· {scopeText(p.scope, p.rule)}</span>}
-          {p.by && p.by !== 'human' && <span className="why">({BY[p.by] ?? p.by})</span>}
+          {p.by && !byHuman(p.by) && <span className="why">({BY[p.by] ?? p.by})</span>}
           {p.state === 'deny' && p.message && <span className="why">— {p.message}</span>}
         </div>
       )}

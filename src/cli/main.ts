@@ -14,6 +14,7 @@ import type { PultPaths } from '../core/paths.js'
 import type { DaemonStatus } from '../core/rpc.js'
 import { VERSION } from '../core/version.js'
 import { formatDoctor, runDoctor } from '../env/doctor.js'
+import { codexConfigPath } from '../env/codexConfig.js'
 import { askDaemon, runMcpAsk, stdioIo } from '../perm/mcpAsk.js'
 import { serviceDoctorItems } from '../service/doctor.js'
 import { installService, serviceStatus, uninstallService } from '../service/install.js'
@@ -863,7 +864,8 @@ async function cmdProvider(paths: PultPaths, args: ParsedArgs): Promise<number> 
  */
 function cmdMcpAsk(paths: PultPaths): Promise<number> {
   const sessionName = process.env['PULT_ASK_SESSION'] ?? 'unknown'
-  runMcpAsk(stdioIo(), (a) => askDaemon(paths, sessionName, a))
+  const askKey = process.env['PULT_ASK_KEY']
+  runMcpAsk(stdioIo(), (a) => askDaemon(paths, sessionName, askKey, a))
   // Процесс живёт, пока `claude` держит его stdin открытым.
   return new Promise<number>((resolve) => { process.stdin.on('end', () => resolve(EXIT.ok)) })
 }
@@ -886,6 +888,8 @@ async function cmdDoctor(paths: PultPaths, args: ParsedArgs): Promise<number> {
       ...bypassDoctorItems(claudeDefaultMode([test ? join(paths.home, 'claude-settings.json') : join(homedir(), '.claude', 'settings.json')]), st?.browser?.sessions ?? 0),
     ],
     ...(test ? { locate: testLocate, pathEntries: (process.env['PATH'] ?? '').split(':').filter(Boolean) } : {}),
+    // 0.3.7: сеть в песочнице Codex (тест — файл в PULT_HOME, config.toml машины не читается).
+    codexConfig: test ? join(paths.home, 'codex-config.toml') : codexConfigPath(),
   })
   out(args.flags.has('json') ? JSON.stringify(report, null, 2) : formatDoctor(report))
   if (report.ok) return EXIT.ok

@@ -19,6 +19,7 @@ import { redactString } from '../core/log.js'
 import type { PultPaths } from '../core/paths.js'
 import type { DaemonNode, DaemonStatus } from '../core/rpc.js'
 import { buildChildEnv } from './allowlist.js'
+import { codexNetworkItems } from './codexConfig.js'
 import { execAsync } from './exec.js'
 import { cmd } from './fixCmd.js'
 import type { LocateDeps, LocatedTool, ToolName } from './locate.js'
@@ -99,6 +100,11 @@ export interface DoctorDeps {
   home?: string
   /** Что лежит по пути симлинка (lstat, без перехода по ссылке). Инъекцией: тест не смотрит на диск машины. */
   linkState?: (path: string) => LinkState
+  /**
+   * 0.3.7: config.toml codex — доктор предупреждает о сети в песочнице (src/env/codexConfig.ts). Нет поля — пункта
+   * нет: тесты доктора не читают файл машины; CLI и демон передают путь.
+   */
+  codexConfig?: string
 }
 
 export type LinkState = 'symlink' | 'missing' | 'other'
@@ -403,6 +409,8 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
       data: { expected: schema.expected, actual: schema.actual, files: schema.files, state: schema.status },
     })
   }
+
+  if (deps.codexConfig) items.push(...codexNetworkItems(deps.codexConfig))
 
   const opencode = tools.opencode
   items.push({

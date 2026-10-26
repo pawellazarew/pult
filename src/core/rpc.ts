@@ -10,9 +10,15 @@ export const PROTOCOL_VERSION = 1
 
 export type ClientKind = 'cli' | 'shell' | 'mcp-ask'
 
+/**
+ * Рукопожатие. Ровно одно из двух: `token` — токен хозяина из PULT_HOME/run/token (окно, CLI: все методы, кроме
+ * `perm.request`), или `ask` — ключ вопросов одной сессии (0.3.7, `pult mcp-ask`: только `perm.request` этой сессии).
+ * `client` — самоназвание для журнала, прав оно не даёт.
+ */
 export interface HelloMessage {
   type: 'hello'
-  token: string
+  token?: string
+  ask?: string
   client: ClientKind
   protocol: number
 }
@@ -105,6 +111,11 @@ export const ERROR_CODES = {
    * того, как окно его прочло: запись отказана, окно перечитывает правило.
    */
   guardChanged: 'guard_changed',
+  /**
+   * 0.3.7: метод не по праву соединения. Ключ вопросов (`hello {ask}`) даёт только `perm.request` своей сессии; токен
+   * хозяина — всё, КРОМЕ `perm.request` (вопрос от имени агента задаёт только его заглушка).
+   */
+  forbidden: 'forbidden',
 } as const
 
 export interface DaemonStatus {

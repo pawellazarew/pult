@@ -6,6 +6,8 @@
 import { appendFileSync } from 'node:fs'
 
 const TRACE = process.env.S9_TRACE || ''
+// S12: инструменты из S9_DENY (через запятую) получают отказ — спайк видит, что вопрос пришёл, и ничего не исполняется.
+const DENY = new Set((process.env.S9_DENY || '').split(',').filter(Boolean))
 const trace = (dir, msg) => { if (TRACE) appendFileSync(TRACE, JSON.stringify({ t: new Date().toISOString(), dir, msg }) + '\n') }
 const send = (msg) => { trace('out', msg); process.stdout.write(JSON.stringify(msg) + '\n') }
 
@@ -38,7 +40,7 @@ process.stdin.on('data', (chunk) => {
         : process.env.S9_CRAFT === '1' && args.tool_name === 'Bash'
           ? [{ type: 'addRules', rules: [{ toolName: 'Bash', ruleContent: String(args.input?.command ?? '') }], behavior: 'allow', destination: 'localSettings' }]
           : null
-      const decision = {
+      const decision = DENY.has(args.tool_name) ? { behavior: 'deny', message: 's9-stub: denied' } : {
         behavior: 'allow',
         updatedInput: args.input ?? {},
         ...(sugg ? { updatedPermissions: sugg.map((s) => ({ ...s, destination: 'localSettings' })) } : {}),
