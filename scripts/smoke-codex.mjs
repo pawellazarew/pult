@@ -152,7 +152,7 @@ async function waitPending(ms = 120_000) {
 
 // --- прогон -------------------------------------------------------------------
 const cfg = defaultConfig()
-const guard = await checkNetwork('codex', cfg.network.codex, cfg.guardCountries, { fresh: true })
+const guard = await checkNetwork('codex', cfg.network.codex, cfg.guard, { fresh: true })
 say(`страж: ${netLine(guard)}`)
 if (!guard.ok) {
   console.error(`ОТКАЗ (страж сети): ${guard.reason}. Ни один ход не сделан.`)

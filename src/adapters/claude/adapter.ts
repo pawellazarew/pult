@@ -43,7 +43,7 @@ import { redactString } from '../../core/log.js'
 import { createLineSplitter } from '../../core/ndjson.js'
 import type { PultPaths } from '../../core/paths.js'
 import { buildChildEnv } from '../../env/allowlist.js'
-import { checkNetwork, netRefusal, noProxyValue } from '../../env/net.js'
+import { checkNetwork, netGeneration, netRefusal, noProxyValue } from '../../env/net.js'
 import { readSavedNode, resolveChildNode } from '../../env/nodeBin.js'
 import type { NetCheck } from '../../env/net.js'
 import type { SessionRecord } from '../../sessions/registry.js'
@@ -197,7 +197,9 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
 
   const netProbe = opts.netCheck
     ?? ((provider: 'claude'): Promise<NetCheck> =>
-      checkNetwork(provider, config.network[provider], config.guardCountries, {}))
+      checkNetwork(provider, config.network[provider], config.guard, {}))
+  /** Поколение правил сети (`netGeneration`), при котором сессия последний раз проходила стража. */
+  const netSeen = new WeakMap<Live, number>()
 
   const need = (name: string): Live => {
     const l = live.get(name)
@@ -567,16 +569,20 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
 
     // --- страж страны выхода (инвариант 2) ------------------------------------
     const idleMs = now() - l.lastTurnAt
-    if (!l.started || idleMs > IDLE_RECHECK_MS || !l.child) {
+    if (!l.started || idleMs > IDLE_RECHECK_MS || !l.child || netSeen.get(l) !== netGeneration()) {
+      // Правило стража сменилось (`settings.set`) — проверка перед этим ходом, даже без простоя. Поколение
+      // запоминается только у ПРОЙДЕННОЙ проверки: после отказа следующий ход проверяется снова.
+      const gen = netGeneration()
       const check = await netProbe('claude')
       if (!check.ok) {
         emitL({
           sessionId: name, provider: 'claude', kind: 'net.blocked',
-          data: { reason: check.reason, loc: check.loc, mode: check.mode, guard: check.guard, turnId },
+          data: { reason: check.reason, loc: check.loc, mode: check.mode, guard: check.guard, ...(check.guardMode ? { guardMode: check.guardMode } : {}), turnId },
         })
         statusL('failed', { reason: 'net_blocked' })
         return fail('blocked_network', netRefusal(check))
       }
+      netSeen.set(l, gen)
       // Профиль сети перечитывается ровно здесь — он мог поменяться с прошлого хода.
       l.netEnv = networkEnv(check)
       dropDeadChild(l)

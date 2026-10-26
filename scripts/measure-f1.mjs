@@ -201,8 +201,8 @@ class GuardStop extends Error {}
 async function guard(step, providers) {
   if (interrupted) throw new Error(`прервано ${interrupted}`)
   for (const provider of providers) {
-    const check = await checkNetwork(provider, cfg.network[provider], cfg.guardCountries, { fresh: true })
-    const d = guardDecision(check, cfg.guardCountries)
+    const check = await checkNetwork(provider, cfg.network[provider], cfg.guard, { fresh: true })
+    const d = guardDecision(check, cfg.guard.mode === 'deny' ? cfg.guard.countries : [])
     log(`страж перед ${step}: ${netLine(check)} → ${d.go ? 'идём' : 'СТОП'} (${d.why})`)
     process.stdout.write(`${JSON.stringify({ type: 'guard', step, provider, loc: check.loc, go: d.go, why: d.why })}\n`)
     if (!d.go) throw new GuardStop(`${step}/${provider}: ${d.why}`)

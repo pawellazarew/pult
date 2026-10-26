@@ -641,7 +641,11 @@ describe('M8f: демон — settings.get|set и последний выбор'
     const c = await connectClient(home.paths)
     try {
       const got = (await c.request('settings.get')) as Record<string, unknown>
-      assert.deepEqual(got, { newSession: { rememberLast: true, defaults: { claude: {}, codex: {} } }, lastUsed: {}, updates: { check: true } })
+      const { network, ...rest } = got
+      assert.deepEqual(rest, { newSession: { rememberLast: true, defaults: { claude: {}, codex: {} } }, lastUsed: {}, updates: { check: true } })
+      // 0.3.6: правило стража и последние выходы; прокси и профили провайдеров окну не отдаются.
+      assert.deepEqual((network as Record<string, unknown>)['guard'], { mode: 'deny', countries: ['RU', 'BY', 'CN', 'IR', 'KP', 'SY', 'CU'] })
+      assert.deepEqual(Object.keys(network as Record<string, unknown>).sort(), ['exits', 'guard'])
       await assert.rejects(c.request('settings.set', { network: { claude: { mode: 'off' } } }), code('invalid_params'))
       await assert.rejects(c.request('settings.set', { newSession: { rememberLast: true }, notifyCommand: 'curl x' }), code('invalid_params'))
       await assert.rejects(c.request('settings.set', { newSession: { defaults: { claude: { approval: 'full' } } } }), code('invalid_params'))

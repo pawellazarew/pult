@@ -452,7 +452,7 @@ describe('config', () => {
         assert.deepEqual(loaded.config.network[p], { mode: 'off', proxy: '' })
       }
       assert.equal(JSON.stringify(defaultConfig()).includes('127.0.0.1'), false)
-      assert.deepEqual(loaded.config.guardCountries, ['RU', 'BY', 'CN', 'IR', 'KP', 'SY', 'CU'])
+      assert.deepEqual(loaded.config.guard, { mode: 'deny', countries: ['RU', 'BY', 'CN', 'IR', 'KP', 'SY', 'CU'] })
     } finally {
       home.remove()
     }
@@ -466,7 +466,7 @@ describe('config', () => {
     })
     assert.equal(config.network.claude.mode, 'off')
     assert.equal(config.network.claude.proxy, '')
-    assert.equal(config.guardCountries.length, 7)
+    assert.equal(config.guard.countries.length, 7)
     assert.equal(warnings.length, 4)
   })
 
@@ -525,11 +525,11 @@ describe('config', () => {
     try {
       const cfg = defaultConfig()
       cfg.network.codex = { mode: 'required', proxy: 'http://127.0.0.1:3128' }
-      cfg.guardCountries = ['ru']
+      cfg.guard = { mode: 'deny', countries: ['ru'] }
       writeConfig(home.paths.config, cfg)
       const loaded = loadConfig(home.paths.config)
       assert.equal(loaded.config.network.codex.mode, 'required')
-      assert.deepEqual(loaded.config.guardCountries, ['RU'])
+      assert.deepEqual(loaded.config.guard, { mode: 'deny', countries: ['RU'] })
       assert.equal(statSync(home.paths.config).mode & 0o777, 0o600)
     } finally {
       home.remove()

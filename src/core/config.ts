@@ -8,6 +8,11 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { atomicWrite } from '../service/fsutil.js'
 import { defaultNewSession, parseNewSession } from '../sessions/settings.js'
 import type { NewSessionSettings } from '../sessions/settings.js'
+import { DEFAULT_GUARD_COUNTRIES, defaultGuard, parseGuardLenient } from './guard.js'
+import type { GuardRule } from './guard.js'
+
+export { DEFAULT_GUARD_COUNTRIES }
+export type { GuardRule }
 
 export type NetMode = 'auto' | 'required' | 'off'
 export type ProviderName = 'claude' | 'codex' | 'opencode'
@@ -32,8 +37,12 @@ export interface NetworkProfile {
 export interface PultConfig {
   version: 1
   network: Record<ProviderName, NetworkProfile>
-  /** Консервативный список-страж Пульта, НЕ официальный список Anthropic (DELTA v0.5 §1). */
-  guardCountries: string[]
+  /**
+   * Страж страны выхода (0.3.6) — в файле `network.guard: {mode: 'deny'|'allow', countries}`, один на всех провайдеров.
+   * Прежний верхний `guardCountries` читается как `{mode: 'deny', countries}`; есть оба — действует `network.guard`.
+   * По умолчанию — запретительный список Пульта (src/core/guard.ts), НЕ официальный список провайдеров.
+   */
+  guard: GuardRule
   /** Сколько тёплый процесс (`--warm`) живёт без реплик, потом его снимает жнец. */
   warmTtlMs: number
   /** Сколько брокер ждёт человека, прежде чем ответить ОТКАЗОМ (инвариант 5). */
@@ -102,7 +111,6 @@ export interface NotifySettings {
  * действует и на прямом пути. Свой прокси — `network.<провайдер>.proxy` в config.json (README).
  */
 export const DEFAULT_NETWORK_PROFILE: Readonly<NetworkProfile> = { mode: 'off', proxy: '' }
-export const DEFAULT_GUARD_COUNTRIES = ['RU', 'BY', 'CN', 'IR', 'KP', 'SY', 'CU']
 // 20 минут: спайк S1 показал живой процесс и тёплый серверный кэш и через час, так что
 // держать дольше нет смысла — выигрыш тёплой сессии всего 1–2 с на реплику (DELTA v0.5 §3).
 export const DEFAULT_WARM_TTL_MS = 1_200_000
@@ -128,7 +136,7 @@ export function defaultConfig(): PultConfig {
       codex: { ...DEFAULT_NETWORK_PROFILE },
       opencode: { ...DEFAULT_NETWORK_PROFILE },
     },
-    guardCountries: [...DEFAULT_GUARD_COUNTRIES],
+    guard: defaultGuard(),
     warmTtlMs: DEFAULT_WARM_TTL_MS,
     permTimeoutMs: DEFAULT_PERM_TIMEOUT_MS,
     subagentGraceMs: DEFAULT_SUBAGENT_GRACE_MS,
@@ -243,12 +251,22 @@ export function validateConfig(raw: unknown): { config: PultConfig; warnings: st
     }
   }
 
-  const guard = o['guardCountries']
-  if (guard !== undefined) {
-    if (Array.isArray(guard) && guard.every((x) => typeof x === 'string')) {
-      cfg.guardCountries = (guard as string[]).map((s) => s.trim().toUpperCase()).filter(Boolean)
+  // Страж: прежний `guardCountries` (запретительный список) — затем `network.guard`, который его перекрывает.
+  const legacy = o['guardCountries']
+  if (legacy !== undefined) {
+    if (Array.isArray(legacy) && legacy.every((x) => typeof x === 'string')) {
+      cfg.guard = { mode: 'deny', countries: [...new Set((legacy as string[]).map((s) => s.trim().toUpperCase()).filter(Boolean))] }
     } else {
       warnings.push('config.json: guardCountries не список строк — взят список по умолчанию')
+    }
+  }
+  const netGuard = net !== null && typeof net === 'object' && !Array.isArray(net) ? (net as Record<string, unknown>)['guard'] : undefined
+  if (netGuard !== undefined) {
+    const parsed = parseGuardLenient(netGuard)
+    warnings.push(...parsed.warnings)
+    if (parsed.rule) {
+      if (legacy !== undefined) warnings.push('config.json: есть и guardCountries, и network.guard — действует network.guard, guardCountries не читается (его можно убрать)')
+      cfg.guard = parsed.rule
     }
   }
 
@@ -348,8 +366,14 @@ export function loadConfig(file: string): LoadedConfig {
   return { config, warnings, fromFile: true }
 }
 
+/** Конфиг в форме файла: страж живёт в `network.guard`. */
+export function configToFile(cfg: PultConfig): Record<string, unknown> {
+  const { guard, ...rest } = cfg
+  return { ...rest, network: { ...cfg.network, guard: { mode: guard.mode, countries: [...guard.countries] } } }
+}
+
 export function writeConfig(file: string, cfg: PultConfig): void {
-  writeFileSync(file, JSON.stringify(cfg, null, 2) + '\n', { mode: 0o600 })
+  writeFileSync(file, JSON.stringify(configToFile(cfg), null, 2) + '\n', { mode: 0o600 })
 }
 
 /**
@@ -376,6 +400,15 @@ export function writeNewSession(file: string, value: NewSessionSettings): void {
  */
 export function writeUpdatesCheck(file: string, check: boolean): void {
   writeConfigSubtree(file, 'updates', (prev) => ({ ...prev, check }), 'флаг проверки обновлений не записан')
+}
+
+/**
+ * 0.3.6, `settings.set {network: {guard}}`: правило стража. Пишется ТОЛЬКО `network.guard` — профили провайдеров
+ * (`network.<провайдер>`: прокси, режим, noProxy) и прежний `guardCountries` остаются как были в файле. Правило
+ * сюда приходит уже проверенным (`parseGuardStrict`).
+ */
+export function writeNetworkGuard(file: string, rule: GuardRule): void {
+  writeConfigSubtree(file, 'network', (prev) => ({ ...prev, guard: { mode: rule.mode, countries: [...rule.countries] } }), 'правило стража сети не записано')
 }
 
 function writeConfigSubtree(file: string, key: string, next: (prev: Record<string, unknown>) => Record<string, unknown>, what: string): void {

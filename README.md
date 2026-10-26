@@ -277,7 +277,7 @@ Pult has no telemetry. Besides your agents' own traffic, it makes these requests
   along the same path the agent will use (`https://api.anthropic.com/cdn-cgi/trace`, fallback
   `https://cloudflare.com/cdn-cgi/trace`). If the country is unknown or in the guard list (`RU, BY, CN, IR, KP, SY, CU`
   — Pult's own conservative list, not an official one), it refuses to start the turn (exit code 4) rather than risk
-  your account. The list is `guardCountries` in `~/.pult/config.json`.
+  your account. See [Network guard](#network-guard) to change the list or allow only chosen countries.
 - **Session titles.** An untitled session names itself from your first message with one cheap `haiku` request on your
   Claude subscription. Turn it off with `"autoTitle": false` in `config.json`.
 - **Update check.** One `GET` of `latest.json` from github.com every 6 hours (and when the window returns after an hour
@@ -286,6 +286,31 @@ Pult has no telemetry. Besides your agents' own traffic, it makes these requests
   the window are downloaded only when you update them.
 
 After editing `~/.pult/config.json`, run `pult daemon stop`; the next command starts the daemon with the new settings.
+
+### Network guard
+
+One rule for all providers decides which exit countries may run turns. Change it in Settings (⌘,) → «Страж сети»,
+with `pult net guard`, or in `config.json`:
+
+- **Deny** (default) — refuse a turn when the exit country is in the list: «Запрещать страны из списка».
+- **Allow** — refuse unless the exit country is in the list: «Разрешать только страны из списка». An empty list is not
+  accepted.
+- An unknown exit country is refused in both modes.
+
+```sh
+pult net guard                    # show the rule
+pult net guard --allow DE,FI      # only these exit countries (ISO 3166-1 codes)
+pult net guard --deny RU,BY       # every exit country except these
+```
+
+```json
+{ "network": { "guard": { "mode": "allow", "countries": ["DE", "FI"] } } }
+```
+
+The countries above are only examples. The window shows each provider's last known exit country and whether the new rule
+would let it through; «Проверить сеть» checks again. A change made in the window or with `pult net guard` applies from
+the next turn of every session, without restarting the daemon; a running turn is not interrupted. The old top-level
+`guardCountries` list still works as a deny list; if `network.guard` is present, it wins. `pult doctor` shows the rule.
 
 **Proxy.** By default there is none: agents and the country check go out directly. To send a provider through a local
 proxy, set `network.<provider>.proxy` (the address below is only an example):
@@ -385,8 +410,8 @@ every `[fail]`.
 
 - **Not logged in** (`Вход claude` / `Вход codex` is red). Run `claude /login` or `codex login` in a terminal, then
   `pult doctor` again.
-- **Exit code 4, "сеть заблокирована стражем" ("network blocked by the guard").** Your exit country is unknown or in
-  the guard list (see [Network & privacy](#network--privacy)). Connect a VPN or proxy and send the message again;
+- **Exit code 4, "сеть заблокирована стражем" ("network blocked by the guard").** Your exit country is unknown or refused
+  by the guard rule (see [Network guard](#network-guard)). Connect a VPN or proxy and send the message again;
   `pult doctor` shows the detected country per provider.
 - **The window says the daemon is not running** ("демон недоступен"). Click "запустить" ("start") in the banner, or
   run `pult daemon stop && pult daemon start`. The reason is in `pult daemon logs`.

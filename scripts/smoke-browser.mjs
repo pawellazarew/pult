@@ -218,7 +218,7 @@ try {
   // --- 4. ход Claude с браузером через Inbox -----------------------------------
   if (CLAUDE_TURN) {
     const cfg = defaultConfig()
-    const net = await checkNetwork('claude', cfg.network.claude, cfg.guardCountries, { fresh: true })
+    const net = await checkNetwork('claude', cfg.network.claude, cfg.guard, { fresh: true })
     say(`4. страж: ${netLine(net)}`)
     if (!net.ok) {
       expect(false, `страж сети не пускает ход: ${net.reason}`)
@@ -269,7 +269,7 @@ try {
   // --- 5. ход Codex: форма вопроса о вызове инструмента, переподключение треда --------
   if (CODEX_TURN && codexBin) {
     const cfg = defaultConfig()
-    const net = await checkNetwork('codex', cfg.network.codex, cfg.guardCountries, { fresh: true })
+    const net = await checkNetwork('codex', cfg.network.codex, cfg.guard, { fresh: true })
     say(`5. страж: ${netLine(net)}`)
     if (!net.ok) {
       expect(false, `страж сети не пускает ход codex: ${net.reason}`)

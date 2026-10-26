@@ -11,6 +11,7 @@ import type { AgentView } from './agents.js'
 import { APPROVAL_FULL_WARNING, APPROVAL_LABEL, APPROVAL_ORDER, PRESETS } from './newAgent.js'
 import type { ProviderCatalog } from './types.js'
 import { compareVersions } from '../../../src/core/semver.js'
+import type { GuardRule } from '../../../src/core/guard.js'
 
 export { modelWindows }
 
@@ -146,9 +147,16 @@ export function draftError(d: NewSessionSettings): string | null {
   }
 }
 
-/** Параметры `settings.set`; `updatesCheck` — флаг автопроверки обновлений, только когда он сменился. */
-export function settingsParams(d: NewSessionSettings, updatesCheck?: boolean): { newSession: NewSessionSettings; updates?: { check: boolean } } {
-  return { newSession: d, ...(updatesCheck !== undefined ? { updates: { check: updatesCheck } } : {}) }
+/**
+ * Параметры `settings.set`; `updatesCheck` — флаг автопроверки обновлений, `guard` — правило стража сети (0.3.6):
+ * каждое только когда сменилось (старый демон незнакомые разделы не принимает, и зря трогать файл незачем).
+ */
+export function settingsParams(d: NewSessionSettings, updatesCheck?: boolean, guard?: GuardRule): { newSession: NewSessionSettings; updates?: { check: boolean }; network?: { guard: GuardRule } } {
+  return {
+    newSession: d,
+    ...(updatesCheck !== undefined ? { updates: { check: updatesCheck } } : {}),
+    ...(guard !== undefined ? { network: { guard: { mode: guard.mode, countries: [...guard.countries] } } } : {}),
+  }
 }
 
 // --- старое окно -------------------------------------------------------------------------------------

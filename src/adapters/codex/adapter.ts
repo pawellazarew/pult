@@ -45,7 +45,7 @@ import { redact, redactString } from '../../core/log.js'
 import type { PultPaths } from '../../core/paths.js'
 import { VERSION } from '../../core/version.js'
 import { buildChildEnv } from '../../env/allowlist.js'
-import { checkNetwork, netRefusal, noProxyValue } from '../../env/net.js'
+import { checkNetwork, netGeneration, netRefusal, noProxyValue } from '../../env/net.js'
 import type { NetCheck } from '../../env/net.js'
 import { readSavedNode, resolveChildNode } from '../../env/nodeBin.js'
 import { BROWSER_SERVER_NAME, DENIED_BROWSER_TOOLS } from '../../mcp/browser.js'
@@ -497,7 +497,9 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
 
   const netProbe = opts.netCheck
     ?? ((provider: 'codex'): Promise<NetCheck> =>
-      checkNetwork(provider, config.network[provider], config.guardCountries, {}))
+      checkNetwork(provider, config.network[provider], config.guard, {}))
+  /** Поколение правил сети (`netGeneration`), при котором сессия последний раз проходила стража. */
+  const netSeen = new WeakMap<Live, number>()
 
   const once = (what: string, log: () => void): void => {
     if (unknownSeen.has(what)) return
@@ -1571,16 +1573,20 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
 
     // --- страж страны выхода (инвариант 2) ------------------------------------
     const idleMs = now() - l.lastTurnAt
-    if (!l.confirmed || idleMs > IDLE_RECHECK_MS || client === null || !client.alive()) {
+    if (!l.confirmed || idleMs > IDLE_RECHECK_MS || client === null || !client.alive() || netSeen.get(l) !== netGeneration()) {
+      // Правило стража сменилось (`settings.set`) — проверка перед этим ходом, даже без простоя. Поколение
+      // запоминается только у ПРОЙДЕННОЙ проверки: после отказа следующий ход проверяется снова.
+      const gen = netGeneration()
       const check = await netProbe('codex')
       if (!check.ok) {
         emitL({
           sessionId: name, provider: 'codex', kind: 'net.blocked',
-          data: { reason: check.reason, loc: check.loc, mode: check.mode, guard: check.guard, turnId },
+          data: { reason: check.reason, loc: check.loc, mode: check.mode, guard: check.guard, ...(check.guardMode ? { guardMode: check.guardMode } : {}), turnId },
         })
         statusL('failed', { reason: 'net_blocked' })
         return fail('blocked_network', netRefusal(check))
       }
+      netSeen.set(l, gen)
       l.netEnv = networkEnv(check)
     }
     if (abandoned()) return giveUp('агент остановлен или снят до запуска хода')

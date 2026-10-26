@@ -181,6 +181,7 @@ const push = (conv: Conversation, ev: PultEvent, item: ConvItem, parentId?: stri
 
 const NET_REASON: Record<string, string> = {
   blocked_country: 'страна выхода в списке-страже',
+  not_allowed_country: 'страны выхода нет в списке разрешённых',
   unknown_location: 'страну выхода определить не удалось',
   proxy_dead: 'прокси не отвечает',
   no_proxy: 'режим required, а прокси не задан',
@@ -195,11 +196,13 @@ export function netBlockedText(data: Record<string, unknown>): { title: string; 
   const why = NET_REASON[reason] ?? reason
   const parts = [
     loc ? `выход: ${loc}` : null,
-    guard ? `страж: ${guard}` : null,
+    guard ? `${data['guardMode'] === 'allow' ? 'разрешены' : 'страж'}: ${guard}` : null,
     retries !== undefined ? `повторов: ${retries}` : null,
   ].filter(Boolean)
   const todo = reason === 'proxy_dead' ? 'подними прокси или переключи профиль сети'
-    : reason === 'no_proxy' ? 'укажи network.<провайдер>.proxy или mode "off" в config.json' : 'подними VPN и повтори реплику'
+    : reason === 'no_proxy' ? 'укажи network.<провайдер>.proxy или mode "off" в config.json'
+    : reason === 'not_allowed_country' ? 'смени выход VPN на страну из списка или поправь «Настройки» → «Страж сети» и повтори реплику'
+    : 'подними VPN и повтори реплику'
   return { title: `Сеть заблокирована стражем — ${why}`, text: `${parts.length ? parts.join(' · ') + ' — ' : ''}${todo}` }
 }
 
