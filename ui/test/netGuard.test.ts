@@ -14,7 +14,7 @@ import {
 import type { GuardRule } from '../src/model/netGuard.js'
 import type { GuardCheck } from '../src/model/health.js'
 import { netBlockedText } from '../src/model/conversation.js'
-import { settingsParams } from '../src/model/sessionSettings.js'
+import { settingsErrorText, settingsParams } from '../src/model/sessionSettings.js'
 
 const html = (c: unknown, props: Record<string, unknown>): string =>
   renderToStaticMarkup(createElement(c as ComponentType<Record<string, unknown>>, props))
@@ -98,6 +98,10 @@ describe('страж сети: выходы под черновиком прав
   it('параметры settings.set: правило — только когда передано', () => {
     assert.deepEqual(settingsParams(NS), { newSession: NS })
     assert.deepEqual(settingsParams(NS, undefined, { mode: 'allow', countries: ['DE'] }), { newSession: NS, network: { guard: { mode: 'allow', countries: ['DE'] } } })
+    assert.deepEqual(settingsParams(NS, undefined, { mode: 'allow', countries: ['DE'] }, { mode: 'deny', countries: ['RU'] }),
+      { newSession: NS, network: { guard: { mode: 'allow', countries: ['DE'] }, expect: { mode: 'deny', countries: ['RU'] } } }, 'с тем, что видело окно')
+    assert.equal(settingsErrorText('guard_changed', 'settings.set: правило стража изменилось снаружи (сейчас: запрещать: CN) — открой «Настройки» заново'),
+      'правило стража изменилось снаружи (сейчас: запрещать: CN) — открой «Настройки» заново')
   })
 
   it('отказ хода в ленте: режим allow — «страны выхода нет в списке разрешённых», список — «разрешены»', () => {
@@ -136,6 +140,14 @@ describe('страж сети: экран «Настройки»', () => {
     assert.match(out, /data-testid="guard-warning"/)
     assert.match(text(out), /С этими правилами сейчас ходы не пойдут: claude \(выход DE\)/)
     assert.doesNotMatch(out, /data-testid="settings-save" disabled/)
+  })
+
+  it('deny без стран — «Страж выключен», сохранять можно', () => {
+    const out = html(SettingsDialog, { settings: NS, catalog: null, onSave: async () => null, onClose: noop, netGuard: panel({ mode: 'deny', countries: [] }) })
+    assert.match(out, /data-testid="guard-off"/)
+    assert.match(text(out), /Страж выключен/)
+    assert.doesNotMatch(out, /data-testid="settings-save"[^>]*disabled/)
+    assert.doesNotMatch(html(SettingsDialog, { settings: NS, catalog: null, onSave: async () => null, onClose: noop, netGuard: panel({ mode: 'deny', countries: ['RU'] }) }), /guard-off/)
   })
 
   it('allow без стран — «Сохранить» недоступна, причина в подвале', () => {

@@ -100,6 +100,11 @@ export const ERROR_CODES = {
   queueItemSent: 'queue_item_sent',
   /** Правка реплики очереди: реплику убрали из очереди (или сессии больше нет) — текст тоже в поле ввода. */
   queueItemRemoved: 'queue_item_removed',
+  /**
+   * 0.3.6: `settings.set {network: {guard, expect}}` — правило стража сменилось снаружи (терминал, другое окно) после
+   * того, как окно его прочло: запись отказана, окно перечитывает правило.
+   */
+  guardChanged: 'guard_changed',
 } as const
 
 export interface DaemonStatus {

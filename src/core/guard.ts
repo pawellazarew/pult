@@ -91,59 +91,77 @@ export class GuardError extends Error {
   }
 }
 
+/** Закрытое правило: allow без стран — каждый ход получает отказ. Так разбор файла отвечает на кривой `network.guard`. */
+export function closedGuard(): GuardRule {
+  return { mode: 'allow', countries: [] }
+}
+
 /**
- * Строгий разбор для `settings.set` и `pult net guard`: ровно `{mode, countries}`, режим deny|allow, коды — из
- * COUNTRY_CODES заглавными (повторы схлопываются), allow без стран — отказ. Любое отклонение — GuardError,
- * и тогда файл не трогается.
+ * Строгая форма правила: ровно `{mode, countries}` (собственные ключи; `__proto__`/`constructor` — лишние поля),
+ * режим deny|allow, коды — из COUNTRY_CODES заглавными (повторы схлопываются). Пустой allow ЗДЕСЬ допустим: так
+ * `settings.set` читает `expect` — правило, которое окно видело (оно может быть и закрытым).
  */
-export function parseGuardStrict(x: unknown): GuardRule {
-  if (x === null || typeof x !== 'object' || Array.isArray(x)) throw new GuardError('network.guard — объект {mode, countries}')
+export function parseGuardShape(x: unknown, what = 'network.guard'): GuardRule {
+  if (x === null || typeof x !== 'object' || Array.isArray(x)) throw new GuardError(`${what} — объект {mode, countries}`)
   const o = x as Record<string, unknown>
   const extra = Object.keys(o).filter((k) => k !== 'mode' && k !== 'countries')
-  if (extra.length) throw new GuardError(`network.guard: лишние поля ${extra.join(', ')} — только mode и countries`)
+  if (extra.length) throw new GuardError(`${what}: лишние поля ${extra.join(', ')} — только mode и countries`)
+  if (!Object.prototype.hasOwnProperty.call(o, 'mode') || !Object.prototype.hasOwnProperty.call(o, 'countries')) {
+    throw new GuardError(`${what} — нужны оба поля: mode и countries`)
+  }
   const mode = o['mode']
-  if (mode !== 'deny' && mode !== 'allow') throw new GuardError('network.guard.mode — deny | allow')
+  if (mode !== 'deny' && mode !== 'allow') throw new GuardError(`${what}.mode — deny | allow`)
   const list = o['countries']
-  if (!Array.isArray(list)) throw new GuardError('network.guard.countries — список кодов стран ISO 3166-1 (DE, FI, …)')
-  if (list.length > COUNTRY_CODES.length) throw new GuardError('network.guard.countries — слишком длинный список')
+  if (!Array.isArray(list)) throw new GuardError(`${what}.countries — список кодов стран ISO 3166-1 (DE, FI, …)`)
+  if (list.length > COUNTRY_CODES.length) throw new GuardError(`${what}.countries — слишком длинный список`)
   const countries: string[] = []
   for (const c of list) {
-    if (!isCountryCode(c)) throw new GuardError(`network.guard.countries: ${JSON.stringify(c)} — не код страны ISO 3166-1 alpha-2 (заглавными, например DE)`)
+    if (!isCountryCode(c)) throw new GuardError(`${what}.countries: ${JSON.stringify(c)} — не код страны ISO 3166-1 alpha-2 (заглавными, например DE)`)
     if (!countries.includes(c)) countries.push(c)
   }
-  if (mode === 'allow' && !countries.length) throw new GuardError('network.guard: в режиме allow нужна хотя бы одна страна — иначе ходы не пойдут никогда')
   return { mode, countries }
 }
 
 /**
- * Мягкий разбор `network.guard` из config.json: регистр и пробелы прощаются, незнакомые коды отбрасываются с
- * предупреждением. Режим кривой — null (возьмётся прежний `guardCountries` или умолчание). allow, в котором не
- * осталось стран, НЕ подменяется запретительным списком: человек сказал «только эти», значит закрыто — все ходы
- * получают отказ, пока список не поправят (так же, как `required` без прокси).
+ * Строгий разбор для `settings.set` и `pult net guard`: форма `parseGuardShape` плюс allow без стран — отказ. Любое
+ * отклонение — GuardError, и тогда файл не трогается.
  */
-export function parseGuardLenient(x: unknown): { rule: GuardRule | null; warnings: string[] } {
-  const warnings: string[] = []
-  if (x === null || typeof x !== 'object' || Array.isArray(x)) {
-    return { rule: null, warnings: ['config.json: network.guard не объект {mode, countries} — правило не взято'] }
-  }
+export function parseGuardStrict(x: unknown): GuardRule {
+  const rule = parseGuardShape(x)
+  if (rule.mode === 'allow' && !rule.countries.length) throw new GuardError('network.guard: в режиме allow нужна хотя бы одна страна — иначе ходы не пойдут никогда')
+  return rule
+}
+
+/** deny с пустым списком — страж выключен: пускается любая известная страна (неизвестная — по-прежнему нет). */
+export function guardOff(rule: GuardRule): boolean {
+  return rule.mode === 'deny' && rule.countries.length === 0
+}
+
+/**
+ * Мягкий разбор `network.guard` из config.json: регистр и пробелы режима и кодов прощаются, незнакомые коды
+ * отбрасываются с предупреждением. Всё, что правилом не разобрать (не объект, режим не deny|allow, `countries` не
+ * список), — ЗАКРЫТО (`closedGuard`): человек написал правило стража, и тихий откат на запретительный список мог бы
+ * пустить ходы оттуда, откуда он их не ждёт. allow, в котором не осталось стран, — тоже закрыто. Так же, как
+ * `required` без прокси: все ходы получают отказ, `pult doctor` — fail, пока правило не поправят.
+ */
+export function parseGuardLenient(x: unknown): { rule: GuardRule; warnings: string[] } {
+  const closed = (why: string): { rule: GuardRule; warnings: string[] } =>
+    ({ rule: closedGuard(), warnings: [`config.json: network.guard ${why} — страж закрыт, все ходы запрещены, пока правило не поправят («Настройки» → «Страж сети» или pult net guard)`] })
+  if (x === null || typeof x !== 'object' || Array.isArray(x)) return closed('не объект {mode, countries}')
   const o = x as Record<string, unknown>
-  const mode = o['mode']
-  if (mode !== 'deny' && mode !== 'allow') {
-    return { rule: null, warnings: [`config.json: network.guard.mode = ${JSON.stringify(mode)} — не deny|allow, правило не взято`] }
-  }
+  const rawMode = typeof o['mode'] === 'string' ? (o['mode'] as string).trim().toLowerCase() : o['mode']
+  if (rawMode !== 'deny' && rawMode !== 'allow') return closed(`: mode = ${JSON.stringify(o['mode'])} — не deny|allow`)
   const raw = o['countries']
+  if (!Array.isArray(raw)) return closed(': countries не список')
+  const warnings: string[] = []
   const countries: string[] = []
-  if (!Array.isArray(raw)) {
-    warnings.push('config.json: network.guard.countries не список — стран нет')
-  } else {
-    for (const c of raw) {
-      const code = typeof c === 'string' ? c.trim().toUpperCase() : ''
-      if (!isCountryCode(code)) { warnings.push(`config.json: network.guard.countries: ${JSON.stringify(c)} — не код страны ISO 3166-1, пропущено`); continue }
-      if (!countries.includes(code)) countries.push(code)
-    }
+  for (const c of raw) {
+    const code = typeof c === 'string' ? c.trim().toUpperCase() : ''
+    if (!isCountryCode(code)) { warnings.push(`config.json: network.guard.countries: ${JSON.stringify(c)} — не код страны ISO 3166-1, пропущено`); continue }
+    if (!countries.includes(code)) countries.push(code)
   }
-  if (mode === 'allow' && !countries.length) {
+  if (rawMode === 'allow' && !countries.length) {
     warnings.push('config.json: network.guard — режим allow без стран: все ходы запрещены, пока не добавишь страну («Настройки» → «Страж сети»)')
   }
-  return { rule: { mode, countries }, warnings }
+  return { rule: { mode: rawMode, countries }, warnings }
 }

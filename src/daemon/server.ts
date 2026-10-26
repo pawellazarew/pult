@@ -35,7 +35,7 @@ import { runDoctor } from '../env/doctor.js'
 import type { DoctorDeps, DoctorReport } from '../env/doctor.js'
 import { serviceDoctorItemsAsync } from '../service/doctor.js'
 import { versionDoctorItems } from '../update/doctor.js'
-import { checkNetwork, clearNetCache, lastNetExits, recordNetCheck } from '../env/net.js'
+import { checkNetwork, clearNetCache, lastNetExits, netGeneration, recordNetCheck } from '../env/net.js'
 import type { NetCheck } from '../env/net.js'
 import { locateToolPath, testLocate } from '../env/locate.js'
 import { buildChildEnv } from '../env/allowlist.js'
@@ -70,7 +70,7 @@ import { browserDoctorItems, bypassDoctorItems, mcpDoctorItems } from '../mcp/do
 import { createMcpExtras } from '../mcp/session.js'
 import { listServers, RESERVED_MCP_NAMES } from '../mcp/servers.js'
 import { MCP_SERVER_NAME_RE, MCP_SERVERS_MAX, writeMcpSelection, writeNetworkGuard, writeNewSession, writeUpdatesCheck } from '../core/config.js'
-import { GuardError, guardLine, guardVerdict, parseGuardStrict } from '../core/guard.js'
+import { GuardError, guardLine, guardVerdict, parseGuardShape, parseGuardStrict, sameGuard } from '../core/guard.js'
 import type { GuardRule } from '../core/guard.js'
 import type { SessionBrowser, SessionRecord, SessionStatus } from '../sessions/registry.js'
 import { ApplyError, createUpdateChecker } from '../update/checker.js'
@@ -574,6 +574,18 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
    * владельца 30.09.2026 два прогона легли друг за другом, и каждый запускал свой десяток процессов
    * (семь `--version`, два входа, схема codex, curl на каждого провайдера).
    */
+  // «Проверить сеть» из окна и `doctor.run {net: true}` не чаще раза в 15 с: проверка каждого провайдера — проба по его
+  // пути. Свежее — прежний ответ (`cached: true`). Смена правила стража (поколение) делает прежний ответ негодным.
+  const DOCTOR_NET_MIN_MS = 15_000
+  const doctorNetLast = new Map<ProviderName, { at: number; gen: number; check: NetCheck }>()
+  const doctorNet = async (provider: ProviderName): Promise<NetCheck> => {
+    const hit = doctorNetLast.get(provider)
+    if (hit && hit.gen === netGeneration() && Date.now() - hit.at < DOCTOR_NET_MIN_MS) return { ...hit.check, cached: true }
+    const gen = netGeneration()
+    const check = await (netCheck ? netCheck(provider) : checkNetwork(provider, config.network[provider], config.guard, { fresh: true }))
+    doctorNetLast.set(provider, { at: Date.now(), gen, check })
+    return check
+  }
   const doctorRuns = new Map<boolean, Promise<DoctorReport>>()
   const doctorOnce = (skipNet: boolean): Promise<DoctorReport> => {
     const running = doctorRuns.get(skipNet)
@@ -601,7 +613,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
       ...(opts.testMode ? { locate: testLocate, pathEntries: (process.env['PATH'] ?? '').split(':').filter(Boolean) } : {}),
       // …и в сеть не ходит, если страж подменён (PULT_TEST_NET или инъекция теста): иначе
       // `doctor.run {net: true}` из окна дёргал настоящий curl посреди герметичного e2e.
-      ...(netCheck ? { net: netCheck } : {}),
+      net: doctorNet,
       ...(opts.doctor ?? {}),
     }).finally(() => { doctorRuns.delete(skipNet) })
     doctorRuns.set(skipNet, run)
@@ -703,15 +715,23 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
           check = (u as { check: boolean }).check
         }
         let guard: GuardRule | undefined
+        let expect: GuardRule | undefined
         if (p['network'] !== undefined) {
           const n = p['network']
           const nk = n !== null && typeof n === 'object' && !Array.isArray(n) ? Object.keys(n) : null
-          if (!nk || nk.length !== 1 || nk[0] !== 'guard') {
-            throw new ManagerError(ERROR_CODES.invalidParams, 'settings.set: network — только {guard: {mode, countries}}; прокси и профили сети — в config.json руками')
+          if (!nk || !nk.includes('guard') || nk.some((k) => k !== 'guard' && k !== 'expect')) {
+            throw new ManagerError(ERROR_CODES.invalidParams, 'settings.set: network — только {guard: {mode, countries}, expect?}; прокси и профили сети — в config.json руками')
           }
-          try { guard = parseGuardStrict((n as Record<string, unknown>)['guard']) } catch (e) {
+          try {
+            guard = parseGuardStrict((n as Record<string, unknown>)['guard'])
+            // `expect` — правило, которое видело окно (сравнить-и-записать): оно может быть и закрытым (allow без стран).
+            if (nk.includes('expect')) expect = parseGuardShape((n as Record<string, unknown>)['expect'], 'network.expect')
+          } catch (e) {
             if (e instanceof GuardError) throw new ManagerError(ERROR_CODES.invalidParams, `settings.set: ${e.message}`)
             throw e
+          }
+          if (expect && !sameGuard(expect, config.guard)) {
+            throw new ManagerError(ERROR_CODES.guardChanged, `settings.set: правило стража изменилось снаружи (сейчас: ${guardLine(config.guard)}) — открой «Настройки» заново`)
           }
         }
         try {

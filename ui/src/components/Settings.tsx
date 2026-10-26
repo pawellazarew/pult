@@ -13,7 +13,7 @@ import type { UpdateStatus } from '../../../src/core/rpc.js'
 import type { ProviderCatalog } from '../model/types.js'
 import { appUpdateView, updateSection } from '../model/update.js'
 import type { UpdateAction } from '../model/update.js'
-import { addCountry, canCheckNet, sameGuard, countryLabel, exitRows, guardDraftError, NET_CHECK_COOLDOWN_MS, refusedWarning, removeCountry, searchCountries, switchGuardMode } from '../model/netGuard.js'
+import { addCountry, canCheckNet, guardOff, sameGuard, countryLabel, exitRows, guardDraftError, NET_CHECK_COOLDOWN_MS, refusedWarning, removeCountry, searchCountries, switchGuardMode } from '../model/netGuard.js'
 import type { GuardMode, GuardRule, GuardStash } from '../model/netGuard.js'
 import type { GuardCheck } from '../model/health.js'
 import { CMD, Kbd } from './common.js'
@@ -213,6 +213,11 @@ export function NetGuardSection({ panel, rule, onChange }: {
           <span className="grow">Сейчас все ходы запрещены: в config.json режим «Разрешать только» без стран. Добавь страну и сохрани — или выбери «Запрещать страны из списка».</span>
         </div>
       )}
+      {guardOff(rule) && (
+        <div className="upd-state upd-warn" role="status" data-testid="guard-off">
+          <span className="grow">Страж выключен: список запрета пуст — ходы пойдут из любой известной страны (неизвестная — по-прежнему отказ).</span>
+        </div>
+      )}
       <div className="guard-modes" role="radiogroup" aria-label="Режим стража">
         <label className="check">
           <input type="radio" name="guard-mode" checked={rule.mode === 'deny'} data-testid="guard-mode-deny" onChange={() => mode('deny')} />
@@ -281,17 +286,28 @@ export function SettingsDialog({ settings, catalog, updates, autoCheck = null, n
   netGuard?: NetGuardPanel
   /**
    * `null` — записано; строка — отказ демона. `autoCheck` — флаг автопроверки (null — не трогать); `guard` — новое
-   * правило стража (null — не менялось или раздела нет).
+   * правило стража и то, на котором стоял черновик (null — не менялось или раздела нет).
    */
-  onSave(next: NewSessionSettings, autoCheck: boolean | null, guard: GuardRule | null): Promise<string | null>
+  onSave(next: NewSessionSettings, autoCheck: boolean | null, guard: { rule: GuardRule; expect: GuardRule } | null): Promise<string | null>
   onClose(): void
 }): ReactElement {
   const [draft, setDraft] = useState<NewSessionSettings>(() => settingsDraft(settings))
   const [auto, setAuto] = useState<boolean | null>(autoCheck)
-  // Правило, с которым диалог открылся: на «Сохранить» уходит только СМЕНА — иначе правило, поменянное тем временем
-  // из терминала (`pult net guard`), затёрлось бы нетронутым черновиком.
-  const [initialGuard] = useState<GuardRule | null>(() => (netGuard ? { mode: netGuard.rule.mode, countries: [...netGuard.rule.countries] } : null))
+  // Правило, на котором стоит черновик: на «Сохранить» уходит только СМЕНА, и с ним же как `expect` — демон откажет
+  // (`guard_changed`), если правило тем временем поменяли из терминала. Свежее правило пришло (окно перечитывает
+  // настройки при открытии), а черновик не тронут — черновик встаёт на него.
+  const seed = (r: GuardRule): GuardRule => ({ mode: r.mode, countries: [...r.countries] })
+  const [initialGuard, setInitialGuard] = useState<GuardRule | null>(() => (netGuard ? seed(netGuard.rule) : null))
   const [guard, setGuard] = useState<GuardRule | null>(initialGuard)
+  const [guardKey, setGuardKey] = useState(0)
+  const fetched = netGuard?.rule
+  useEffect(() => {
+    if (!fetched || !initialGuard || sameGuard(fetched, initialGuard)) return
+    if (guard && !sameGuard(guard, initialGuard)) return
+    setInitialGuard(seed(fetched))
+    setGuard(seed(fetched))
+    setGuardKey((k) => k + 1)
+  }, [fetched?.mode, fetched?.countries.join(',')])
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const first = useRef<HTMLSelectElement>(null)
@@ -301,7 +317,7 @@ export function SettingsDialog({ settings, catalog, updates, autoCheck = null, n
     if (busy || invalid) return
     setBusy(true)
     setErr(null)
-    const e = await onSave(draft, auto, guard && initialGuard && !sameGuard(guard, initialGuard) ? guard : null)
+    const e = await onSave(draft, auto, guard && initialGuard && !sameGuard(guard, initialGuard) ? { rule: guard, expect: initialGuard } : null)
     setBusy(false)
     if (e) setErr(e)
   }
@@ -336,7 +352,7 @@ export function SettingsDialog({ settings, catalog, updates, autoCheck = null, n
             {PROVIDERS.map((p) => <ProviderDefaultsBox key={p} provider={p} draft={draft} catalog={catalog} onChange={setDraft} />)}
           </div>
         </section>
-        {netGuard && guard && <NetGuardSection panel={netGuard} rule={guard} onChange={setGuard} />}
+        {netGuard && guard && <NetGuardSection key={guardKey} panel={netGuard} rule={guard} onChange={setGuard} />}
         {updates && <UpdatesSection panel={updates} auto={auto} onAuto={setAuto} />}
         <section className="settings-sec" aria-labelledby="settings-look-h" data-testid="settings-appearance">
           <h3 id="settings-look-h">Внешний вид</h3>

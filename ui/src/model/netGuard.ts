@@ -2,12 +2,12 @@
 // под черновиком и предупреждение «с этими правилами сейчас ходы не пойдут». Проверка правила — та же, что у демона
 // (`parseGuardStrict`, src/core/guard.ts): окно лишь говорит заранее то, что `settings.set` и так скажет.
 
-import { COUNTRY_CODES, GuardError, guardVerdict, parseGuardStrict, sameGuard } from '../../../src/core/guard.js'
+import { COUNTRY_CODES, GuardError, guardOff, guardVerdict, parseGuardStrict, sameGuard } from '../../../src/core/guard.js'
 import type { GuardMode, GuardRule } from '../../../src/core/guard.js'
 import type { GuardCheck } from './health.js'
 
 export type { GuardMode, GuardRule }
-export { sameGuard }
+export { guardOff, sameGuard }
 
 /** «Проверить сеть» — не чаще раза в столько: каждая проверка — проба к провайдерам по каждому пути. */
 export const NET_CHECK_COOLDOWN_MS = 15_000

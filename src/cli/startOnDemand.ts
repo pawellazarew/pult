@@ -102,7 +102,7 @@ export function daemonSpawnEnv(paths: PultPaths, parentEnv: NodeJS.ProcessEnv): 
       // M8c: свой адрес latest.json — настройка человека (только https, channel.ts), демон обязан её видеть.
       ...(parentEnv['PULT_UPDATE_URL'] ? { PULT_UPDATE_URL: parentEnv['PULT_UPDATE_URL'] } : {}),
       // Тестовые швы канала обновлений и задержка стража (M8e) — только вместе с PULT_TEST=1: вне тестов демон их и не читает.
-      ...(parentEnv['PULT_TEST'] === '1' ? pick(parentEnv, ['PULT_TEST_UPDATE_DIR', 'PULT_TEST_RELEASE_KEY', 'PULT_TEST_UPDATE_FIRST_MS', 'PULT_TEST_NET_DELAY_MS', 'PULT_TEST_PROVIDERS', 'PULT_TEST_APP_DIRS', 'PULT_TEST_APP_HELLO_MS', 'PULT_TEST_APP_CODESIGN']) : {}),
+      ...(parentEnv['PULT_TEST'] === '1' ? pick(parentEnv, ['PULT_TEST_UPDATE_DIR', 'PULT_TEST_RELEASE_KEY', 'PULT_TEST_UPDATE_FIRST_MS', 'PULT_TEST_NET_DELAY_MS', 'PULT_TEST_NET_LOC', 'PULT_TEST_PROVIDERS', 'PULT_TEST_APP_DIRS', 'PULT_TEST_APP_HELLO_MS', 'PULT_TEST_APP_CODESIGN']) : {}),
     },
   })
 }

@@ -38,7 +38,7 @@ import { ensureDaemon } from './startOnDemand.js'
 import { describePlan, launchUi, planUi } from './ui.js'
 import { browserInstalled, BrowserInstallError, browserPrefix, claudeDefaultMode, findChrome, installBrowser, PLAYWRIGHT_MCP_PACKAGE, PLAYWRIGHT_MCP_VERSION } from '../mcp/browser.js'
 import { browserDoctorItems, bypassDoctorItems, installStateOf, mcpDoctorItems } from '../mcp/doctor.js'
-import { GuardError, guardLine, parseGuardStrict } from '../core/guard.js'
+import { GuardError, guardLine, guardVerdict, parseGuardStrict } from '../core/guard.js'
 import type { GuardRule } from '../core/guard.js'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -1017,11 +1017,19 @@ async function cmdNet(paths: PultPaths, args: ParsedArgs): Promise<number> {
   try {
     const r = (next
       ? await client.request('settings.set', { network: { guard: next } })
-      : await client.request('settings.get')) as { network?: { guard?: GuardRule } }
+      : await client.request('settings.get')) as { network?: { guard?: GuardRule; exits?: Record<string, { loc?: string | null; reason?: string } | undefined> } }
     const rule = r.network?.guard
     if (!rule) { err('pult net guard: демон старше 0.3.6 не знает правила стража — перезапусти его новой версией'); return EXIT.error }
-    if (args.flags.has('json')) { out(JSON.stringify(rule)); return EXIT.ok }
+    const exits = r.network?.exits ?? {}
+    if (args.flags.has('json')) { out(JSON.stringify({ guard: rule, exits })); return EXIT.ok }
     out(`страж сети: ${guardLine(rule)}${next ? ' — со следующего хода' : ''}`)
+    // Последний известный выход провайдеров (из уже сделанных проверок, без новой пробы) — под этим правилом.
+    for (const [provider, e] of Object.entries(exits)) {
+      if (!e) continue
+      out(e.loc
+        ? `  ${provider}: выход ${e.loc} — ${guardVerdict(rule, e.loc).ok ? 'проходит' : 'не проходит'}`
+        : `  ${provider}: выход неизвестен (${e.reason ?? 'нет ответа'}) — не проходит`)
+    }
     return EXIT.ok
   } catch (e) {
     if (e instanceof ClientError) { err(`pult net guard: ${e.code} — ${e.message}`); return exitForError(e.code) }

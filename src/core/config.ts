@@ -262,12 +262,11 @@ export function validateConfig(raw: unknown): { config: PultConfig; warnings: st
   }
   const netGuard = net !== null && typeof net === 'object' && !Array.isArray(net) ? (net as Record<string, unknown>)['guard'] : undefined
   if (netGuard !== undefined) {
+    // Кривой `network.guard` — закрыто (parseGuardLenient), а не откат на guardCountries или умолчание.
     const parsed = parseGuardLenient(netGuard)
     warnings.push(...parsed.warnings)
-    if (parsed.rule) {
-      if (legacy !== undefined) warnings.push('config.json: есть и guardCountries, и network.guard — действует network.guard, guardCountries не читается (его можно убрать)')
-      cfg.guard = parsed.rule
-    }
+    if (legacy !== undefined) warnings.push('config.json: есть и guardCountries, и network.guard — действует network.guard, guardCountries не читается (его можно убрать)')
+    cfg.guard = parsed.rule
   }
 
   if (o['autoTitle'] !== undefined) {

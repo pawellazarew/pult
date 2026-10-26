@@ -18,6 +18,7 @@ import type { EventDraft } from '../dist/core/events.js'
 import { createLogger } from '../dist/core/log.js'
 import { ensureLayout, layout } from '../dist/core/paths.js'
 import type { NetCheck } from '../dist/env/net.js'
+import { clearNetCache } from '../dist/env/net.js'
 import { createBroker } from '../dist/perm/broker.js'
 import type { PermBroker } from '../dist/perm/broker.js'
 import { FAKE_CODEX, sleep, waitFor } from './helpers.js'
@@ -526,6 +527,25 @@ describe('адаптер codex: страж сети, лимиты, самоле�
       assert.equal(outcome.errorCode, 'blocked_network')
       assert.equal(r.boots(), 0, 'процесс не должен был подниматься')
       assert.ok(r.drafts.some((d) => d.kind === 'net.blocked'))
+    } finally { await r.adapter.shutdown(); r.remove() }
+  })
+
+  it('0.3.6: смена правила стража (clearNetCache → новое поколение) — следующий ход проверяется без простоя', async () => {
+    let calls = 0
+    let ok = true
+    const r = rig({ net: async () => { calls++; return ok ? okCheck() : okCheck({ ok: false, reason: 'not_allowed_country', loc: 'FI', path: 'none' }) } })
+    try {
+      await r.adapter.startSession(spec(r))
+      assert.equal((await (await r.adapter.send('w', 'раз')).done).ok, true)
+      assert.equal((await (await r.adapter.send('w', 'два')).done).ok, true)
+      assert.equal(calls, 1, 'без смены правила второй ход в пределах минуты стража не проходит')
+      ok = false
+      clearNetCache()
+      const refused = await (await r.adapter.send('w', 'три')).done
+      assert.deepEqual([refused.ok, refused.errorCode, calls], [false, 'blocked_network', 2])
+      ok = true
+      assert.equal((await (await r.adapter.send('w', 'четыре')).done).ok, true)
+      assert.equal(calls, 3, 'после отказа поколение не запомнено — снова проверка')
     } finally { await r.adapter.shutdown(); r.remove() }
   })
 

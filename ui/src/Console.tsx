@@ -251,6 +251,10 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     finally { setProvidersChecking(false) }
   }, [bridge])
 
+  // «Настройки» открылись — перечитать (правило стража могли сменить из терминала): диалог встанет на свежее.
+  const settingsOpen = modal?.type === 'settings'
+  useEffect(() => { if (settingsOpen) void refreshSettings() }, [settingsOpen, refreshSettings])
+
   const refreshTimer = useRef<number | null>(null)
   const scheduleRefresh = useCallback((): void => {
     if (refreshTimer.current !== null) return
@@ -802,13 +806,15 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
       setBannerError(settingsErrorText(isBridgeError(e) ? e.code : null, errorText(e)))
     })
   }
-  const saveSettings = async (next: NewSessionSettings, autoCheck: boolean | null, guardRule: GuardRule | null): Promise<string | null> => {
+  const saveSettings = async (next: NewSessionSettings, autoCheck: boolean | null, guardRule: { rule: GuardRule; expect: GuardRule } | null): Promise<string | null> => {
     // Флаг автопроверки и правило стража — только если сменились: старый демон их не принимает, и зря трогать файл незачем.
     const updates = autoCheck !== null && settings?.updates && autoCheck !== settings.updates.check ? autoCheck : undefined
     const guardNext = guardRule && settings?.network ? guardRule : undefined
     try {
-      setSettings(await bridge.call('settings.set', settingsParams(next, updates, guardNext)) as SettingsReply)
+      setSettings(await bridge.call('settings.set', settingsParams(next, updates, guardNext?.rule, guardNext?.expect)) as SettingsReply)
     } catch (e) {
+      // Правило сменили снаружи — свежее в окне сразу; диалог открывается заново на нём.
+      if (isBridgeError(e) && e.code === 'guard_changed') void refreshSettings()
       return settingsErrorText(isBridgeError(e) ? e.code : null, errorText(e))
     }
     if (updates !== undefined) void refreshStatus()

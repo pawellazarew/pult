@@ -151,11 +151,13 @@ export function draftError(d: NewSessionSettings): string | null {
  * Параметры `settings.set`; `updatesCheck` — флаг автопроверки обновлений, `guard` — правило стража сети (0.3.6):
  * каждое только когда сменилось (старый демон незнакомые разделы не принимает, и зря трогать файл незачем).
  */
-export function settingsParams(d: NewSessionSettings, updatesCheck?: boolean, guard?: GuardRule): { newSession: NewSessionSettings; updates?: { check: boolean }; network?: { guard: GuardRule } } {
+export function settingsParams(d: NewSessionSettings, updatesCheck?: boolean, guard?: GuardRule, expect?: GuardRule): { newSession: NewSessionSettings; updates?: { check: boolean }; network?: { guard: GuardRule; expect?: GuardRule } } {
+  const copy = (r: GuardRule): GuardRule => ({ mode: r.mode, countries: [...r.countries] })
   return {
     newSession: d,
     ...(updatesCheck !== undefined ? { updates: { check: updatesCheck } } : {}),
-    ...(guard !== undefined ? { network: { guard: { mode: guard.mode, countries: [...guard.countries] } } } : {}),
+    // `expect` — правило, которое видело окно: правку из терминала, сделанную тем временем, демон не даст затереть.
+    ...(guard !== undefined ? { network: { guard: copy(guard), ...(expect ? { expect: copy(expect) } : {}) } } : {}),
   }
 }
 
@@ -171,6 +173,7 @@ export function shellHasSettings(windowVersion: string | null): boolean {
 
 /** Отказ словами: старая оболочка отвечает `method_not_allowed` — подсказка про терминал. */
 export function settingsErrorText(code: string | null, message: string): string {
+  if (code === 'guard_changed') return `${message.replace(/^settings\.set: /, '')}`
   if (code === 'method_not_allowed') return `Это окно не умеет менять настройки (оболочка старше ${SETTINGS_SHELL_VERSION}) — в терминале: pult agent set <имя> --model … / config.json → newSession`
   if (code === 'not_found' && /неизвестный метод/.test(message)) return 'Демон старше 0.3.0 не умеет менять настройки — перезапусти его новой версией'
   return message

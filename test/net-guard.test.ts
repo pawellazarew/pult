@@ -64,7 +64,8 @@ describe('правило стража: коды, строгий и мягкий 
     const empty = parseGuardLenient({ mode: 'allow', countries: ['GER'] })
     assert.deepEqual(empty.rule, { mode: 'allow', countries: [] }, 'не подменяется запретительным списком')
     assert.ok(empty.warnings.some((w) => /все ходы запрещены/.test(w)))
-    assert.equal(parseGuardLenient({ mode: 'whatever', countries: [] }).rule, null)
+    assert.deepEqual(parseGuardLenient({ mode: 'whatever', countries: [] }).rule, { mode: 'allow', countries: [] }, 'кривой режим — закрыто')
+    assert.deepEqual(parseGuardLenient({ mode: 'DENY', countries: [] }).rule, { mode: 'deny', countries: [] })
   })
 
   it('матрица решений: deny/allow × в списке / не в списке / неизвестно', () => {
@@ -104,10 +105,13 @@ describe('config.json: перенос guardCountries → network.guard', () => {
     assert.match(warnings[0]!, /действует network\.guard/)
   })
 
-  it('кривой network.guard — предупреждение, остаётся guardCountries', () => {
-    const { config, warnings } = validateConfig({ guardCountries: ['RU'], network: { guard: { mode: 'maybe', countries: ['DE'] } } })
-    assert.deepEqual(config.guard, { mode: 'deny', countries: ['RU'] })
-    assert.equal(warnings.length, 1)
+  it('кривой network.guard — ЗАКРЫТО (allow без стран), а не откат на guardCountries или умолчание', () => {
+    for (const bad of [{ mode: 'maybe', countries: ['DE'] }, { mode: 'deny', countries: 'RU' }, null, 'deny', [], { countries: ['DE'] }]) {
+      const { config, warnings } = validateConfig({ guardCountries: ['RU'], network: { guard: bad } })
+      assert.deepEqual(config.guard, { mode: 'allow', countries: [] }, JSON.stringify(bad))
+      assert.ok(warnings.some((w) => /страж закрыт, все ходы запрещены/.test(w)), JSON.stringify(bad))
+    }
+    assert.deepEqual(validateConfig({ network: { guard: { mode: ' Allow ', countries: ['de'] } } }).config.guard, { mode: 'allow', countries: ['DE'] }, 'регистр режима прощается')
   })
 
   it('writeConfig пишет страж в network.guard, guardCountries в файле нет; читается обратно', () => {
@@ -217,6 +221,67 @@ describe('демон: settings.get|set network.guard и применение б�
     } finally { c.close(); await d.stop('конец теста'); home.remove() }
   })
 
+  it('сравнить-и-записать: expect не совпал — guard_changed, файл не тронут; совпал — записано', async () => {
+    const home = tempHome()
+    const d = await startTestDaemon(home)
+    const c = await connectClient(home.paths)
+    try {
+      await c.request('settings.set', { network: { guard: { mode: 'allow', countries: ['DE'] } } })
+      const before = readFileSync(home.paths.config, 'utf8')
+      // Окно видело прежнее правило (умолчание), а его тем временем сменили из терминала.
+      await assert.rejects(
+        c.request('settings.set', { network: { guard: { mode: 'allow', countries: ['FI'] }, expect: { mode: 'deny', countries: [...DEFAULT_GUARD_COUNTRIES] } } }),
+        (e: { code?: string; message?: string }) => e.code === 'guard_changed' && /изменилось снаружи/.test(e.message ?? ''),
+      )
+      assert.equal(readFileSync(home.paths.config, 'utf8'), before)
+      await assert.rejects(c.request('settings.set', { network: { guard: { mode: 'allow', countries: ['FI'] }, expect: { mode: 'allow' } } }), code('invalid_params'))
+      const ok = (await c.request('settings.set', { network: { guard: { mode: 'allow', countries: ['FI'] }, expect: { mode: 'allow', countries: ['DE'] } } })) as { network: { guard: unknown } }
+      assert.deepEqual(ok.network.guard, { mode: 'allow', countries: ['FI'] })
+    } finally { c.close(); await d.stop('конец теста'); home.remove() }
+  })
+
+  it('__proto__ и constructor под network и guard — отказ, файл не тронут', async () => {
+    const home = tempHome()
+    writeFileSync(home.paths.config, '{"version": 1}\n')
+    const d = await startTestDaemon(home)
+    const c = await connectClient(home.paths)
+    try {
+      const evil = [
+        '{"network": {"__proto__": {"guard": {"mode": "allow", "countries": ["DE"]}}}}',
+        '{"network": {"guard": {"mode": "allow", "countries": ["DE"]}, "__proto__": {"x": 1}}}',
+        '{"network": {"guard": {"mode": "allow", "countries": ["DE"]}, "constructor": {"prototype": {"x": 1}}}}',
+        '{"network": {"guard": {"__proto__": {"mode": "allow"}, "mode": "allow", "countries": ["DE"]}}}',
+        '{"network": {"guard": {"mode": "allow", "countries": ["DE"], "constructor": 1}}}',
+        '{"network": {"guard": {"__proto__": {"mode": "allow", "countries": ["DE"]}}}}',
+      ]
+      for (const raw of evil) {
+        await assert.rejects(c.request('settings.set', JSON.parse(raw) as Record<string, unknown>), code('invalid_params'), raw)
+        assert.equal(readFileSync(home.paths.config, 'utf8'), '{"version": 1}\n', raw)
+      }
+      assert.equal(({} as Record<string, unknown>)['x'], undefined, 'прототип не тронут')
+    } finally { c.close(); await d.stop('конец теста'); home.remove() }
+  })
+
+  it('doctor: сеть не чаще раза в 15 с (прежний ответ), смена правила — свежая проверка; deny без стран — warn «страж выключен»', async () => {
+    const home = tempHome()
+    const d = await startTestDaemon(home)
+    const c = await connectClient(home.paths)
+    type Report = { items: Array<{ id: string; status: string; detail: string; data?: Record<string, unknown> }> }
+    const netAt = (r: Report): unknown => r.items.find((i) => i.id === 'net.claude')?.data?.['checkedAt']
+    try {
+      const a = (await c.request('doctor.run', { net: true })) as Report
+      await new Promise((r) => setTimeout(r, 20))
+      const b = (await c.request('doctor.run', { net: true })) as Report
+      assert.equal(netAt(b), netAt(a), 'вторая проверка в пределах 15 с — прежний ответ')
+      await c.request('settings.set', { network: { guard: { mode: 'deny', countries: [] } } })
+      const e = (await c.request('doctor.run', { net: true })) as Report
+      assert.notEqual(netAt(e), netAt(a), 'правило сменилось — проверка заново')
+      const rule = e.items.find((i) => i.id === 'guard.rule')
+      assert.equal(rule?.status, 'warn')
+      assert.match(rule?.detail ?? '', /страж выключен/)
+    } finally { c.close(); await d.stop('конец теста'); home.remove() }
+  })
+
   it('смена правила действует со следующего хода тёплой сессии без простоя; doctor показывает правило и отказ', async () => {
     const home = tempHome()
     const root = mkdtempSync(join(tmpdir(), 'pt-guard-'))
@@ -286,8 +351,17 @@ describe('CLI: pult net guard и pult doctor', () => {
       const set = await runCli(paths, ['net', 'guard', '--allow', 'de, fi'])
       assert.equal(set.code, 0, set.stderr)
       assert.match(set.stdout, /^страж сети: разрешать только: DE, FI — со следующего хода$/m)
+      // Демон, поднятый CLI, получил PULT_TEST_NET_LOC: выход DE проходит по allow DE,FI — ход идёт.
+      const work = join(dir, 'work')
+      mkdirSync(work)
+      assert.equal((await runCli(paths, ['agent', 'start', 'w', '--kind', 'claude', '--cwd', work])).code, 0)
+      const turn = await runCli(paths, ['agent', 'prompt', 'w', 'привет', '--wait'])
+      assert.equal(turn.code, 0, turn.stderr)
       const json = await runCli(paths, ['net', 'guard', '--json'])
-      assert.deepEqual(JSON.parse(json.stdout), { mode: 'allow', countries: ['DE', 'FI'] })
+      const shown = JSON.parse(json.stdout) as { guard: unknown; exits: Record<string, { loc: string }> }
+      assert.deepEqual(shown.guard, { mode: 'allow', countries: ['DE', 'FI'] })
+      assert.equal(shown.exits['claude']?.loc, 'DE')
+      assert.match((await runCli(paths, ['net', 'guard'])).stdout, /^  claude: выход DE — проходит$/m)
       for (const bad of [['net', 'guard', '--allow'], ['net', 'guard', '--allow', 'GER'], ['net', 'guard', '--deny', 'RU', '--allow', 'DE'], ['net', 'nope']]) {
         const r = await runCli(paths, bad)
         assert.equal(r.code, 1, bad.join(' '))

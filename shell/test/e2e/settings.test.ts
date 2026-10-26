@@ -121,4 +121,27 @@ describe('окно: настройки сессии M8f', () => {
     assert.ok(await waitFor(async () => /Сеть заблокирована стражем — страны выхода нет в списке разрешённых/.test((await feed.textContent()) ?? ''), 10_000),
       `причины отказа нет в ленте: ${(await feed.textContent()) ?? ''}`)
   })
+
+  it('«Страж сети»: правка из терминала видна при открытии; правка во время открытого диалога — отказ «изменилось снаружи»', async () => {
+    const chip = (code: string) => h.win.locator(`[data-testid="guard-chip"][data-code="${code}"]`)
+    // Окно читало allow DE; правило меняют мимо окна (как `pult net guard --deny CN`).
+    await c.request('settings.set', { network: { guard: { mode: 'deny', countries: ['CN'] } } })
+    await h.win.keyboard.press('Meta+,')
+    const dlg = h.win.getByTestId('settings-dialog')
+    await dlg.waitFor({ timeout: 5000 })
+    await chip('CN').waitFor({ timeout: 5000 })
+    assert.equal(await h.win.getByTestId('guard-mode-deny').isChecked(), true, 'диалог встал на свежее правило')
+    assert.equal(await chip('DE').count(), 0)
+    // Диалог открыт, а правило снова меняют снаружи; правка в устаревшем диалоге не затирает его.
+    await c.request('settings.set', { network: { guard: { mode: 'deny', countries: ['IR'] } } })
+    const before = readFileSync(h.paths.config, 'utf8')
+    await h.win.getByTestId('guard-chip-remove-CN').click()
+    await h.win.getByTestId('guard-search').fill('куба')
+    await h.win.getByTestId('guard-add-CU').click()
+    await h.win.getByTestId('settings-save').click()
+    assert.ok(await waitFor(async () => /изменилось снаружи/.test((await h.win.getByTestId('settings-error').textContent().catch(() => '')) ?? ''), 5000), 'отказа нет')
+    assert.equal(readFileSync(h.paths.config, 'utf8'), before, 'правило из терминала не затёрто')
+    await h.win.keyboard.press('Escape')
+    assert.ok(await waitFor(async () => (await dlg.count()) === 0, 5000))
+  })
 })

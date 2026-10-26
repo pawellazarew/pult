@@ -312,7 +312,8 @@ would let it through; «Проверить сеть» checks again. A change mad
 the next turn of every session, without restarting the daemon; a running turn is not interrupted. The old top-level
 `guardCountries` list still works as a deny list; if `network.guard` is present, it wins, and saving the rule from the
 window or `pult net guard` removes the old key. `pult doctor` shows the rule. If `config.json` has allow mode with no
-valid country, every turn is refused until you add one.
+valid country, or a `network.guard` Pult cannot read, every turn is refused until you fix it. Deny mode with an empty
+list turns the guard off (doctor warns).
 
 **Proxy.** By default there is none: agents and the country check go out directly. To send a provider through a local
 proxy, set `network.<provider>.proxy` (the address below is only an example):

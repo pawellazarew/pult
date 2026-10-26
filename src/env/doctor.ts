@@ -26,7 +26,7 @@ import { codexInsideChatGPTApp, locateAllAsync } from './locate.js'
 import { loginShellPath } from './loginShell.js'
 import type { NetCheck } from './net.js'
 import { checkNetwork, netLine } from './net.js'
-import { guardLine } from '../core/guard.js'
+import { guardLine, guardOff } from '../core/guard.js'
 
 export type DoctorStatus = 'ok' | 'warn' | 'fail'
 
@@ -422,11 +422,14 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
   items.push({
     id: 'guard.rule',
     title: 'Страж сети',
-    status: emptyAllow ? 'fail' : 'ok',
+    status: emptyAllow ? 'fail' : guardOff(rule) ? 'warn' : 'ok',
     detail: emptyAllow
       ? `${guardLine(rule)} — все ходы запрещены: в режиме allow нет ни одной страны (config.json → network.guard)`
+      : guardOff(rule)
+      ? `${guardLine(rule)} — страж выключен: ходы идут из любой известной страны (неизвестная — по-прежнему отказ)`
       : `${guardLine(rule)} — для claude, codex и opencode; неизвестная страна — отказ`,
-    ...(emptyAllow ? { fix: 'добавь страну в «Настройки» (⌘,) → «Страж сети» или: pult net guard --allow DE' } : {}),
+    ...(emptyAllow ? { fix: 'добавь страну в «Настройки» (⌘,) → «Страж сети» или: pult net guard --allow DE' }
+      : guardOff(rule) ? { fix: 'верни страны в «Настройки» (⌘,) → «Страж сети» или: pult net guard --deny RU,BY' } : {}),
     data: { mode: rule.mode, countries: [...rule.countries] },
   })
   if (!deps.skipNet) {
