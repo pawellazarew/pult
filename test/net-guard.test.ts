@@ -177,7 +177,8 @@ async function eventOf(c: Awaited<ReturnType<typeof connectClient>>, name: strin
 describe('демон: settings.get|set network.guard и применение без рестарта', () => {
   it('строгий отказ не трогает файл; запись — только network.guard; get отдаёт правило', async () => {
     const home = tempHome()
-    const before = JSON.stringify({ version: 1, guardCountries: ['RU'], network: { claude: { mode: 'auto', proxy: 'http://127.0.0.1:9', noProxy: ['.corp.example'] } }, custom: 42 }, null, 2)
+    const original = { version: 1, guardCountries: ['RU'], network: { claude: { mode: 'auto', proxy: 'http://127.0.0.1:9', noProxy: ['.corp.example'] } }, custom: 42 }
+    const before = JSON.stringify(original, null, 2) + '\n'
     writeFileSync(home.paths.config, before)
     home.config = loadConfig(home.paths.config).config
     const d = await startTestDaemon(home)
@@ -205,12 +206,12 @@ describe('демон: settings.get|set network.guard и применение б�
       }
       const set = (await c.request('settings.set', { network: { guard: { mode: 'allow', countries: ['FI', 'DE'] } } })) as { network: { guard: unknown } }
       assert.deepEqual(set.network.guard, { mode: 'allow', countries: ['FI', 'DE'] })
-      const file = JSON.parse(readFileSync(home.paths.config, 'utf8')) as Record<string, unknown>
-      assert.deepEqual(file['network'], {
-        claude: { mode: 'auto', proxy: 'http://127.0.0.1:9', noProxy: ['.corp.example'] },
-        guard: { mode: 'allow', countries: ['FI', 'DE'] },
-      }, 'профиль провайдера не тронут')
-      assert.deepEqual([file['custom'], file['guardCountries'], file['version']], [42, ['RU'], 1], 'остальное — как было')
+      // Побайтно то же, что было, кроме двух правок: добавлен network.guard, удалён перекрытый guardCountries.
+      const { guardCountries: legacy, ...rest } = original
+      assert.deepEqual(legacy, ['RU'])
+      const expected = { ...rest, network: { ...original.network, guard: { mode: 'allow', countries: ['FI', 'DE'] } } }
+      assert.equal(readFileSync(home.paths.config, 'utf8'), JSON.stringify(expected, null, 2) + '\n')
+      assert.deepEqual(validateConfig(JSON.parse(readFileSync(home.paths.config, 'utf8'))).warnings, [], 'предупреждения «есть оба» больше нет')
       assert.deepEqual(((await c.request('settings.get')) as { network: { guard: unknown } }).network.guard, { mode: 'allow', countries: ['FI', 'DE'] })
       assert.deepEqual(loadConfig(home.paths.config).config.guard, { mode: 'allow', countries: ['FI', 'DE'] }, 'рестарт прочтёт то же')
     } finally { c.close(); await d.stop('конец теста'); home.remove() }
@@ -294,6 +295,12 @@ describe('CLI: pult net guard и pult doctor', () => {
       assert.deepEqual((JSON.parse(readFileSync(paths.config, 'utf8')) as { network: { guard: unknown } }).network.guard, { mode: 'allow', countries: ['DE', 'FI'] }, 'отказ файл не тронул')
       const doc = await runCli(paths, ['doctor', '--no-net'])
       assert.match(doc.stdout, /Страж сети.*разрешать только: DE, FI/)
+      // В файле allow без годных стран — закрыто: doctor объясняет и выходит с кодом 4.
+      writeFileSync(paths.config, JSON.stringify({ version: 1, network: { guard: { mode: 'allow', countries: ['GER'] } } }))
+      const closed = await runCli(paths, ['doctor', '--no-net'])
+      assert.equal(closed.code, 4, closed.stdout)
+      assert.match(closed.stdout, /разрешать только: \(пусто\) — все ходы запрещены/)
+      assert.match(closed.stdout, /pult net guard --allow/)
     } finally {
       await runCli(paths, ['daemon', 'stop']).catch(() => undefined)
       rmSync(dir, { recursive: true, force: true })

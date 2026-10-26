@@ -423,7 +423,9 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
     id: 'guard.rule',
     title: 'Страж сети',
     status: emptyAllow ? 'fail' : 'ok',
-    detail: `${guardLine(rule)} — для claude, codex и opencode; неизвестная страна — отказ`,
+    detail: emptyAllow
+      ? `${guardLine(rule)} — все ходы запрещены: в режиме allow нет ни одной страны (config.json → network.guard)`
+      : `${guardLine(rule)} — для claude, codex и opencode; неизвестная страна — отказ`,
     ...(emptyAllow ? { fix: 'добавь страну в «Настройки» (⌘,) → «Страж сети» или: pult net guard --allow DE' } : {}),
     data: { mode: rule.mode, countries: [...rule.countries] },
   })

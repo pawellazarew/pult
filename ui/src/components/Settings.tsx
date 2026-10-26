@@ -208,6 +208,11 @@ export function NetGuardSection({ panel, rule, onChange }: {
     <section className="settings-sec" aria-labelledby="settings-guard-h" data-testid="settings-net-guard">
       <h3 id="settings-guard-h">Страж сети</h3>
       <span className="note">Перед ходом Пульт проверяет страну выхода тем путём, которым пойдёт агент. Правило одно для claude, codex и opencode; страну определить не удалось — ход не идёт. У каждого режима свой список. Действует со следующего хода, идущий ход не прерывается.</span>
+      {panel.rule.mode === 'allow' && !panel.rule.countries.length && (
+        <div className="upd-state upd-warn" role="alert" data-testid="guard-closed">
+          <span className="grow">Сейчас все ходы запрещены: в config.json режим «Разрешать только» без стран. Добавь страну и сохрани — или выбери «Запрещать страны из списка».</span>
+        </div>
+      )}
       <div className="guard-modes" role="radiogroup" aria-label="Режим стража">
         <label className="check">
           <input type="radio" name="guard-mode" checked={rule.mode === 'deny'} data-testid="guard-mode-deny" onChange={() => mode('deny')} />

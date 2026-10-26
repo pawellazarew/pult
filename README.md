@@ -310,7 +310,9 @@ pult net guard --deny RU,BY       # every exit country except these
 The countries above are only examples. The window shows each provider's last known exit country and whether the new rule
 would let it through; «Проверить сеть» checks again. A change made in the window or with `pult net guard` applies from
 the next turn of every session, without restarting the daemon; a running turn is not interrupted. The old top-level
-`guardCountries` list still works as a deny list; if `network.guard` is present, it wins. `pult doctor` shows the rule.
+`guardCountries` list still works as a deny list; if `network.guard` is present, it wins, and saving the rule from the
+window or `pult net guard` removes the old key. `pult doctor` shows the rule. If `config.json` has allow mode with no
+valid country, every turn is refused until you add one.
 
 **Proxy.** By default there is none: agents and the country check go out directly. To send a provider through a local
 proxy, set `network.<provider>.proxy` (the address below is only an example):

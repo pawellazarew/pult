@@ -1589,12 +1589,14 @@ haiku/medium + `--permission-mode manual --disallowedTools Write Edit MultiEdit 
   `network.guard`, предупреждение в журнал на старте («guardCountries не читается»). `writeConfig` пишет страж только в
   `network.guard`. Мягкий разбор файла: регистр прощается, чужие коды отбрасываются с предупреждением; кривой режим —
   правило не берётся (остаётся `guardCountries` или умолчание); `allow`, в котором не осталось стран, — ЗАКРЫТО: все
-  ходы получают отказ (как `required` без прокси), `pult doctor` — fail.
+  ходы получают отказ (как `required` без прокси), `pult doctor` — fail «все ходы запрещены…» с подсказкой и кодом 4,
+  раздел окна — красная строка «Сейчас все ходы запрещены…».
 - **`settings.set`** принимает ровно `{network: {guard: {mode, countries}}}` (рядом — `newSession`, `updates`). Под
   `network` ничего больше: прокси, профили провайдеров, `noProxy` окном не пишутся никогда. Разбор строгий
   (`parseGuardStrict`): лишнее поле, незнакомый или строчный код, пустой `allow` → `invalid_params`, файл не тронут.
-  Пишется только `network.guard` (`writeNetworkGuard`): профили `network.<провайдер>` и прежний `guardCountries` остаются
-  в файле как были. `settings.get` отдаёт `network: {guard, exits}` — `exits` это последний известный выход по
+  Пишется только `network.guard` (`writeNetworkGuard`): профили `network.<провайдер>` и всё прочее остаются в файле как
+  были, а прежний верхний `guardCountries` (та же настройка, теперь перекрытая) удаляется в той же атомарной записи —
+  предупреждение «есть оба» после первой записи из окна или `pult net guard` больше не звучит. `settings.get` отдаёт `network: {guard, exits}` — `exits` это последний известный выход по
   провайдерам (`lastNetExits`, src/env/net.ts: `loc`, `path`, `reason`, `checkedAt`) из уже сделанных проверок, без
   новой пробы.
 - **Сразу, без рестарта демона.** `settings.set` меняет `config.guard` (адаптеры читают его на каждой проверке) и зовёт
@@ -1670,7 +1672,10 @@ haiku/medium + `--permission-mode manual --disallowedTools Write Edit MultiEdit 
 `systemctl --user enable` остаются ручными шагами (`spike/env/HUMAN-STEPS.md`).
 
 **Известные нестабильные тесты** (провал одного из них — повторить прогон целиком один раз; повторился — разбирать):
-e2e `search.test` «Target page, context or browser has been closed»; e2e `flows.test` — набор в поле обрезан (Playwright
+e2e `search.test` «Target page, context or browser has been closed»; e2e `app-update.test` «черновик поля реплики
+переживает SIGTERM окна и новый процесс» — `TypeError [Error]: Cannot read properties of undefined (reading '_object')`
+внутри Playwright после SIGTERM главного процесса Electron (26.10.2026, PR #15: 1 из 3 полных прогонов при load average ~9,
+кода окна и демона прогон не касался; повтор зелёный; причина не искалась); e2e `flows.test` — набор в поле обрезан (Playwright
 не допечатал); юнит `search.test` «20 МБ: демон отвечает…» — `цикл стоял 121 мс подряд` при пороге ниже (1 раз из 3 полных
 прогонов 20.10 при load average машины ~30 от соседних агентов; замер времени, причина в коде не искалась). Вылечены: e2e `flows.test` «"Стоп" посреди хода» и `chat.test` «⌘Enter посреди хода» — баг окна (смена
 статуса из очереди окна выброшена «полом» истории, см. «Найдено» выше; до лечения — провал на 4-м прогоне под нагрузкой, после —

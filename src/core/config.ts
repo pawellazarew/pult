@@ -404,14 +404,15 @@ export function writeUpdatesCheck(file: string, check: boolean): void {
 
 /**
  * 0.3.6, `settings.set {network: {guard}}`: правило стража. Пишется ТОЛЬКО `network.guard` — профили провайдеров
- * (`network.<провайдер>`: прокси, режим, noProxy) и прежний `guardCountries` остаются как были в файле. Правило
- * сюда приходит уже проверенным (`parseGuardStrict`).
+ * (`network.<провайдер>`: прокси, режим, noProxy) остаются как были в файле. Прежний верхний `guardCountries` — та же
+ * настройка, теперь перекрытая, — удаляется в той же атомарной записи: иначе предупреждение «есть оба» звучало бы на
+ * каждом старте. Правило сюда приходит уже проверенным (`parseGuardStrict`).
  */
 export function writeNetworkGuard(file: string, rule: GuardRule): void {
-  writeConfigSubtree(file, 'network', (prev) => ({ ...prev, guard: { mode: rule.mode, countries: [...rule.countries] } }), 'правило стража сети не записано')
+  writeConfigSubtree(file, 'network', (prev) => ({ ...prev, guard: { mode: rule.mode, countries: [...rule.countries] } }), 'правило стража сети не записано', ['guardCountries'])
 }
 
-function writeConfigSubtree(file: string, key: string, next: (prev: Record<string, unknown>) => Record<string, unknown>, what: string): void {
+function writeConfigSubtree(file: string, key: string, next: (prev: Record<string, unknown>) => Record<string, unknown>, what: string, drop: readonly string[] = []): void {
   let raw: Record<string, unknown> = {}
   let text: string | null = null
   try {
@@ -433,5 +434,6 @@ function writeConfigSubtree(file: string, key: string, next: (prev: Record<strin
   }
   const prev = raw[key] !== null && typeof raw[key] === 'object' && !Array.isArray(raw[key]) ? raw[key] as Record<string, unknown> : {}
   raw[key] = next(prev)
+  for (const k of drop) delete raw[k]
   atomicWrite(file, JSON.stringify(raw, null, 2) + '\n', 0o600)
 }
