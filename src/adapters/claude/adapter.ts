@@ -241,8 +241,7 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
   const writeMcpConfig = (l: Live, nodeBin: string, servers: Record<string, Record<string, unknown>>): { file: string; askKey: string } => {
     mkdirSync(paths.run, { recursive: true, mode: 0o700 })
     const file = join(paths.run, `mcp-${l.spec.name}.json`)
-    // Ключ — на процесс: прежний (процесс уже вышел или не родился) снимаем, новый пишем в файл.
-    revokeAskKey(l)
+    // Ключ — на процесс. Прежний снимает выход ЕГО процесса (тот мог ещё доживать после закрытия stdin и спрашивать).
     const askKey = askKeys.mint(l.spec.name)
     l.askKey = askKey
     writeFileSync(file, mcpConfigBody({
