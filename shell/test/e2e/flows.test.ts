@@ -215,6 +215,9 @@ describe('окно: рабочие сценарии', () => {
     await rule.waitFor({ timeout: 5000 })
     assert.match((await rule.textContent()) ?? '', /Всегда: команды, начинающиеся с.*echo hi > x\.txt/)
     assert.equal(await card.getByTestId('perm-approve-session').count(), 0, '«в этой сессии» сервер не предлагал')
+    // Открыта сессия beta, и фокус в её поле реплики: оттуда ⌘Enter карточку ДРУГОЙ сессии не разрешает (после #13).
+    // Человек выбирает карточку в Inbox — фокус уходит из поля, и ⌘Enter разрешает её.
+    await card.locator('.perm-h').click()
     await h.win.keyboard.press('Meta+Enter')
     assert.deepEqual((await settled()).map((e) => e.data['scope']), ['once'], '⌘Enter — всегда один раз')
 

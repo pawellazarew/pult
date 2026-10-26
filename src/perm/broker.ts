@@ -17,6 +17,9 @@
 //      Раз показанное и исполняемое расходятся, карточка обязана это СКАЗАТЬ: флаг `concealed`
 //      в событии и в `perm.list`. Иначе `ssh root@prod.example.com` выглядит как `ssh <email>`,
 //      и человек разрешает команду, адресата которой не видел.
+//   4. Спрашивающий умер — вопрос снимается ОТКАЗОМ (`signal` в `request`): заглушка `pult mcp-ask` живёт,
+//      пока жив её `claude`, и её соединение закрывается вместе с ним. Без этого карточка висела в Inbox
+//      до таймаута, а «Разрешить» на ней уходило в никуда (у Codex то же делает `cancelPermissions`).
 
 import { randomBytes } from 'node:crypto'
 import type { EventDraft } from '../core/events.js'
@@ -52,8 +55,18 @@ export interface PendingPermission {
   waitingMs: number
 }
 
+/** Чем снять вопрос, пока он ждёт: спрашивающий процесс завершился. */
+export interface RequestOptions {
+  /** Сработал — отказ с `reason` (по умолчанию «процесс агента завершился»), `by: provider_gone`. */
+  signal?: AbortSignal
+  reason?: string
+}
+
+/** Причина отказа по умолчанию, когда спрашивающий процесс (`pult mcp-ask` и его `claude`) умер. */
+export const ASKER_GONE_REASON = 'процесс агента завершился'
+
 export interface PermBroker {
-  request(req: PermissionRequest): Promise<PermissionDecision>
+  request(req: PermissionRequest, opts?: RequestOptions): Promise<PermissionDecision>
   list(sessionId?: string): PendingPermission[]
   /** false — такого id нет (уже решён, истёк или его не было). */
   resolve(id: string, decision: PermissionDecision, by?: string): boolean
@@ -125,7 +138,7 @@ export function createBroker(opts: BrokerOptions): PermBroker {
   }
 
   return {
-    request(req) {
+    request(req, ro = {}) {
       const id = `p${++seq}-${run}`
       const createdAt = Date.now()
       const createdAtIso = new Date(createdAt).toISOString()
@@ -157,6 +170,9 @@ export function createBroker(opts: BrokerOptions): PermBroker {
         }
         // `unref` намеренно НЕ зовём: пока кто-то ждёт решения, демон обязан быть жив.
         pending.set(id, entry)
+        const gone = (): void => {
+          finish(entry, { behavior: 'deny', message: `pult: ${ro.reason ?? ASKER_GONE_REASON}` }, 'provider_gone')
+        }
         opts.emit({
           sessionId: req.sessionId,
           provider: 'pult',
@@ -170,6 +186,15 @@ export function createBroker(opts: BrokerOptions): PermBroker {
             ...(concealed ? { concealed: true } : {}),
           },
         })
+        // Подписка — ПОСЛЕ `permission.requested`: в журнале отказ всегда идёт за вопросом, даже если
+        // спрашивающий умер ещё до того, как вопрос дошёл до брокера.
+        if (ro.signal) {
+          if (ro.signal.aborted) { gone(); return }
+          const signal = ro.signal
+          signal.addEventListener('abort', gone, { once: true })
+          const settle = entry.settle
+          entry.settle = (decision, how) => { signal.removeEventListener('abort', gone); settle(decision, how) }
+        }
       })
     },
 

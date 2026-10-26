@@ -173,6 +173,11 @@ interface Connection {
   app?: ShellHello
   /** Интерфейс этой оболочки уже сделал первый вызов — окно готово (обновление окна ждёт этого). */
   rendererSeen?: boolean
+  /**
+   * Срабатывает на закрытии соединения. Вопрос `perm.request` от `pult mcp-ask` ждёт решения на ЭТОМ соединении:
+   * оно закрылось — заглушка умерла вместе со своим `claude`, отвечать некому, вопрос снимается отказом.
+   */
+  closed: AbortController
 }
 
 /** Вызовы, которые делает только интерфейс окна (main оболочки их не шлёт): первый из них — окно готово. */
@@ -399,6 +404,10 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
       },
     } : {}),
   })
+  // Ход идёт по статусу ИЛИ заводится прямо сейчас (resume/send — статуса `working` ещё нет). Один счёт на «Обновить»
+  // в окне (checker ждёт, пока он не 0) и на `pult update` из CLI (`daemon.status.turns`).
+  const runningTurns = (): number =>
+    new Set([...manager.list().filter((r) => RUNNING_TURN.has(r.lastStatus)).map((r) => r.name), ...manager.startingTurns()]).size
   // M8c: канал обновлений. В тестовом демоне расписание — только по шву (`opts.updates`) или в сквозном
   // прогоне с PULT_TEST_UPDATE_DIR (первая проверка — через PULT_TEST_UPDATE_FIRST_MS): иначе каждый тест
   // заводил бы таймер, который через минуту честно сообщал бы «сеть в тестах не трогается».
@@ -406,8 +415,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
   const updater: UpdateChecker = createUpdateChecker({
     paths, config, logger,
     current: VERSION,
-    // Ход идёт по статусу ИЛИ заводится прямо сейчас (resume/send — статуса `working` ещё нет).
-    runningTurns: () => new Set([...manager.list().filter((r) => RUNNING_TURN.has(r.lastStatus)).map((r) => r.name), ...manager.startingTurns()]).size,
+    runningTurns,
     onApplyEnd: () => { manager.resumeQueues() },
     blocked: () => (appUpdaterRef?.busy() ? 'идёт обновление окна — пакет обновится после него' : null),
     ...(opts.testMode && !opts.updates
@@ -526,6 +534,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     notify: { ...config.notify },
     browser: browserStatus(),
     update: updateStatus(),
+    turns: runningTurns(),
   })
   function browserStatus(): NonNullable<DaemonStatus['browser']> {
     const st = installer.state()
@@ -992,7 +1001,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
           toolName: String(p['toolName'] ?? 'tool'),
           ...(str(p['toolUseId']) !== undefined ? { toolUseId: str(p['toolUseId']) as string } : {}),
           input: (p['input'] && typeof p['input'] === 'object' ? p['input'] : {}) as Record<string, unknown>,
-        })
+        }, { signal: conn.closed.signal })
       }
       case 'usage.get':
         return { usage: manager.usage() }
@@ -1287,7 +1296,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
 
   server.on('connection', (socket) => {
     const id = ++connSeq
-    const conn: Connection = { id, socket, authed: false, client: 'unknown', subs: createSubscriptions(bus, store, liveChannel), searchGen: 0 }
+    const conn: Connection = { id, socket, authed: false, client: 'unknown', subs: createSubscriptions(bus, store, liveChannel), searchGen: 0, closed: new AbortController() }
     connections.set(id, conn)
     const splitter = createLineSplitter()
 
@@ -1382,6 +1391,8 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
       connections.delete(id)
       // Окно, которое правило реплику очереди, ушло — очередь не ждёт его правки.
       manager.queueReleaseOwner(id)
+      // Заглушка `pult mcp-ask` умерла посреди вопроса — её вопросы уходят из Inbox отказом.
+      conn.closed.abort()
     })
   })
 

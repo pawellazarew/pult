@@ -432,6 +432,20 @@ describe('доктор', () => {
     }
   })
 
+  it('`required` без прокси — fail с подсказкой «укажи proxy или mode off», а не «подними прокси»', async () => {
+    const home = tempHome()
+    try {
+      const report = await runDoctor(deps(home, {
+        net: async (provider) => ({ ...netOk(), provider, mode: 'required', proxy: null, ok: false, reason: 'no_proxy', path: 'none', loc: null }),
+      }))
+      const item = report.items.find((i) => i.id === 'net.claude')!
+      assert.equal(item.status, 'fail')
+      assert.match(String(item.fix), /network\.claude\.mode = "required" без proxy — ходы запрещены: укажи network\.claude\.proxy или поставь mode = "off"/)
+    } finally {
+      home.remove()
+    }
+  })
+
   it('PATH доходит до поиска CLI и до запуска найденного', async () => {
     // Модуль loginShell написан ради того, что 6 из 7 CLI не видны в PATH службы launchd,
     // но его никто не звал: PATH-ветка locateTool была мёртвым кодом, а CLI из nvm или

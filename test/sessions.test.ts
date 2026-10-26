@@ -3,7 +3,7 @@
 
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { describe, it } from 'node:test'
@@ -466,8 +466,58 @@ describe('менеджер: папка сессии', () => {
       assert.deepEqual(stand.manager.list(), [], 'отказ на входе: в реестре пусто')
       // Папка внутри PULT_HOME до config.json не дотягивается — её пускаем.
       await stand.manager.start({ name: 'w', kind: 'claude', cwd: workIn(home) })
+      // `PULT_HOME/..x` — не сосед, а потомок (relative → `..`): его пускаем.
       assert.equal(coversPultHome(join(home.paths.home, '..x'), home.paths.home), false)
       assert.equal(coversPultHome(workIn(home), home.paths.home), false)
+      await stand.close()
+    } finally { home.remove() }
+  })
+
+  it('«..x» по-настоящему: PULT_HOME под папкой `..x` — она и её родитель накрывают его, сосед `..x` — нет', () => {
+    const root = mkdtempSync(join(tmpdir(), 'pt-dots-'))
+    try {
+      // relative(root, root/..x/home) = `..x/home` — начинается с «..», но это спуск, а не подъём.
+      const parent = join(root, '..x')
+      const ph = join(parent, 'home')
+      mkdirSync(ph, { recursive: true })
+      assert.equal(coversPultHome(parent, ph), true, 'папка `..x` над PULT_HOME')
+      assert.equal(coversPultHome(root, ph), true, 'дед: relative = `..x/home`')
+      // Настоящий сосед с именем `..x`: relative(root/b/..x, root/b/home) = `../home` — не накрывает.
+      const sib = join(root, 'b')
+      mkdirSync(join(sib, '..x'), { recursive: true })
+      mkdirSync(join(sib, 'home'), { recursive: true })
+      assert.equal(coversPultHome(join(sib, '..x'), join(sib, 'home')), false)
+      assert.equal(coversPultHome(join(ph, 'w'), ph), false, 'папка внутри PULT_HOME')
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+
+  it('сессия из sessions.json с папкой над PULT_HOME: ход и смена режима шире «Только чтение» — отказ; в нём ход идёт', async () => {
+    const home = tempHome()
+    try {
+      // Заведена до проверки на старте (или папка стала ссылкой): запись лежит в sessions.json как есть.
+      writeFileSync(join(home.paths.home, '.pult-fake.json'), JSON.stringify({ scenario: 'simple', speed: 0 }))
+      const legacy = (name: string, approval?: SessionRecord['approval']): SessionRecord => ({
+        name, provider: 'claude', cwd: home.paths.home, mode: 'turn', ...(approval ? { approval } : {}),
+        createdAt: '2026-10-01T10:00:00.000Z', lastStatus: 'idle', lastEventId: 0,
+      })
+      writeSessionsAtomic(home.paths.sessions, [legacy('old'), legacy('ws', 'workspace'), legacy('ro', 'read-only')])
+      const stand = boot(home)
+      const refused = (e: { code?: string; message?: string }): boolean => e.code === 'invalid_params' && /Только чтение/.test(e.message ?? '')
+      // resume: ход в `ask` и `workspace` не заводится — ни реплики в журнале, ни процесса.
+      await assert.rejects(() => stand.manager.prompt('old', 'привет'), refused)
+      await assert.rejects(() => stand.manager.prompt('ws', 'привет'), refused)
+      assert.equal(stand.store.readFrom(0).filter((e) => e.kind === 'message.user').length, 0, 'реплика не ушла в журнал')
+      // configure: шире «Только чтение» — отказ, запись не тронута; в «Только чтение» — можно.
+      await assert.rejects(() => stand.manager.configure({ name: 'old', approval: 'workspace' }), refused)
+      await assert.rejects(() => stand.manager.configure({ name: 'old', approval: 'full', confirm: true }), refused)
+      assert.equal(stand.manager.list().find((r) => r.name === 'old')?.approval, undefined)
+      const r = await stand.manager.configure({ name: 'ws', approval: 'read-only' })
+      assert.equal(r.record.approval, 'read-only')
+      // «Только чтение» — ход идёт.
+      await stand.manager.prompt('ro', 'привет')
+      const out = await stand.manager.wait({ name: 'ro', until: ['idle', 'done'], timeoutMs: 15_000 })
+      assert.equal(out.reason, 'matched')
+      assert.equal(out.status, 'idle', JSON.stringify(out))
       await stand.close()
     } finally { home.remove() }
   })

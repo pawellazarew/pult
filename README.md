@@ -128,7 +128,8 @@ How Pult is built and tested: [`docs/DEV.md`](docs/DEV.md) (in Russian).
 
 Pick a project folder — a git repository is recommended, so you can review and undo what the agent changed. It can't
 be `PULT_HOME` (`~/.pult`) or a folder above it such as `~`: an agent that edits files without asking would be able to
-rewrite Pult's own `config.json`.
+rewrite Pult's own `config.json`. If your `PULT_HOME` lives elsewhere and you pick your home folder anyway, Pult warns
+you: the agent could change `~/.claude`, `~/.codex`, `~/.zshrc` and the like without asking.
 
 ```sh
 pult doctor                                                   # everything in place?
@@ -183,7 +184,9 @@ Every question from every session goes to the Inbox (⌘I in the window, `pult p
   the card (`<email>`, `<token>`, `<redacted>`), and Codex fields are clipped; the ORIGINAL command still runs, so
   `ssh root@prod.example.com` shows as `ssh <email>`. Such a card is marked "Показано не всё" ("not everything is
   shown") and `pult perm list` prints `ВНИМАНИЕ: показано не всё`; if unsure, deny. ⌘Enter only approves a card you can
-  see: the open session's own request or one in the open Inbox.
+  see: the open session's own request or one in the open Inbox. Pressed in a session's reply box, it only approves that
+  session's own request — never a card of another session.
+- **A dead agent's question goes away.** If the `claude` process that asked dies, its card leaves the Inbox as "deny".
 - **Silence is a no.** Nobody answered within 10 minutes, the daemon went away, the agent was stopped — the answer is
   "deny".
 
@@ -244,6 +247,8 @@ pult update --app        # update the window (Pult.app, macOS) from the same cha
 pult update --app --rollback   # put the previous window back if the new one failed on its first start
 ```
 
+- `pult update` (also `--from`, `--to`) restarts the daemon, so it refuses while turns are running
+  («идут ходы: N … дождись или --force»); `--force` updates anyway and cuts them off.
 - `latest.json` of the latest GitHub release is signed with Ed25519 (the public key is built into Pult); the package
   must match the size and sha256 in the signed manifest. Anything else is refused and nothing is installed.
 - The daemon checks a minute after start, then every 6 hours, and when the window comes back to the screen if the last
@@ -296,7 +301,7 @@ proxy, set `network.<provider>.proxy` (the address below is only an example):
 ```
 
 - `auto` tries the proxy with a real request and goes direct if it is dead (the country check still applies);
-  `required` never goes direct — a dead proxy blocks the turn; `off` (the default) is direct only.
+  `required` never goes direct — a dead proxy, or no `proxy` at all, blocks the turn; `off` (the default) is direct only.
 - The agent gets the proxy as `HTTPS_PROXY` (Codex also `ALL_PROXY`), with `NO_PROXY` for localhost.
 - Services that must bypass the proxy (say, a work tracker behind a company VPN) go to `network.<provider>.noProxy`:
   `"noProxy": [".corp.example", "10.0.0.0/8"]`. Write domains as `.domain`.

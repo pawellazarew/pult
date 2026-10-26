@@ -3,7 +3,7 @@
 
 import type { NewSessionPrefill } from '../../../shell/src/contract.js'
 import type { ApprovalMode } from '../../../src/adapters/types.js'
-import { CLAUDE_DEFAULT_EFFORT, CLAUDE_DEFAULT_MODEL, CLAUDE_EFFORTS, CLAUDE_MODELS, CODEX_EFFORTS_FALLBACK, modeBlocksBrowser } from '../../../src/sessions/settings.js'
+import { CLAUDE_DEFAULT_EFFORT, CLAUDE_DEFAULT_MODEL, CLAUDE_EFFORTS, CLAUDE_MODELS, CODEX_EFFORTS_FALLBACK, HOME_CWD_WARNING, modeBlocksBrowser } from '../../../src/sessions/settings.js'
 import type { LastUsed, NewSessionSettings, ProviderDefaults } from '../../../src/sessions/settings.js'
 import type { AgentProvider } from './types.js'
 import type { ProviderCatalog } from './types.js'
@@ -92,6 +92,24 @@ export function approvalFooter(provider: AgentProvider, mode: ApprovalMode, clau
 
 /** Красное предупреждение у `full` (одинаково у обоих провайдеров). */
 export const APPROVAL_FULL_WARNING = 'агент делает что угодно без вопросов, песочницы нет'
+
+/**
+ * Папка — домашняя или выше: `/`, `/Users`, `/home`, `/Users/<имя>`, `/home/<имя>`. Окну домашнюю папку никто не
+ * сообщает — угадываем по форме пути, как `shortPath` (model/agents.ts).
+ */
+export function cwdCoversHome(cwd: string): boolean {
+  const p = cwd.replace(/\/+$/, '') || '/'
+  return /^(\/|\/Users|\/home|\/Users\/[^/]+|\/home\/[^/]+)$/.test(p)
+}
+
+/**
+ * Предупреждение (не отказ) в «+ Сессия»: папка — дом или выше, режим шире «Только чтение». С веткой worktree агент
+ * живёт в папке worktree, а не здесь, — предупреждать не о чем.
+ */
+export function homeWarning(form: Pick<NewAgentForm, 'cwd' | 'approval' | 'worktree'>): string | null {
+  if (!form.cwd || form.approval === 'read-only' || form.worktree.trim()) return null
+  return cwdCoversHome(form.cwd) ? HOME_CWD_WARNING : null
+}
 
 /**
  * Режим, при котором браузер для агента не включается (тот же список, что у демона — src/mcp/browser.ts

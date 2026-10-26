@@ -2,7 +2,8 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
-import { describePermission, gutterNo, optionsLine, scopeButtons, scopeText } from '../model/permissions.js'
+import { concealedNote, describePermission, gutterNo, optionsLine, scopeButtons, scopeText } from '../model/permissions.js'
+import type { PermKind } from '../model/permissions.js'
 import type { PermissionOffers, PermissionScope } from '../../../src/adapters/types.js'
 import type { DiffBlock } from '../model/permissions.js'
 import { answersReady, buildAnswers, isQuestionTool, questionsOf } from '../model/questions.js'
@@ -87,11 +88,7 @@ export function PermCard(p: PermCardProps): ReactElement {
           {v.fields.map(([k, val]) => <FieldRow key={k} k={k} v={val} />)}
         </dl>
       )}
-      {p.state === 'pending' && p.concealed && (
-        <div className="perm-concealed" data-testid="perm-concealed">
-          Показано не всё: фильтр секретов скрыл часть ввода (<code>&lt;email&gt;</code>, <code>&lt;token&gt;</code>, <code>&lt;redacted&gt;</code>) или длинное поле обрезано. Исполнится исходная команда — не уверен, отказывай.
-        </div>
-      )}
+      {p.state === 'pending' && p.concealed && <Concealed kind={v.kind} />}
       {p.state === 'pending' && optionsLine(v.options) && <div className="perm-opts">варианты провайдера: {optionsLine(v.options)}</div>}
       {p.state === 'pending' && rule?.note && <div className="perm-opts" data-testid="perm-rule-note">{rule.label} «{rule.code}» {rule.note}</div>}
 
@@ -152,6 +149,7 @@ function QuestionCard(p: PermCardProps): ReactElement {
   }))
   return <article className="perm" data-state={p.state} data-testid="perm-card" data-perm-id={p.permId} data-question="1" onMouseDown={p.onFocus}>
     <div className="perm-h"><span className="lbl">Вопрос{p.agent ? ` ${p.agent.provider === 'codex' ? 'Codex' : 'Claude'}` : ''}</span>{p.agent && <><span className="who">{p.agent.name}</span><ProviderTag provider={p.agent.provider} /></>}{p.state === 'pending' && <span className="waited">ждёт {ago(p.createdAt, p.now)}</span>}</div>
+    {p.state === 'pending' && p.concealed && <Concealed kind="question" />}
     {questions.map((q) => <fieldset key={q.key} className="question-field" disabled={p.busy || p.state !== 'pending'}>
       {q.header && <legend>{q.header}</legend>}<div className="perm-reason">{q.question}</div>
       {q.options.map((o) => <label key={o.label} className="question-option">
@@ -164,6 +162,16 @@ function QuestionCard(p: PermCardProps): ReactElement {
     </fieldset>)}
     {p.state === 'pending' ? <div className="perm-actions"><button type="button" className="btn btn-ok" disabled={p.busy || !ready} onClick={() => p.onAnswer?.(answers)} data-testid="question-send">Отправить ответ</button><button type="button" className="btn btn-ghost" disabled={p.busy} onClick={() => p.onDeny?.('')}>Пропустить</button></div> : <div className="perm-done">{p.state === 'allow' ? 'Ответ отправлен' : p.state === 'expired' ? 'Вопрос устарел' : 'Вопрос пропущен'}</div>}
   </article>
+}
+
+/** Показанное ≠ исходному (`concealed`): фильтр секретов или подрезка. Слова — под вид карточки (`concealedNote`). */
+function Concealed({ kind }: { kind: PermKind | 'question' }): ReactElement {
+  const n = concealedNote(kind)
+  return (
+    <div className="perm-concealed" data-testid="perm-concealed">
+      Показано не всё: фильтр секретов скрыл {n.what} (<code>&lt;email&gt;</code>, <code>&lt;token&gt;</code>, <code>&lt;redacted&gt;</code>) или длинное поле обрезано. {n.then}
+    </div>
+  )
 }
 
 function FieldRow({ k, v }: { k: string; v: string }): ReactElement {

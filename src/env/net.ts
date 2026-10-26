@@ -32,7 +32,7 @@ export const PROBE_TIMEOUT_MS = 8000
 export const CACHE_TTL_MS = 60_000
 
 export type NetPath = 'proxy' | 'direct' | 'none'
-export type NetReason = 'ok' | 'proxy_dead' | 'blocked_country' | 'unknown_location'
+export type NetReason = 'ok' | 'proxy_dead' | 'blocked_country' | 'unknown_location' | 'no_proxy'
 
 export interface ProbeResult {
   status: number | null
@@ -189,6 +189,16 @@ export async function checkNetwork(
     proxy = null
     loc = await traceVia('direct', null, probe, timeoutMs, urls, attempts)
   } else {
+    // `required` без адреса прокси — закрыто, без проб: прямой путь здесь запрещён, а прокси пробовать не на чем.
+    if (profile.mode === 'required' && !profile.proxy) {
+      const check: NetCheck = {
+        provider, mode: profile.mode, path: 'none', proxy: null, loc: null,
+        ok: false, reason: 'no_proxy', fellBack: false, guard, attempts, noProxy,
+        ms: now() - t0, checkedAt: new Date().toISOString(), cached: false,
+      }
+      cache.set(key, { at: now(), check })
+      return check
+    }
     // И в auto, и в required сначала пробуем прокси — НАСТОЯЩИМ запросом.
     loc = profile.proxy ? await traceVia('proxy', profile.proxy, probe, timeoutMs, urls, attempts) : null
     if (loc) {
@@ -230,6 +240,16 @@ export async function checkNetwork(
   }
   cache.set(key, { at: now(), check })
   return check
+}
+
+/**
+ * Отказ хода стражем — для `TurnOutcome.message`. `no_proxy` объясняется словами: код причины сам по себе не говорит,
+ * что чинить.
+ */
+export function netRefusal(c: Pick<NetCheck, 'provider' | 'reason'>): string {
+  return c.reason === 'no_proxy'
+    ? `страж сети: no_proxy — network.${c.provider}.mode = "required", а proxy не задан; ход запрещён. Укажи network.${c.provider}.proxy или mode "off" в config.json`
+    : `страж сети: ${c.reason}`
 }
 
 /** Одна строка для человека: `claude: auto → прямой, loc=XX, 412 мс`. */

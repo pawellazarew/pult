@@ -841,6 +841,8 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
     // ⌘Enter во время хода — «прервать и сказать» (О2). Дальше окна не идёт: там ⌘Enter — «разрешить
     // выделенный запрос». Без хода, с пустым полем или со старым демоном — горячая клавиша окна, как раньше.
     // Сессия ждёт тебя (разрешение, вопрос, выделенный запрос) — ⌘Enter остаётся «разрешить запрос».
+    // `permFocused` — выделен запрос ЭТОЙ сессии (Console: `composerApproves`): карточка другой сессии в открытом Inbox
+    // ⌘Enter из этого поля не получает — ни здесь, ни в окне (там тот же фильтр по источнику клавиши).
     if (cmd && composerCmdEnter({ busy, needsYou, permFocused, queueable, hasText: text.trim() !== '', blocked }) === 'interrupt') {
       e.preventDefault()
       e.stopPropagation()

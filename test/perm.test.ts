@@ -5,7 +5,8 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import { describe, it } from 'node:test'
-import { createBroker } from '../dist/perm/broker.js'
+import { ASKER_GONE_REASON, createBroker } from '../dist/perm/broker.js'
+import type { AdapterDeps } from '../dist/adapters/types.js'
 import { runMcpAsk } from '../dist/perm/mcpAsk.js'
 import type { AskDecision, McpServerIo } from '../dist/perm/mcpAsk.js'
 import type { EventDraft } from '../dist/core/events.js'
@@ -166,6 +167,42 @@ describe('брокер разрешений', () => {
     broker.resolve(broker.list()[0]!.id, { behavior: 'allow' })
     assert.deepEqual((await hidden).updatedInput, { command: 'ssh root@prod.example.com uptime' })
     broker.shutdown()
+  })
+
+  it('ТИП: `askPermission` адаптера принимает `concealed` (литерал с лишним полем не скомпилировался бы)', async () => {
+    const seen: unknown[] = []
+    const ask: AdapterDeps['askPermission'] = async (req) => { seen.push(req.concealed); return { behavior: 'deny' } }
+    await ask({ sessionId: 'w', toolName: 'execCommand', input: { command: ['a'] }, concealed: true })
+    await ask({ sessionId: 'w', toolName: 'execCommand', input: { command: ['a'] } })
+    assert.deepEqual(seen, [true, undefined])
+  })
+
+  it('СПРАШИВАЮЩИЙ УМЕР: `signal` снимает вопрос отказом (`provider_gone`), после решения он ни на что не влияет', async () => {
+    const drafts: EventDraft[] = []
+    const broker = createBroker({ emit: (d) => drafts.push(d) })
+    const resolved = (): Record<string, unknown>[] => drafts.filter((d) => d.kind === 'permission.resolved').map((d) => d.data as Record<string, unknown>)
+    const gone = new AbortController()
+    const asked = broker.request({ sessionId: 'w', toolName: 'Bash', input: { command: 'ls' } }, { signal: gone.signal })
+    const kept = new AbortController()
+    const answered = broker.request({ sessionId: 'w', toolName: 'Bash', input: { command: 'pwd' } }, { signal: kept.signal })
+    assert.equal(broker.pendingCount(), 2)
+    gone.abort()
+    const d = await asked
+    assert.equal(d.behavior, 'deny')
+    assert.equal(d.message, `pult: ${ASKER_GONE_REASON}`)
+    assert.deepEqual(broker.list().map((p) => p.input['command']), ['pwd'], 'снят только вопрос умершего')
+    assert.deepEqual([resolved()[0]?.['by'], resolved()[0]?.['decision']], ['provider_gone', 'deny'])
+    // Ответ пришёл раньше смерти — смерть после ответа ничего не пишет и не меняет.
+    broker.resolve(broker.list()[0]!.id, { behavior: 'allow' })
+    assert.equal((await answered).behavior, 'allow')
+    kept.abort()
+    assert.equal(resolved().length, 2)
+    // Умер ещё до вопроса — вопрос сразу снят отказом, а в журнале отказ стоит за вопросом.
+    const dead = new AbortController(); dead.abort()
+    const late = await broker.request({ sessionId: 'w', toolName: 'Bash', input: {} }, { signal: dead.signal })
+    assert.equal(late.behavior, 'deny')
+    assert.deepEqual(drafts.slice(-2).map((x) => x.kind), ['permission.requested', 'permission.resolved'])
+    assert.equal(broker.pendingCount(), 0)
   })
 })
 
@@ -353,6 +390,24 @@ describe('круг разрешений: настоящий `pult mcp-ask` пр�
       const decision = decisionOf(await answer)
       assert.equal(decision.behavior, 'deny')
     } finally { stub.kill(); home.remove() }
+  })
+
+  it('ЗАГЛУШКА УМЕРЛА (умер её claude): вопрос уходит из Inbox отказом «процесс агента завершился», как у Codex', async () => {
+    const home = tempHome()
+    const daemon = await startTestDaemon(home)
+    await register(daemon, home, 'w')
+    const stub = startStub(home.paths.home, 'w')
+    try {
+      await stub.call('initialize', {})
+      void stub.call('tools/call', { name: 'ask', arguments: { tool_name: 'Bash', input: { command: 'make deploy' } } })
+      assert.ok(await waitFor(() => daemon.broker.pendingCount() === 1, 5000), 'запрос должен дойти до брокера')
+      stub.kill()
+      assert.ok(await waitFor(() => daemon.broker.pendingCount() === 0, 5000), 'вопрос мёртвой заглушки висит в Inbox')
+      const resolved = daemon.store.readFrom(0, { sessionId: 'w' }).filter((e) => e.kind === 'permission.resolved')
+      assert.equal(resolved.length, 1)
+      assert.deepEqual([resolved[0]!.data['decision'], resolved[0]!.data['by'], resolved[0]!.data['message']],
+        ['deny', 'provider_gone', `pult: ${ASKER_GONE_REASON}`])
+    } finally { stub.kill(); await daemon.stop('тест'); home.remove() }
   })
 
   it('perm.request доступен ТОЛЬКО клиенту mcp-ask: обычный cli получает отказ', async () => {

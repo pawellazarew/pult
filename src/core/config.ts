@@ -17,8 +17,8 @@ export const PROVIDERS: readonly ProviderName[] = ['claude', 'codex', 'opencode'
 export interface NetworkProfile {
   mode: NetMode
   /**
-   * URL прокси; используется в режимах auto и required. Пустая строка — прокси нет: тогда режим
-   * всегда `off` (это гарантирует `validateConfig`, а `checkNetwork` страхует ещё раз).
+   * URL прокси; используется в режимах auto и required. Пустая строка — прокси нет: `auto` тогда становится `off`
+   * (`validateConfig`), а `required` остаётся и запрещает ходы (`checkNetwork` → `no_proxy`): закрыто, а не напрямую.
    */
   proxy: string
   /**
@@ -223,9 +223,13 @@ export function validateConfig(raw: unknown): { config: PultConfig; warnings: st
             warnings.push(`config.json: network.${p}.mode = ${JSON.stringify(mode)} — не auto|required|off, взят ${cfg.network[p].mode}`)
           }
         }
-        if (cfg.network[p].mode !== 'off' && !hasProxy) {
-          warnings.push(`config.json: network.${p}.mode = ${cfg.network[p].mode} без proxy — прокси нет, взят off (прямой путь)`)
+        // `auto` без прокси — прямой путь (он и так им был бы при мёртвом прокси). `required` без прокси — ЗАКРЫТО:
+        // человек сказал «только через прокси», и тихий `off` пустил бы ходы напрямую. Ходы отказывают (`no_proxy`).
+        if (cfg.network[p].mode === 'auto' && !hasProxy) {
+          warnings.push(`config.json: network.${p}.mode = auto без proxy — прокси нет, взят off (прямой путь)`)
           cfg.network[p].mode = 'off'
+        } else if (cfg.network[p].mode === 'required' && !hasProxy) {
+          warnings.push(`config.json: network.${p}.mode = required без proxy — ходы ${p} запрещены, пока не задан network.${p}.proxy (или mode "off")`)
         }
         const noProxy = e['noProxy']
         if (noProxy !== undefined) {

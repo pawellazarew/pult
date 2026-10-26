@@ -429,7 +429,9 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
         // В строке есть адрес прокси — он может нести логин и пароль.
         detail: redactString(netLine(check)),
         ...(check.ok ? {} : {
-          fix: check.reason === 'proxy_dead'
+          fix: check.reason === 'no_proxy'
+            ? `network.${provider}.mode = "required" без proxy — ходы запрещены: укажи network.${provider}.proxy или поставь mode = "off" в ${deps.paths.config}`
+            : check.reason === 'proxy_dead'
             ? (check.proxy
               ? `подними прокси ${redactString(check.proxy)} или поставь network.${provider}.mode = "auto" в ${deps.paths.config}`
               : `укажи network.${provider}.proxy или поставь network.${provider}.mode = "off" в ${deps.paths.config}`)

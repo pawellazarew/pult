@@ -138,6 +138,8 @@ export interface AdapterDeps {
     input: Record<string, unknown>
     /** M8d: что провайдер предложил сверх «один раз» (кнопки «В этой сессии» / «Всегда …»). */
     offers?: PermissionOffers
+    /** Адаптер сам скрыл или подрезал часть входа до брокера (Codex) — карточка скажет «показано не всё». */
+    concealed?: boolean
   }): Promise<PermissionDecision>
   /**
    * Снять ВСЕ ожидающие вопросы этой сессии ОТКАЗОМ; возвращает, сколько сняли.

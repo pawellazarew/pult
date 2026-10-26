@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict'
 import { beforeEach, describe, it } from 'node:test'
 import { DEFAULT_GUARD_COUNTRIES } from '../dist/core/config.js'
-import { checkNetwork, clearNetCache, curlArgs, noProxyValue, parseLoc } from '../dist/env/net.js'
+import { checkNetwork, clearNetCache, curlArgs, netRefusal, noProxyValue, parseLoc } from '../dist/env/net.js'
 import { claudeNetworkEnv } from '../dist/adapters/claude/adapter.js'
 import { codexNetworkEnv } from '../dist/adapters/codex/adapter.js'
 import type { ProbeFn } from '../dist/env/net.js'
@@ -108,7 +108,10 @@ describe('страж', () => {
     const before = probe.calls.length
     const r = await checkNetwork('codex', { mode: 'required', proxy: '' }, DEFAULT_GUARD_COUNTRIES, { probe: probe.fn })
     assert.equal(r.ok, false)
-    assert.equal(r.reason, 'proxy_dead')
+    assert.equal(r.path, 'none')
+    assert.equal(r.reason, 'no_proxy')
+    assert.match(netRefusal(r), /^страж сети: no_proxy — network\.codex\.mode = "required", а proxy не задан; ход запрещён/)
+    assert.equal(netRefusal({ provider: 'claude', reason: 'blocked_country' }), 'страж сети: blocked_country', 'прочие причины — как были')
     assert.equal(probe.calls.length, before, 'required без прокси не пробует ни прокси, ни прямой путь')
   })
 

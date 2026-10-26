@@ -5,6 +5,7 @@
 //   N3 — «в очередь» во время установки встаёт в очередь, а не получает отказ.
 
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -24,7 +25,8 @@ import { createManager, ManagerError } from '../dist/sessions/manager.js'
 import type { HttpGet } from '../dist/update/fetch.js'
 import { publicOf, signEnvelope } from '../dist/update/manifest.js'
 import type { ApplyChild } from '../dist/update/checker.js'
-import { CLI_ENTRY, FAKE_CLAUDE, startTestDaemon, tempHome, waitFor } from './helpers.js'
+import { refuseRunningTurns } from '../dist/update/update.js'
+import { CLI_ENTRY, FAKE_CLAUDE, startTestDaemon, tempHome, waitFor, workIn } from './helpers.js'
 import type { TempHome } from './helpers.js'
 
 const okNet = async (): Promise<NetCheck> => ({
@@ -186,5 +188,57 @@ describe('демон: N1 целиком — конец хода запускае
       rmSync(cwd, { recursive: true, force: true })
       home.remove()
     }
+  })
+})
+
+// `pult update` из CLI (канал, --from, --to) перезапускает демона: идущие ходы оборвались бы. Окно ждёт их конца
+// (checker.ts), CLI — отказывает с тем же счётом (`daemon.status.turns`) или идёт дальше с `--force`.
+describe('pult update из CLI и идущие ходы', () => {
+  it('refuseRunningTurns: идут ходы — отказ с числом; --force, 0 ходов, нет демона, старый демон — дальше', async () => {
+    const lines: string[] = []
+    const io = { out: (s: string) => { lines.push(s) }, err: (s: string) => { lines.push(s) } }
+    const home = tempHome()
+    try {
+      const at = (st: { turns?: number } | null) => async () => st
+      assert.equal(await refuseRunningTurns(home.paths, io, { force: false, status: at({ turns: 2 }) }), true)
+      assert.match(lines.at(-1) ?? '', /^pult update: идут ходы: 2 — .*дождись или --force$/)
+      const n = lines.length
+      assert.equal(await refuseRunningTurns(home.paths, io, { force: true, status: at({ turns: 2 }) }), false)
+      assert.equal(await refuseRunningTurns(home.paths, io, { force: false, status: at({ turns: 0 }) }), false)
+      assert.equal(await refuseRunningTurns(home.paths, io, { force: false, status: at(null) }), false)
+      assert.equal(await refuseRunningTurns(home.paths, io, { force: false, status: at({}) }), false)
+      assert.equal(lines.length, n, 'пропуск молчит')
+    } finally { home.remove() }
+  })
+
+  it('daemon.status.turns считает идущие ходы; `pult update --to` отказывает, --force проходит дальше', async () => {
+    const home = tempHome()
+    const daemon = await startTestDaemon(home)
+    const run = (args: string[]): Promise<{ code: number | null; err: string }> => new Promise((resolve) => {
+      const child = spawn(process.execPath, [CLI_ENTRY, 'update', ...args], { env: { ...process.env, PULT_HOME: home.paths.home, PULT_TEST: '1' }, stdio: ['ignore', 'pipe', 'pipe'] })
+      let err = ''
+      child.stderr.on('data', (b: Buffer) => { err += b.toString() })
+      child.on('exit', (code) => resolve({ code, err }))
+    })
+    try {
+      await daemon.manager.start({ name: 'w', kind: 'claude', cwd: workIn(home) })
+      assert.equal(daemon.status().turns, 0)
+      daemon.manager.emit({ sessionId: 'w', provider: 'claude', kind: 'status.changed', data: { status: 'working', turnId: 't1' } })
+      assert.ok(await waitFor(() => daemon.status().turns === 1, 3000), `turns: ${daemon.status().turns}`)
+      const refused = await run(['--to', '9.9.9'])
+      assert.equal(refused.code, 1)
+      assert.match(refused.err, /идут ходы: 1 — .*дождись или --force/)
+      // --force: отказа по ходам нет — дальше обычный путь (версии 9.9.9 на диске нет).
+      const forced = await run(['--to', '9.9.9', '--force'])
+      assert.equal(forced.code, 1)
+      assert.doesNotMatch(forced.err, /идут ходы/)
+      assert.match(forced.err, /версии 9\.9\.9 на диске нет/)
+      // Ход кончился — без --force тоже дальше.
+      daemon.manager.emit({ sessionId: 'w', provider: 'claude', kind: 'status.changed', data: { status: 'idle', turnId: 't1' } })
+      assert.ok(await waitFor(() => daemon.status().turns === 0, 3000))
+      assert.doesNotMatch((await run(['--to', '9.9.9'])).err, /идут ходы/)
+      // --list и --check с --force не бывает.
+      assert.match((await run(['--list', '--force'])).err, /--force — не с --list и --check/)
+    } finally { await daemon.stop('тест'); home.remove() }
   })
 })

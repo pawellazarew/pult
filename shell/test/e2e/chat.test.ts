@@ -114,4 +114,36 @@ describe('окно: чат M8e', () => {
     assert.match((await h.win.getByTestId('msg-user').last().textContent()) ?? '', /Вместо/)
     await c.request('agent.stop', { name: 'ux2' }).catch(() => undefined)
   })
+
+  it('⌘Enter в поле сессии A прерывает A, а карточку сессии B из открытого Inbox не разрешает', async () => {
+    // Сессия B ждёт разрешения — её карточка в открытом Inbox, и вне поля ⌘Enter разрешил бы её (выделена).
+    await c.request('agent.start', { name: 'pb', kind: 'claude', cwd: h.workDir('pb', { scenario: 'demo-edit' }) })
+    await c.request('agent.prompt', { name: 'pb', text: 'Поправь округление' })
+    const inbox = h.win.getByTestId('inbox')
+    if (!(await inbox.count())) await h.win.keyboard.press('Meta+i')
+    const card = inbox.locator('[data-testid="perm-card"]')
+    assert.ok(await waitFor(async () => (await card.count()) === 1, 15_000), 'запрос B не дошёл до Inbox')
+    const permId = await card.getAttribute('data-perm-id')
+    // Сессия A посреди хода (глухой fake: ход оседает секунды, как в тесте выше).
+    await c.request('agent.start', { name: 'pa', kind: 'claude', cwd: h.workDir('pa', { scenario: 'simple', hangAfterInit: 30_000, deaf: '1' }) })
+    await c.request('agent.prompt', { name: 'pa', text: 'Первая' })
+    await select('pa')
+    assert.ok(await waitFor(async () => (await journal('pa')).some((e) => e.kind === 'session.started'), 10_000), 'глухой процесс не поднялся')
+    assert.ok(await waitFor(async () => (await h.win.getByTestId('conv-status').textContent()) === 'идёт', 10_000))
+    // Предусловие: карточка B выделена — старое поле отдало бы ⌘Enter окну, и оно разрешило бы её.
+    assert.equal(await card.getAttribute('data-focused'), 'true')
+    const box = h.win.getByTestId('composer')
+    await box.fill('Вместо')
+    await box.press('Meta+Enter')
+    assert.equal(await box.inputValue(), '', 'реплика не ушла «прервать и сказать»')
+    assert.ok(await waitFor(async () => JSON.stringify(await users('pa')) === JSON.stringify(['Первая', 'Вместо']), 20_000), `реплики A: ${JSON.stringify(await users('pa'))}`)
+    // B по-прежнему ждёт: ни решения в журнале, ни пропажи из perm.list.
+    const pending = ((await c.request('perm.list', {})) as { pending: Array<{ id: string }> }).pending.map((p) => p.id)
+    assert.ok(pending.includes(String(permId)), `запрос B снят: ${JSON.stringify(pending)}`)
+    assert.equal((await journal('pb')).filter((e) => e.kind === 'permission.resolved').length, 0, 'запрос B получил решение')
+    assert.equal(await card.count(), 1, 'карточка B ушла из Inbox')
+    await h.shot('cmd-enter-other-session')
+    await c.request('agent.stop', { name: 'pa' }).catch(() => undefined)
+    await c.request('agent.stop', { name: 'pb' }).catch(() => undefined)
+  })
 })

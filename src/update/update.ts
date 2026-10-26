@@ -277,6 +277,22 @@ async function switchAndProbe(paths: PultPaths, io: Io, v: string, action: Updat
   return 1
 }
 
+/**
+ * `pult update` из CLI (канал, `--from`, `--to`) перезапускает демона, а с ним обрываются идущие ходы. Окно в этом
+ * случае ждёт конца ходов (src/update/checker.ts); CLI ждать в фоне некому — он отказывает с тем же счётом
+ * (`daemon.status.turns`), `--force` — не ждать. Демона нет или он старый (поля нет) — ходов он не знает, отказа нет.
+ * `--expect` (так «Обновить» зовёт сам демон) сюда не ходит: демон уже дождался ходов или человек нажал «Сейчас».
+ * true — отказано, строка уже в stderr.
+ */
+export async function refuseRunningTurns(paths: PultPaths, io: Io, opts: { force: boolean; status?: () => Promise<{ turns?: number } | null> }): Promise<boolean> {
+  if (opts.force) return false
+  const st = await (opts.status ?? (() => daemonStatusOnce(paths)))()
+  const turns = typeof st?.turns === 'number' ? st.turns : 0
+  if (turns <= 0) return false
+  io.err(`pult update: идут ходы: ${turns} — обновление перезапустит демона и оборвёт их; дождись или --force`)
+  return true
+}
+
 export async function updateFrom(paths: PultPaths, io: Io, tgzArg: string, opts: UpdateOptions = {}): Promise<number> {
   return withUpdateLock(paths, io, () => installTarball(paths, io, tgzArg, opts))
 }
