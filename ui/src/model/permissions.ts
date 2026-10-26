@@ -354,3 +354,21 @@ export function scopeText(scope: unknown, rule: unknown): string | null {
   if (!label) return 'всегда (правило провайдера)'
   return r?.['kind'] === 'network' ? `всегда — сеть к ${label}` : `всегда: команды, начинающиеся с «${label}»`
 }
+
+/**
+ * Строка «показано не всё» (`concealed`, src/perm/broker.ts) — словами под вид карточки. Команда исполнится исходной,
+ * правка или вызов — с исходным вводом; у вопроса (AskUserQuestion, requestUserInput) ничего не исполняется — модель
+ * просто знает вопрос целиком, и «команды» там нет.
+ */
+export function concealedNote(kind: PermKind | 'question'): { what: string; then: string } {
+  if (kind === 'question') {
+    return {
+      what: 'часть вопроса или вариантов',
+      then: 'Модель видит вопрос целиком — не уверен, о чём он, пропусти.',
+    }
+  }
+  return {
+    what: 'часть ввода',
+    then: kind === 'command' ? 'Исполнится исходная команда — не уверен, отказывай.' : 'Исполнится исходный ввод — не уверен, отказывай.',
+  }
+}

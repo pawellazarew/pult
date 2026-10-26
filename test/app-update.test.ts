@@ -741,7 +741,7 @@ describe('обновление окна: демон целиком (сокет, 
     }
   })
 
-  it('CLI: --force без --app и --app вместе с --check — отказ', async () => {
+  it('CLI: --force с --list и --app вместе с --check — отказ', async () => {
     const run = (args: string[]): Promise<{ code: number | null; out: string }> => new Promise((resolve) => {
       const home = mkdtempSync(join(tmpdir(), 'pau-c-'))
       const child = spawn(process.execPath, [CLI_ENTRY, 'update', ...args], { env: { ...process.env, PULT_HOME: home, PULT_TEST: '1' }, stdio: ['ignore', 'pipe', 'pipe'] })
@@ -749,9 +749,10 @@ describe('обновление окна: демон целиком (сокет, 
       child.stderr.on('data', (b: Buffer) => { out += b.toString() })
       child.on('exit', (code) => { rmSync(home, { recursive: true, force: true }); resolve({ code, out }) })
     })
-    const a = await run(['--force'])
+    // `--force` без `--app` теперь значит «не ждать идущих ходов» (канал, --from, --to); с --list и --check его нет.
+    const a = await run(['--force', '--list'])
     assert.notEqual(a.code, 0)
-    assert.match(a.out, /--force — только вместе с --app/)
+    assert.match(a.out, /--force — не с --list и --check/)
     const b = await run(['--app', '--check'])
     assert.notEqual(b.code, 0)
     assert.match(b.out, /pult update --check/)

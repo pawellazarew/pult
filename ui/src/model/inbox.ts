@@ -118,13 +118,25 @@ export function pendingBySession(state: InboxState): Record<string, number> {
  * разговоре) или показанный в Inbox (`shown`; Inbox закрыт или отфильтрован — `[]`). КАК ЛОМАЛОСЬ:
  * при закрытом Inbox откат шёл на самый старый запрос ЛЮБОЙ сессии, и ⌘↵ в сессии A разрешал
  * команду сессии B, которой на экране не было.
+ *
+ * Это правило ⌘↵ ВНЕ поля ввода. В поле реплики сессии A действует более узкое — `composerApproves`.
  */
-export function focusedRequest(list: readonly InboxItem[], chosen: string | null, currentAgent: string | null, shown: readonly InboxItem[] = list): InboxItem | null {
+export function focusedRequest(list: readonly InboxItem[], chosen: string | null, currentAgent: string | null, shown: readonly InboxItem[] = list, ownShown = true): InboxItem | null {
   const shownIds = new Set(shown.map((p) => p.id))
-  const visible = list.filter((p) => p.sessionId === currentAgent || shownIds.has(p.id))
+  // Свой запрос виден в разговоре, только когда лента загрузилась (`ownShown`): пока она грузится, карточки на экране нет.
+  const visible = list.filter((p) => (ownShown && p.sessionId === currentAgent) || shownIds.has(p.id))
   if (chosen) { const hit = visible.find((p) => p.id === chosen); if (hit) return hit }
   if (currentAgent) { const own = visible.find((p) => p.sessionId === currentAgent); if (own) return own }
   return visible[0] ?? null
+}
+
+/**
+ * ⌘↵ в поле реплики разрешает только запрос ТЕКУЩЕЙ сессии: человек печатает сессии A, и карточка сессии B, пусть
+ * видимая в открытом Inbox, не должна получить «да» от клавиши, нажатой в чужом поле. Возвращает запрос, который
+ * ⌘↵ из поля разрешит, или null (тогда клавиша — «прервать и сказать» или ничего).
+ */
+export function composerApproves(focused: InboxItem | null, currentAgent: string | null): InboxItem | null {
+  return focused && currentAgent !== null && focused.sessionId === currentAgent ? focused : null
 }
 
 // --- О2: ошибки и фильтры Inbox (docs/14 «Ошибки в Inbox и фильтры») ------------------------------

@@ -12,11 +12,11 @@ import { ApprovalField } from '../src/components/Panels.js'
 import { PermCard } from '../src/components/PermCard.js'
 import type { AgentView } from '../src/model/agents.js'
 import { buildAgents } from '../src/model/agents.js'
-import { applyConversation, EMPTY_CONVERSATION } from '../src/model/conversation.js'
+import { applyConversation, EMPTY_CONVERSATION, netBlockedText } from '../src/model/conversation.js'
 import type { PermItem } from '../src/model/conversation.js'
-import { hotkeyAction } from '../src/model/hotkeys.js'
-import { applyInbox, EMPTY_INBOX, reconcileInbox } from '../src/model/inbox.js'
-import { approvalBlocksBrowser, approvalHint, defaultForm, startParams, switchProvider, validateForm } from '../src/model/newAgent.js'
+import { composerCmdEnter, hotkeyAction } from '../src/model/hotkeys.js'
+import { applyInbox, composerApproves, EMPTY_INBOX, focusedRequest, reconcileInbox } from '../src/model/inbox.js'
+import { approvalBlocksBrowser, approvalHint, cwdCoversHome, defaultForm, homeWarning, startParams, switchProvider, validateForm } from '../src/model/newAgent.js'
 import { parseOffers, scopeButtons, scopeText } from '../src/model/permissions.js'
 import { busySessions, groupByProject, projectRemoval } from '../src/model/projects.js'
 import type { PultEvent } from '../src/model/types.js'
@@ -166,5 +166,78 @@ describe('M8d: «Убрать из списка» для любого проек
     const after = groupByProject([], [ag('c', '/loose', { archived: true })])
     assert.equal(after.length, 0)
     assert.equal(groupByProject([], [ag('c', '/loose', { archived: true }), ag('n', '/loose')]).length, 1)
+  })
+})
+
+describe('после #13: «показано не всё» словами карточки, ⌘↵ из поля — только своя сессия, дом как папка', () => {
+  const concealed = (over: Record<string, unknown>): string => text(card({ concealed: true, offers: undefined, ...over }))
+
+  it('команда — «исходная команда»; правка — «исходный ввод»; решённая карточка — без строки', () => {
+    const cmd = concealed({ toolName: 'Bash', input: { command: 'ssh <email> uptime' } })
+    assert.match(cmd, /Показано не всё: фильтр секретов скрыл часть ввода .*Исполнится исходная команда — не уверен, отказывай\./)
+    const edit = concealed({ toolName: 'Edit', input: { file_path: '/w/a.ts', old_string: 'a', new_string: '<token>' } })
+    assert.match(edit, /Исполнится исходный ввод/)
+    assert.doesNotMatch(edit, /команда/)
+    assert.doesNotMatch(card({ concealed: true, state: 'allow', toolName: 'Bash', input: { command: 'ls' } }), /perm-concealed/)
+  })
+
+  it('вопрос (AskUserQuestion и requestUserInput) — про вопрос, без слова «команда»', () => {
+    const claudeQ = html(PermCard, {
+      permId: 'q1', toolName: 'AskUserQuestion', state: 'pending', createdAt: '2026-10-19T09:59:50Z', now: NOW, concealed: true,
+      input: { questions: [{ question: 'Писать <email>?', header: 'Адрес', multiSelect: false, options: [{ label: 'Да' }, { label: 'Нет' }] }] },
+      onFocus: noop, onApprove: noop, onDeny: noop, onAnswer: noop,
+    })
+    const codexQ = html(PermCard, {
+      permId: 'q2', toolName: 'requestUserInput', state: 'pending', createdAt: '2026-10-19T09:59:50Z', now: NOW, concealed: true,
+      input: { questions: [{ id: 'k', header: 'Ключ', question: 'Какой <token>?', isOther: true, options: [] }] },
+      onFocus: noop, onApprove: noop, onDeny: noop, onAnswer: noop,
+    })
+    for (const out of [claudeQ, codexQ]) {
+      assert.match(out, /data-testid="perm-concealed"/)
+      assert.match(text(out), /Показано не всё: фильтр секретов скрыл часть вопроса или вариантов .*Модель видит вопрос целиком — не уверен, о чём он, пропусти\./)
+      assert.doesNotMatch(text(out), /команд/)
+    }
+    // Без флага — строки нет и у вопроса.
+    assert.doesNotMatch(html(PermCard, {
+      permId: 'q3', toolName: 'AskUserQuestion', state: 'pending', createdAt: '2026-10-19T09:59:50Z', now: NOW,
+      input: { questions: [{ question: 'Да?', header: 'Q', multiSelect: false, options: [{ label: 'Да' }] }] }, onFocus: noop, onAnswer: noop, onDeny: noop,
+    }), /perm-concealed/)
+  })
+
+  it('⌘↵: свой запрос виден только после загрузки ленты; из поля — только запрос текущей сессии', () => {
+    const own = { id: 'pa', sessionId: 'a', toolName: 'Bash', input: {}, createdAt: '2' }
+    const other = { id: 'pb', sessionId: 'b', toolName: 'Bash', input: {}, createdAt: '1' }
+    // Лента сессии a ещё грузится, Inbox закрыт — своей карточки на экране нет: выделять нечего.
+    assert.equal(focusedRequest([own], null, 'a', [], false), null)
+    assert.equal(focusedRequest([own], null, 'a', [], true)?.id, 'pa')
+    // Лента грузится, но тот же запрос показан в открытом Inbox — виден.
+    assert.equal(focusedRequest([own], null, 'a', [own], false)?.id, 'pa')
+    // Inbox открыт, у a своего нет: вне поля ⌘↵ берёт карточку b, из поля a — нет.
+    const f = focusedRequest([other], null, 'a', [other], true)
+    assert.equal(f?.id, 'pb')
+    assert.equal(composerApproves(f, 'a'), null)
+    assert.equal(composerApproves(f, 'b')?.id, 'pb')
+    assert.equal(composerApproves(null, 'a'), null)
+    assert.equal(composerApproves(f, null), null)
+    // Поле a при выделенной карточке b: «прервать и сказать» не подавлено (permFocused — только своё).
+    assert.equal(composerCmdEnter({ busy: true, needsYou: false, permFocused: composerApproves(f, 'a') !== null, queueable: true, hasText: true, blocked: false }), 'interrupt')
+  })
+
+  it('папка — дом или выше: предупреждение в форме (не отказ); «Только чтение» и worktree — без него', () => {
+    for (const p of ['/', '/Users', '/Users/you', '/Users/you/', '/home', '/home/user']) assert.equal(cwdCoversHome(p), true, p)
+    for (const p of ['/Users/you/proj', '/home/user/w/x', '/tmp', '/opt/pult']) assert.equal(cwdCoversHome(p), false, p)
+    const f = { ...defaultForm('claude'), cwd: '/Users/you', name: 'w' }
+    assert.match(homeWarning(f) ?? '', /агент сможет менять ~\/\.claude, ~\/\.codex, ~\/\.zshrc и др\. без вопросов в режимах «Правки в папке без вопросов» и «Полный доступ»/)
+    assert.equal(homeWarning({ ...f, approval: 'read-only' }), null)
+    assert.equal(homeWarning({ ...f, worktree: 'feat/x' }), null)
+    assert.equal(homeWarning({ ...f, cwd: '/Users/you/proj' }), null)
+    assert.equal(homeWarning({ ...f, cwd: '' }), null)
+    assert.deepEqual(validateForm(f, []), {}, 'предупреждение не мешает завести')
+  })
+
+  it('сеть: `no_proxy` — своими словами и что делать', () => {
+    const t = netBlockedText({ reason: 'no_proxy' })
+    assert.match(t.title, /режим required, а прокси не задан/)
+    assert.match(t.text, /укажи network\.<провайдер>\.proxy или mode "off" в config\.json/)
   })
 })

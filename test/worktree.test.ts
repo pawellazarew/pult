@@ -683,3 +683,59 @@ describe('worktree: гонка agent rm --worktree и agent prompt в менед
     } finally { t.close(); home.remove() }
   })
 })
+
+describe('worktree: папка сессии над PULT_HOME проверяется по настоящей папке сессии', () => {
+  // Репозиторий в папке, которая накрывает PULT_HOME (как git в `~` при PULT_HOME = ~/.pult): `--cwd` без
+  // worktree — отказ; с worktree агент живёт в PULT_HOME/worktrees/…, а не в `--cwd`, — ложного отказа нет.
+  let dir: string
+  let env: NodeJS.ProcessEnv
+  let repo: string
+  let paths: PultPaths
+
+  before(() => {
+    dir = realpathSync(mkdtempSync(join(tmpdir(), 'pt-wth-')))
+    mkdirSync(join(dir, 'home'))
+    env = cleanEnv(join(dir, 'home'))
+    repo = makeRepo(env, join(dir, 'repo'))
+    paths = layout(join(repo, 'ph'))
+    ensureLayout(paths)
+  })
+  after(() => { rmSync(dir, { recursive: true, force: true }) })
+
+  it('без worktree — отказ; с worktree — сессия в PULT_HOME/worktrees', async () => {
+    const adapter = {
+      async startSession(spec: { name: string }) { return { providerSessionId: `p-${spec.name}` } },
+      async send() { throw new Error('не нужен') },
+      async respondPermission() {},
+      async interrupt() {},
+      async resume() {},
+      async close() {},
+      blocked: () => ({ blocked: false }),
+      reset() {},
+      async shutdown() {},
+    } as unknown as ProviderAdapter
+    const logs = tempHome()
+    const store = createStore(paths)
+    const manager = createManager({
+      paths, config: defaultConfig(), logger: logs.logger, store,
+      publish: (d) => store.append(d),
+      adapters: { claude: adapter },
+      broker: createBroker({ emit: () => {} }),
+      env,
+    })
+    try {
+      await assert.rejects(() => manager.start({ name: 'plain', kind: 'claude', cwd: repo }),
+        (e: { code?: string; message?: string }) => e.code === 'invalid_params' && /возьми папку проекта/.test(e.message ?? ''))
+      const rec = await manager.start({ name: 'wt', kind: 'claude', cwd: repo, worktree: 'feat/home' })
+      assert.ok(rec.cwd.startsWith(join(paths.home, 'worktrees') + '/'), rec.cwd)
+      // И дальше: смена режима на «правки без вопросов» проверяет папку worktree, а не `--cwd`.
+      const r = await manager.configure({ name: 'wt', approval: 'workspace' })
+      assert.equal(r.record.approval, 'workspace')
+      await manager.rm('wt', { worktree: true })
+    } finally {
+      await manager.shutdown()
+      store.close()
+      logs.remove()
+    }
+  })
+})

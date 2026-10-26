@@ -3,11 +3,12 @@
 
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { describe, it } from 'node:test'
 import { createClaudeAdapter } from '../dist/adapters/claude/adapter.js'
+import type { ProviderAdapter } from '../dist/adapters/types.js'
 import type { PultEvent } from '../dist/core/events.js'
 import { layout, ensureLayout } from '../dist/core/paths.js'
 import { createStore } from '../dist/core/store.js'
@@ -466,9 +467,73 @@ describe('менеджер: папка сессии', () => {
       assert.deepEqual(stand.manager.list(), [], 'отказ на входе: в реестре пусто')
       // Папка внутри PULT_HOME до config.json не дотягивается — её пускаем.
       await stand.manager.start({ name: 'w', kind: 'claude', cwd: workIn(home) })
+      // `PULT_HOME/..x` — не сосед, а потомок (relative → `..`): его пускаем.
       assert.equal(coversPultHome(join(home.paths.home, '..x'), home.paths.home), false)
       assert.equal(coversPultHome(workIn(home), home.paths.home), false)
       await stand.close()
+    } finally { home.remove() }
+  })
+
+  it('«..x» по-настоящему: PULT_HOME под папкой `..x` — она и её родитель накрывают его, сосед `..x` — нет', () => {
+    const root = mkdtempSync(join(tmpdir(), 'pt-dots-'))
+    try {
+      // relative(root, root/..x/home) = `..x/home` — начинается с «..», но это спуск, а не подъём.
+      const parent = join(root, '..x')
+      const ph = join(parent, 'home')
+      mkdirSync(ph, { recursive: true })
+      assert.equal(coversPultHome(parent, ph), true, 'папка `..x` над PULT_HOME')
+      assert.equal(coversPultHome(root, ph), true, 'дед: relative = `..x/home`')
+      // Настоящий сосед с именем `..x`: relative(root/b/..x, root/b/home) = `../home` — не накрывает.
+      const sib = join(root, 'b')
+      mkdirSync(join(sib, '..x'), { recursive: true })
+      mkdirSync(join(sib, 'home'), { recursive: true })
+      assert.equal(coversPultHome(join(sib, '..x'), join(sib, 'home')), false)
+      assert.equal(coversPultHome(join(ph, 'w'), ph), false, 'папка внутри PULT_HOME')
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+
+  it('сессия из sessions.json с папкой над PULT_HOME: ход и смена режима шире «Только чтение» — отказ; в нём ход идёт', async () => {
+    const home = tempHome()
+    try {
+      // Заведена до проверки на старте (или папка стала ссылкой): запись лежит в sessions.json как есть.
+      const legacy = (name: string, approval?: SessionRecord['approval']): SessionRecord => ({
+        name, provider: 'claude', cwd: home.paths.home, mode: 'turn', ...(approval ? { approval } : {}),
+        createdAt: '2026-10-01T10:00:00.000Z', lastStatus: 'idle', lastEventId: 0,
+      })
+      writeSessionsAtomic(home.paths.sessions, [legacy('old'), legacy('ws', 'workspace'), legacy('ro', 'read-only')])
+      // Адаптер-заглушка без процессов: проверяется решение менеджера, а не claude.
+      const resumed: string[] = []
+      const adapter = {
+        async startSession(spec: { name: string }) { return { name: spec.name, providerSessionId: `p-${spec.name}` } },
+        async resume(name: string) { resumed.push(name) },
+        async send(name: string) { return { turnId: `t-${name}`, done: Promise.resolve({ turnId: `t-${name}`, ok: true }) } },
+        configure: () => 'next_turn',
+        async respondPermission() {}, async interrupt() {}, async close() {}, async shutdown() {},
+        blocked: () => ({ blocked: false }), reset() {},
+      } as unknown as ProviderAdapter
+      const store = createStore(home.paths)
+      const manager = createManager({
+        paths: home.paths, config: defaultConfig(), logger: home.logger, store,
+        publish: (d) => store.append(d), adapters: { claude: adapter },
+        broker: createBroker({ emit: () => {} }),
+      })
+      try {
+        const refused = (e: { code?: string; message?: string }): boolean => e.code === 'invalid_params' && /Только чтение/.test(e.message ?? '')
+        // resume: ход в `ask` и `workspace` не заводится — ни реплики в журнале, ни resume.
+        await assert.rejects(() => manager.prompt('old', 'привет'), refused)
+        await assert.rejects(() => manager.prompt('ws', 'привет'), refused)
+        assert.equal(store.readFrom(0).filter((e) => e.kind === 'message.user').length, 0, 'реплика не ушла в журнал')
+        assert.deepEqual(resumed, [])
+        // configure: шире «Только чтение» — отказ, запись не тронута; в «Только чтение» — можно.
+        await assert.rejects(() => manager.configure({ name: 'old', approval: 'workspace' }), refused)
+        await assert.rejects(() => manager.configure({ name: 'old', approval: 'full', confirm: true }), refused)
+        assert.equal(manager.list().find((r) => r.name === 'old')?.approval, undefined)
+        const r = await manager.configure({ name: 'ws', approval: 'read-only' })
+        assert.equal(r.record.approval, 'read-only')
+        // «Только чтение» — ход заводится.
+        assert.equal((await manager.prompt('ro', 'привет')).turnId, 't-ro')
+        assert.deepEqual(resumed, ['ro'])
+      } finally { await manager.shutdown().catch(() => {}); store.close() }
     } finally { home.remove() }
   })
 })

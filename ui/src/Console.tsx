@@ -33,7 +33,7 @@ import { hotkeyAction, userJumpAllowed } from './model/hotkeys.js'
 import { itemForEvent, jumpStep } from './model/search.js'
 import type { SearchHit, SearchReply } from './model/search.js'
 import type { HotAction } from './model/hotkeys.js'
-import { focusedRequest, inboxCounts, inboxList, inboxView, isInboxFilter, pendingBySession, reconcileInbox } from './model/inbox.js'
+import { composerApproves, focusedRequest, inboxCounts, inboxList, inboxView, isInboxFilter, pendingBySession, reconcileInbox } from './model/inbox.js'
 import type { InboxFilter } from './model/inbox.js'
 import { isSnoozed, nextWaiting, pruneSnoozed, snooze, unsnooze } from './model/queue.js'
 import type { Snoozed } from './model/queue.js'
@@ -567,7 +567,9 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   // Inbox по фильтру (О2): запросы, ошибки, непрочитанное — model/inbox.ts.
   const inboxShown = useMemo(() => inboxView(inboxFilter, inbox, agents), [inboxFilter, inbox, agents])
   // ⌘↵ разрешает только видимую карточку: закрытый Inbox чужих запросов не показывает.
-  const focused = focusedRequest(inbox, focusChosen, current?.name ?? null, inboxOpen ? inboxShown.perms : [])
+  const focused = focusedRequest(inbox, focusChosen, current?.name ?? null, inboxOpen ? inboxShown.perms : [], historyShown)
+  // Поле реплики знает только запрос СВОЕЙ сессии: ⌘↵ в нём не разрешает карточку другой сессии из Inbox.
+  const ownFocused = composerApproves(focused, current?.name ?? null)
   const inboxNums = useMemo(() => inboxCounts(inbox, agents), [inbox, agents])
   const guard = useMemo(() => guardView([...guardFromDoctor(doctor.report), ...ui.guard]), [doctor.report, ui.guard])
   const doctorGroupsList = useMemo(() => doctorGroups(doctor.report), [doctor.report])
@@ -936,13 +938,17 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         e.preventDefault()
         markUnread(current.name)
         return
-      case 'approveFocused':
-        if (modal || !focused) return
+      case 'approveFocused': {
+        // ⌘↵ из поля реплики — только свой запрос текущей сессии; вне поля — любой видимый (свой или в открытом Inbox).
+        const fromComposer = (e.target as { getAttribute?(n: string): string | null } | null)?.getAttribute?.('data-testid') === 'composer'
+        const target = fromComposer ? composerApproves(focused, current?.name ?? null) : focused
+        if (modal || !target) return
         // Вопрос модели ⌘↵ не «разрешает»: на него отвечают выбором в карточке.
-        if (isQuestionTool(focused.toolName)) return
+        if (isQuestionTool(target.toolName)) return
         e.preventDefault()
-        approve(focused.id)
+        approve(target.id)
         return
+      }
       case 'escape':
         if (modal) { e.preventDefault(); setModal(null); return }
         if (current && statusView(current.status).busy) { e.preventDefault(); setModal({ type: 'stop', name: current.name }) }
@@ -1036,7 +1042,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
             scrollTo={jump && jump.name === current.name && jumpState === 'ready'
               ? { eventId: jump.eventId, nonce: jump.nonce, kind: jump.kind, ...(jump.parentId !== undefined ? { parentId: jump.parentId } : {}) } : null}
             onScrolled={onScrolled} userJump={userJump}
-            usage={ui.usage[current.provider]} focusedPerm={focused?.id ?? null} permBusy={permBusy} link={conn.state}
+            usage={ui.usage[current.provider]} focusedPerm={ownFocused?.id ?? null} permBusy={permBusy} link={conn.state}
             sending={send.sending} sendError={send.error}
             pending={pendingBubble(outgoing, current.name, withEarlier(ui, current.name))}
             onSend={sendPrompt} filePaths={filePaths}

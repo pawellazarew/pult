@@ -183,6 +183,7 @@ const NET_REASON: Record<string, string> = {
   blocked_country: 'страна выхода в списке-страже',
   unknown_location: 'страну выхода определить не удалось',
   proxy_dead: 'прокси не отвечает',
+  no_proxy: 'режим required, а прокси не задан',
   api_retry_storm: 'провайдер не отвечает: повторы подряд',
 }
 
@@ -197,7 +198,8 @@ export function netBlockedText(data: Record<string, unknown>): { title: string; 
     guard ? `страж: ${guard}` : null,
     retries !== undefined ? `повторов: ${retries}` : null,
   ].filter(Boolean)
-  const todo = reason === 'proxy_dead' ? 'подними прокси или переключи профиль сети' : 'подними VPN и повтори реплику'
+  const todo = reason === 'proxy_dead' ? 'подними прокси или переключи профиль сети'
+    : reason === 'no_proxy' ? 'укажи network.<провайдер>.proxy или mode "off" в config.json' : 'подними VPN и повтори реплику'
   return { title: `Сеть заблокирована стражем — ${why}`, text: `${parts.length ? parts.join(' · ') + ' — ' : ''}${todo}` }
 }
 

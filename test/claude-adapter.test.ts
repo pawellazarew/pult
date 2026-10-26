@@ -8,11 +8,12 @@ import { join } from 'node:path'
 import { describe, it } from 'node:test'
 import { createClaudeAdapter } from '../dist/adapters/claude/adapter.js'
 import type { ProviderAdapter } from '../dist/adapters/types.js'
-import { defaultConfig } from '../dist/core/config.js'
+import { defaultConfig, validateConfig } from '../dist/core/config.js'
 import type { PultConfig } from '../dist/core/config.js'
 import type { EventDraft } from '../dist/core/events.js'
 import { createLogger } from '../dist/core/log.js'
 import { ensureLayout, layout } from '../dist/core/paths.js'
+import { checkNetwork } from '../dist/env/net.js'
 import type { NetCheck } from '../dist/env/net.js'
 import { stableNodePath } from '../dist/env/nodeBin.js'
 import { CLI_ENTRY, FAKE_CLAUDE, sleep, waitFor } from './helpers.js'
@@ -42,7 +43,7 @@ const okCheck = (over: Partial<NetCheck> = {}): NetCheck => ({
 function rig(opts: {
   scenario: string
   config?: Partial<PultConfig>
-  net?: () => Promise<NetCheck>
+  net?: (provider: 'claude') => Promise<NetCheck>
   speed?: number
   /** Путь к бинарю: тест «спавн не удался» подсовывает сюда несуществующий файл. */
   bin?: string
@@ -252,6 +253,25 @@ describe('адаптер claude: защиты', () => {
       assert.equal(outcome.errorCode, 'blocked_network')
       assert.deepEqual(r.runs(), [], 'дочерний процесс не должен был запускаться')
       assert.ok(r.drafts.some((d) => d.kind === 'net.blocked'))
+    } finally { await r.adapter.shutdown(); r.remove() }
+  })
+
+  it('ЗАКРЫТО: `required` без прокси в config.json — ход отказан с понятной причиной, прямой путь не пробуется', async () => {
+    const { config } = validateConfig({ version: 1, network: { claude: { mode: 'required' } } })
+    let probes = 0
+    const r = rig({
+      scenario: 'simple',
+      net: (p) => checkNetwork(p, config.network[p], config.guardCountries, { fresh: true, probe: async () => { probes++; return { status: 0, stdout: 'loc=FI', stderr: '' } } }),
+    })
+    try {
+      await r.adapter.startSession(spec(r))
+      const outcome = await (await r.adapter.send('w', 'привет')).done
+      assert.equal(outcome.ok, false)
+      assert.equal(outcome.errorCode, 'blocked_network')
+      assert.match(String(outcome.message), /no_proxy — network\.claude\.mode = "required", а proxy не задан; ход запрещён/)
+      assert.equal(probes, 0, 'ни прокси, ни прямой путь не пробовались')
+      assert.deepEqual(r.runs(), [])
+      assert.equal((r.drafts.find((d) => d.kind === 'net.blocked')?.data as { reason?: string } | undefined)?.reason, 'no_proxy')
     } finally { await r.adapter.shutdown(); r.remove() }
   })
 

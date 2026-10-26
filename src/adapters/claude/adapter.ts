@@ -43,7 +43,7 @@ import { redactString } from '../../core/log.js'
 import { createLineSplitter } from '../../core/ndjson.js'
 import type { PultPaths } from '../../core/paths.js'
 import { buildChildEnv } from '../../env/allowlist.js'
-import { checkNetwork, noProxyValue } from '../../env/net.js'
+import { checkNetwork, netRefusal, noProxyValue } from '../../env/net.js'
 import { readSavedNode, resolveChildNode } from '../../env/nodeBin.js'
 import type { NetCheck } from '../../env/net.js'
 import type { SessionRecord } from '../../sessions/registry.js'
@@ -575,7 +575,7 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
           data: { reason: check.reason, loc: check.loc, mode: check.mode, guard: check.guard, turnId },
         })
         statusL('failed', { reason: 'net_blocked' })
-        return fail('blocked_network', `страж сети: ${check.reason}`)
+        return fail('blocked_network', netRefusal(check))
       }
       // Профиль сети перечитывается ровно здесь — он мог поменяться с прошлого хода.
       l.netEnv = networkEnv(check)

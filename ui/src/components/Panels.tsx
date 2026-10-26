@@ -9,7 +9,7 @@ import type { DoctorGroup } from '../model/health.js'
 import { attentionKeys, searchKeys } from '../model/hotkeys.js'
 import { ATTENTION_LABEL, INBOX_FILTERS } from '../model/inbox.js'
 import type { InboxFilter, InboxItem, SessionCard } from '../model/inbox.js'
-import { APPROVAL_FULL_WARNING, APPROVAL_LABEL, APPROVAL_ORDER, approvalHint, prefillForm, promptStats, providerPreset, switchProviderPrefill, validateForm, withFolder } from '../model/newAgent.js'
+import { APPROVAL_FULL_WARNING, APPROVAL_LABEL, APPROVAL_ORDER, approvalHint, homeWarning, prefillForm, promptStats, providerPreset, switchProviderPrefill, validateForm, withFolder } from '../model/newAgent.js'
 import type { NewAgentForm, SettingsReply } from '../model/newAgent.js'
 import type { NewSessionPrefill } from '../../../shell/src/contract.js'
 import type { AgentProvider, DoctorReport, ProviderCatalog } from '../model/types.js'
@@ -437,6 +437,7 @@ export function NewAgentDialog({ taken, pickFolder, onCreate, onClose, catalog, 
             <button type="button" className="btn" onClick={() => void choose()} data-testid="pick-folder"><Icon name="folder" />Выбрать…</button>
           </div>
           {tried && errors.cwd && <span className="bad">{errors.cwd}</span>}
+          {homeWarning(form) && <span className="bad" role="alert" data-testid="new-agent-home-warning">{homeWarning(form)}</span>}
           {dropHint && <span className="note" role="status" data-testid="new-agent-drop-hint">{dropHint}</span>}
         </div>
 

@@ -21,12 +21,12 @@ interface Run { code: number; stdout: string; stderr: string }
 /** Ответ стража сети для демона: `ok` — пускать ход, `blocked` — запрещать. */
 let netMode: 'ok' | 'blocked' = 'ok'
 
-function runCli(paths: PultPaths, args: string[], timeoutMs = 25_000): Promise<Run> {
+function runCli(paths: PultPaths, args: string[], timeoutMs = 25_000, extraEnv: Record<string, string> = {}): Promise<Run> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [CLI, ...args], {
       // PULT_TEST_NET делает прогон герметичным: без неё демон звал настоящий `curl`
       // и результат зависел от страны выхода машины (ревью В3 — течёт и В2).
-      env: { ...process.env, PULT_HOME: paths.home, PULT_TEST: '1', PULT_TEST_NET: netMode, PULT_CLAUDE_BIN: FAKE_CLAUDE },
+      env: { ...process.env, PULT_HOME: paths.home, PULT_TEST: '1', PULT_TEST_NET: netMode, PULT_CLAUDE_BIN: FAKE_CLAUDE, ...extraEnv },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     let stdout = ''
@@ -77,6 +77,23 @@ describe('CLI: агенты сквозным прогоном', () => {
     assert.equal(parsed.sessions[0]?.name, 'w')
     assert.equal(parsed.sessions[0]?.mode, 'turn')
     assert.equal(parsed.sessions[0]?.lastStatus, 'cold')
+  })
+
+  it('папка — домашняя (или выше): заводит, но предупреждает; в «только чтение» — молча', async () => {
+    // PULT_HOME лежит не в этом «доме» — старт не отказ, а предупреждение: агент правил бы ~/.claude, ~/.zshrc…
+    const fakeHome = makeWork('fakehome', 'simple')
+    const warn = /внимание — папка — домашняя или выше: агент сможет менять ~\/\.claude, ~\/\.codex, ~\/\.zshrc/
+    const a = await runCli(paths, ['agent', 'start', 'hw', '--kind', 'claude', '--cwd', fakeHome], 25_000, { HOME: fakeHome })
+    assert.equal(a.code, 0, a.stderr)
+    assert.match(a.stderr, warn)
+    const b = await runCli(paths, ['agent', 'start', 'hr', '--kind', 'claude', '--cwd', fakeHome, '--approval', 'read-only'], 25_000, { HOME: fakeHome })
+    assert.equal(b.code, 0, b.stderr)
+    assert.doesNotMatch(b.stderr, warn)
+    // Обычная папка проекта под этим домом — без предупреждения.
+    const c = await runCli(paths, ['agent', 'start', 'hp', '--kind', 'claude', '--cwd', work], 25_000, { HOME: fakeHome })
+    assert.equal(c.code, 0, c.stderr)
+    assert.doesNotMatch(c.stderr, warn)
+    for (const n of ['hw', 'hr', 'hp']) assert.equal((await runCli(paths, ['agent', 'rm', n])).code, 0)
   })
 
   it('pult session … — то же, что pult agent … (окно зовёт агентов сессиями)', async () => {

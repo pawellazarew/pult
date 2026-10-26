@@ -484,14 +484,16 @@ describe('config', () => {
     assert.deepEqual({ ...config, network: d.network }, d)
   })
 
-  it('прокси без режима — auto; режим без прокси — off с предупреждением', () => {
+  it('прокси без режима — auto; auto без прокси — off; required без прокси остаётся required (закрыто) — с предупреждением', () => {
     const { config, warnings } = validateConfig({
       network: { claude: { proxy: 'http://127.0.0.1:3128' }, codex: { mode: 'required' }, opencode: { mode: 'auto', proxy: '' } },
     })
     assert.deepEqual(config.network.claude, { mode: 'auto', proxy: 'http://127.0.0.1:3128' })
-    assert.deepEqual(config.network.codex, { mode: 'off', proxy: '' })
+    // «Только через прокси» без прокси — не тихий прямой путь, а запрет ходов (checkNetwork → no_proxy).
+    assert.deepEqual(config.network.codex, { mode: 'required', proxy: '' })
     assert.deepEqual(config.network.opencode, { mode: 'off', proxy: '' })
     assert.equal(warnings.length, 3)
+    assert.ok(warnings.some((w) => /network\.codex\.mode = required без proxy — ходы codex запрещены/.test(w)), warnings.join('\n'))
   })
 
   it('noProxy: «*.домен» становится «.домен», повторы схлопываются, без поля профиль прежний', () => {

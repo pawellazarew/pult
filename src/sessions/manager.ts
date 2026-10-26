@@ -14,9 +14,9 @@
 // `agent.wait`, и его можно позвать хоть из другого процесса.
 
 import { randomUUID } from 'node:crypto'
-import { realpathSync, statSync } from 'node:fs'
-import { relative, sep } from 'node:path'
+import { statSync } from 'node:fs'
 import type { PultConfig } from '../core/config.js'
+import { coversDir } from '../core/paths.js'
 import type { EventDraft, PultEvent } from '../core/events.js'
 import type { Logger } from '../core/log.js'
 import { redactString } from '../core/log.js'
@@ -50,9 +50,16 @@ import type { ExternalMessage } from './external.js'
  * `run/token`, которым отвечают на запросы Inbox. Папка ВНУТРИ `PULT_HOME` до них не дотягивается — её пускаем.
  */
 export function coversPultHome(cwd: string, home: string): boolean {
-  const real = (p: string): string => { try { return realpathSync.native(p) } catch { return p } }
-  const rel = relative(real(cwd), real(home))
-  return rel !== '..' && !rel.startsWith(`..${sep}`)
+  return coversDir(cwd, home)
+}
+
+/**
+ * Сессия, заведённая до этой проверки (или папка, ставшая ссылкой выше `PULT_HOME`), живёт в `sessions.json` с такой
+ * папкой. Ей остаётся только «Только чтение»: ход и смена режима на любой другой — отказ (`agent.configure`, resume).
+ */
+function pultHomeRefusal(name: string, cwd: string, home: string): string {
+  return `сессия ${name}: в её папке ${cwd} лежит ${home} — агент переписал бы config.json Пульта без вопроса; `
+    + 'здесь можно только «Только чтение» (pult agent set ' + name + ' --approval read-only) или заведи сессию в папке проекта'
 }
 
 export class ManagerError extends Error {
@@ -772,7 +779,10 @@ export function createManager(opts: ManagerOptions): SessionManager {
         let cwdOk = false
         try { cwdOk = statSync(params.cwd).isDirectory() } catch { cwdOk = false }
         if (!cwdOk) throw new ManagerError('invalid_params', `--cwd ${params.cwd}: такой папки нет`)
-        if (coversPultHome(params.cwd, opts.paths.home)) {
+        // Без worktree папка сессии — сама `--cwd`, проверка до всего. С worktree агент живёт в папке worktree
+        // (`PULT_HOME/worktrees/…`), а не в `--cwd`: репозиторий в `~` здесь не повод для отказа — проверяется ниже
+        // настоящая папка сессии.
+        if (!params.worktree && coversPultHome(params.cwd, opts.paths.home)) {
           throw new ManagerError('invalid_params', `--cwd ${params.cwd}: внутри папки сессии лежит ${opts.paths.home} — возьми папку проекта`)
         }
         const adapter = adapterFor(params.kind)
@@ -812,6 +822,9 @@ export function createManager(opts: ManagerOptions): SessionManager {
           }
         }
         const sessionCwd = prepared ? prepared.cwd : params.cwd
+        if (prepared && coversPultHome(sessionCwd, opts.paths.home)) {
+          throw new ManagerError('invalid_params', `worktree ${sessionCwd}: внутри папки сессии лежит ${opts.paths.home} — возьми папку проекта`)
+        }
         // О3: имя переиспользуемо — профиль и скачивания браузера прежней сессии с этим именем новой не
         // достаются (куки входа чужие). Убирается до первого хода, с браузером или без.
         try { await resetBrowserDirs(opts.paths, params.name) } catch (e) {
@@ -935,6 +948,11 @@ export function createManager(opts: ManagerOptions): SessionManager {
         throw e
       }
       if (!hasChanges(changes)) return { record: cur, changes, when: 'next_turn' }
+      // Папка сессии накрывает PULT_HOME (сессия из sessions.json до этой проверки): режим шире «Только чтение» дал бы
+      // агенту править config.json Пульта без вопроса. Проверяется настоящая папка сессии (у worktree — его папка).
+      if (changes.approval && changes.approval.to !== 'read-only' && coversPultHome(cur.cwd, opts.paths.home)) {
+        throw new ManagerError('invalid_params', pultHomeRefusal(name, cur.cwd, opts.paths.home))
+      }
       const next: SessionSettingsPatch = {
         ...((changes.model ? changes.model.to : cur.model) ? { model: (changes.model ? changes.model.to : cur.model) as string } : {}),
         ...((changes.effort ? changes.effort.to : cur.effort) ? { effort: (changes.effort ? changes.effort.to : cur.effort) as string } : {}),
@@ -1006,6 +1024,11 @@ export function createManager(opts: ManagerOptions): SessionManager {
       }
       if (removing.has(name)) {
         throw new ManagerError('invalid_params', `агент ${name} удаляется (agent rm --worktree) — новый ход не заводится`)
+      }
+      // Сессия из sessions.json с папкой над PULT_HOME (заведена до проверки на старте): ход только в «Только чтение».
+      // До реплики в журнале и до resume — ни одного шага в такой папке с правом писать.
+      if ((rec.approval ?? 'ask') !== 'read-only' && coversPultHome(rec.cwd, opts.paths.home)) {
+        throw new ManagerError('invalid_params', pultHomeRefusal(name, rec.cwd, opts.paths.home))
       }
       const adapter = adapterFor(rec.provider)
       // M8f (ревью, HIGH 3): настройки ЭТОГО хода — снимок сейчас, до первого await. `agent.configure`, пришедший,

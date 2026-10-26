@@ -9,7 +9,7 @@ import { readFileSync, statSync, unlinkSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { loadConfig } from '../core/config.js'
 import type { PultEvent } from '../core/events.js'
-import { ensureLayout, paths as resolvePaths } from '../core/paths.js'
+import { coversDir, ensureLayout, paths as resolvePaths } from '../core/paths.js'
 import type { PultPaths } from '../core/paths.js'
 import type { DaemonStatus } from '../core/rpc.js'
 import { VERSION } from '../core/version.js'
@@ -19,7 +19,7 @@ import { serviceDoctorItems } from '../service/doctor.js'
 import { installService, serviceStatus, uninstallService } from '../service/install.js'
 import { stopDaemon } from '../service/stop.js'
 import { versionDoctorItems } from '../update/doctor.js'
-import { updateFrom, updateList, updateTo } from '../update/update.js'
+import { refuseRunningTurns, updateFrom, updateList, updateTo } from '../update/update.js'
 import { EXIT_UPDATE_AVAILABLE, updateCheck, updateLatest } from '../update/channel.js'
 import { runtimeInstall, runtimeShow } from '../update/runtimeCli.js'
 import { updateAppCli } from '../update/appUpdateCli.js'
@@ -29,7 +29,7 @@ import { testLocate } from '../env/locate.js'
 import { contextShare, parseSessionContext } from '../sessions/context.js'
 import { isUnread, parseAttention } from '../sessions/attention.js'
 import { isApprovalMode } from '../adapters/types.js'
-import { APPROVAL_WORDS, describeChanges, modeBlocksBrowser, parseNewSession } from '../sessions/settings.js'
+import { APPROVAL_WORDS, describeChanges, HOME_CWD_WARNING, modeBlocksBrowser, parseNewSession } from '../sessions/settings.js'
 import type { ConfigureChanges, ConfigureWhen, NewSessionSettings } from '../sessions/settings.js'
 import type { PermissionOffers } from '../adapters/types.js'
 import { connectClient } from './client.js'
@@ -72,6 +72,7 @@ const HELP = `pult ${VERSION} — диспетчерская над claude, code
   pult update --from <pult-x.y.z.tgz> [--reinstall]   поставить версию из тарбола и переключиться
                                     (проба нового демона; не прошла — откат на прежнюю)
   pult update --to <версия>         переключиться на уже стоящую версию (ручной откат)
+  pult update … --force             не ждать идущих ходов (без него: идут ходы — отказ, демон не трогается)
   pult update --list [--json]       версии на диске: current, previous, bad
   pult update --app [--force]       обновить окно (Pult.app, macOS) из того же канала: демон качает и
                                     проверяет архив, закрывает окно, меняет и открывает; не поднялось —
@@ -482,6 +483,10 @@ async function cmdAgent(paths: PultPaths, args: ParsedArgs): Promise<number> {
         out(`агент ${String(r['name'])} заведён: ${String(r['provider'])}, режим ${String(r['mode'])}, cwd ${String(r['cwd'])}`
           + `, подтверждения: ${approvalLabel(r['approval'])}`)
         if (r['approval'] === 'full') err('pult agent start: режим full — агент делает что угодно без вопросов, песочницы нет')
+        // Не отказ — предупреждение: дом агенту можно дать сознательно, но он должен знать, что под ним лежит.
+        if (r['approval'] !== 'read-only' && typeof r['cwd'] === 'string' && coversDir(r['cwd'], homedir())) {
+          err(`pult agent start: внимание — ${HOME_CWD_WARNING}`)
+        }
         const wt = r['worktree'] as { path: string; branch: string } | undefined
         if (wt) {
           const how = r['worktreeAction'] === 'created' ? 'новая ветка'
@@ -923,13 +928,16 @@ async function cmdUpdate(paths: PultPaths, args: ParsedArgs): Promise<number> {
   const app = args.flags.has('app')
   const modes = [from !== undefined, to !== undefined, args.flags.has('list'), args.flags.has('check') && !app, app].filter(Boolean).length
   if (modes > 1) { err('pult update: --from, --to, --list, --check и --app — по одному за раз'); return EXIT.error }
-  if (args.flags.has('force') && !app) { err('pult update: --force — только вместе с --app'); return EXIT.error }
+  // `--force`: у окна — ставить и «плохую» версию; у пакета (канал, --from, --to) — не ждать конца идущих ходов.
+  if (args.flags.has('force') && (args.flags.has('list') || args.flags.has('check'))) { err('pult update: --force — не с --list и --check'); return EXIT.error }
   if (args.flags.has('rollback') && !app) { err('pult update: --rollback — только вместе с --app'); return EXIT.error }
   if (app && args.flags.has('check')) { err('pult update --app: проверить окно — pult update --check (строка «окно: …»)'); return EXIT.error }
   // 0.3.4: окно — через демона (он закрывает окно, меняет Pult.app и ждёт hello нового), сессии не трогаются.
   if (app) return updateAppCli(cliIo, { force: args.flags.has('force'), rollback: args.flags.has('rollback'), connect: async () => (await ensureDaemon(paths)).client })
   if (args.flags.has('list')) return updateList(paths, cliIo, opts)
   if (args.flags.has('check')) return updateCheck(paths, cliIo, { json: opts.json })
+  // Как «Обновить» в окне: идущий ход не обрывается молча. `--expect` зовёт сам демон — он уже дождался ходов.
+  if (args.flags.get('expect') === undefined && await refuseRunningTurns(paths, cliIo, { force: args.flags.has('force') })) return EXIT.error
   if (from !== undefined) {
     if (typeof from !== 'string' || !from) { err('pult update --from: нужен путь к тарболу pult-x.y.z.tgz'); return EXIT.error }
     return updateFrom(paths, cliIo, from, opts)

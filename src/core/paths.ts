@@ -2,9 +2,9 @@
 // берёт готовую структуру, чтобы «никаких записей вне PULT_HOME» (инвариант 8) можно было
 // проверить чтением одного файла.
 
-import { chmodSync, mkdirSync } from 'node:fs'
+import { chmodSync, mkdirSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join, relative, resolve, sep } from 'node:path'
 
 export interface PultPaths {
   readonly home: string
@@ -137,4 +137,14 @@ export function checkSockPath(sock: string): void {
       'Задай PULT_HOME покороче — ядро обрежет путь и демон станет недостижим.',
     )
   }
+}
+
+/**
+ * `dir` — сама папка `target` или её предок (оба через realpath; нет такой папки — путь как есть). Сравнение по
+ * частям пути, а не по строкам: `/a/..x` — потомок `/a`, а не «выше» (relative даёт `..x`, а не `..`).
+ */
+export function coversDir(dir: string, target: string): boolean {
+  const real = (p: string): string => { try { return realpathSync.native(p) } catch { return resolve(p) } }
+  const rel = relative(real(dir), real(target))
+  return rel !== '..' && !rel.startsWith(`..${sep}`)
 }
