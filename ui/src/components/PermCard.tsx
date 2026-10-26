@@ -24,6 +24,8 @@ export interface PermCardProps {
   by?: string
   /** M8d: что провайдер предложил сверх «один раз» — кнопки «В этой сессии» и «Всегда …». */
   offers?: PermissionOffers
+  /** Показано не всё: фильтр секретов скрыл часть входа или длинное поле обрезано — исполнится исходный вход. */
+  concealed?: boolean
   /** M8d: решённая карточка — с какой шириной разрешили. */
   scope?: 'session' | 'rule'
   rule?: { kind: string; label: string }
@@ -84,6 +86,11 @@ export function PermCard(p: PermCardProps): ReactElement {
         <dl className="perm-fields">
           {v.fields.map(([k, val]) => <FieldRow key={k} k={k} v={val} />)}
         </dl>
+      )}
+      {p.state === 'pending' && p.concealed && (
+        <div className="perm-concealed" data-testid="perm-concealed">
+          Показано не всё: фильтр секретов скрыл часть ввода (<code>&lt;email&gt;</code>, <code>&lt;token&gt;</code>, <code>&lt;redacted&gt;</code>) или длинное поле обрезано. Исполнится исходная команда — не уверен, отказывай.
+        </div>
       )}
       {p.state === 'pending' && optionsLine(v.options) && <div className="perm-opts">варианты провайдера: {optionsLine(v.options)}</div>}
       {p.state === 'pending' && rule?.note && <div className="perm-opts" data-testid="perm-rule-note">{rule.label} «{rule.code}» {rule.note}</div>}

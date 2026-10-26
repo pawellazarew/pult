@@ -20,6 +20,8 @@ export interface InboxItem {
   input: Record<string, unknown>
   /** M8d: «В этой сессии» / «Всегда …» — что провайдер предложил на этот запрос. */
   offers?: PermissionOffers
+  /** Показанный вход не равен исполняемому (src/perm/broker.ts). */
+  concealed?: true
   createdAt: string
 }
 
@@ -43,6 +45,7 @@ export function applyInbox(state: InboxState, ev: PultEvent): InboxState {
           ...(toolUseId ? { toolUseId } : {}),
           input: obj(ev.data['input']) ?? {},
           ...(offers ? { offers } : {}),
+          ...(ev.data['concealed'] === true ? { concealed: true as const } : {}),
           createdAt: ev.ts,
         },
       }
@@ -87,6 +90,7 @@ export function reconcileInbox(state: InboxState, pending: readonly PendingPermi
       ...(p.toolUseId ? { toolUseId: p.toolUseId } : {}),
       input: p.input,
       ...(offers ? { offers } : {}),
+      ...(p.concealed === true ? { concealed: true as const } : {}),
       createdAt: p.createdAt,
     }
   }
@@ -109,11 +113,18 @@ export function pendingBySession(state: InboxState): Record<string, number> {
 /**
  * Какой запрос «выделен» (⌘Enter разрешает его): выбранный человеком, если он ещё ждёт; иначе
  * первый запрос текущего агента; иначе самый старый.
+ *
+ * Выделить можно только запрос, карточку которого человек ВИДИТ: свой у текущего агента (карточка в
+ * разговоре) или показанный в Inbox (`shown`; Inbox закрыт или отфильтрован — `[]`). КАК ЛОМАЛОСЬ:
+ * при закрытом Inbox откат шёл на самый старый запрос ЛЮБОЙ сессии, и ⌘↵ в сессии A разрешал
+ * команду сессии B, которой на экране не было.
  */
-export function focusedRequest(list: readonly InboxItem[], chosen: string | null, currentAgent: string | null): InboxItem | null {
-  if (chosen) { const hit = list.find((p) => p.id === chosen); if (hit) return hit }
-  if (currentAgent) { const own = list.find((p) => p.sessionId === currentAgent); if (own) return own }
-  return list[0] ?? null
+export function focusedRequest(list: readonly InboxItem[], chosen: string | null, currentAgent: string | null, shown: readonly InboxItem[] = list): InboxItem | null {
+  const shownIds = new Set(shown.map((p) => p.id))
+  const visible = list.filter((p) => p.sessionId === currentAgent || shownIds.has(p.id))
+  if (chosen) { const hit = visible.find((p) => p.id === chosen); if (hit) return hit }
+  if (currentAgent) { const own = visible.find((p) => p.sessionId === currentAgent); if (own) return own }
+  return visible[0] ?? null
 }
 
 // --- О2: ошибки и фильтры Inbox (docs/14 «Ошибки в Inbox и фильтры») ------------------------------

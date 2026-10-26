@@ -14,6 +14,9 @@
 //   3. Вход инструмента редактируется ПЕРЕД публикацией события, но решение возвращает
 //      ИСХОДНЫЙ вход: `{"behavior":"allow"}` обязан нести `updatedInput`, и подсунуть туда
 //      строку `<email>` вместо настоящего пути — значит сломать правку.
+//      Раз показанное и исполняемое расходятся, карточка обязана это СКАЗАТЬ: флаг `concealed`
+//      в событии и в `perm.list`. Иначе `ssh root@prod.example.com` выглядит как `ssh <email>`,
+//      и человек разрешает команду, адресата которой не видел.
 
 import { randomBytes } from 'node:crypto'
 import type { EventDraft } from '../core/events.js'
@@ -30,6 +33,8 @@ export interface PermissionRequest {
   input: Record<string, unknown>
   /** M8d: что провайдер предложил сверх «один раз» — по этому окно рисует кнопки, а `perm.resolve` сверяет scope. */
   offers?: PermissionOffers
+  /** Адаптер сам скрыл или обрезал часть входа (Codex: `redact` и подрезка до брокера) — брокеру этого не видно. */
+  concealed?: boolean
 }
 
 export interface PendingPermission {
@@ -41,6 +46,8 @@ export interface PendingPermission {
   input: Record<string, unknown>
   /** M8d: «В этой сессии» / «Всегда …» — только то, что провайдер предложил на ЭТОТ запрос. */
   offers?: PermissionOffers
+  /** Показанный вход НЕ равен исполняемому: фильтр секретов что-то заменил или длинное поле обрезано. */
+  concealed?: true
   createdAt: string
   waitingMs: number
 }
@@ -69,6 +76,7 @@ interface Entry {
   id: string
   req: PermissionRequest
   redacted: Record<string, unknown>
+  concealed: boolean
   /**
    * M8d: предложения — тоже через `redact` (инвариант 7): префикс команды в «Всегда для …» — та же команда, и токен
    * в её аргументах не должен уехать в журнал. На провод уходит НЕ это, а исходная поправка, которую держит адаптер.
@@ -122,6 +130,7 @@ export function createBroker(opts: BrokerOptions): PermBroker {
       const createdAt = Date.now()
       const createdAtIso = new Date(createdAt).toISOString()
       const redacted = redact(req.input) as Record<string, unknown>
+      const concealed = req.concealed === true || JSON.stringify(redacted) !== JSON.stringify(req.input)
       // Секрет в префиксе правила (`curl -H 'Authorization: …'`) — правило НЕ предлагаем вовсе (ревью M8d): карточка
       // показала бы `<redacted>`, а в правила Codex записался бы сам секрет — человек разрешил бы то, чего не видел.
       const ruleClean = req.offers?.rule ? redactString(req.offers.rule.label) === req.offers.rule.label : false
@@ -134,6 +143,7 @@ export function createBroker(opts: BrokerOptions): PermBroker {
           id,
           req,
           redacted,
+          concealed,
           ...(offers ? { offers } : {}),
           createdAt,
           createdAtIso,
@@ -157,6 +167,7 @@ export function createBroker(opts: BrokerOptions): PermBroker {
             ...(req.toolUseId ? { toolUseId: req.toolUseId } : {}),
             input: redacted,
             ...(offers ? { offers } : {}),
+            ...(concealed ? { concealed: true } : {}),
           },
         })
       })
@@ -173,6 +184,7 @@ export function createBroker(opts: BrokerOptions): PermBroker {
           ...(e.req.toolUseId ? { toolUseId: e.req.toolUseId } : {}),
           input: e.redacted,
           ...(e.offers ? { offers: e.offers } : {}),
+          ...(e.concealed ? { concealed: true as const } : {}),
           createdAt: e.createdAtIso,
           waitingMs: now - e.createdAt,
         }))

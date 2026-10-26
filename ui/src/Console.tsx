@@ -564,9 +564,10 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   /** Проект текущей сессии: ⌘N заводит новую сессию в нём же. */
   const currentProject = current ? groups.find((g) => g.sessions.some((s) => s.name === current.name))?.path ?? null : null
   const inbox = useMemo(() => inboxList(ui.inbox), [ui.inbox])
-  const focused = focusedRequest(inbox, focusChosen, current?.name ?? null)
   // Inbox по фильтру (О2): запросы, ошибки, непрочитанное — model/inbox.ts.
   const inboxShown = useMemo(() => inboxView(inboxFilter, inbox, agents), [inboxFilter, inbox, agents])
+  // ⌘↵ разрешает только видимую карточку: закрытый Inbox чужих запросов не показывает.
+  const focused = focusedRequest(inbox, focusChosen, current?.name ?? null, inboxOpen ? inboxShown.perms : [])
   const inboxNums = useMemo(() => inboxCounts(inbox, agents), [inbox, agents])
   const guard = useMemo(() => guardView([...guardFromDoctor(doctor.report), ...ui.guard]), [doctor.report, ui.guard])
   const doctorGroupsList = useMemo(() => doctorGroups(doctor.report), [doctor.report])

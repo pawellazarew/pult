@@ -87,7 +87,7 @@ export function Inbox({ items, cards = [], filter = 'all', counts, agents, focus
           {items.map((p) => (
             <PermCard key={p.id} permId={p.id} toolName={p.toolName} input={p.input} state="pending"
               agent={who(p.sessionId)} createdAt={p.createdAt} now={now}
-              focused={focused === p.id} busy={busy.has(p.id)} {...(p.offers ? { offers: p.offers } : {})}
+              focused={focused === p.id} busy={busy.has(p.id)} {...(p.offers ? { offers: p.offers } : {})} {...(p.concealed ? { concealed: true } : {})}
               onFocus={() => onFocus(p.id)} onApprove={(scope) => onApprove(p.id, scope)} onAnswer={(answers) => onAnswer?.(p.id, answers)} onDeny={(r) => onDeny(p.id, r)} />
           ))}
           {cards.filter((c) => !c.error).map((c) => <SessionCardView key={`s:${c.name}`} c={c} agent={who(c.name)} now={now}

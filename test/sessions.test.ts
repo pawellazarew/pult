@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { describe, it } from 'node:test'
 import { createClaudeAdapter } from '../dist/adapters/claude/adapter.js'
 import type { PultEvent } from '../dist/core/events.js'
@@ -15,13 +15,13 @@ import type { EventStore } from '../dist/core/store.js'
 import { defaultConfig } from '../dist/core/config.js'
 import type { NetCheck } from '../dist/env/net.js'
 import { createBroker } from '../dist/perm/broker.js'
-import { createManager } from '../dist/sessions/manager.js'
+import { coversPultHome, createManager } from '../dist/sessions/manager.js'
 import type { SessionManager } from '../dist/sessions/manager.js'
 import { createRegistry, isSessionName, normalizeTitle, parseSessions, SESSION_TITLE_MAX, writeSessionsAtomic } from '../dist/sessions/registry.js'
 import type { SessionRecord, SessionRegistry, SessionStatus } from '../dist/sessions/registry.js'
 import { reduceStatus, reduceStatusEvent } from '../dist/sessions/status.js'
 import { buildTree, formatTree } from '../dist/sessions/tree.js'
-import { CLI_ENTRY, FAKE_CLAUDE, sleep, tempHome, waitFor } from './helpers.js'
+import { CLI_ENTRY, FAKE_CLAUDE, sleep, tempHome, waitFor, workIn } from './helpers.js'
 import type { TempHome } from './helpers.js'
 
 const ev = (kind: string, over: Partial<PultEvent> = {}): PultEvent => ({
@@ -401,7 +401,7 @@ describe('менеджер: название агента', () => {
     const home = tempHome()
     try {
       const stand = boot(home)
-      const started = await stand.manager.start({ name: 'w', title: '  Починить  VPN ', kind: 'claude', cwd: home.paths.home })
+      const started = await stand.manager.start({ name: 'w', title: '  Починить  VPN ', kind: 'claude', cwd: workIn(home) })
       assert.equal(started.title, 'Починить VPN')
       const before = stand.store.lastId
 
@@ -428,7 +428,7 @@ describe('менеджер: название агента', () => {
     const home = tempHome()
     try {
       const stand = boot(home)
-      await stand.manager.start({ name: 'w', kind: 'claude', cwd: home.paths.home })
+      await stand.manager.start({ name: 'w', kind: 'claude', cwd: workIn(home) })
       stand.manager.rename('w', 'как было')
       const code = (fn: () => unknown): string | undefined => {
         try { fn() } catch (e) { return (e as { code?: string }).code }
@@ -442,10 +442,32 @@ describe('менеджер: название агента', () => {
       assert.equal(code(() => stand.manager.rename('w', 42 as unknown as string)), 'invalid_params')
       assert.equal(stand.manager.list()[0]?.title, 'как было')
       await assert.rejects(
-        () => stand.manager.start({ name: 'x', title: 'я'.repeat(SESSION_TITLE_MAX + 1), kind: 'claude', cwd: home.paths.home }),
+        () => stand.manager.start({ name: 'x', title: 'я'.repeat(SESSION_TITLE_MAX + 1), kind: 'claude', cwd: workIn(home) }),
         (e: { code?: string }) => e.code === 'invalid_params',
       )
       assert.deepEqual(stand.manager.list().map((s) => s.name), ['w'], 'агент с негодным названием не заведён')
+      await stand.close()
+    } finally { home.remove() }
+  })
+})
+
+describe('менеджер: папка сессии', () => {
+  it('не PULT_HOME и не его предок: агент с правкой файлов без вопроса переписал бы config.json Пульта', async () => {
+    const home = tempHome()
+    try {
+      const stand = boot(home)
+      for (const cwd of [home.paths.home, dirname(home.paths.home), `${home.paths.home}/`]) {
+        await assert.rejects(
+          () => stand.manager.start({ name: 'x', kind: 'claude', cwd }),
+          (e: { code?: string; message?: string }) => e.code === 'invalid_params' && /возьми папку проекта/.test(e.message ?? ''),
+          cwd,
+        )
+      }
+      assert.deepEqual(stand.manager.list(), [], 'отказ на входе: в реестре пусто')
+      // Папка внутри PULT_HOME до config.json не дотягивается — её пускаем.
+      await stand.manager.start({ name: 'w', kind: 'claude', cwd: workIn(home) })
+      assert.equal(coversPultHome(join(home.paths.home, '..x'), home.paths.home), false)
+      assert.equal(coversPultHome(workIn(home), home.paths.home), false)
       await stand.close()
     } finally { home.remove() }
   })
@@ -600,7 +622,7 @@ describe('менеджер сессий: рестарт демона', () => {
     let stand = boot(home)
     const originalId = '94357d2d-8c5c-46b3-9a4c-2176726d3521'
     try {
-      const imported = await stand.manager.importSession({ name: 'imported', kind: 'claude', cwd: home.paths.home }, originalId,
+      const imported = await stand.manager.importSession({ name: 'imported', kind: 'claude', cwd: workIn(home) }, originalId,
         [{ role: 'user', text: 'Вопрос из CLI' }, { role: 'assistant', text: 'Ответ из CLI' }], true)
       assert.equal(imported.providerSessionId, originalId)
       assert.equal(imported.forkOnResume, true)
@@ -623,7 +645,7 @@ describe('менеджер сессий: рестарт демона', () => {
     const home = tempHome()
     const stand = boot(home)
     try {
-      await stand.manager.importSession({ name: 'imported', kind: 'claude', cwd: home.paths.home }, 'original', [], true)
+      await stand.manager.importSession({ name: 'imported', kind: 'claude', cwd: workIn(home) }, 'original', [], true)
       stand.manager.emit({ sessionId: 'imported', provider: 'claude', kind: 'session.started', data: { providerSessionId: 'forked' } })
       assert.equal(stand.manager.list()[0]?.providerSessionId, 'forked')
       assert.equal(stand.manager.list()[0]?.forkOnResume, undefined)

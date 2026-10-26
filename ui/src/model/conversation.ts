@@ -78,6 +78,8 @@ export interface PermItem extends Base {
   message?: string
   /** M8d: «В этой сессии» / «Всегда …», предложенные провайдером (пока ждёт). */
   offers?: PermissionOffers
+  /** Показанный вход не равен исполняемому (src/perm/broker.ts). */
+  concealed?: true
   /** M8d: с какой шириной разрешили — `session` | `rule` (нет — один раз) и правило, если `rule`. */
   scope?: 'session' | 'rule'
   rule?: { kind: string; label: string }
@@ -341,6 +343,7 @@ export function applyConversation(conv: Conversation, ev: PultEvent): Conversati
         ...(toolUseId ? { toolUseId } : {}),
         input: obj(d['input']) ?? {},
         ...(offers ? { offers } : {}),
+        ...(d['concealed'] === true ? { concealed: true as const } : {}),
         state: 'pending',
       })
     }

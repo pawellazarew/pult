@@ -390,6 +390,8 @@ const approvalKey = (generation: number, id: JsonRpcId): string => `${generation
 
 /** Длина строки в отправленном человеку описании запроса: полотно в Inbox читать нельзя. */
 const APPROVAL_FIELD_LIMIT = 2000
+/** Столько элементов массива видно в карточке; хвост — строкой `…(ещё N)`, не молча. */
+const APPROVAL_ARRAY_LIMIT = 40
 /** Поля, которые в Inbox не нужны: это маршрутизация, а не то, что человек разрешает. */
 const APPROVAL_SKIP_FIELDS: ReadonlySet<string> = new Set(['threadId', 'turnId', 'startedAtMs'])
 
@@ -947,11 +949,24 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
    * и ни слова о файле — то есть разрешал вслепую. Теперь пропускаются ВСЕ параметры запроса,
    * кроме маршрутных, включая незнакомые (протокол растёт, и поле, о котором мы не знаем,
    * человеку нужнее, чем нам): всё через `redact`, длинные строки подрезаны.
+   *
+   * `concealed` — показано не всё: брокер видит только уже подрезанный вход и сам этого не заметит. Длинный
+   * массив тоже помечается (`…(ещё N)`): `command` старого `execCommandApproval` — массив, и молча
+   * отрезанный хвост команды человек разрешил бы, не видя.
    */
-  const approvalInput = (params: Record<string, unknown>, offered: string[]): Record<string, unknown> => {
+  const approvalInput = (params: Record<string, unknown>, offered: string[]): { input: Record<string, unknown>; concealed?: true } => {
+    let clipped = false
     const cap = (v: unknown): unknown => {
-      if (typeof v === 'string') return v.length > APPROVAL_FIELD_LIMIT ? `${v.slice(0, APPROVAL_FIELD_LIMIT)}…(обрезано)` : v
-      if (Array.isArray(v)) return v.slice(0, 40).map(cap)
+      if (typeof v === 'string') {
+        if (v.length <= APPROVAL_FIELD_LIMIT) return v
+        clipped = true
+        return `${v.slice(0, APPROVAL_FIELD_LIMIT)}…(обрезано)`
+      }
+      if (Array.isArray(v)) {
+        if (v.length <= APPROVAL_ARRAY_LIMIT) return v.map(cap)
+        clipped = true
+        return [...v.slice(0, APPROVAL_ARRAY_LIMIT).map(cap), `…(ещё ${v.length - APPROVAL_ARRAY_LIMIT})`]
+      }
       const o = obj(v)
       if (!o) return v
       const out: Record<string, unknown> = {}
@@ -968,7 +983,8 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
     // `availableDecisions` не объявляет (правка файла и два старых), здесь стоит их словарь
     // решений — иначе человек видел бы пустой список там, где выбор на самом деле есть.
     picked['availableDecisions'] = offered
-    return redact(picked) as Record<string, unknown>
+    const input = redact(picked) as Record<string, unknown>
+    return clipped || JSON.stringify(input) !== JSON.stringify(picked) ? { input, concealed: true } : { input }
   }
 
   /**
@@ -1089,7 +1105,7 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
           sessionId: l.spec.name,
           toolName: `mcp__${call.server}__${call.tool}`,
           ...(str(params['turnId']) ? { toolUseId: `${str(params['turnId'])}:${String(id)}` } : {}),
-          input: approvalInput({
+          ...approvalInput({
             ...(call.args !== null ? { arguments: call.args } : { arguments: 'аргументы не пришли — Codex не прислал их ни в вопросе, ни в начале вызова' }),
             message: params['message'],
           }, ['accept', 'decline']),
@@ -1176,7 +1192,7 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
         sessionId: l.spec.name,
         toolName: APPROVAL_TOOL_NAME[method] ?? method,
         toolUseId: approvalId ? `${itemId}:${approvalId}` : itemId,
-        input: approvalInput(params, offered),
+        ...approvalInput(params, offered),
         ...(scoped.offers.session || scoped.offers.rule ? { offers: scoped.offers } : {}),
       })
     } catch (e) {

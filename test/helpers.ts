@@ -4,7 +4,7 @@
 //      вместе с именем теста туда почти упирается.
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import net from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -52,6 +52,16 @@ export function tempHome(): TempHome {
       removeTree(dir)
     },
   }
+}
+
+/**
+ * Папка проекта для сессии внутри временного дома. Сам `PULT_HOME` папкой сессии быть не может
+ * (`coversPultHome`, src/sessions/manager.ts).
+ */
+export function workIn(home: TempHome, name = 'work'): string {
+  const dir = join(home.paths.home, name)
+  mkdirSync(dir, { recursive: true })
+  return dir
 }
 
 export async function startTestDaemon(

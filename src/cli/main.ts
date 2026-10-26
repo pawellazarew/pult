@@ -770,6 +770,7 @@ async function cmdPerm(paths: PultPaths, args: ParsedArgs): Promise<number> {
         for (const p of r.pending) {
           out(`${String(p['id'])}  ${String(p['sessionId'])}  ${String(p['toolName'])}  ждёт ${Math.round(Number(p['waitingMs']) / 1000)} с`)
           out(`    ${JSON.stringify(p['input'])}`)
+          if (p['concealed'] === true) out('    ВНИМАНИЕ: показано не всё — фильтр секретов скрыл часть входа или длинное поле обрезано; исполнится исходный вход')
           // M8d: что ещё можно, кроме «один раз», — ровно то, что провайдер предложил на этот запрос.
           const offers = p['offers'] as PermissionOffers | undefined
           if (offers?.session) out('    --session: разрешить в этой сессии (и такие же до её конца)')
