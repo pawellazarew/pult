@@ -60,6 +60,8 @@ function Diff({ d }: { d: DiffBlock }): ReactElement {
 }
 
 const BY: Record<string, string> = { human: 'человек', timeout: 'таймаут', stop: 'сессия остановлена', rm: 'сессия удалена', shutdown: 'демон остановлен' }
+/** 0.3.7: ответ человека демон пишет как `<клиент>#<соединение>` (`shell#3`, `cli#7`) — подпись ему не нужна, как и `human`. */
+const byHuman = (by: string): boolean => by === 'human' || /^[a-z][a-z0-9-]*#\d+$/.test(by)
 
 export function PermCard(p: PermCardProps): ReactElement {
   const v = useMemo(() => describePermission(p.toolName, p.input), [p.toolName, p.input])
@@ -130,7 +132,7 @@ export function PermCard(p: PermCardProps): ReactElement {
           <Icon name={p.state === 'allow' ? 'check' : 'x'} />
           {p.state === 'allow' ? 'Разрешено' : 'Отказано'}
           {p.state === 'allow' && scopeText(p.scope, p.rule) && <span className="why" data-testid="perm-scope">· {scopeText(p.scope, p.rule)}</span>}
-          {p.by && p.by !== 'human' && <span className="why">({BY[p.by] ?? p.by})</span>}
+          {p.by && !byHuman(p.by) && <span className="why">({BY[p.by] ?? p.by})</span>}
           {p.state === 'deny' && p.message && <span className="why">— {p.message}</span>}
         </div>
       )}

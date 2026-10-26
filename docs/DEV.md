@@ -1642,6 +1642,79 @@ haiku/medium + `--permission-mode manual --disallowedTools Write Edit MultiEdit 
   причиной в ленте; правка из терминала видна при открытии ⌘,; правка в открытом диалоге поверх чужой — отказ
   «изменилось снаружи», файл не тронут).
 
+## Ключи вопросов и модель угроз (0.3.7, окно 0.1.15 без замены)
+
+Укрепление по отчёту в #13 (внешний вклад). Оболочка не менялась: окно и так вырезает `updatedInput` из `perm.resolve`
+(`shell/src/contract.ts`) и ходит токеном хозяина.
+
+**Модель угроз.** Демон и агенты работают от одного пользователя. Сокет `PULT_HOME/run/pultd.sock` (0600) и токен
+`PULT_HOME/run/token` (0600) защищают от ДРУГИХ пользователей машины, не от кода самого владельца. До 0.3.7 держатель
+токена мог всё: любой RPC, `perm.request` (право проверялось по самоназванию `client: 'mcp-ask'`), `perm.resolve` с
+произвольным `updatedInput` (разрешить карточку `ls` и исполнить другую команду) и `scope: rule`; заглушка `pult mcp-ask`
+читала токен хозяина с диска. Значит, агент, который прочёл файл токена (у Claude нет песочницы ОС — хватало инструмента
+Read), получал весь пульт.
+
+Достижимость (анализ 26.10.2026; «до» — 0.3.6, «после» — 0.3.7):
+
+| кто | сокет | файл токена | до | после |
+|---|---|---|---|---|
+| Codex `read-only` / `workspace-write`, сеть выключена | `connect` отказан песочницей | читается | ничего | ничего |
+| Codex с `sandbox_workspace_write.network_access = true` или `danger-full-access` | доступен | читается | всё | всё (остаточный риск; `pult doctor` предупреждает о сети) |
+| Claude, инструменты Read/Edit (без песочницы ОС) | — | читается | всё | `deny Read/Edit(//PULT_HOME/run/**)` — отказ без вопроса |
+| Claude, Bash по правилу владельца (`Bash(python3:*)`) в «Только чтение» | доступен | читается | всё, без вопроса | `ask: ["Bash"]` — вопрос в Inbox |
+| Claude, Bash после «да» в Inbox / в `full` | доступен | читается | всё | всё (остаточный риск) |
+| заглушка `pult mcp-ask` | доступен | читала | токен хозяина | ключ вопросов: только `perm.request` своей сессии |
+| держатель токена | доступен | — | всё, вкл. `perm.request` и подмену входа | всё, кроме `perm.request`; `updatedInput` — отказ |
+
+**Что сделано.**
+
+- **`perm.resolve`** — `'updatedInput' in params` → `invalid_params`, карточка ждёт дальше. Единственный законный автор
+  `updatedInput` — брокер (ответы `AskUserQuestion` из `answers`); голое «да» возвращает исходный вход. В
+  `permission.resolved.by` — `<client>#<connId>` ответившего соединения (`shell#3`, `cli#7`); карточка окна такой `by` не
+  подписывает (`byHuman`, ui/src/components/PermCard.tsx), как и прежний `human`.
+- **Ключи вопросов** (`src/perm/askKeys.ts`): `mint(session)` — 32 случайных байта hex, `lookup`, `revoke`; только в памяти
+  демона, сверка `timingSafeEqual` по всем ключам без раннего выхода. Рукопожатие — ровно одно из двух: `{token}` → роль
+  `owner`, `{ask}` → роль `ask` с привязанной сессией; оба сразу, чужой или снятый ключ — `bad_token`. Роль `ask`: любой
+  метод, кроме `perm.request`, — новый код `forbidden`; `sessionId` — сессия ключа (другое имя — `forbidden`), ключ
+  сверяется заново на каждом запросе (снятый посреди соединения — `forbidden`). Роль `owner`: `perm.request` — `forbidden`.
+  Проверки `client !== 'mcp-ask'` больше нет: самоназвание прав не даёт (оно только в журнале и `by`, `[a-z][a-z0-9-]{0,31}`).
+- **Адаптер Claude**: `writeMcpConfig` выдаёт ключ на каждый процесс `claude` и пишет его в env заглушки (`PULT_ASK_KEY`,
+  рядом `PULT_HOME` — только ради пути к сокету, и `PULT_ASK_SESSION`); снимается на `exit`/`close` ЭТОГО процесса (рядом
+  с удалением файла), на `close` сессии и `shutdown`. Заглушка (`src/perm/mcpAsk.ts`) токен не читает; нет ключа — отказ.
+- **`--settings` каждой сессии Claude** (`claudeGuardPermissions` + `mergePermissions`, src/adapters/claude/argv.ts):
+  всегда `deny: Read(//<run>/**), Edit(//<run>/**)` — путь как есть и по realpath; в `read-only` — `ask: ["Bash"]`. Правила
+  О3 (браузер, только с брокером) сливаются в тот же один флаг.
+- **`pult doctor`** — пункт `codex.network` (src/env/codexConfig.ts): `sandbox_workspace_write.network_access = true` в
+  `$CODEX_HOME/config.toml` или `~/.codex/config.toml` → warn «песочница Codex с сетью: агент сможет обратиться к демону
+  Пульта». Файл только читается, разбор одного ключа (таблица, ключ с точкой, встроенная таблица; профили — нет), без
+  зависимостей. Тестовый демон и `PULT_TEST=1` читают `PULT_HOME/codex-config.toml`.
+
+**Спайк S12** (`spike/claude/s12-ask-bash.mjs`, CLI 2.1.310, haiku/low, 3 хода, две сессии; временная папка проекта со
+своим `.claude/settings.local.json` = `allow: ["Bash(python3:*)"]`, `--setting-sources project,local` — настройки владельца
+не грузятся; временная папка «run» вне cwd с файлом-меткой; заглушка s9-stub с `S9_DENY` — отказ на всё, спайк видит
+только, дошёл ли вопрос; журнал — `s12-ask-bash.jsonl` и `s12-mcp-trace.jsonl` в `logs/` ноги, итог — строка `S12-claude`
+в её таблице вердиктов). 26.10.2026, выход DE, `works`:
+
+| ход | правила `--settings` | итог |
+|---|---|---|
+| T1 `python3 -c …` в `manual` | `ask: ["Bash"]` + deny run | вопрос пришёл в заглушку, файл не создан (`permission_denials: Bash`) |
+| T2 Read `<run>/token` | то же | Read вызван, вопроса нет, отказ правилом (`permission_denials: Read`), метки в ответе нет |
+| T3 (контроль) `python3 -c …` в `manual` | без `ask` | вопроса нет, файл создан — правило проекта само по себе исполняет интерпретатор молча |
+
+**Чего это не закрывает** (README, раздел «Безопасность»): код от того же пользователя (любая команда вне песочницы,
+Bash после «да», `full`) по-прежнему читает токен и делает всё; одно разрешённое расширение прав — полный доступ;
+интерпретаторы в разрешающих правилах Claude исполняют что угодно в `ask` и `workspace`; `confirm: true` для `full` —
+защита от опечатки, не второй фактор. Не проверено спайком: соблюдает ли `bypassPermissions` (`full`) правила `deny`
+(в `full` агент и так может всё через Bash); правила с путём, где есть `(` или `)`.
+
+- Тесты: `test/perm.test.ts` (заглушка без файла токена; без ключа — отказ; токен хозяина + `client: 'mcp-ask'` →
+  `forbidden`; ключ: только `perm.request`, чужая сессия — `forbidden`, снятый ключ — `bad_token` / `forbidden`; `perm.resolve`
+  с `updatedInput` → `invalid_params`, карточка ждёт, голое «да» — исходный вход, `by` = `cli#N`; ответы `AskUserQuestion`
+  через RPC; `askKeys`), `test/claude-argv.test.ts` (env заглушки без токена, deny при любом режиме и без брокера, `ask Bash`
+  в read-only), `test/browser.test.ts` (слияние с правилами браузера в один `--settings`), `test/claude-adapter.test.ts`
+  (ключ на процесс, снят после выхода, второй ход — новый ключ), `test/doctor.test.ts` (`codex.network`), e2e
+  `shell/test/e2e/flows.test.ts` (`by` — `shell#N`).
+
 ## CI
 
 Одна команда, одинаковая для человека и для GitHub Actions:

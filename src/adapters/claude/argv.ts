@@ -35,6 +35,34 @@ export const PERMISSION_TOOL = `mcp__${PERMISSION_SERVER_NAME}__ask`
 /** Инструменты, которых у сессии `read-only` нет вовсе (`--disallowedTools`): правки файлов и выход из режима плана. */
 export const CLAUDE_READONLY_DENIED: readonly string[] = ['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'ExitPlanMode']
 
+export interface ClaudePermissionRules { allow?: readonly string[]; ask?: readonly string[]; deny?: readonly string[] }
+
+/**
+ * 0.3.7: правила, которые Пульт ставит КАЖДОЙ сессии Claude поверх правил владельца (у Claude deny > ask > allow, и
+ * разрешающее правило владельца их не перебьёт):
+ *   * `deny Read/Edit(//<папка>/**)` — папка `PULT_HOME/run` (токен хозяина, mcp-config с ключом вопросов): `//` —
+ *     абсолютный путь в правилах Claude Code; правило Edit закрывает и Write/MultiEdit/NotebookEdit;
+ *   * `read-only` — `ask: ["Bash"]`: правило владельца вроде `Bash(python3:*)` иначе исполнило бы интерпретатор в
+ *     «Только чтение» без вопроса (`manual` уважает allow-правила). ИЗМЕРЕНО спайком S12 (CLI 2.1.310, haiku): с `ask`
+ *     вопрос пришёл, без него — команда прошла молча; Read файла в папке вне cwd под deny — отказ без вопроса.
+ */
+export function claudeGuardPermissions(protectDirs: readonly string[], approval?: ApprovalMode): ClaudePermissionRules {
+  return {
+    ...(approval === 'read-only' ? { ask: ['Bash'] } : {}),
+    deny: protectDirs.flatMap((d) => [`Read(/${d}/**)`, `Edit(/${d}/**)`]),
+  }
+}
+
+/** Слить наборы правил: списки по видам, без повторов, порядок первого появления. Пустые виды не пишутся. */
+export function mergePermissions(...sets: Array<ClaudePermissionRules | undefined>): ClaudePermissionRules {
+  const out: { allow?: string[]; ask?: string[]; deny?: string[] } = {}
+  for (const kind of ['allow', 'ask', 'deny'] as const) {
+    const all = [...new Set(sets.flatMap((x) => [...(x?.[kind] ?? [])]))]
+    if (all.length) out[kind] = all
+  }
+  return out
+}
+
 export interface ClaudeArgvOptions {
   /** Первый ход сессии: `--session-id <uuid>`. Последующие: `--resume <uuid>`. */
   sessionId: string
@@ -52,6 +80,11 @@ export interface ClaudeArgvOptions {
    * про браузер всегда, запретить исполнение кода, разрешить чтение скачиваний. Только вместе с брокером.
    */
   permissions?: { allow?: readonly string[]; ask?: readonly string[]; deny?: readonly string[] }
+  /**
+   * 0.3.7: папки, которые агенту не читать и не править НИКОГДА (`PULT_HOME/run`: токен хозяина, файлы --mcp-config
+   * с ключами вопросов). Правила `deny` уходят в `--settings` при любом режиме и вместе с правилами О3.
+   */
+  protectDirs?: readonly string[]
   /** Дополнительные флаги (например `--allowedTools`). */
   extra?: readonly string[]
 }
@@ -80,17 +113,15 @@ export function buildClaudeArgv(opts: ClaudeArgvOptions): string[] {
     a.push('--mcp-config', opts.mcpConfigPath)
     a.push('--strict-mcp-config')
     a.push('--permission-prompt-tool', PERMISSION_TOOL)
-    const p = opts.permissions
-    if (p && (p.allow?.length || p.ask?.length || p.deny?.length)) {
-      a.push('--settings', JSON.stringify({ permissions: {
-        ...(p.allow?.length ? { allow: [...p.allow] } : {}),
-        ...(p.ask?.length ? { ask: [...p.ask] } : {}),
-        ...(p.deny?.length ? { deny: [...p.deny] } : {}),
-      } }))
-    }
   } else {
     a.push('--permission-prompts', 'none')
   }
+  // Правила О3 (браузер) — только вместе с брокером; правила 0.3.7 — всегда. Один флаг `--settings` на всё.
+  const p = mergePermissions(
+    claudeGuardPermissions(opts.protectDirs ?? [], opts.approval),
+    opts.mcpConfigPath ? opts.permissions : undefined,
+  )
+  if (p.allow?.length || p.ask?.length || p.deny?.length) a.push('--settings', JSON.stringify({ permissions: p }))
   if (opts.extra) a.push(...opts.extra)
   return a
 }
@@ -115,8 +146,10 @@ export interface McpConfigOptions {
   nodeBin: string
   /** Путь до собранного `dist/cli/main.js`: заглушка — это режим самого `pult`. */
   cliEntry: string
-  /** PULT_HOME, чтобы заглушка нашла сокет и токен. */
+  /** PULT_HOME — только чтобы заглушка нашла сокет. Токена хозяина она не читает (0.3.7). */
   home: string
+  /** 0.3.7: ключ вопросов этого процесса `claude` (src/perm/askKeys.ts): право только на `perm.request` своей сессии. */
+  askKey: string
   /** Имя сессии: заглушка подписывает им запросы брокеру. */
   sessionName: string
   /**
@@ -129,8 +162,9 @@ export interface McpConfigOptions {
 /**
  * Содержимое файла `--mcp-config`. Запускается НАСТОЯЩИЙ `pult mcp-ask`, а не отдельный
  * бинарь: так круг разрешений в тестах и в жизни идёт по одному и тому же коду.
- * PULT_HOME передаётся через env этого файла — своего окружения у заглушки нет: её запускает
- * `claude`, а не Пульт.
+ * PULT_HOME и ключ вопросов передаются через env этого файла — своего окружения у заглушки нет: её
+ * запускает `claude`, а не Пульт. Файл лежит в `PULT_HOME/run` (0600), и чтение этой папки агенту запрещено
+ * (`claudeGuardPermissions`).
  */
 export function mcpConfigBody(opts: McpConfigOptions): string {
   const extra = { ...(opts.servers ?? {}) }
@@ -144,6 +178,7 @@ export function mcpConfigBody(opts: McpConfigOptions): string {
         env: {
           PULT_HOME: opts.home,
           PULT_ASK_SESSION: opts.sessionName,
+          PULT_ASK_KEY: opts.askKey,
         },
       },
       ...extra,

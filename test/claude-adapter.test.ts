@@ -16,6 +16,8 @@ import { ensureLayout, layout } from '../dist/core/paths.js'
 import { checkNetwork } from '../dist/env/net.js'
 import type { NetCheck } from '../dist/env/net.js'
 import { stableNodePath } from '../dist/env/nodeBin.js'
+import { createAskKeys } from '../dist/perm/askKeys.js'
+import type { AskKeys } from '../dist/perm/askKeys.js'
 import { CLI_ENTRY, FAKE_CLAUDE, sleep, waitFor } from './helpers.js'
 
 interface Rig {
@@ -59,6 +61,8 @@ function rig(opts: {
   nodeExec?: string
   /** Содержимое PULT_HOME/node-path (его пишет лаунчер службы). */
   savedNode?: string
+  /** 0.3.7: ключи вопросов (тест следит, когда выдан и снят). */
+  askKeys?: AskKeys
 }): Rig {
   const dir = mkdtempSync(join(tmpdir(), 'pt-ad-'))
   const paths = layout(join(dir, 'h'))
@@ -86,6 +90,7 @@ function rig(opts: {
     bin: opts.bin ?? FAKE_CLAUDE,
     cliEntry: CLI_ENTRY,
     ...(opts.nodeExec ? { nodeExec: opts.nodeExec } : {}),
+    ...(opts.askKeys ? { askKeys: opts.askKeys } : {}),
     emit: (d) => { drafts.push(d) },
     askPermission: async () => ({ behavior: 'deny', message: 'тест' }),
     ...(opts.net ? { netCheck: opts.net } : { netCheck: async () => okCheck() }),
@@ -143,6 +148,34 @@ describe('адаптер claude: контракт запуска', () => {
       const cfgPath = argv[argv.indexOf('--mcp-config') + 1] as string
       const cfg = JSON.parse(readFileSync(cfgPath, 'utf8')) as { mcpServers: Record<string, { args: string[] }> }
       assert.deepEqual(cfg.mcpServers['pult']?.args, [CLI_ENTRY, 'mcp-ask'])
+    } finally { await r.adapter.shutdown(); r.remove() }
+  })
+
+  it('0.3.7: ключ вопросов — на процесс: выдан перед запуском, в файле --mcp-config, снят на выходе процесса', async () => {
+    const inner = createAskKeys()
+    const log: string[] = []
+    const keys: AskKeys = {
+      mint: (s) => { const k = inner.mint(s); log.push(`mint ${s} ${k}`); return k },
+      lookup: (k) => inner.lookup(k),
+      revoke: (k) => { const ok = inner.revoke(k); if (ok) log.push(`revoke ${k}`); return ok },
+      size: () => inner.size(),
+    }
+    const r = rig({ scenario: 'simple', askKeys: keys })
+    try {
+      await r.adapter.startSession(spec(r, { broker: true }))
+      await (await r.adapter.send('w', 'привет')).done
+      const key = (log[0] ?? '').split(' ')[2] as string
+      assert.match(log[0] ?? '', /^mint w [0-9a-f]{64}$/)
+      assert.ok(await waitFor(() => inner.size() === 0, 5000), `ключ не снят после выхода процесса: ${log.join(' | ')}`)
+      assert.deepEqual(log, [`mint w ${key}`, `revoke ${key}`])
+      // Следующий ход — новый процесс и новый ключ; прежний не воскресает.
+      await (await r.adapter.send('w', 'ещё')).done
+      assert.ok(await waitFor(() => inner.size() === 0, 5000))
+      assert.equal(log.filter((l) => l.startsWith('mint')).length, 2)
+      assert.notEqual(log[2]?.split(' ')[2], key)
+      const argv = r.runs()[1]!.argv
+      const settings = JSON.parse(argv[argv.indexOf('--settings') + 1] as string) as { permissions: { deny: string[] } }
+      assert.ok(settings.permissions.deny.some((d) => /^Read\(\/\/.*\/h\/run\/\*\*\)$/.test(d)), settings.permissions.deny.join(' '))
     } finally { await r.adapter.shutdown(); r.remove() }
   })
 
