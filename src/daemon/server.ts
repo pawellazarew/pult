@@ -198,6 +198,14 @@ interface Connection {
 /** Вызовы, которые делает только интерфейс окна (main оболочки их не шлёт): первый из них — окно готово. */
 const RENDERER_METHODS: ReadonlySet<string> = new Set(['settings.get', 'events.snapshot', 'update.status', 'update.check', 'providers.check'])
 
+/** Собственные поля параметров RPC в объекте без прототипа; не объект — пусто. */
+export function ownParams(raw: unknown): Record<string, unknown> {
+  const out = Object.create(null) as Record<string, unknown>
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return out
+  for (const k of Object.keys(raw)) out[k] = (raw as Record<string, unknown>)[k]
+  return out
+}
+
 export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
   const { paths, config, logger } = opts
   const backlogLimit = opts.writeBacklogLimit ?? WRITE_BACKLOG_LIMIT
@@ -1032,7 +1040,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
         // 0.3.7: подмена входа запрещена. Раньше `updatedInput` разрешал «одно» и исполнял «другое» (одобрить карточку
         // `ls` и подставить `curl … | sh`). Единственный законный автор updatedInput — сам брокер (ответы AskUserQuestion
         // из `answers`); окно его и так вырезает. Отказ — до брокера: карточка остаётся ждать.
-        if ('updatedInput' in p) {
+        if (Object.hasOwn(p, 'updatedInput')) {
           throw new ManagerError(ERROR_CODES.invalidParams, 'perm.resolve: updatedInput не принимается — разрешается ровно показанный запрос')
         }
         const id = String(p['id'] ?? '')
@@ -1102,7 +1110,9 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     const send = (payload: unknown): void => { writeFrame(conn, payload) }
     const fail = (code: string, message: string, data?: unknown): void =>
       send({ id: req.id, error: { code, message, ...(data !== undefined ? { data } : {}) } })
-    const params = (req.params ?? {}) as Record<string, unknown>
+    // Параметры — объект БЕЗ прототипа, только собственные поля запроса (ревью #16): решения о правах (`approval ?? 'ask'`,
+    // `confirm`, `'updatedInput' in p`, `scope`, `browser`) не должны зависеть от того, что лежит в Object.prototype.
+    const params = ownParams(req.params)
     // 0.3.7: ключ вопросов — ничего, кроме `perm.request` (ни подписки, ни статуса, ни resolve).
     if (conn.role !== 'owner' && req.method !== 'perm.request') {
       fail(ERROR_CODES.forbidden, `${req.method}: ключ вопросов даёт только perm.request`)

@@ -14,6 +14,7 @@ import type { EventDraft } from '../dist/core/events.js'
 import { PROTOCOL_VERSION } from '../dist/core/rpc.js'
 import { readToken } from '../dist/core/token.js'
 import type { DaemonHandle } from '../dist/daemon/server.js'
+import { ownParams } from '../dist/daemon/server.js'
 import { CLI_ENTRY, rawConnect, sleep, startTestDaemon, tempHome, waitFor, workIn } from './helpers.js'
 import type { TempHome } from './helpers.js'
 
@@ -726,5 +727,16 @@ describe('ключи вопросов (src/perm/askKeys.ts)', () => {
     assert.equal(keys.revokeSession('w'), 2)
     assert.equal(keys.lookup(b), null)
     assert.equal(keys.size(), 1)
+  })
+})
+
+// --- ревью #16: параметры RPC читаются только из собственных полей ---------------------
+describe('параметры RPC без прототипа (ревью #16)', () => {
+  it('ownParams: только собственные поля, без прототипа; не объект — пусто', () => {
+    const p = ownParams(JSON.parse('{"a":1,"__proto__":{"approval":"full"}}'))
+    assert.equal(Object.getPrototypeOf(p), null)
+    assert.deepEqual(Object.keys(p).sort(), ['__proto__', 'a'])
+    assert.equal(p['approval'], undefined)
+    for (const raw of [null, undefined, 'x', 42, [1, 2]]) assert.deepEqual(Object.keys(ownParams(raw)), [])
   })
 })

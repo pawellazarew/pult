@@ -657,6 +657,22 @@ describe('доктор: сеть в песочнице Codex (0.3.7)', () => {
     assert.deepEqual(perm('[permissions.p.network.unix_sockets]\n"/tmp/x.sock" = "allow"'), ['permissions.p.network.unix_sockets'])
     assert.deepEqual(perm('enabled = true'), [])
     assert.deepEqual(codexSandboxNetwork('[permissions.q.network]\ndangerously_allow_all_unix_sockets = true').unixSockets, [], 'профиль не выбран')
+    // Ревью #16 (MED): ключи прототипа отказаны, Object.prototype не трогается; таблицы — без прототипа.
+    for (const bad of [
+      '[__proto__]\nx = 1', '["__proto__"]\nx = 1', 'a.__proto__.x = 1', 'v = { __proto__ = { x = 1 } }',
+      '[[__proto__]]\nx = 1', '[constructor]\nx = 1', 'prototype = 1', '[a.constructor.prototype]\nx = 1',
+    ]) {
+      assert.throws(() => parseTomlLite(bad), /не принимается/, bad)
+      assert.equal(({} as Record<string, unknown>)['x'], undefined, bad)
+      assert.equal(codexNetworkAccess(bad), null)
+      const it = codexNetworkItems('/c', () => bad)[0]!
+      assert.deepEqual([it.status, /не разобран/.test(it.detail)], ['warn', true], bad)
+    }
+    const parsed = parseTomlLite('[a]\nb = { c = 1 }\n[[d]]\ne = 1')
+    assert.equal(Object.getPrototypeOf(parsed), null)
+    assert.equal(Object.getPrototypeOf(parsed['a']), null)
+    assert.equal(Object.getPrototypeOf((parsed['a'] as Record<string, unknown>)['b']), null)
+    assert.equal(Object.getPrototypeOf((parsed['d'] as unknown[])[0]), null)
     // Кривой TOML — бросок разбора; совместимый вход — null.
     assert.throws(() => parseTomlLite('[sandbox_workspace_write\nnetwork_access = true'))
     assert.equal(codexNetworkAccess('x = "незакрыта'), null)

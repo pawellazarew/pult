@@ -28,11 +28,19 @@ export type TomlTable = { [k: string]: TomlValue }
 class TomlError extends Error {}
 
 /**
+ * Ключи, которые в обычном объекте JS — не данные, а прототип (ревью #16, MED). `[__proto__]\napproval = "full"` в
+ * config.toml иначе загрязнял Object.prototype ВНУТРИ демона (doctor.run идёт там): `agent.start` без approval получал бы
+ * `full`. Такой файл — «не разобран»; таблицы к тому же без прототипа.
+ */
+const RESERVED_KEYS: ReadonlySet<string> = new Set(['__proto__', 'constructor', 'prototype'])
+const table = (): TomlTable => Object.create(null) as TomlTable
+
+/**
  * Маленький разбор TOML 1.0 (+ перевод строки во встроенной таблице, как в 1.1). Значения, которые не нужны доктору
  * (числа, даты), — строкой как есть. Ошибка — `TomlError` с номером строки.
  */
 export function parseTomlLite(text: string): TomlTable {
-  const root: TomlTable = {}
+  const root: TomlTable = table()
   let i = 0
   let line = 1
   const n = text.length
@@ -99,6 +107,7 @@ export function parseTomlLite(text: string): TomlTable {
         if (!m) fail('ожидался ключ')
         parts.push(m![0]); i += m![0].length
       }
+      if (RESERVED_KEYS.has(parts[parts.length - 1]!)) fail(`ключ ${parts[parts.length - 1]} не принимается`)
       skipSpaces()
       if (peek() !== '.') return parts
       i++
@@ -125,7 +134,7 @@ export function parseTomlLite(text: string): TomlTable {
     }
     if (peek() === '{') {
       i++
-      const tbl: TomlTable = {}
+      const tbl: TomlTable = table()
       for (;;) {
         skipAll()
         if (peek() === '}') { i++; return tbl }
@@ -148,8 +157,8 @@ export function parseTomlLite(text: string): TomlTable {
   const tableAt = (base: TomlTable, path: string[]): TomlTable => {
     let t = base
     for (const p of path) {
-      const next = t[p]
-      if (next === undefined) { const fresh: TomlTable = {}; t[p] = fresh; t = fresh; continue }
+      const next = Object.hasOwn(t, p) ? t[p] : undefined
+      if (next === undefined) { const fresh: TomlTable = table(); t[p] = fresh; t = fresh; continue }
       if (Array.isArray(next)) {
         // Массив таблиц: ключи пишутся в последнюю.
         const last = next[next.length - 1]
@@ -178,8 +187,8 @@ export function parseTomlLite(text: string): TomlTable {
       i += 2
       const parent = tableAt(root, path.slice(0, -1))
       const last = path[path.length - 1]!
-      const arr = Array.isArray(parent[last]) ? parent[last] as TomlValue[] : (parent[last] = [] as TomlValue[]) as TomlValue[]
-      const fresh: TomlTable = {}
+      const arr = Object.hasOwn(parent, last) && Array.isArray(parent[last]) ? parent[last] as TomlValue[] : (parent[last] = [] as TomlValue[]) as TomlValue[]
+      const fresh: TomlTable = table()
       arr.push(fresh)
       current = fresh
     } else if (peek() === '[') {

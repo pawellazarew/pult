@@ -1704,6 +1704,12 @@ Read), получал весь пульт.
   отказ). `askKeys.revokeSession(name)` — на `close` (`agent rm`) и `shutdown` адаптера: новая сессия с тем же именем
   старых ключей не получает. Бросок между выдачей ключа и спавном (`spawn` отказывает синхронно на нулевом байте в
   аргументе) снимает ключ и файл, сессия не остаётся «занятой», ход — `internal`. Самоназвание не по форме — `unknown`.
+  Повторное ревью: `parseTomlLite` строит таблицы без прототипа (`Object.create(null)`) и отказывает ключам `__proto__`,
+  `constructor`, `prototype` (файл — «не разобран»): `[__proto__]\napproval = "full"` в config.toml codex загрязнял
+  Object.prototype в демоне (doctor.run идёт там), и `agent.start` без approval получал `full`, а `'updatedInput' in p`
+  отказывал каждому `perm.resolve`. Вдобавок `dispatch` берёт параметры RPC в объект без прототипа (`ownParams`), а
+  `perm.resolve` проверяет `Object.hasOwn(p, 'updatedInput')`. Полной защиты от загрязнения прототипа ВНУТРИ процесса нет и
+  быть не может (обычные объекты менеджера тоже читают прототип) — поэтому закрыт источник, разбор чужого файла.
 
 **Спайк S12** (`spike/claude/s12-ask-bash.mjs`, CLI 2.1.310, haiku/low, 3 хода, две сессии; временная папка проекта со
 своим `.claude/settings.local.json` = `allow: ["Bash(python3:*)"]`, `--setting-sources project,local` — настройки владельца
