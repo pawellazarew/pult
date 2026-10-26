@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { describe, it } from 'node:test'
 import { createClaudeAdapter } from '../dist/adapters/claude/adapter.js'
+import type { ProviderAdapter } from '../dist/adapters/types.js'
 import type { PultEvent } from '../dist/core/events.js'
 import { layout, ensureLayout } from '../dist/core/paths.js'
 import { createStore } from '../dist/core/store.js'
@@ -495,30 +496,44 @@ describe('менеджер: папка сессии', () => {
     const home = tempHome()
     try {
       // Заведена до проверки на старте (или папка стала ссылкой): запись лежит в sessions.json как есть.
-      writeFileSync(join(home.paths.home, '.pult-fake.json'), JSON.stringify({ scenario: 'simple', speed: 0 }))
       const legacy = (name: string, approval?: SessionRecord['approval']): SessionRecord => ({
         name, provider: 'claude', cwd: home.paths.home, mode: 'turn', ...(approval ? { approval } : {}),
         createdAt: '2026-10-01T10:00:00.000Z', lastStatus: 'idle', lastEventId: 0,
       })
       writeSessionsAtomic(home.paths.sessions, [legacy('old'), legacy('ws', 'workspace'), legacy('ro', 'read-only')])
-      const stand = boot(home)
-      const refused = (e: { code?: string; message?: string }): boolean => e.code === 'invalid_params' && /Только чтение/.test(e.message ?? '')
-      // resume: ход в `ask` и `workspace` не заводится — ни реплики в журнале, ни процесса.
-      await assert.rejects(() => stand.manager.prompt('old', 'привет'), refused)
-      await assert.rejects(() => stand.manager.prompt('ws', 'привет'), refused)
-      assert.equal(stand.store.readFrom(0).filter((e) => e.kind === 'message.user').length, 0, 'реплика не ушла в журнал')
-      // configure: шире «Только чтение» — отказ, запись не тронута; в «Только чтение» — можно.
-      await assert.rejects(() => stand.manager.configure({ name: 'old', approval: 'workspace' }), refused)
-      await assert.rejects(() => stand.manager.configure({ name: 'old', approval: 'full', confirm: true }), refused)
-      assert.equal(stand.manager.list().find((r) => r.name === 'old')?.approval, undefined)
-      const r = await stand.manager.configure({ name: 'ws', approval: 'read-only' })
-      assert.equal(r.record.approval, 'read-only')
-      // «Только чтение» — ход идёт.
-      await stand.manager.prompt('ro', 'привет')
-      const out = await stand.manager.wait({ name: 'ro', until: ['idle', 'done'], timeoutMs: 15_000 })
-      assert.equal(out.reason, 'matched')
-      assert.equal(out.status, 'idle', JSON.stringify(out))
-      await stand.close()
+      // Адаптер-заглушка без процессов: проверяется решение менеджера, а не claude.
+      const resumed: string[] = []
+      const adapter = {
+        async startSession(spec: { name: string }) { return { name: spec.name, providerSessionId: `p-${spec.name}` } },
+        async resume(name: string) { resumed.push(name) },
+        async send(name: string) { return { turnId: `t-${name}`, done: Promise.resolve({ turnId: `t-${name}`, ok: true }) } },
+        configure: () => 'next_turn',
+        async respondPermission() {}, async interrupt() {}, async close() {}, async shutdown() {},
+        blocked: () => ({ blocked: false }), reset() {},
+      } as unknown as ProviderAdapter
+      const store = createStore(home.paths)
+      const manager = createManager({
+        paths: home.paths, config: defaultConfig(), logger: home.logger, store,
+        publish: (d) => store.append(d), adapters: { claude: adapter },
+        broker: createBroker({ emit: () => {} }),
+      })
+      try {
+        const refused = (e: { code?: string; message?: string }): boolean => e.code === 'invalid_params' && /Только чтение/.test(e.message ?? '')
+        // resume: ход в `ask` и `workspace` не заводится — ни реплики в журнале, ни resume.
+        await assert.rejects(() => manager.prompt('old', 'привет'), refused)
+        await assert.rejects(() => manager.prompt('ws', 'привет'), refused)
+        assert.equal(store.readFrom(0).filter((e) => e.kind === 'message.user').length, 0, 'реплика не ушла в журнал')
+        assert.deepEqual(resumed, [])
+        // configure: шире «Только чтение» — отказ, запись не тронута; в «Только чтение» — можно.
+        await assert.rejects(() => manager.configure({ name: 'old', approval: 'workspace' }), refused)
+        await assert.rejects(() => manager.configure({ name: 'old', approval: 'full', confirm: true }), refused)
+        assert.equal(manager.list().find((r) => r.name === 'old')?.approval, undefined)
+        const r = await manager.configure({ name: 'ws', approval: 'read-only' })
+        assert.equal(r.record.approval, 'read-only')
+        // «Только чтение» — ход заводится.
+        assert.equal((await manager.prompt('ro', 'привет')).turnId, 't-ro')
+        assert.deepEqual(resumed, ['ro'])
+      } finally { await manager.shutdown().catch(() => {}); store.close() }
     } finally { home.remove() }
   })
 })
