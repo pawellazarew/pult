@@ -678,32 +678,48 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
     const netEnv = l.netEnv
     let mapper = l.mapper
     if (!l.child) {
-      const argv = buildClaudeArgv({
-        sessionId: l.providerSessionId,
-        resume: l.started,
-        forkOnResume: l.spec.forkOnResume,
-        ...(flags.model ? { model: flags.model } : {}),
-        ...(flags.effort ? { effort: flags.effort } : {}),
-        ...(l.spec.settingSources ? { settingSources: l.spec.settingSources } : {}),
-        ...(flags.approval ? { approval: flags.approval } : {}),
-        ...(mcpConfigPath ? { mcpConfigPath } : {}),
-        ...(mcpConfigPath && permissions ? { permissions } : {}),
-        protectDirs: protectDirs(),
-      })
-      mapper = createClaudeMapper({
-        sessionId: name,
-        onUnknown: (t) => logger.warn('незнакомое событие claude — пропущено', { session: name, type: t }),
-      })
-      l.mapper = mapper
-      // Счёт фоновых задач — счёт ПРОЦЕССА. У нового процесса их нет, пока он сам не скажет
-      // (`background_tasks_changed`); прежний счёт держал бы его живым ради чужих задач.
-      l.bgTasks = 0
-      clearBgExpected(l)
-      const child = spawn(opts.bin, argv, {
-        cwd: l.spec.cwd,
-        env: buildChildEnv(process.env, { network: netEnv, extra: {} }),
-        stdio: ['pipe', 'pipe', 'pipe'],
-      })
+      // 0.3.7 (ревью #16): от выдачи ключа до спавна — синхронный код, который может бросить (spawn отказывает сразу на
+      // аргументе с нулевым байтом). Бросок не должен оставить живой ключ, файл с ним и сессию «занятой».
+      let child: ChildProcess
+      try {
+        const argv = buildClaudeArgv({
+          sessionId: l.providerSessionId,
+          resume: l.started,
+          forkOnResume: l.spec.forkOnResume,
+          ...(flags.model ? { model: flags.model } : {}),
+          ...(flags.effort ? { effort: flags.effort } : {}),
+          ...(l.spec.settingSources ? { settingSources: l.spec.settingSources } : {}),
+          ...(flags.approval ? { approval: flags.approval } : {}),
+          ...(mcpConfigPath ? { mcpConfigPath } : {}),
+          ...(mcpConfigPath && permissions ? { permissions } : {}),
+          protectDirs: protectDirs(),
+        })
+        mapper = createClaudeMapper({
+          sessionId: name,
+          onUnknown: (t) => logger.warn('незнакомое событие claude — пропущено', { session: name, type: t }),
+        })
+        l.mapper = mapper
+        // Счёт фоновых задач — счёт ПРОЦЕССА. У нового процесса их нет, пока он сам не скажет
+        // (`background_tasks_changed`); прежний счёт держал бы его живым ради чужих задач.
+        l.bgTasks = 0
+        clearBgExpected(l)
+        child = spawn(opts.bin, argv, {
+          cwd: l.spec.cwd,
+          env: buildChildEnv(process.env, { network: netEnv, extra: {} }),
+          stdio: ['pipe', 'pipe', 'pipe'],
+        })
+      } catch (e) {
+        if (askKey) { askKeys.revoke(askKey); if (l.askKey === askKey) l.askKey = null }
+        if (mcpConfigPath) {
+          try { unlinkSync(mcpConfigPath) } catch { /* уже нет */ }
+          if (l.mcpConfigPath === mcpConfigPath) l.mcpConfigPath = null
+        }
+        l.mapper = null
+        l.busy = false
+        logger.error('claude не запустился: spawn бросил', { session: name, error: (e as Error).message })
+        statusL('failed', { reason: 'spawn' })
+        return fail('internal', `claude не запустился: ${(e as Error).message.slice(0, 300)}`)
+      }
       l.child = child
       // M8f: с чем процесс запущен — по этому граница хода решает, менять ли его.
       l.childFlags = { ...flags }
@@ -1174,7 +1190,8 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
 
     async close(name) {
       const l = live.get(name)
-      if (!l) return
+      // 0.3.7: имя переиспользуемо (`agent rm` и новая сессия с тем же именем) — ключи прежней не должны к ней подойти.
+      if (!l) { askKeys.revokeSession(name); return }
       l.closing = true
       if (l.reaper) { clearTimeout(l.reaper); l.reaper = null }
       const child = l.child
@@ -1184,6 +1201,7 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
       if (child) await waitExit(child, INTERRUPT_KILL_MS)
       if (l.mcpConfigPath) { try { unlinkSync(l.mcpConfigPath) } catch { /* уже нет */ } }
       revokeAskKey(l)
+      askKeys.revokeSession(name)
       live.delete(name)
       status(name, 'done', {})
     },
@@ -1203,6 +1221,7 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
         killChild(l, 'SIGTERM')
         if (l.mcpConfigPath) { try { unlinkSync(l.mcpConfigPath) } catch { /* уже нет */ } }
         revokeAskKey(l)
+        askKeys.revokeSession(l.spec.name)
       }
       live.clear()
       // Дети, у которых ход уже закончился, а добивающий таймер ещё не сработал: в `live`

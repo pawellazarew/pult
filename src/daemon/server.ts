@@ -1431,54 +1431,63 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
             bye('handshake_required', 'первым сообщением должно быть hello')
             return
           }
-          // 0.3.7: ровно одно — токен хозяина или ключ вопросов. Оба сразу — отказ: право не должно зависеть
-          // от того, какое поле демон проверил первым.
-          const given = typeof msg['token'] === 'string' ? msg['token'] : ''
-          const askGiven = typeof msg['ask'] === 'string' ? msg['ask'] : ''
-          let role: 'owner' | 'ask'
-          let askSession: string | null = null
-          if (given && askGiven) {
-            logger.warn('рукопожатие с токеном и ключом вопросов сразу', { conn: id })
-            bye('bad_token', 'токен или ключ вопросов — одно из двух')
-            return
-          } else if (askGiven) {
-            askSession = askKeys.lookup(askGiven)
-            if (askSession === null) {
-              logger.warn('отвергнут неверный ключ вопросов', { conn: id, givenLength: askGiven.length })
-              bye('bad_token', 'ключ вопросов не подходит')
+          // Рукопожатие — в try: любой бросок на чужом вводе (до 0.3.7 — `timingSafeEqual` на ключе не той длины в байтах)
+          // ронял бы весь демон, ведь это обработчик 'data' сокета. Отказ рукопожатия вместо этого.
+          try {
+            // 0.3.7: ровно одно — токен хозяина или ключ вопросов. Оба сразу — отказ: право не должно зависеть
+            // от того, какое поле демон проверил первым.
+            // Наличие поля, а не его непустота: `{token: "", ask: …}` — тоже «оба сразу».
+            const given = typeof msg['token'] === 'string' ? msg['token'] : ''
+            const askGiven = typeof msg['ask'] === 'string' ? msg['ask'] : ''
+            let role: 'owner' | 'ask'
+            let askSession: string | null = null
+            if (msg['token'] !== undefined && msg['ask'] !== undefined) {
+              logger.warn('рукопожатие с токеном и ключом вопросов сразу', { conn: id })
+              bye('bad_token', 'токен или ключ вопросов — одно из двух')
+              return
+            } else if (msg['ask'] !== undefined) {
+              askSession = askKeys.lookup(askGiven)
+              if (askSession === null) {
+                logger.warn('отвергнут неверный ключ вопросов', { conn: id, givenLength: askGiven.length })
+                bye('bad_token', 'ключ вопросов не подходит')
+                return
+              }
+              role = 'ask'
+            } else {
+              if (!tokenEquals(given, token)) {
+                logger.warn('отвергнут неверный токен', { conn: id, givenLength: given.length })
+                bye('bad_token', 'токен не подходит')
+                return
+              }
+              role = 'owner'
+            }
+            const protocol = msg['protocol']
+            if (protocol !== undefined && protocol !== PROTOCOL_VERSION) {
+              bye('bad_protocol', `демон говорит на протоколе ${PROTOCOL_VERSION}`)
               return
             }
-            role = 'ask'
-          } else {
-            if (!tokenEquals(given, token)) {
-              logger.warn('отвергнут неверный токен', { conn: id, givenLength: given.length })
-              bye('bad_token', 'токен не подходит')
-              return
+            conn.authed = true
+            conn.role = role
+            if (role === 'ask') { conn.askKey = askGiven; conn.askSession = askSession as string }
+            // Самоназвание — только для журнала и `by`; режем до разумного, чтобы не тащить мусор в журнал.
+            conn.client = typeof msg['client'] === 'string' && /^[a-z][a-z0-9-]{0,31}$/.test(msg['client']) ? msg['client'] : 'unknown'
+            clearTimeout(timer)
+            // 0.3.4: оболочка называет свою версию и путь — обновление окна ждёт hello НОВОЙ версии.
+            if (conn.client === 'shell' && role === 'owner') {
+              conn.app = shellHelloOf(msg['app'])
+              appUpdater.onShellHello(conn.app)
             }
-            role = 'owner'
-          }
-          const protocol = msg['protocol']
-          if (protocol !== undefined && protocol !== PROTOCOL_VERSION) {
-            bye('bad_protocol', `демон говорит на протоколе ${PROTOCOL_VERSION}`)
+            socket.write(encodeLine({
+              type: 'hello_ok',
+              protocol: PROTOCOL_VERSION,
+              daemon: { version: VERSION, pid: process.pid, startedAt },
+            }))
+            logger.info('клиент подключился', { conn: id, client: conn.client, role, ...(askSession ? { session: askSession } : {}) })
+          } catch (e) {
+            logger.warn('рукопожатие упало на вводе клиента', { conn: id, error: (e as Error).message })
+            bye('bad_token', 'рукопожатие не разобрано')
             return
           }
-          conn.authed = true
-          conn.role = role
-          if (role === 'ask') { conn.askKey = askGiven; conn.askSession = askSession as string }
-          // Самоназвание — только для журнала и `by`; режем до разумного, чтобы не тащить мусор в журнал.
-          conn.client = typeof msg['client'] === 'string' && /^[a-z][a-z0-9-]{0,31}$/.test(msg['client']) ? msg['client'] : 'unknown'
-          clearTimeout(timer)
-          // 0.3.4: оболочка называет свою версию и путь — обновление окна ждёт hello НОВОЙ версии.
-          if (conn.client === 'shell' && role === 'owner') {
-            conn.app = shellHelloOf(msg['app'])
-            appUpdater.onShellHello(conn.app)
-          }
-          socket.write(encodeLine({
-            type: 'hello_ok',
-            protocol: PROTOCOL_VERSION,
-            daemon: { version: VERSION, pid: process.pid, startedAt },
-          }))
-          logger.info('клиент подключился', { conn: id, client: conn.client, role, ...(askSession ? { session: askSession } : {}) })
           continue
         }
 

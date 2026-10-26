@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
-import { concealedNote, describePermission, gutterNo, optionsLine, scopeButtons, scopeText } from '../model/permissions.js'
+import { byHuman, concealedNote, describePermission, gutterNo, optionsLine, scopeButtons, scopeText } from '../model/permissions.js'
 import type { PermKind } from '../model/permissions.js'
 import type { PermissionOffers, PermissionScope } from '../../../src/adapters/types.js'
 import type { DiffBlock } from '../model/permissions.js'
@@ -60,8 +60,6 @@ function Diff({ d }: { d: DiffBlock }): ReactElement {
 }
 
 const BY: Record<string, string> = { human: 'человек', timeout: 'таймаут', stop: 'сессия остановлена', rm: 'сессия удалена', shutdown: 'демон остановлен' }
-/** 0.3.7: ответ человека демон пишет как `<клиент>#<соединение>` (`shell#3`, `cli#7`) — подпись ему не нужна, как и `human`. */
-const byHuman = (by: string): boolean => by === 'human' || /^[a-z][a-z0-9-]*#\d+$/.test(by)
 
 export function PermCard(p: PermCardProps): ReactElement {
   const v = useMemo(() => describePermission(p.toolName, p.input), [p.toolName, p.input])

@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import { describe, it } from 'node:test'
 import { ASKER_GONE_REASON, createBroker } from '../dist/perm/broker.js'
-import { createAskKeys } from '../dist/perm/askKeys.js'
+import { createAskKeys, isAskKeyShape } from '../dist/perm/askKeys.js'
 import type { AdapterDeps } from '../dist/adapters/types.js'
 import { runMcpAsk } from '../dist/perm/mcpAsk.js'
 import type { AskDecision, McpServerIo } from '../dist/perm/mcpAsk.js'
@@ -513,6 +513,84 @@ describe('круг разрешений: настоящий `pult mcp-ask` пр�
     } finally { await daemon.stop('тест'); home.remove() }
   })
 
+  it('ревью #16 (HIGH): кривой ключ или токен на рукопожатии — bad_token, демон жив', async () => {
+    const home = tempHome()
+    const daemon = await startTestDaemon(home)
+    await register(daemon, home, 'w')
+    try {
+      const good = daemon.askKeys.mint('w')
+      const hellos: Array<Record<string, unknown>> = [
+        { ask: 'é'.repeat(64) },                 // 64 знака, 128 байт: раньше timingSafeEqual бросал и ронял демона
+        { ask: 'я'.repeat(32) },                 // 64 байта, 32 знака
+        { ask: good.toUpperCase() },             // не та форма
+        { ask: good + '0' },
+        { ask: 42 },
+        { ask: { k: good } },
+        { ask: '' },
+        { ask: null },
+        { token: '', ask: good },                // поле есть — «оба сразу»
+        { token: 'é'.repeat(64) },
+        { token: 7 },
+        {},
+      ]
+      for (const hello of hellos) {
+        const conn = await rawConnect(home.paths)
+        conn.send({ type: 'hello', ...hello, client: 'mcp-ask', protocol: PROTOCOL_VERSION })
+        const f = await conn.next()
+        assert.deepEqual([f['type'], f['code']], ['error', 'bad_token'], JSON.stringify(hello))
+        await conn.closed
+      }
+      // Демон жив и ключ рабочий.
+      const conn = await rawConnect(home.paths)
+      conn.send({ type: 'hello', ask: good, client: 'mcp-ask', protocol: PROTOCOL_VERSION })
+      assert.equal((await conn.next())['type'], 'hello_ok')
+      // Повторный hello после рукопожатия — обычный кадр без id: invalid_params, права не меняются.
+      conn.send({ type: 'hello', token: readToken(home.paths.token), client: 'shell', protocol: PROTOCOL_VERSION })
+      assert.equal(((await conn.next())['error'] as Record<string, unknown>)['code'], 'invalid_params')
+      conn.send({ id: 1, method: 'daemon.status', params: {} })
+      assert.equal(((await conn.next())['error'] as Record<string, unknown>)['code'], 'forbidden')
+      conn.end()
+    } finally { await daemon.stop('тест'); home.remove() }
+  })
+
+  it('ревью #16: agent rm и новая сессия с тем же именем — ключ прежней не подходит', async () => {
+    const home = tempHome()
+    const daemon = await startTestDaemon(home)
+    await register(daemon, home, 'w')
+    try {
+      const old = daemon.askKeys.mint('w')
+      await daemon.manager.rm('w')
+      await register(daemon, home, 'w')
+      const conn = await rawConnect(home.paths)
+      conn.send({ type: 'hello', ask: old, client: 'mcp-ask', protocol: PROTOCOL_VERSION })
+      const f = await conn.next()
+      assert.deepEqual([f['type'], f['code']], ['error', 'bad_token'])
+      assert.equal(daemon.askKeys.size(), 0)
+    } finally { await daemon.stop('тест'); home.remove() }
+  })
+
+  it('ревью #16: самоназвание не по форме — `unknown#N` в by', async () => {
+    const home = tempHome()
+    const daemon = await startTestDaemon(home)
+    await register(daemon, home, 'w')
+    try {
+      for (const client of ['Shell', 'x'.repeat(40), '../evil', 42]) {
+        const answer = daemon.broker.request({ sessionId: 'w', toolName: 'Bash', input: { command: 'ls' } })
+        const id = daemon.broker.list()[0]!.id
+        const conn = await rawConnect(home.paths)
+        conn.send({ type: 'hello', token: readToken(home.paths.token), client, protocol: PROTOCOL_VERSION })
+        await conn.next()
+        conn.send({ id: 1, method: 'perm.resolve', params: { id, decision: 'allow' } })
+        await conn.next()
+        await answer
+        conn.end()
+      }
+      const by = daemon.store.readFrom(0, { sessionId: 'w' }).filter((e) => e.kind === 'permission.resolved').map((e) => String(e.data['by']))
+      assert.equal(by.length, 4)
+      for (const b of by) assert.match(b, /^unknown#\d+$/)
+    } finally { await daemon.stop('тест'); home.remove() }
+  })
+
   it('0.3.7: ключ сняли посреди соединения — следующий perm.request отказан', async () => {
     const home = tempHome()
     const daemon = await startTestDaemon(home)
@@ -638,6 +716,15 @@ describe('ключи вопросов (src/perm/askKeys.ts)', () => {
     assert.equal(keys.revoke(a), false)
     assert.equal(keys.lookup(a), null)
     assert.equal(keys.lookup(b), 'w')
+    assert.equal(keys.size(), 1)
+    // Не та форма — null без броска (ревью #16, HIGH).
+    for (const bad of ['é'.repeat(64), 'я'.repeat(32), b.toUpperCase(), 42, null, undefined, {}]) assert.equal(keys.lookup(bad), null)
+    assert.equal(isAskKeyShape(b), true)
+    assert.equal(isAskKeyShape('é'.repeat(64)), false)
+    // revokeSession снимает все ключи сессии и только её.
+    keys.mint('w'); keys.mint('other')
+    assert.equal(keys.revokeSession('w'), 2)
+    assert.equal(keys.lookup(b), null)
     assert.equal(keys.size(), 1)
   })
 })

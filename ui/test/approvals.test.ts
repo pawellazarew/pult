@@ -17,7 +17,7 @@ import type { PermItem } from '../src/model/conversation.js'
 import { composerCmdEnter, hotkeyAction } from '../src/model/hotkeys.js'
 import { applyInbox, composerApproves, EMPTY_INBOX, focusedRequest, reconcileInbox } from '../src/model/inbox.js'
 import { approvalBlocksBrowser, approvalHint, cwdCoversHome, defaultForm, homeWarning, startParams, switchProvider, validateForm } from '../src/model/newAgent.js'
-import { parseOffers, scopeButtons, scopeText } from '../src/model/permissions.js'
+import { byHuman, parseOffers, scopeButtons, scopeText } from '../src/model/permissions.js'
 import { busySessions, groupByProject, projectRemoval } from '../src/model/projects.js'
 import type { PultEvent } from '../src/model/types.js'
 
@@ -239,5 +239,12 @@ describe('после #13: «показано не всё» словами кар
     const t = netBlockedText({ reason: 'no_proxy' })
     assert.match(t.title, /режим required, а прокси не задан/)
     assert.match(t.text, /укажи network\.<провайдер>\.proxy или mode "off" в config\.json/)
+  })
+})
+
+describe('кто ответил (0.3.7)', () => {
+  it('byHuman: human и <клиент>#<соединение> (в том числе unknown#N) — без подписи; служебные — с подписью', () => {
+    for (const by of ['human', 'shell#3', 'cli#17', 'unknown#5', 'mcp-ask#2']) assert.equal(byHuman(by), true, by)
+    for (const by of ['timeout', 'rm', 'stop', 'shutdown', 'provider_gone', 'Shell#3', 'shell#', '#3', 'shell#3 x']) assert.equal(byHuman(by), false, by)
   })
 })

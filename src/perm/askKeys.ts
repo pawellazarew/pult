@@ -16,20 +16,29 @@ export interface AskKeys {
   /** Новый ключ для сессии: 32 случайных байта, hex. */
   mint(session: string): string
   /** Сессия ключа; null — такого ключа нет (снят, чужой, пустой). Сравнение постоянного времени. */
-  lookup(key: string): string | null
+  lookup(key: unknown): string | null
   /** Снять ключ; false — его и не было. */
   revoke(key: string): boolean
+  /** Снять все ключи сессии (закрытие, `agent rm`, остановка): имя может достаться новой сессии. Сколько снято. */
+  revokeSession(session: string): number
   /** Сколько ключей живо (тесты, отладка). */
   size(): number
+}
+
+/** Форма ключа: 32 байта hex строчными — то, что выдаёт `mint`. Всё прочее не сверяется вовсе. */
+export function isAskKeyShape(key: unknown): key is string {
+  return typeof key === 'string' && key.length === ASK_KEY_BYTES * 2 && /^[0-9a-f]+$/.test(key)
 }
 
 export function createAskKeys(): AskKeys {
   // Ключи храним списком и сверяем каждый `timingSafeEqual`: поиск по Map выдавал бы по времени, есть ли префикс.
   // Ключей — по одному на живой процесс `claude`, единицы; перебор ничего не стоит.
   const keys: Array<{ key: Buffer; hex: string; session: string }> = []
-  const find = (key: string): number => {
-    if (typeof key !== 'string' || key.length !== ASK_KEY_BYTES * 2) return -1
-    const given = Buffer.from(key, 'utf8')
+  const find = (key: unknown): number => {
+    // Ровно 64 строчных hex-знака ДО любой сверки: длина строки JS — не длина байт (`'é'.repeat(64)` — 128 байт),
+    // и `timingSafeEqual` на разной длине бросает. Бросок в обработчике рукопожатия ронял весь демон (ревью #16).
+    if (!isAskKeyShape(key)) return -1
+    const given = Buffer.from(key, 'ascii')
     let hit = -1
     for (let i = 0; i < keys.length; i++) {
       // Без раннего выхода: время не зависит от того, какой по счёту ключ совпал.
@@ -40,7 +49,7 @@ export function createAskKeys(): AskKeys {
   return {
     mint(session) {
       const hex = randomBytes(ASK_KEY_BYTES).toString('hex')
-      keys.push({ key: Buffer.from(hex, 'utf8'), hex, session })
+      keys.push({ key: Buffer.from(hex, 'ascii'), hex, session })
       return hex
     },
     lookup(key) {
@@ -52,6 +61,13 @@ export function createAskKeys(): AskKeys {
       if (i < 0) return false
       keys.splice(i, 1)
       return true
+    },
+    revokeSession(session) {
+      let n = 0
+      for (let i = keys.length - 1; i >= 0; i--) {
+        if (keys[i]!.session === session) { keys.splice(i, 1); n++ }
+      }
+      return n
     },
     size: () => keys.length,
   }

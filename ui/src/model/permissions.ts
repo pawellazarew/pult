@@ -372,3 +372,11 @@ export function concealedNote(kind: PermKind | 'question'): { what: string; then
     then: kind === 'command' ? 'Исполнится исходная команда — не уверен, отказывай.' : 'Исполнится исходный ввод — не уверен, отказывай.',
   }
 }
+
+/**
+ * 0.3.7: кто ответил на вопрос. Ответ человека демон пишет как `<клиент>#<соединение>` (`shell#3`, `cli#7`, самоназвание
+ * не по форме — `unknown#5`) — подпись ему не нужна, как и прежнему `human`. Прочее (`timeout`, `rm`, …) — подписывается.
+ */
+export function byHuman(by: string): boolean {
+  return by === 'human' || /^[a-z][a-z0-9-]{0,31}#\d+$/.test(by)
+}

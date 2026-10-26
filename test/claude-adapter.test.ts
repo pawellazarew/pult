@@ -158,6 +158,7 @@ describe('адаптер claude: контракт запуска', () => {
       mint: (s) => { const k = inner.mint(s); log.push(`mint ${s} ${k}`); return k },
       lookup: (k) => inner.lookup(k),
       revoke: (k) => { const ok = inner.revoke(k); if (ok) log.push(`revoke ${k}`); return ok },
+      revokeSession: (n) => inner.revokeSession(n),
       size: () => inner.size(),
     }
     const r = rig({ scenario: 'simple', askKeys: keys })
@@ -176,6 +177,39 @@ describe('адаптер claude: контракт запуска', () => {
       const argv = r.runs()[1]!.argv
       const settings = JSON.parse(argv[argv.indexOf('--settings') + 1] as string) as { permissions: { deny: string[] } }
       assert.ok(settings.permissions.deny.some((d) => /^Read\(\/\/.*\/h\/run\/\*\*\)$/.test(d)), settings.permissions.deny.join(' '))
+    } finally { await r.adapter.shutdown(); r.remove() }
+  })
+
+  it('ревью #16: spawn бросил после выдачи ключа — ключ снят, файл убран, сессия не «занята»', async () => {
+    const keys = createAskKeys()
+    const r = rig({ scenario: 'simple', askKeys: keys })
+    try {
+      // Нулевой байт в аргументе — spawn отказывает синхронно (ERR_INVALID_ARG_VALUE).
+      await r.adapter.startSession(spec(r, { broker: true, model: 'hai\u0000ku' }))
+      const outcome = await (await r.adapter.send('w', 'привет')).done
+      assert.equal(outcome.ok, false)
+      assert.equal(outcome.errorCode, 'internal')
+      assert.match(String(outcome.message), /claude не запустился/)
+      assert.equal(keys.size(), 0, 'ключ брошенного запуска снят')
+      assert.equal(r.runs().length, 0)
+      // Сессия не залипла в «занята»: следующий ход отвечает не «уже делает ход».
+      const again = await (await r.adapter.send('w', 'ещё')).done
+      assert.doesNotMatch(String(again.message ?? ''), /уже делает ход/)
+      assert.equal(keys.size(), 0)
+    } finally { await r.adapter.shutdown(); r.remove() }
+  })
+
+  it('ревью #16: close снимает все ключи сессии (имя переиспользуемо)', async () => {
+    const keys = createAskKeys()
+    const r = rig({ scenario: 'simple', askKeys: keys })
+    try {
+      await r.adapter.startSession(spec(r, { broker: true }))
+      keys.mint('w'); keys.mint('other')
+      await r.adapter.close('w')
+      assert.equal(keys.size(), 1)
+      keys.mint('gone')
+      await r.adapter.close('gone')
+      assert.equal(keys.size(), 1, 'сессии нет в адаптере — ключи по имени всё равно сняты')
     } finally { await r.adapter.shutdown(); r.remove() }
   })
 
