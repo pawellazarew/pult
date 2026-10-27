@@ -8,10 +8,10 @@ import { createElement } from 'react'
 import type { ComponentType } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { NewAgentDialog } from '../src/components/Panels.js'
-import { FOLDER_DROP_HINT, folderFromDrop, hasFiles, pathsInputHandlers } from '../src/model/filePathsInput.js'
+import { FOLDER_DROP_HINT, folderFromDrop, hasFiles, OLD_WINDOW_IMAGE_HINT, pasteFallback, pasteKind, pathsInputHandlers } from '../src/model/filePathsInput.js'
 import type { Caret, DragLike, PasteLike, PathsField } from '../src/model/filePathsInput.js'
-import { insertPaths } from '../src/model/paths.js'
-import type { FilePathSource } from '../src/model/paths.js'
+import { insertPaths, insertText } from '../src/model/paths.js'
+import type { FilePathSource, SavedClipboardImage } from '../src/model/paths.js'
 import { defaultForm, withFolder } from '../src/model/newAgent.js'
 
 /** Поле из стейта, как у компонента: `put` вставляет `insertPaths` от текущего текста. */
@@ -133,6 +133,135 @@ describe('пути файлов в поле: общий помощник пол�
     const e = paste(f.el, ['Files'], [file('a')])
     await h.onPaste(e)
     assert.deepEqual([over.prevented, drop.prevented, e.prevented, f.puts.length], [false, false, false, 0])
+  })
+})
+
+describe('⌘V картинки из буфера (окно 0.1.16): PNG в PULT_HOME/attachments, путь — в поле', () => {
+  /** Поле с заметками и вставкой текста, как у хука useFilePaths. */
+  function imgField(value: string, caret: number, src: FilePathSource | null) {
+    const f = field(value, caret, src)
+    const notices: string[] = []
+    f.t.notice = (m) => { notices.push(m) }
+    f.t.putText = (ins, start, end) => {
+      const r = insertText(f.el.value, start, end, ins)
+      f.el.value = r.text
+      f.el.selectionStart = f.el.selectionEnd = r.caret
+    }
+    return { ...f, notices }
+  }
+  const SAVED = '/h/attachments/2026-10-27/paste-101500-a1b2c3.png'
+  function imgSource(r: SavedClipboardImage | Error, paths: string[] = []): FilePathSource & { calls: number } {
+    const s = {
+      calls: 0,
+      clipboard: async () => paths,
+      files: () => [],
+      image: async () => { s.calls++; if (r instanceof Error) throw r; return r },
+    }
+    return s
+  }
+  const png = (): File => new File([new Uint8Array([0x89, 0x50])], 'image.png', { type: 'image/png' })
+  function pasteT(el: Caret, types: string[], files: File[], text: string) {
+    const e = paste(el, types, files) as ReturnType<typeof paste> & { clipboardData: { getData(t: string): string } }
+    e.clipboardData.getData = (t: string) => (t === 'text/plain' ? text : '')
+    return e
+  }
+
+  it('решение по буферу: только картинка / только текст / файлы / текст+картинка', () => {
+    assert.equal(pasteKind(['image/png'], ''), 'image')
+    assert.equal(pasteKind(['text/html', 'image/png'], ''), 'image', '«Копировать картинку» в браузере: HTML рядом — всё равно картинка')
+    assert.equal(pasteKind(['text/plain'], 'abc'), 'default')
+    assert.equal(pasteKind(['Files'], ''), 'files')
+    assert.equal(pasteKind(['Files', 'text/plain'], 'a.txt'), 'files', 'Finder: имя файла текстом рядом с файлами')
+    assert.equal(pasteKind(['text/plain', 'image/png'], 'abc'), 'default', 'текст сильнее картинки (Office кладёт снимок рядом)')
+    assert.deepEqual([pasteFallback({ plainText: 'abc', image: true }), pasteFallback({ plainText: '', image: true }), pasteFallback({ plainText: '', image: false })], ['text', 'image', 'none'])
+  })
+
+  it('только картинка (Files без пути): main сохраняет, путь встаёт на место каретки', async () => {
+    const src = imgSource({ path: SAVED, width: 10, height: 10, bytes: 99 })
+    const f = imgField('глянькод', 5, src)
+    const e = pasteT(f.el, ['Files'], [png()], '')
+    await pathsInputHandlers(f.t).onPaste(e)
+    assert.equal(e.prevented, true)
+    assert.equal(src.calls, 1)
+    assert.equal(f.el.value, `глянь ${SAVED} код`)
+    assert.equal(f.el.selectionStart, `глянь ${SAVED} `.length)
+    assert.deepEqual(f.notices, [])
+  })
+
+  it('только картинка типом image/png (без Files): тоже сохраняется', async () => {
+    const src = imgSource({ path: SAVED, width: 1, height: 1, bytes: 1 })
+    const f = imgField('', 0, src)
+    const e = pasteT(f.el, ['image/png'], [], '')
+    await pathsInputHandlers(f.t).onPaste(e)
+    assert.deepEqual([e.prevented, f.el.value], [true, SAVED])
+  })
+
+  it('только текст: событие не отменено, картинку не сохраняем', async () => {
+    const src = imgSource({ path: SAVED, width: 1, height: 1, bytes: 1 })
+    const f = imgField('x', 1, src)
+    const e = pasteT(f.el, ['text/plain'], [], 'hello')
+    assert.equal(pathsInputHandlers(f.t).onPaste(e), undefined)
+    assert.deepEqual([e.prevented, src.calls, f.el.value], [false, 0, 'x'])
+  })
+
+  it('текст и картинка без Files: вставляет браузер текст, картинку не сохраняем', async () => {
+    const src = imgSource({ path: SAVED, width: 1, height: 1, bytes: 1 })
+    const f = imgField('', 0, src)
+    const e = pasteT(f.el, ['text/plain', 'image/png'], [], 'ячейка')
+    assert.equal(pathsInputHandlers(f.t).onPaste(e), undefined)
+    assert.deepEqual([e.prevented, src.calls], [false, 0])
+  })
+
+  it('текст и картинка с Files (вставка отменена ради файлов, путей нет): вставляем текст сами, картинку — нет', async () => {
+    const src = imgSource({ path: SAVED, width: 1, height: 1, bytes: 1 })
+    const f = imgField('a b', 2, src)
+    const e = pasteT(f.el, ['Files', 'text/plain'], [png()], 'ячейка')
+    await pathsInputHandlers(f.t).onPaste(e)
+    assert.deepEqual([e.prevented, src.calls, f.el.value, f.el.selectionStart], [true, 0, 'a ячейкаb', 8])
+  })
+
+  it('файлы из Finder рядом с картинкой: пути файлов, картинку не сохраняем', async () => {
+    const src = imgSource({ path: SAVED, width: 1, height: 1, bytes: 1 }, ['/srv/a.png'])
+    const f = imgField('', 0, src)
+    await pathsInputHandlers(f.t).onPaste(pasteT(f.el, ['Files', 'text/plain'], [png()], 'a.png'))
+    assert.deepEqual([src.calls, f.el.value], [0, '/srv/a.png'])
+  })
+
+  it('старое окно (нет метода картинки): поле не тронуто, подсказка обновить окно', async () => {
+    const f = imgField('abc', 3, source([]))
+    const e = pasteT(f.el, ['Files'], [png()], '')
+    await pathsInputHandlers(f.t).onPaste(e)
+    assert.deepEqual([e.prevented, f.el.value, f.notices], [true, 'abc', [OLD_WINDOW_IMAGE_HINT]])
+    assert.match(OLD_WINDOW_IMAGE_HINT, /0\.1\.16/)
+    assert.match(OLD_WINDOW_IMAGE_HINT, /Настройки → Обновления → Обновить окно/)
+  })
+
+  it('отказ main (больше 25 МБ) или брошенный вызов — словами под полем, поле не тронуто', async () => {
+    for (const r of [{ error: 'картинка больше 25 МБ' }, new Error('канал закрыт')] as const) {
+      const f = imgField('abc', 3, imgSource(r))
+      await pathsInputHandlers(f.t).onPaste(pasteT(f.el, ['Files'], [png()], ''))
+      assert.equal(f.el.value, 'abc')
+      assert.deepEqual(f.notices, [r instanceof Error ? 'канал закрыт' : r.error])
+    }
+  })
+
+  it('пока main сохранял, в поле допечатали — путь встаёт туда, где каретка сейчас', async () => {
+    let release!: (v: SavedClipboardImage) => void
+    const src: FilePathSource = { clipboard: async () => [], files: () => [], image: () => new Promise((r) => { release = r }) }
+    const f = imgField('a', 1, src)
+    const done = pathsInputHandlers(f.t).onPaste(pasteT(f.el, ['Files'], [png()], ''))
+    f.el.value = 'abc'
+    f.el.selectionStart = f.el.selectionEnd = 3
+    await new Promise((r) => setTimeout(r, 0))
+    release({ path: '/x.png', width: 1, height: 1, bytes: 1 })
+    await done
+    assert.equal(f.el.value, 'abc /x.png')
+  })
+
+  it('путь картинки с пробелом в PULT_HOME — в кавычках, как путь файла', async () => {
+    const f = imgField('', 0, imgSource({ path: '/srv/pult home/attachments/d/p.png', width: 1, height: 1, bytes: 1 }))
+    await pathsInputHandlers(f.t).onPaste(pasteT(f.el, ['Files'], [png()], ''))
+    assert.equal(f.el.value, "'/srv/pult home/attachments/d/p.png'")
   })
 })
 

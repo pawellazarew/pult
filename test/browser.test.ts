@@ -628,7 +628,10 @@ describe('демон: agent.browser, mcp.list, mcp.select, ход с брауз�
       const run = realpathSync(home.paths.run)
       const runRules = [...new Set([home.paths.run, run])].flatMap((x) => [`Read(/${x}/**)`, `Edit(/${x}/**)`])
       assert.deepEqual(JSON.parse(argv[argv.indexOf('--settings') + 1] as string), { permissions: { allow: bp.allow, ask: bp.ask, deny: [...runRules, ...bp.deny] } })
-      assert.ok(!argv.includes('--add-dir'))
+      // 0.3.8: --add-dir — только картинки из буфера окна (PULT_HOME/attachments), папка скачиваний браузера — нет.
+      const added = argv.slice(argv.indexOf('--add-dir') + 1).filter((_a, i, all) => !all.slice(0, i + 1).some((x) => x.startsWith('--')))
+      assert.ok(added.length > 0 && added.every((d) => d.endsWith('/attachments')), added.join(' '))
+      assert.ok(!added.some((d) => d.includes(dirs.downloads)))
       await c.request('perm.resolve', { id: pending[0]?.id, decision: 'deny', message: 'нет' })
       await c.request('agent.wait', { name: 'w', timeoutMs: 8000 })
       assert.ok(await waitFor(() => !existsSync(cfgPath), 5000), 'файл --mcp-config убран, когда процесс вышел')

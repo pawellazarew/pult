@@ -1,5 +1,6 @@
 // Файлы в поле текста: ⌘V на файлах из Finder и перетаскивание кладут в поле их пути (поле реплики разговора и
-// «первая реплика» в «+ Сессия»), а папка, брошенная на форму «+ Сессия», становится папкой сессии.
+// «первая реплика» в «+ Сессия»), а папка, брошенная на форму «+ Сессия», становится папкой сессии. ⌘V на картинке
+// без файла (скриншот, «Копировать картинку» в браузере) — окно 0.1.16 сохраняет её PNG-файлом и кладёт его путь.
 // Без React и без DOM: события здесь — их минимальная форма, поэтому ui/test гоняет логику без окна.
 
 import type { FilePathSource } from './paths.js'
@@ -16,7 +17,8 @@ export function hasFiles(types: List<string> | null | undefined): boolean {
 }
 
 export interface PasteLike {
-  clipboardData: { types: List<string>; files: List<File> }
+  /** `getData('text/plain')` — обычный текст буфера; нет метода — текста нет. */
+  clipboardData: { types: List<string>; files: List<File>; getData?(type: string): string }
   currentTarget: Caret
   preventDefault(): void
 }
@@ -33,6 +35,37 @@ export interface PathsField {
   field(): Caret | null
   /** Вставить пути на место выделения [start, end) и поставить каретку за ними. */
   put(paths: string[], start: number, end: number): void
+  /** Вставить текст как есть (обычная вставка, отменённая ради возможных файлов, а файлов не оказалось). */
+  putText?(text: string, start: number, end: number): void
+  /** Сказать под полем (отказ сохранить картинку, старое окно). */
+  notice?(text: string): void
+}
+
+/** Окно 0.1.15 и старше не умеет сохранять картинку из буфера: метода моста нет. */
+export const OLD_WINDOW_IMAGE_HINT = 'Вставка картинок — в окне 0.1.16: Настройки → Обновления → Обновить окно'
+
+/**
+ * Что делать с ⌘V — решается синхронно, в обработчике (отменить вставку можно только там):
+ *   * `files` — в буфере тип `Files` (файлы из Finder ИЛИ картинка без пути): вставку отменяем, дальше по порядку пути
+ *     файлов из main → пути `File` → обычный текст буфера, если есть (его и вставила бы система) → картинка;
+ *   * `image` — картинка (`image/*`) без файлов и без обычного текста;
+ *   * `default` — всё остальное, в том числе текст рядом с картинкой: вставку делает браузер, как раньше.
+ * Текст сильнее картинки нарочно: Office, Numbers и редакторы кладут рядом с копируемым текстом его снимок — вставить
+ * ждут текст. «Копировать картинку» в браузере кладёт рядом только HTML (`text/html`), обычного текста нет — картинка.
+ */
+export type PasteKind = 'files' | 'image' | 'default'
+
+export function pasteKind(types: List<string> | null | undefined, plainText: string): PasteKind {
+  const t = arr(types)
+  if (t.includes('Files')) return 'files'
+  if (!plainText && t.some((x) => x.startsWith('image/'))) return 'image'
+  return 'default'
+}
+
+/** Итог вставки, когда путей файлов нет: текст, картинка или ничего. Чистая функция — матрица в ui/test. */
+export function pasteFallback(o: { plainText: string; image: boolean }): 'text' | 'image' | 'none' {
+  if (o.plainText) return 'text'
+  return o.image ? 'image' : 'none'
 }
 
 /**
@@ -47,21 +80,41 @@ export function pathsInputHandlers(t: PathsField): {
   return {
     // ⌘V на файлах из Finder: Chromium отдаёт тип `Files` и только ПЕРВЫЙ файл, а в поле не кладёт
     // ничего (замерено 06.10.2026, Electron 44). Все пути знает main — читает их из буфера.
+    // Картинка без файла (скриншот, «Копировать картинку»): Chromium отдаёт `Files` с `image.png` без пути на диске
+    // или только тип `image/*` — сохраняет её main (окно 0.1.16), в поле встаёт путь к PNG.
     onPaste(e) {
       const src = t.source
-      if (!src || !hasFiles(e.clipboardData.types)) return undefined
+      let plainText = ''
+      try { plainText = e.clipboardData.getData?.('text/plain') ?? '' } catch { plainText = '' }
+      const kind = src ? pasteKind(e.clipboardData.types, plainText) : 'default'
+      if (!src || kind === 'default') return undefined
       e.preventDefault()
       const { selectionStart: start, selectionEnd: end, value: before } = e.currentTarget
       const dropped = arr(e.clipboardData.files)
+      const imageInClipboard = kind === 'image' || dropped.some((f) => f.type.startsWith('image/')) || arr(e.clipboardData.types).some((x) => x.startsWith('image/'))
+      // Пока main читал буфер, в поле могли допечатать — тогда вставляем туда, где каретка сейчас.
+      const at = (): [number, number] => {
+        const el = t.field()
+        return el && el.value !== before ? [el.selectionStart, el.selectionEnd] : [start, end]
+      }
       return (async () => {
         let paths: string[] = []
-        try { paths = await src.clipboard() } catch { /* старая оболочка или чужой буфер */ }
-        if (!paths.length) paths = src.files(dropped)
-        if (!paths.length) return
-        // Пока main читал буфер, в поле могли допечатать — тогда вставляем туда, где каретка сейчас.
-        const el = t.field()
-        if (el && el.value !== before) t.put(paths, el.selectionStart, el.selectionEnd)
-        else t.put(paths, start, end)
+        if (kind === 'files') {
+          try { paths = await src.clipboard() } catch { /* старая оболочка или чужой буфер */ }
+          if (!paths.length) paths = src.files(dropped)
+        }
+        if (paths.length) { t.put(paths, ...at()); return }
+        const next = pasteFallback({ plainText, image: imageInClipboard })
+        if (next === 'text') { t.putText?.(plainText, ...at()); return }
+        if (next !== 'image') return
+        if (!src.image) { t.notice?.(OLD_WINDOW_IMAGE_HINT); return }
+        let r: Awaited<ReturnType<NonNullable<typeof src.image>>>
+        try { r = await src.image() } catch (err) {
+          const m = (err as { message?: unknown } | null)?.message
+          r = { error: typeof m === 'string' && m ? m : 'картинка не сохранилась' }
+        }
+        if ('error' in r) { t.notice?.(r.error); return }
+        t.put([r.path], ...at())
       })()
     },
     onDragOver(e) {

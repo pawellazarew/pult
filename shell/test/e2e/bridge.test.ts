@@ -4,9 +4,11 @@
 // ни одно не пришло дважды.
 
 import assert from 'node:assert/strict'
+import { existsSync, readFileSync, statSync } from 'node:fs'
+import path from 'node:path'
 import { after, before, describe, it } from 'node:test'
 import type { DaemonStatus } from '../../src/contract.js'
-import { launch, sleep, waitFor } from './harness.js'
+import { launch, ONE_PX_PNG, sleep, waitFor } from './harness.js'
 import type { Harness } from './harness.js'
 
 type Debug = { ids: number[]; conn: Array<{ state: string; at: number }>; boot: number | null }
@@ -44,9 +46,32 @@ describe('окно: мост, подписка, переподключение',
     assert.equal(probe.process, 'undefined')
     assert.equal(probe.version, 1)
     assert.deepEqual(probe.bridgeKeys, [
-      'call', 'clipboardFilePaths', 'copyText', 'notify', 'onConnection', 'onNavigate', 'openExternal', 'pathsForFiles', 'pickFolder', 'revealPath',
+      'call', 'clipboardFilePaths', 'clipboardImage', 'copyText', 'notify', 'onConnection', 'onNavigate', 'openExternal', 'pathsForFiles', 'pickFolder', 'revealPath',
       'startDaemon', 'stopDaemon', 'subscribe', 'testMode', 'version',
     ])
+  })
+
+  it('окно 0.1.16: clipboardImage.save() пишет только под PULT_HOME/attachments — путь и байты окна игнорируются', async () => {
+    const png = Buffer.from(ONE_PX_PNG, 'base64')
+    await h.app.evaluate((_e, b64) => { (globalThis as { __pultTestClipboardImage?: Uint8Array }).__pultTestClipboardImage = Buffer.from(b64, 'base64') }, ONE_PX_PNG)
+    try {
+      const evil = path.join(h.home, 'evil.png')
+      // Лишние аргументы из окна (путь, байты) — мимо: preload их не передаёт, main не читает.
+      const r = await h.win.evaluate(async (p) => (window.pult!.clipboardImage!.save as unknown as (...a: unknown[]) => Promise<unknown>)(p, 'AAAA'), evil)
+      const saved = r as { path: string; width: number; height: number; bytes: number }
+      assert.equal(typeof saved.path, 'string', JSON.stringify(r))
+      assert.equal(path.dirname(path.dirname(saved.path)), path.join(h.home, 'attachments'))
+      assert.match(path.basename(saved.path), /^paste-\d{6}-[0-9a-f]{6}\.png$/)
+      assert.deepEqual([saved.width, saved.height], [1, 1])
+      assert.equal(statSync(saved.path).mode & 0o777, 0o600)
+      assert.equal(statSync(path.dirname(saved.path)).mode & 0o777, 0o700)
+      assert.deepEqual(readFileSync(saved.path).subarray(0, 8), png.subarray(0, 8), 'PNG-подпись')
+      assert.equal(existsSync(evil), false)
+    } finally {
+      await h.app.evaluate(() => { delete (globalThis as { __pultTestClipboardImage?: Uint8Array }).__pultTestClipboardImage })
+    }
+    // Буфер без картинки — отказ словами, файла нет.
+    assert.deepEqual(await h.win.evaluate(async () => window.pult!.clipboardImage!.save()), { error: 'в буфере нет картинки' })
   })
 
   it('мост отвергает методы вне белого списка, не доходя до демона', async () => {

@@ -96,6 +96,13 @@ const listed = asar.listPackage(path.join(APP, 'Contents', 'Resources', 'app.asa
 // build/trayTemplate*.png — значок строки меню: main берёт его рядом с собой, из app.asar.
 const want = ['/build', '/build/trayTemplate.png', '/build/trayTemplate@2x.png', '/dist', '/dist/main.js', '/dist/preload.cjs', '/package.json']
 check(JSON.stringify(listed) === JSON.stringify(want), `app.asar: ${listed.join(' ')}`)
+// Окно 0.1.16: канал вставки картинки — и в preload, и в main (собранное, а не старое из кэша).
+{
+  const archive = path.join(APP, 'Contents', 'Resources', 'app.asar')
+  const read = (f) => { try { return asar.extractFile(archive, f).toString() } catch { return '' } }
+  check(read('dist/preload.cjs').includes('pult:clipboard-image') && read('dist/main.js').includes('pult:clipboard-image'),
+    'app.asar: канал pult:clipboard-image в preload и main (вставка картинки из буфера)')
+}
 check(!existsSync(path.join(APP, 'Contents', 'Resources', 'app')), 'рядом с app.asar нет папки app/')
 check(!existsSync(path.join(APP, 'Contents', 'Resources', 'default_app.asar')), 'демо-приложение Electron default_app.asar не поставляется')
 
@@ -180,6 +187,9 @@ async function launchChecks() {
       const bridge = await page.evaluate(() => ({ pult: typeof window.pult, require: typeof window.require, process: typeof window.process }))
       check(bridge.pult === 'object' && bridge.require === 'undefined' && bridge.process === 'undefined',
         `мост window.pult есть, require/process нет (${JSON.stringify(bridge)})`)
+      // Окно 0.1.16: вставка картинки из буфера — метод моста без аргументов.
+      const image = await page.evaluate(() => typeof window.pult?.clipboardImage?.save)
+      check(image === 'function', `мост: clipboardImage.save есть (${image})`)
       // По data-testid, а не по тексту: «+ Агент» 07.10.2026 стал «+ Сессия», и проверка молча проваливалась.
       check(await waitFor(async () => page.evaluate(() => document.querySelector('[data-testid="new-agent"]') !== null)), 'интерфейс отрисован (кнопка новой сессии)')
       mkdirSync(path.join(SHELL, 'test-results'), { recursive: true })

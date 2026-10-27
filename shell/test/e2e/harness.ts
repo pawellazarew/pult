@@ -61,6 +61,9 @@ function alive(pid: number): boolean {
   try { process.kill(pid, 0); return true } catch (e) { return (e as NodeJS.ErrnoException).code === 'EPERM' }
 }
 
+/** Настоящий PNG 1×1 (base64): его понимает `nativeImage.createFromBuffer` — e2e вставки картинки из буфера. */
+export const ONE_PX_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
+
 export interface Harness {
   home: string
   paths: PultPaths

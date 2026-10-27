@@ -3,7 +3,7 @@
 
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { buildClaudeArgv, claudeGuardPermissions, escapeRulePath, mcpConfigBody, PERMISSION_TOOL, userTurnLine } from '../dist/adapters/claude/argv.js'
+import { buildClaudeArgv, claudeAddDirs, claudeGuardPermissions, escapeRulePath, mcpConfigBody, PERMISSION_TOOL, userTurnLine } from '../dist/adapters/claude/argv.js'
 
 const UUID = '94357d2d-8c5c-46b3-9a4c-2176726d3521'
 
@@ -108,6 +108,24 @@ describe('argv claude', () => {
     assert.deepEqual(settings(ro), { permissions: { ask: ['Bash'], deny } })
     assert.deepEqual(claudeGuardPermissions(['/a', '/b'], 'read-only'), { ask: ['Bash'], deny: ['Read(//a/**)', 'Edit(//a/**)', 'Read(//b/**)', 'Edit(//b/**)'] })
     assert.equal(settings(buildClaudeArgv({ sessionId: UUID, resume: false })), null, 'без папок и read-only — флага нет')
+  })
+
+  it('0.3.8: --add-dir PULT_HOME/attachments — рядом с deny на run, а не внутри; закрытая папка в --add-dir не попадает', () => {
+    const argv = buildClaudeArgv({ sessionId: UUID, resume: false, mcpConfigPath: '/x', protectDirs: ['/p/run'], addDirs: ['/p/attachments', '/p/attachments'] })
+    const i = argv.indexOf('--add-dir')
+    assert.ok(i > 0, argv.join(' '))
+    assert.equal(argv.filter((a) => a === '--add-dir').length, 1, 'один флаг на все папки')
+    assert.equal(argv[i + 1], '/p/attachments')
+    // Флаг вариадический: следом — флаг, а не позиционный аргумент, который CLI принял бы за папку.
+    assert.ok(argv[i + 2]?.startsWith('--'), `после папки: ${argv[i + 2]}`)
+    // deny на run остаётся, и attachments им не задета: правило — `//p/run/**`, папка — `/p/attachments`.
+    const settings = JSON.parse(argv[argv.indexOf('--settings') + 1] as string) as { permissions: { deny: string[] } }
+    assert.deepEqual(settings.permissions.deny, ['Read(//p/run/**)', 'Edit(//p/run/**)'])
+    assert.ok(!settings.permissions.deny.some((d) => d.includes('attachments')))
+    // Без папок — флага нет (как до 0.3.8).
+    assert.ok(!buildClaudeArgv({ sessionId: UUID, resume: false }).includes('--add-dir'))
+    // Закрытая папка, папка внутри неё, относительный путь, путь-флаг и нулевой байт — не уходят.
+    assert.deepEqual(claudeAddDirs(['/p/run', '/p/run/x', '/p/run/', 'rel', '-x', '/a\u0000b', '/p/runner', '/p/attachments'], ['/p/run']), ['/p/runner', '/p/attachments'])
   })
 
   it('ревью #16: метасимволы глоба в пути правила экранируются (S12 T6: без этого правило мимо)', () => {

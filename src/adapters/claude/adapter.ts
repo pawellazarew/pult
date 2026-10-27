@@ -238,6 +238,19 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
     try { real = realpathSync(paths.run) } catch { /* папки ещё нет — хватит пути как есть */ }
     return [...new Set([paths.run, real])]
   }
+  /**
+   * 0.3.8: `PULT_HOME/attachments` (картинки из буфера окна) — в `--add-dir`, чтобы claude читал их без вопроса, как
+   * файлы cwd. Как есть и по realpath (как `protectDirs`). Папки нет — заводим (0700): демон заводит её на старте, но
+   * адаптер живёт и без демона (тесты).
+   */
+  const addDirs = (): string[] => {
+    const dir = paths.attachments
+    if (!dir) return []
+    try { mkdirSync(dir, { recursive: true, mode: 0o700 }) } catch { /* нет прав — claude скажет сам */ }
+    let real = dir
+    try { real = realpathSync(dir) } catch { /* нет папки — путь как есть */ }
+    return [...new Set([dir, real])]
+  }
   const writeMcpConfig = (l: Live, nodeBin: string, servers: Record<string, Record<string, unknown>>): { file: string; askKey: string } => {
     mkdirSync(paths.run, { recursive: true, mode: 0o700 })
     const file = join(paths.run, `mcp-${l.spec.name}.json`)
@@ -693,6 +706,7 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
           ...(mcpConfigPath ? { mcpConfigPath } : {}),
           ...(mcpConfigPath && permissions ? { permissions } : {}),
           protectDirs: protectDirs(),
+          addDirs: addDirs(),
         })
         mapper = createClaudeMapper({
           sessionId: name,

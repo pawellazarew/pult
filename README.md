@@ -201,6 +201,13 @@ Every question from every session goes to the Inbox (⌘I in the window, `pult p
 In the dialog, drop a folder onto the form to use it as the session folder; files dropped into the first message, or
 copied in Finder and pasted with ⌘V, become their full paths (quoted when they contain spaces), as in the chat input.
 
+**Images from the clipboard** (window 0.1.16). ⌘V on an image without a file — a screenshot copied to the clipboard,
+"Copy image" in a browser — saves it as a PNG under `~/.pult/attachments/<date>/` (folders 0700, file 0600, up to 25 MB)
+and pastes its path, in the chat input and in the first message. When the clipboard also holds plain text, the text is
+pasted, as everywhere else (Office and editors put a picture of the copied text next to it). Claude sessions get that
+folder via `--add-dir` and read the image without a question; Codex reads it within its sandbox. Pult deletes
+attachments older than 30 days. An older window says where to update it (Settings → Updates → Update window).
+
 | mode (window label) | Claude | Codex |
 |---|---|---|
 | `read-only` ("Только чтение") | no edits; every command asks | `read-only` sandbox; anything wider asks |
@@ -358,6 +365,8 @@ token in `~/.pult/run/token` controls every session. What Pult does about that, 
   refuses a replaced input. The journal records which client answered (`shell#3`, `cli#7`).
 - **Cards say when they hide something** (masked secrets, clipped fields), and ⌘Enter approves only a card you can see.
 - **Session folders can't cover `~/.pult`**, so an agent with write access to its folder can't rewrite Pult's config.
+- **Pasted images live outside the run folder.** `~/.pult/attachments` is a sibling of `~/.pult/run`, not inside it:
+  `--add-dir` opens only the pasted images to Claude, and the deny rules on the run folder stay as they are.
 - **Network guard.** Turns don't start from refused exit countries (see [Network guard](#network-guard)).
 
 **What Pult doesn't protect**

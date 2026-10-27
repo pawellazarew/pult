@@ -494,6 +494,7 @@ export function NewAgentDialog({ taken, pickFolder, onCreate, onClose, catalog, 
             className={prompt.over ? 'drop' : undefined} data-drop={prompt.over ? '1' : undefined}
             onChange={(e) => setForm({ ...form, prompt: e.target.value })}
             onPaste={prompt.onPaste} onDragEnter={prompt.onDragEnter} onDragOver={prompt.onDragOver} onDragLeave={prompt.onDragLeave} onDrop={prompt.onDrop} />
+          {prompt.notice && <span className="note" role="status" data-testid="new-agent-paste-notice">{prompt.notice}</span>}
           {prefill && form.prompt && (() => {
             const st = promptStats(form.prompt)
             return <span className="note" data-testid="new-agent-prompt-stats">{`${st.lines} ${plural(st.lines, 'строка', 'строки', 'строк')} · ${st.chars} ${plural(st.chars, 'знак', 'знака', 'знаков')}`}</span>

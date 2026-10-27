@@ -177,6 +177,11 @@ describe('адаптер claude: контракт запуска', () => {
       const argv = r.runs()[1]!.argv
       const settings = JSON.parse(argv[argv.indexOf('--settings') + 1] as string) as { permissions: { deny: string[] } }
       assert.ok(settings.permissions.deny.some((d) => /^Read\(\/\/.*\/h\/run\/\*\*\)$/.test(d)), settings.permissions.deny.join(' '))
+      // 0.3.8: картинки из буфера окна — в --add-dir (PULT_HOME/attachments, папка заведена), а не в deny.
+      const addDir = argv[argv.indexOf('--add-dir') + 1] ?? ''
+      assert.ok(argv.includes('--add-dir') && /\/h\/attachments$/.test(addDir), argv.join(' '))
+      assert.ok(existsSync(addDir), 'папка attachments заведена до спавна')
+      assert.ok(!settings.permissions.deny.some((d) => d.includes('attachments')))
     } finally { await r.adapter.shutdown(); r.remove() }
   })
 

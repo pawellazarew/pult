@@ -2,7 +2,7 @@
 // Основа перенесена из spike/env/sock-server.mjs (проверка S9f): каталог 0700 и файлы 0600
 // явным chmod, lock с проверкой живости pid, старый сокет удаляется ТОЛЬКО после взятия lock.
 
-import { existsSync, chmodSync, readdirSync, readFileSync, statSync, unlinkSync } from 'node:fs'
+import { existsSync, chmodSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync } from 'node:fs'
 import net from 'node:net'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -21,6 +21,7 @@ import { createStore, GET_LIMIT } from '../core/store.js'
 import { clipEvent, compactHistory, fitEvent, HISTORY_PAGE_BYTES, LIVE_LINE_BYTES, pageHistory } from '../core/history.js'
 import { normalizeQuery, QUERY_MAX_CHARS, SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX, searchEvents } from '../core/search.js'
 import { exportSession } from '../core/exportMd.js'
+import { ATTACHMENTS_SWEEP_MS, sweepAttachments } from '../core/attachments.js'
 
 /** Строка события в `events.get` — до этой длины: окно показывает вывод до 4000 знаков, вход — целиком. */
 const GET_STRING_CHARS = 100_000
@@ -1543,10 +1544,28 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
   }
   chmodSync(paths.sock, 0o600)
 
+  // Картинки из буфера окна (PULT_HOME/attachments, окно 0.1.16): папка есть всегда (её отдают claude через --add-dir),
+  // старше 30 дней — удаляются на старте и раз в сутки (src/core/attachments.ts: только внутри, симлинки не раскрываются).
+  try {
+    mkdirSync(paths.attachments, { recursive: true, mode: 0o700 })
+    // Права — как у остальных папок PULT_HOME (mode у mkdir режет umask). Симлинк на месте папки не трогаем: chmod пошёл бы по нему.
+    if (lstatSync(paths.attachments).isDirectory()) chmodSync(paths.attachments, 0o700)
+  } catch (e) { logger.warn('attachments не создалась', { error: (e as Error).message }) }
+  const sweepAttachmentsNow = (): void => {
+    try {
+      const r = sweepAttachments(paths.attachments)
+      if (r.files || r.dirs || r.errors) logger.info('уборка attachments', { ...r })
+    } catch (e) { logger.warn('уборка attachments не удалась', { error: (e as Error).message }) }
+  }
+  sweepAttachmentsNow()
+  const attachmentsTimer = setInterval(sweepAttachmentsNow, ATTACHMENTS_SWEEP_MS)
+  attachmentsTimer.unref?.()
+
   const stop = async (reason: string): Promise<void> => {
     if (stopping) return
     stopping = true
     logger.info('остановка демона', { reason })
+    clearInterval(attachmentsTimer)
     updater.stop()
     // Сначала ОТКАЗ всем, кто ждёт решения, и только потом закрытие сокета: заглушка
     // `pult mcp-ask` иначе повисла бы на мёртвом сокете, а `claude` — на ней (инвариант 5).
