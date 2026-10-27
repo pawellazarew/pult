@@ -65,6 +65,7 @@ describe('спокойный чат: навигация', () => {
     for (let i = 0; i < 12; i++) await c.request('project.add', { path: h.workDir(`project-${i}`) })
     const projects = h.win.getByTestId('project-manager')
     await projects.locator('summary').click()
+    await projects.evaluate(async (el) => { await Promise.all(el.getAnimations({ subtree: true }).map((a) => a.finished.catch(() => {}))) })
     const recent = h.win.getByTestId('chats-recent')
     for (const [width, height] of [[1280, 800], [1024, 642], [900, 560]]) {
       await h.app.evaluate(({ BrowserWindow }, [w, hh]) => { BrowserWindow.getAllWindows()[0]?.setContentSize(w!, hh!) }, [width, height])

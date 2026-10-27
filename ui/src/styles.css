@@ -264,8 +264,8 @@ button { font: inherit; color: inherit; }
 /* --- проекты: дерево «папка → её сессии» ------------------------------------------ */
 .tree { display: flex; flex-direction: column; overflow: hidden; flex: 1; min-height: 0; padding-bottom: 6px; }
 .active-chats { flex: 1 1 50%; min-height: 0; overflow: auto; }
-.sidebar-projects { flex: 0 1 auto; min-height: 38px; max-height: 32%; overflow: auto; }
-.tree .chat-recent { display: flex; flex-direction: column; flex: 1 1 45%; min-height: min(160px, 45%); overflow: hidden; border-top: 1px solid var(--hair); }
+.sidebar-projects { flex: 0 0 auto; min-height: 38px; max-height: max(136px, 32%); overflow: auto; overflow-anchor: none; scrollbar-gutter: stable; }
+.tree .chat-recent { display: flex; flex-direction: column; flex: 1 1 45%; min-height: min(104px, 35%); overflow: hidden; border-top: 1px solid var(--hair); }
 .tree .chat-recent .chat-section-title { flex: none; }
 .tree .chat-recent .ag-list { flex: 1; min-height: 0; overflow: auto; }
 .recent-empty { padding: 8px 10px; color: var(--faint); font: 12px/1.5 var(--body); }
@@ -914,12 +914,21 @@ button { font: inherit; color: inherit; }
 .ag-meta .when { font-size: 10.5px; opacity: 0; transition: opacity 140ms ease; }
 .ag:hover .when, .ag:focus-within .when { opacity: 1; }
 .tree .project-manager { margin: 0 10px; padding-top: 0; border-top: 1px solid var(--hair); }
-.project-manager > summary { position: sticky; top: 0; z-index: 1; background: var(--sidebar); cursor: pointer; color: var(--mut); font-size: 12px; padding: 8px; }
+.project-manager { interpolate-size: allow-keywords; }
+.project-manager::details-content { block-size: 0; overflow: clip; transition: block-size 220ms cubic-bezier(.4, 0, .2, 1), content-visibility 220ms allow-discrete; }
+.project-manager[open]::details-content { block-size: auto; }
+.project-manager > summary { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between; height: 36px; padding: 0 8px; background: var(--sidebar); cursor: pointer; color: var(--mut); font-size: 12px; list-style: none; }
+.project-manager > summary::-webkit-details-marker { display: none; }
+.project-heading { display: inline-flex; align-items: center; gap: 5px; }
+.project-manager[open] > summary .proj-chev { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) {
+  .project-manager::details-content, .project-manager .proj-chev { transition: none; }
+}
 .project-manager > summary .count { margin-left: 8px; font-size: 11px; color: var(--faint); }
 .project-manager .proj-h { padding: 7px 8px; border-radius: 6px; font: 12px var(--body); }
 .project-manager .proj + .proj { border: 0; }
 .project-manager .proj-btn { opacity: 1; }
-.project-manager .project-add { margin: 0 0 4px 4px; font-size: 12px; }
+.project-manager .project-add { margin: 0; padding: 5px; opacity: 1; }
 .project-manager .proj-h > .ic { color: var(--faint); width: 14px; height: 14px; }
 .ag-foot { display: none; }
 .external-open, .sidebar-settings { border: 0; border-radius: 8px; background: transparent; justify-content: flex-start; color: var(--mut); margin: 2px 12px 8px; padding: 9px 10px; font-size: 12px; }

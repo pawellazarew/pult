@@ -145,10 +145,11 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
         </div>}
         <div className="sidebar-projects" data-testid="sidebar-projects">
         <details className="project-manager" data-testid="project-manager">
-          <summary>Проекты<span className="count">{p.groups.length}</span></summary>
-          <button type="button" className="btn btn-sm btn-ghost project-add" onClick={p.onAddProject} data-testid="add-project" title="Добавить папку проекта">
-            <Icon name="plus" />Добавить проект
-          </button>
+          <summary>
+            <span className="project-heading"><Icon name="chev" className="ic proj-chev" />Проекты<span className="count">{p.groups.length}</span></span>
+            <button type="button" className="proj-btn project-add" onClick={(e) => { e.preventDefault(); e.stopPropagation(); p.onAddProject() }}
+              onKeyDown={(e) => e.stopPropagation()} data-testid="add-project" title="Добавить папку проекта" aria-label="Добавить проект"><Icon name="plus" /></button>
+          </summary>
           {p.groups.map((g) => (
             <section key={g.path} className="proj" data-testid="project" data-project={g.path} data-pinned={g.pinned ? '1' : '0'}>
               <div className="proj-h" onContextMenu={(e) => projectMenu(e, g)} title={g.path}>
