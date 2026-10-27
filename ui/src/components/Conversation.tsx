@@ -128,6 +128,7 @@ export function Conversation(p: ConversationProps): ReactElement {
   const feed = useRef<HTMLDivElement>(null)
   const qe = useQueueEdit(p.onQueueEdit)
   const stick = useRef(true)
+  const feedSize = useRef({ height: 0, viewport: 0 })
   const [away, setAway] = useState(false)
 
   // Своя реплика ушла — лента едет вниз к ней, даже если человек перед этим листал вверх.
@@ -146,6 +147,7 @@ export function Conversation(p: ConversationProps): ReactElement {
     const sync = (): void => {
       if (stick.current) { el.scrollTop = el.scrollHeight; setAway(false) }
       else setAway(el.scrollHeight - el.scrollTop - el.clientHeight >= 80)
+      feedSize.current = { height: el.scrollHeight, viewport: el.clientHeight }
     }
     const observer = new ResizeObserver(sync)
     observer.observe(el)
@@ -157,7 +159,13 @@ export function Conversation(p: ConversationProps): ReactElement {
 
   const onScroll = (): void => {
     const el = feed.current
-    if (el) { stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80; setAway(!stick.current) }
+    if (el) {
+      const resized = feedSize.current.height !== el.scrollHeight || feedSize.current.viewport !== el.clientHeight
+      // Browser scroll anchoring can emit scroll before ResizeObserver when a tool expands.
+      if (resized && stick.current) { el.scrollTop = el.scrollHeight; setAway(false) }
+      else { stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80; setAway(!stick.current) }
+      feedSize.current = { height: el.scrollHeight, viewport: el.clientHeight }
+    }
   }
 
   // --- О2: переход к событию, метки реплик человека, ⌥↑/⌥↓ ---------------------------------
