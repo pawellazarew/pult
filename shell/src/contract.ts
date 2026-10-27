@@ -212,10 +212,10 @@ export interface PultBridge {
   openExternal?(url: string): Promise<void>
   /**
    * Окно 0.1.16: картинка из буфера (скриншот без файла, картинка из браузера) → PNG в
-   * `PULT_HOME/attachments/<дата>/paste-<время>-<hex>.png` (shell/src/clipboardImage.ts). Без аргументов НАРОЧНО: путь
-   * выбирает main, байты main читает из системного буфера сам — окно не передаёт ни пути, ни данных. Ответ — путь,
-   * который окно вставляет в поле как путь файла, или `{error}` словами. Необязательный: старая оболочка его не знает,
-   * интерфейс тогда подсказывает обновить окно.
+   * `PULT_HOME/attachments/<сессия>/<дата>/paste-<время>-<hex>.png` (shell/src/clipboardImage.ts). Из окна — ТОЛЬКО имя
+   * сессии (main проверяет его правилом имён демона): путь выбирает main, байты main читает из системного буфера сам.
+   * Своя папка у сессии — claude получает `--add-dir` только на неё. Ответ — путь, который окно вставляет в поле как
+   * путь файла, или `{error}` словами. Необязательный: старая оболочка его не знает, интерфейс подсказывает обновить окно.
    */
   clipboardImage?: ClipboardImageBridge
 }
@@ -224,7 +224,7 @@ export interface PultBridge {
 export type ClipboardImageResult = { path: string; width: number; height: number; bytes: number } | { error: string }
 
 export interface ClipboardImageBridge {
-  save(): Promise<ClipboardImageResult>
+  save(session: string): Promise<ClipboardImageResult>
 }
 
 /** Каналы IPC между preload и main. Имена в одном месте: опечатка в строке канала молчит. */

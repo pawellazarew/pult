@@ -39,6 +39,11 @@ export interface PathsField {
   putText?(text: string, start: number, end: number): void
   /** Сказать под полем (отказ сохранить картинку, старое окно). */
   notice?(text: string): void
+  /**
+   * Сессия, чья картинка: своя папка `attachments/<сессия>`, и только её claude читает без вопроса. Поле разговора —
+   * его сессия, «первая реплика» — набранное имя (картинка ляжет в папку будущей сессии с этим именем).
+   */
+  session?(): string
 }
 
 /** Окно 0.1.15 и старше не умеет сохранять картинку из буфера: метода моста нет. */
@@ -109,7 +114,7 @@ export function pathsInputHandlers(t: PathsField): {
         if (next !== 'image') return
         if (!src.image) { t.notice?.(OLD_WINDOW_IMAGE_HINT); return }
         let r: Awaited<ReturnType<NonNullable<typeof src.image>>>
-        try { r = await src.image() } catch (err) {
+        try { r = await src.image(t.session?.() ?? '') } catch (err) {
           const m = (err as { message?: unknown } | null)?.message
           r = { error: typeof m === 'string' && m ? m : 'картинка не сохранилась' }
         }

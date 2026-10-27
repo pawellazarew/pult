@@ -245,7 +245,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     return {
       clipboard: () => clipboardFilePaths(),
       files: (f) => pathsForFiles(f),
-      ...(clipboardImage && typeof clipboardImage.save === 'function' ? { image: () => clipboardImage.save() } : {}),
+      ...(clipboardImage && typeof clipboardImage.save === 'function' ? { image: (session: string) => clipboardImage.save(session) } : {}),
     }
   }, [bridge])
   const refreshSettings = useCallback(async (): Promise<void> => {

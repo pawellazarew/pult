@@ -343,7 +343,7 @@ export function NewAgentDialog({ taken, pickFolder, onCreate, onClose, catalog, 
     applyFolder(dir)
   }
   // Файлы в «первую реплику» — пути, как в поле ввода разговора; папка на остальную форму — папка сессии.
-  const prompt = useFilePaths({ source: filePaths, box: promptBox, text: form.prompt, setText: (v) => setForm((f) => ({ ...f, prompt: v })) })
+  const prompt = useFilePaths({ source: filePaths, box: promptBox, text: form.prompt, setText: (v) => setForm((f) => ({ ...f, prompt: v })), session: form.name })
   const [folderOver, setFolderOver] = useState(false)
   const [dropHint, setDropHint] = useState<string | null>(null)
   const inPrompt = (e: DragEvent<HTMLElement>): boolean => !!promptBox.current?.contains(e.target as Node)

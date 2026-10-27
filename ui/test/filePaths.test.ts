@@ -138,8 +138,9 @@ describe('пути файлов в поле: общий помощник пол�
 
 describe('⌘V картинки из буфера (окно 0.1.16): PNG в PULT_HOME/attachments, путь — в поле', () => {
   /** Поле с заметками и вставкой текста, как у хука useFilePaths. */
-  function imgField(value: string, caret: number, src: FilePathSource | null) {
+  function imgField(value: string, caret: number, src: FilePathSource | null, session = 'w') {
     const f = field(value, caret, src)
+    f.t.session = () => session
     const notices: string[] = []
     f.t.notice = (m) => { notices.push(m) }
     f.t.putText = (ins, start, end) => {
@@ -149,13 +150,14 @@ describe('⌘V картинки из буфера (окно 0.1.16): PNG в PULT
     }
     return { ...f, notices }
   }
-  const SAVED = '/h/attachments/2026-10-27/paste-101500-a1b2c3.png'
-  function imgSource(r: SavedClipboardImage | Error, paths: string[] = []): FilePathSource & { calls: number } {
+  const SAVED = '/h/attachments/w/2026-10-27/paste-101500-a1b2c3.png'
+  function imgSource(r: SavedClipboardImage | Error, paths: string[] = []): FilePathSource & { calls: number; sessions: string[] } {
     const s = {
       calls: 0,
+      sessions: [] as string[],
       clipboard: async () => paths,
       files: () => [],
-      image: async () => { s.calls++; if (r instanceof Error) throw r; return r },
+      image: async (session: string) => { s.calls++; s.sessions.push(session); if (r instanceof Error) throw r; return r },
     }
     return s
   }
@@ -183,6 +185,7 @@ describe('⌘V картинки из буфера (окно 0.1.16): PNG в PULT
     await pathsInputHandlers(f.t).onPaste(e)
     assert.equal(e.prevented, true)
     assert.equal(src.calls, 1)
+    assert.deepEqual(src.sessions, ['w'], 'картинка — в папку сессии поля')
     assert.equal(f.el.value, `глянь ${SAVED} код`)
     assert.equal(f.el.selectionStart, `глянь ${SAVED} `.length)
     assert.deepEqual(f.notices, [])
@@ -258,10 +261,18 @@ describe('⌘V картинки из буфера (окно 0.1.16): PNG в PULT
     assert.equal(f.el.value, 'abc /x.png')
   })
 
-  it('путь картинки с пробелом в PULT_HOME — в кавычках, как путь файла', async () => {
-    const f = imgField('', 0, imgSource({ path: '/srv/pult home/attachments/d/p.png', width: 1, height: 1, bytes: 1 }))
+  it('«первая реплика» без имени: имя уходит пустым, отказ main — словами под полем', async () => {
+    const src = imgSource({ error: 'картинке нужна сессия: сначала задай имя (латиница, цифры, - и _)' })
+    const f = imgField('', 0, src, '')
     await pathsInputHandlers(f.t).onPaste(pasteT(f.el, ['Files'], [png()], ''))
-    assert.equal(f.el.value, "'/srv/pult home/attachments/d/p.png'")
+    assert.deepEqual([src.sessions, f.el.value], [[''], ''])
+    assert.match(f.notices[0] ?? '', /сессия/)
+  })
+
+  it('путь картинки с пробелом в PULT_HOME — в кавычках, как путь файла', async () => {
+    const f = imgField('', 0, imgSource({ path: '/srv/pult home/attachments/w/d/p.png', width: 1, height: 1, bytes: 1 }))
+    await pathsInputHandlers(f.t).onPaste(pasteT(f.el, ['Files'], [png()], ''))
+    assert.equal(f.el.value, "'/srv/pult home/attachments/w/d/p.png'")
   })
 })
 

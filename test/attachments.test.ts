@@ -2,11 +2,11 @@
 // ничего вне attachments/, симлинки не раскрываются, свежее не трогается.
 
 import assert from 'node:assert/strict'
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, realpathSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
-import { ATTACHMENTS_MAX_AGE_MS, ATTACHMENTS_SWEEP_MS, sweepAttachments } from '../dist/core/attachments.js'
+import { ATTACHMENTS_MAX_AGE_MS, ATTACHMENTS_SWEEP_MS, sessionAttachmentsDirs, sweepAttachments } from '../dist/core/attachments.js'
 import { layout } from '../dist/core/paths.js'
 import { removeTree, startTestDaemon, tempHome } from './helpers.js'
 
@@ -37,22 +37,28 @@ describe('attachments: раскладка и уборка', () => {
     const root = mkdtempSync(join(tmpdir(), 'pat-'))
     try {
       const dir = join(root, 'attachments')
-      const oldA = file(join(dir, '2026-09-01', 'paste-1.png'), 40)
-      const oldB = file(join(dir, '2026-09-01', 'paste-2.png'), 31)
-      age(join(dir, '2026-09-01'), 31)
-      const fresh = file(join(dir, '2026-10-20', 'paste-3.png'), 7)
-      const mixedOld = file(join(dir, '2026-09-20', 'paste-4.png'), 35)
-      const mixedNew = file(join(dir, '2026-09-20', 'paste-5.png'), 29)
-      age(join(dir, '2026-09-20'), 29)
+      const s = join(dir, 'w')
+      const oldA = file(join(s, '2026-09-01', 'paste-1.png'), 40)
+      const oldB = file(join(s, '2026-09-01', 'paste-2.png'), 31)
+      age(join(s, '2026-09-01'), 31)
+      const fresh = file(join(s, '2026-10-20', 'paste-3.png'), 7)
+      const mixedOld = file(join(s, '2026-09-20', 'paste-4.png'), 35)
+      const mixedNew = file(join(s, '2026-09-20', 'paste-5.png'), 29)
+      age(join(s, '2026-09-20'), 29)
       // Пустая, но свежая папка дня (окно только что завело) — не трогаем.
-      mkdirSync(join(dir, '2026-10-27'))
+      mkdirSync(join(s, '2026-10-27'))
+      // Сессия, у которой всё старое: файл, папка дня и сама папка сессии уходят.
+      const gone = file(join(dir, 'old', '2026-08-01', 'paste-6.png'), 60)
+      age(join(dir, 'old', '2026-08-01'), 60)
+      age(join(dir, 'old'), 60)
       const r = sweepAttachments(dir, NOW)
-      assert.deepEqual(r, { files: 3, dirs: 1, errors: 0 })
-      assert.deepEqual([oldA, oldB, mixedOld].map(existsSync), [false, false, false])
+      assert.deepEqual(r, { files: 4, dirs: 3, errors: 0 })
+      assert.deepEqual([oldA, oldB, mixedOld, gone].map(existsSync), [false, false, false, false])
       assert.deepEqual([fresh, mixedNew].map(existsSync), [true, true])
-      assert.equal(existsSync(join(dir, '2026-09-01')), false)
-      assert.equal(existsSync(join(dir, '2026-09-20')), true)
-      assert.equal(existsSync(join(dir, '2026-10-27')), true)
+      assert.equal(existsSync(join(s, '2026-09-01')), false)
+      assert.equal(existsSync(join(s, '2026-09-20')), true)
+      assert.equal(existsSync(join(s, '2026-10-27')), true)
+      assert.equal(existsSync(join(dir, 'old')), false)
       assert.equal(existsSync(dir), true, 'сама attachments остаётся')
     } finally { removeTree(root) }
   })
@@ -94,19 +100,61 @@ describe('attachments: раскладка и уборка', () => {
     assert.deepEqual(sweepAttachments(join(tmpdir(), 'нет-такой-папки-pult'), NOW), { files: 0, dirs: 0, errors: 0 })
   })
 
+  it('папка сессии для --add-dir: заводится 0700, путь как есть и realpath; чужое имя — пусто', () => {
+    const root = mkdtempSync(join(tmpdir(), 'pat-'))
+    try {
+      const home = join(root, 'h')
+      mkdirSync(home)
+      const dirs = sessionAttachmentsDirs(home, 'w')
+      const want = join(realpathSync(home), 'attachments', 'w')
+      assert.deepEqual(dirs, [...new Set([join(home, 'attachments', 'w'), want])])
+      assert.equal(statSync(want).mode & 0o777, 0o700)
+      assert.equal(statSync(join(home, 'attachments')).mode & 0o777, 0o700)
+      for (const bad of ['', '..', '../x', 'W', 'a/b']) assert.deepEqual(sessionAttachmentsDirs(home, bad), [], bad)
+    } finally { removeTree(root) }
+  })
+
+  it('attachments или папка сессии — симлинк (в том числе на ~): --add-dir не даём, по ссылке ничего не создаём', () => {
+    const root = mkdtempSync(join(tmpdir(), 'pat-'))
+    try {
+      const home = join(root, 'h')
+      mkdirSync(home)
+      symlinkSync(homedir(), join(home, 'attachments'))
+      assert.deepEqual(sessionAttachmentsDirs(home, 'zz-pult-test-never'), [])
+      assert.equal(existsSync(join(homedir(), 'zz-pult-test-never')), false, 'в домашней папке ничего не заведено')
+
+      const home2 = join(root, 'h2')
+      mkdirSync(join(home2, 'attachments'), { recursive: true })
+      const outside = join(root, 'outside')
+      mkdirSync(outside)
+      symlinkSync(outside, join(home2, 'attachments', 'w'))
+      assert.deepEqual(sessionAttachmentsDirs(home2, 'w'), [])
+    } finally { removeTree(root) }
+  })
+
+  it('PULT_HOME сам — симлинк: realpath сравнивается от realpath(PULT_HOME), папка годится', () => {
+    const root = mkdtempSync(join(tmpdir(), 'pat-'))
+    try {
+      mkdirSync(join(root, 'real-h'))
+      symlinkSync(join(root, 'real-h'), join(root, 'h'))
+      const dirs = sessionAttachmentsDirs(join(root, 'h'), 'w')
+      assert.ok(dirs.includes(join(realpathSync(join(root, 'real-h')), 'attachments', 'w')), dirs.join(' '))
+    } finally { removeTree(root) }
+  })
+
   it('демон на старте заводит attachments (0700) и удаляет старое, соседей PULT_HOME не трогает', async () => {
     const home = tempHome()
     const { paths } = home
-    const old = file(join(paths.attachments, '2026-08-01', 'paste-1.png'), 45)
-    age(join(paths.attachments, '2026-08-01'), 45)
-    const fresh = file(join(paths.attachments, '2026-10-26', 'paste-2.png'), 1)
+    const old = file(join(paths.attachments, 'w', '2026-08-01', 'paste-1.png'), 45)
+    age(join(paths.attachments, 'w', '2026-08-01'), 45)
+    const fresh = file(join(paths.attachments, 'w', '2026-10-26', 'paste-2.png'), 1)
     // Старый файл рядом с attachments (в PULT_HOME) — не наш, не трогаем.
     const neighbour = file(join(paths.home, 'old-neighbour.txt'), 400)
     try {
       const d = await startTestDaemon(home)
       try {
         assert.equal(existsSync(old), false)
-        assert.equal(existsSync(join(paths.attachments, '2026-08-01')), false)
+        assert.equal(existsSync(join(paths.attachments, 'w', '2026-08-01')), false)
         assert.equal(existsSync(fresh), true)
         assert.equal(existsSync(neighbour), true)
         assert.equal(statSync(paths.attachments).mode & 0o777, 0o700)

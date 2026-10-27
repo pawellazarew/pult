@@ -8,8 +8,10 @@ import { pathsInputHandlers } from '../model/filePathsInput.js'
 import { insertPaths, insertText } from '../model/paths.js'
 import type { FilePathSource } from '../model/paths.js'
 
-export function useFilePaths({ source, box, text, setText }: {
+export function useFilePaths({ source, box, text, setText, session }: {
   source: FilePathSource | null
+  /** Имя сессии для картинки из буфера (папка `attachments/<сессия>`); в «+ Сессия» — набранное имя. */
+  session: string
   box: RefObject<HTMLTextAreaElement | null>
   /** Текст поля из стейта — на случай, когда самого поля ещё нет. */
   text: string
@@ -47,6 +49,7 @@ export function useFilePaths({ source, box, text, setText }: {
     put: (paths, start, end) => apply(insertPaths(box.current?.value ?? text, start, end, paths)),
     putText: (ins, start, end) => apply(insertText(box.current?.value ?? text, start, end, ins)),
     notice: (msg) => say(msg),
+    session: () => session,
   })
   const onDragOver = (e: DragEvent<HTMLTextAreaElement>): void => {
     h.onDragOver(e)

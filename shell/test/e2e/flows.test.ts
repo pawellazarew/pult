@@ -7,7 +7,7 @@ import { existsSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { after, before, describe, it } from 'node:test'
 import type { Page } from 'playwright-core'
-import { launch, ONE_PX_PNG, waitFor } from './harness.js'
+import { launch, ONE_PX_PNG, sleep, waitFor } from './harness.js'
 import type { Harness } from './harness.js'
 
 type Client = Awaited<ReturnType<Harness['client']>>
@@ -111,12 +111,13 @@ describe('окно: рабочие сценарии', () => {
     }
     const attachments = path.join(h.home, 'attachments')
     const escRe = (x: string): string => x.replace(/[.*+?^$|()[\]{}\\]/g, '\\$&')
-    const re = new RegExp(`^глянь ${escRe(attachments)}/\\d{4}-\\d{2}-\\d{2}/paste-\\d{6}-[0-9a-f]{6}\\.png$`)
+    const re = (session: string): RegExp => new RegExp(`^глянь ${escRe(path.join(attachments, session))}/\\d{4}-\\d{2}-\\d{2}/paste-\\d{6}-[0-9a-f]{6}\\.png$`)
     try {
       const box = h.win.getByTestId('composer')
       await box.fill('глянь ')
       await pasteImage('composer')
-      assert.ok(await waitFor(async () => re.test(await box.inputValue()), 5000), `в поле: ${await box.inputValue()}`)
+      // Поле разговора сессии alpha — папка attachments/alpha (своя у сессии: --add-dir claude только на неё).
+      assert.ok(await waitFor(async () => re('alpha').test(await box.inputValue()), 5000), `в поле: ${await box.inputValue()}`)
       const p1 = (await box.inputValue()).slice('глянь '.length)
       assert.ok(existsSync(p1), `файла нет: ${p1}`)
       assert.equal(statSync(p1).mode & 0o777, 0o600)
@@ -126,9 +127,17 @@ describe('окно: рабочие сценарии', () => {
       const dlg = h.win.getByTestId('new-agent-dialog')
       await dlg.waitFor({ timeout: 5000 })
       const prompt = dlg.getByTestId('new-agent-prompt')
+      // Без имени — отказ словами: папку картинке даёт имя будущей сессии.
+      await dlg.getByTestId('new-agent-name').fill('')
+      await sleep(1100)
       await prompt.fill('глянь ')
       await pasteImage('new-agent-prompt')
-      assert.ok(await waitFor(async () => re.test(await prompt.inputValue()), 5000), `в «первой реплике»: ${await prompt.inputValue()}`)
+      assert.ok(await waitFor(async () => /сессия/.test((await dlg.getByTestId('new-agent-paste-notice').textContent({ timeout: 500 }).catch(() => null)) ?? ''), 5000), 'нет заметки «нужно имя»')
+      assert.equal(await prompt.inputValue(), 'глянь ')
+      await dlg.getByTestId('new-agent-name').fill('pic')
+      await sleep(1100)
+      await pasteImage('new-agent-prompt')
+      assert.ok(await waitFor(async () => re('pic').test(await prompt.inputValue()), 5000), `в «первой реплике»: ${await prompt.inputValue()}`)
       const p2 = (await prompt.inputValue()).slice('глянь '.length)
       assert.ok(existsSync(p2) && p2 !== p1, `второй файл: ${p2}`)
       await h.win.keyboard.press('Escape')
@@ -137,6 +146,7 @@ describe('окно: рабочие сценарии', () => {
       await h.app.evaluate(() => { delete (globalThis as { __pultTestClipboardImage?: Uint8Array }).__pultTestClipboardImage })
     }
     // Буфер без картинки: отказ словами под полем, поле не тронуто.
+    await sleep(1100)
     const box = h.win.getByTestId('composer')
     await box.fill('abc')
     await pasteImage('composer')

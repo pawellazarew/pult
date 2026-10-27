@@ -29,6 +29,9 @@ export type SavedClipboardImage = { path: string; width: number; height: number;
 export interface FilePathSource {
   clipboard(): Promise<string[]>
   files(files: File[]): string[]
-  /** Окно 0.1.16: сохранить картинку из буфера в PULT_HOME/attachments. Нет — окно старше, вставка картинок не умеет. */
-  image?(): Promise<SavedClipboardImage>
+  /**
+   * Окно 0.1.16: сохранить картинку из буфера в PULT_HOME/attachments/<сессия>. Нет — окно старше, вставка картинок не
+   * умеет. Имя сессии проверяет main (правило имён демона); пустое или чужое — отказ словами.
+   */
+  image?(session: string): Promise<SavedClipboardImage>
 }

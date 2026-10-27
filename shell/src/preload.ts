@@ -88,9 +88,9 @@ const bridge: PultBridge = {
   },
 
   clipboardImage: {
-    // Без аргументов: путь и байты решает main (contract.ts). Ответ чужой формы — отказ словами, а не исключение.
-    async save(): Promise<ClipboardImageResult> {
-      const r = (await ipcRenderer.invoke(IPC.clipboardImage)) as unknown
+    // Только имя сессии (строкой): путь и байты решает main (contract.ts). Ответ чужой формы — отказ словами.
+    async save(session: string): Promise<ClipboardImageResult> {
+      const r = (await ipcRenderer.invoke(IPC.clipboardImage, typeof session === 'string' ? session : '')) as unknown
       if (r && typeof r === 'object') {
         const o = r as Record<string, unknown>
         if (typeof o['path'] === 'string' && typeof o['width'] === 'number' && typeof o['height'] === 'number' && typeof o['bytes'] === 'number') {

@@ -110,22 +110,27 @@ describe('argv claude', () => {
     assert.equal(settings(buildClaudeArgv({ sessionId: UUID, resume: false })), null, 'без папок и read-only — флага нет')
   })
 
-  it('0.3.8: --add-dir PULT_HOME/attachments — рядом с deny на run, а не внутри; закрытая папка в --add-dir не попадает', () => {
-    const argv = buildClaudeArgv({ sessionId: UUID, resume: false, mcpConfigPath: '/x', protectDirs: ['/p/run'], addDirs: ['/p/attachments', '/p/attachments'] })
+  it('0.3.8: --add-dir PULT_HOME/attachments/<сессия> — рядом с deny на run; закрытое, над закрытым, /, ~ и PULT_HOME — нет', () => {
+    const argv = buildClaudeArgv({ sessionId: UUID, resume: false, mcpConfigPath: '/x', protectDirs: ['/p/run'], addDirs: ['/p/attachments/w', '/p/attachments/w'], addDirRoots: ['/home/you', '/p'] })
     const i = argv.indexOf('--add-dir')
     assert.ok(i > 0, argv.join(' '))
     assert.equal(argv.filter((a) => a === '--add-dir').length, 1, 'один флаг на все папки')
-    assert.equal(argv[i + 1], '/p/attachments')
+    assert.equal(argv[i + 1], '/p/attachments/w')
     // Флаг вариадический: следом — флаг, а не позиционный аргумент, который CLI принял бы за папку.
     assert.ok(argv[i + 2]?.startsWith('--'), `после папки: ${argv[i + 2]}`)
-    // deny на run остаётся, и attachments им не задета: правило — `//p/run/**`, папка — `/p/attachments`.
+    // deny на run остаётся, и attachments им не задета.
     const settings = JSON.parse(argv[argv.indexOf('--settings') + 1] as string) as { permissions: { deny: string[] } }
     assert.deepEqual(settings.permissions.deny, ['Read(//p/run/**)', 'Edit(//p/run/**)'])
     assert.ok(!settings.permissions.deny.some((d) => d.includes('attachments')))
     // Без папок — флага нет (как до 0.3.8).
     assert.ok(!buildClaudeArgv({ sessionId: UUID, resume: false }).includes('--add-dir'))
-    // Закрытая папка, папка внутри неё, относительный путь, путь-флаг и нулевой байт — не уходят.
-    assert.deepEqual(claudeAddDirs(['/p/run', '/p/run/x', '/p/run/', 'rel', '-x', '/a\u0000b', '/p/runner', '/p/attachments'], ['/p/run']), ['/p/runner', '/p/attachments'])
+    // Закрытая, внутри неё, над ней (содержит run: /p, /), корни (~, PULT_HOME и выше), относительный, флаг, NUL — не уходят.
+    assert.deepEqual(claudeAddDirs(
+      ['/p/run', '/p/run/x', '/p/run/', '/p', '/p/', '/', 'rel', '-x', '/a\u0000b', '/home/you', '/home', '/home/you/proj', '/p/runner', '/p/attachments/w'],
+      ['/p/run'], ['/home/you', '/p'],
+    ), ['/home/you/proj', '/p/runner', '/p/attachments/w'])
+    // Без явных корней `/` всё равно не проходит.
+    assert.deepEqual(claudeAddDirs(['/', '/x'], []), ['/x'])
   })
 
   it('ревью #16: метасимволы глоба в пути правила экранируются (S12 T6: без этого правило мимо)', () => {

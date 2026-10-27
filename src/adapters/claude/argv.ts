@@ -56,16 +56,17 @@ export function claudeGuardPermissions(protectDirs: readonly string[], approval?
 }
 
 /**
- * Папки для `--add-dir`: абсолютные, без нулевого байта, не начинаются с `-` (иначе CLI прочёл бы флаг), без повторов, и
- * ни одна не равна закрытой папке и не лежит внутри неё (`PULT_HOME/run`, сравнение по частям пути).
+ * Папки для `--add-dir`: абсолютные, без нулевого байта, не начинаются с `-` (иначе CLI прочёл бы флаг), без повторов.
+ * Отказ папке, которая равна закрытой (`PULT_HOME/run`), лежит внутри неё ИЛИ содержит её, и папке, которая равна или
+ * содержит любой из `roots` (`/`, домашняя папка, PULT_HOME): `--add-dir ~` открыл бы агенту всё (ревью #17).
  */
-export function claudeAddDirs(dirs: readonly string[], protectDirs: readonly string[]): string[] {
-  const inside = (d: string, p: string): boolean => {
-    const a = d.replace(/\/+$/, '')
-    const b = p.replace(/\/+$/, '')
-    return a === b || a.startsWith(`${b}/`)
-  }
-  return [...new Set(dirs)].filter((d) => d.startsWith('/') && !d.includes('\0') && !protectDirs.some((p) => inside(d, p)))
+export function claudeAddDirs(dirs: readonly string[], protectDirs: readonly string[], roots: readonly string[] = []): string[] {
+  const norm = (p: string): string => p.replace(/\/+$/, '')
+  /** `b` — сама `a` или внутри неё. */
+  const within = (b: string, a: string): boolean => { const x = norm(a), y = norm(b); return y === x || y.startsWith(`${x}/`) }
+  return [...new Set(dirs)].filter((d) => d.startsWith('/') && !d.includes('\0')
+    && !protectDirs.some((p) => within(d, p) || within(p, d))
+    && !['/', ...roots].some((r) => within(r, d)))
 }
 
 /**
@@ -110,11 +111,13 @@ export interface ClaudeArgvOptions {
    */
   protectDirs?: readonly string[]
   /**
-   * 0.3.8: папки сверх cwd, доступные инструментам claude (`--add-dir`): `PULT_HOME/attachments` — картинки, вставленные
-   * из буфера в окне. Папка из `protectDirs` или внутри неё сюда не попадает (`claudeAddDirs`): deny и так сильнее,
-   * но `--add-dir` на закрытую папку был бы ложным сигналом.
+   * 0.3.8: папки сверх cwd, доступные инструментам claude (`--add-dir`): `PULT_HOME/attachments/<сессия>` — картинки,
+   * вставленные из буфера в окне в ЭТУ сессию. Закрытая папка, папка внутри неё или над ней, `/`, домашняя и PULT_HOME
+   * сюда не попадают (`claudeAddDirs`).
    */
   addDirs?: readonly string[]
+  /** Папки, которые `--add-dir` не может ни повторить, ни содержать: домашняя, PULT_HOME (`/` — всегда). */
+  addDirRoots?: readonly string[]
   /** Дополнительные флаги (например `--allowedTools`). */
   extra?: readonly string[]
 }
@@ -139,7 +142,7 @@ export function buildClaudeArgv(opts: ClaudeArgvOptions): string[] {
   // Список — отдельными словами, ровно как в замере S10 (флаг вариадический; следом всегда идёт флаг на «--»).
   if (opts.approval === 'read-only') a.push('--disallowedTools', ...CLAUDE_READONLY_DENIED)
   // `--add-dir` вариадический (CLI 2.1.310: `--add-dir <directories...>`): все папки одним флагом, следом — флаг.
-  const addDirs = claudeAddDirs(opts.addDirs ?? [], opts.protectDirs ?? [])
+  const addDirs = claudeAddDirs(opts.addDirs ?? [], opts.protectDirs ?? [], opts.addDirRoots ?? [])
   if (addDirs.length) a.push('--add-dir', ...addDirs)
   if (opts.mcpConfigPath) {
     a.push('--permission-prompts', 'host')
