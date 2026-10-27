@@ -136,7 +136,7 @@ describe('пути файлов в поле: общий помощник пол�
   })
 })
 
-describe('⌘V картинки из буфера (окно 0.1.16): PNG в PULT_HOME/attachments, путь — в поле', () => {
+describe('⌘V картинки из буфера (окно 0.1.20): PNG в PULT_HOME/attachments, путь — в поле', () => {
   /** Поле с заметками и вставкой текста, как у хука useFilePaths. */
   function imgField(value: string, caret: number, src: FilePathSource | null, session = 'w') {
     const f = field(value, caret, src)
@@ -235,7 +235,7 @@ describe('⌘V картинки из буфера (окно 0.1.16): PNG в PULT
     const e = pasteT(f.el, ['Files'], [png()], '')
     await pathsInputHandlers(f.t).onPaste(e)
     assert.deepEqual([e.prevented, f.el.value, f.notices], [true, 'abc', [OLD_WINDOW_IMAGE_HINT]])
-    assert.match(OLD_WINDOW_IMAGE_HINT, /0\.1\.16/)
+    assert.match(OLD_WINDOW_IMAGE_HINT, /0\.1\.20/)
     assert.match(OLD_WINDOW_IMAGE_HINT, /Настройки → Обновления → Обновить окно/)
   })
 
