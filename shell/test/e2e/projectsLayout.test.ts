@@ -26,7 +26,7 @@ describe('раскрытие проектов', () => {
       const geometry = await h.win.getByTestId('sidebar-projects').evaluate((el) => {
         const bounds = el.getBoundingClientRect()
         return { top: bounds.top, bottom: bounds.bottom, count: el.querySelector('.count')?.textContent,
-          rows: [...el.querySelectorAll('.proj-h')].map((row) => { const r = row.getBoundingClientRect(); return { top: r.top, bottom: r.bottom } }) }
+          rows: Array.from(el.querySelectorAll('.proj-h')).map((row) => { const r = row.getBoundingClientRect(); return { top: r.top, bottom: r.bottom } }) }
       })
       assert.equal(geometry.count, '3')
       assert.equal(geometry.rows.length, 3)
