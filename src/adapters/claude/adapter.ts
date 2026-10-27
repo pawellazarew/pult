@@ -35,6 +35,7 @@ import { spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { mkdirSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { PultConfig } from '../../core/config.js'
@@ -43,6 +44,7 @@ import type { Logger } from '../../core/log.js'
 import { redactString } from '../../core/log.js'
 import { createLineSplitter } from '../../core/ndjson.js'
 import type { PultPaths } from '../../core/paths.js'
+import { sessionAttachmentsDirs } from '../../core/attachments.js'
 import { buildChildEnv } from '../../env/allowlist.js'
 import { checkNetwork, netGeneration, netRefusal, noProxyValue } from '../../env/net.js'
 import { readSavedNode, resolveChildNode } from '../../env/nodeBin.js'
@@ -238,6 +240,18 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
     let real = paths.run
     try { real = realpathSync(paths.run) } catch { /* папки ещё нет — хватит пути как есть */ }
     return [...new Set([paths.run, real])]
+  }
+  /**
+   * 0.3.8: `PULT_HOME/attachments/<сессия>` (картинки из буфера окна, вставленные в ЭТУ сессию) — в `--add-dir`, чтобы
+   * claude читал их без вопроса, как файлы cwd. Без флага Read вне cwd спрашивает (замер S13, CLI 2.1.310, haiku, `manual`
+   * и `default`: отказ «outside the allowed working directories»; с `--add-dir` — прочитал). Папка своя у сессии: общая
+   * открыла бы каждой сессии картинки всех. Симлинк или подмена по пути — флага нет (src/core/attachments.ts).
+   */
+  const addDirs = (name: string): string[] => (paths.home ? sessionAttachmentsDirs(paths.home, name) : [])
+  const addDirRoots = (): string[] => {
+    const out = [homedir(), paths.home]
+    for (const p of [homedir(), paths.home]) { try { out.push(realpathSync(p)) } catch { /* нет — как есть */ } }
+    return [...new Set(out.filter(Boolean))]
   }
   const writeMcpConfig = (l: Live, nodeBin: string, servers: Record<string, Record<string, unknown>>): { file: string; askKey: string } => {
     mkdirSync(paths.run, { recursive: true, mode: 0o700 })
@@ -694,6 +708,8 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
           ...(mcpConfigPath ? { mcpConfigPath } : {}),
           ...(mcpConfigPath && permissions ? { permissions } : {}),
           protectDirs: protectDirs(),
+          addDirs: addDirs(l.spec.name),
+          addDirRoots: addDirRoots(),
         })
         mapper = createClaudeMapper({
           sessionId: name,

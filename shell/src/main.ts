@@ -21,6 +21,8 @@ import { listWorkspaceFiles, readWorkspaceFile } from '../../src/core/fileBrowse
 import { referencesFile } from '../../src/core/fileReferences.js'
 import { APP_INDEX, APP_ORIGIN, APP_SCHEME, appHeaders, mimeOf, resolveAppPath } from './appPath.js'
 import { parseBackoff } from './backoff.js'
+import { readClipboardImageBytes, saveClipboardImage, SaveRate } from './clipboardImage.js'
+import type { ClipboardItemsLike, SaveImageResult } from './clipboardImage.js'
 import { readClipboardPaths } from './clipboardPaths.js'
 import { BRIDGE_VERSION, IPC, isAllowedMethod, sanitizeParams, SUBSCRIBE_VIA_BRIDGE } from './contract.js'
 import type { CallReply, ConnState, DaemonStatus, NavTarget, NotifyTarget } from './contract.js'
@@ -61,8 +63,10 @@ function log(msg: string, extra?: Record<string, unknown>): void {
 let mainWindow: BrowserWindow | null = null
 let link: DaemonLink | null = null
 let uiRoot = ''
+/** PULT_HOME — из paths() пакета, как у демона; пусто до boot. */
 let pultHome = ''
 let tray: Tray | null = null
+const saveRate = new SaveRate(1000)
 
 /** Только наше окно и только наша страница: IPC из чужого фрейма молча отвергается. */
 function trusted(e: IpcMainEvent | IpcMainInvokeEvent): boolean {
@@ -569,6 +573,30 @@ function registerIpc(): void {
     }, process.platform)
   })
 
+  // Окно 0.1.16: картинка из буфера → PNG в PULT_HOME/attachments/<сессия> (clipboardImage.ts). От окна — только имя
+  // сессии (проверяется по правилу имён демона); путь решает main, байты — из системного буфера.
+  ipcMain.handle(IPC.clipboardImage, async (e, session: unknown): Promise<SaveImageResult> => {
+    if (!trusted(e)) return { error: 'вызов не из окна Пульта' }
+    if (!pultHome) return { error: 'Пульт ещё не готов' }
+    if (!saveRate.take(Date.now())) return { error: 'не чаще одной картинки в секунду' }
+    // Тестовый прогон системный буфер не читает и не пишет: e2e кладёт байты картинки в main, дальше — тот же путь
+    // (ClipboardItem → заголовок → nativeImage → PNG → файл).
+    const testBytes = (globalThis as { __pultTestClipboardImage?: Uint8Array }).__pultTestClipboardImage
+    const board: ClipboardItemsLike = TEST_MODE
+      ? { read: async () => (testBytes ? [{ types: ['image/png'], getType: async () => new Blob([new Uint8Array(testBytes)], { type: 'image/png' }) }] : []) }
+      : clipboard
+    // nativeImage перекодирует в PNG: метаданные (EXIF, геометка) не уходят. Декодирует — только после проверки
+    // размера по заголовку (бомба распаковки).
+    const r = saveClipboardImage({
+      home: pultHome,
+      session,
+      bytes: await readClipboardImageBytes(board),
+      decode: (b) => nativeImage.createFromBuffer(b),
+    })
+    if ('error' in r) log('картинка из буфера не сохранена', { error: r.error })
+    return r
+  })
+
   ipcMain.handle(IPC.notify, (e, title: unknown, body: unknown, target: unknown, kind: unknown, sound: unknown): boolean => {
     if (!trusted(e) || typeof title !== 'string' || typeof body !== 'string') return false
     // Пока окно в фокусе, уведомление — шум: человек и так смотрит на Пульт.
@@ -618,6 +646,7 @@ async function boot(): Promise<void> {
   const startMod = await load<StartModule>('cli/startOnDemand.js')
   const pathsMod = await load<PathsModule>('core/paths.js')
   const paths = pathsMod.paths(process.env)
+  // Не `paths.attachments`: окно 0.1.16 может стоять при пакете старше, чей layout этого поля не знает.
   pultHome = paths.home
   const nodePath = resolveNode(process.env, paths.nodePath, realFs)
 

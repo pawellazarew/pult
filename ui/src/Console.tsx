@@ -250,9 +250,16 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     }
   }, [bridge])
   // Пути файлов для поля реплики (⌘V из Finder, перетаскивание). Старая оболочка мост не знает — поле как раньше.
+  // Окно 0.1.16 ещё и сохраняет картинку из буфера (`clipboardImage.save`); у старого метода нет — ⌘V на картинке
+  // подсказывает обновить окно.
   const filePaths = useMemo<FilePathSource | null>(() => {
-    const { clipboardFilePaths, pathsForFiles } = bridge
-    return clipboardFilePaths && pathsForFiles ? { clipboard: () => clipboardFilePaths(), files: (f) => pathsForFiles(f) } : null
+    const { clipboardFilePaths, pathsForFiles, clipboardImage } = bridge
+    if (!clipboardFilePaths || !pathsForFiles) return null
+    return {
+      clipboard: () => clipboardFilePaths(),
+      files: (f) => pathsForFiles(f),
+      ...(clipboardImage && typeof clipboardImage.save === 'function' ? { image: (session: string) => clipboardImage.save(session) } : {}),
+    }
   }, [bridge])
   const refreshSettings = useCallback(async (): Promise<void> => {
     try { setSettings(await bridge.call('settings.get') as SettingsReply) } catch { /* старый демон или оболочка — форма на встроенных умолчаниях */ }

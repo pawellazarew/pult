@@ -212,6 +212,14 @@ export interface PultBridge {
    * Необязательный: старая оболочка его не знает, интерфейс тогда копирует адрес.
    */
   openExternal?(url: string): Promise<void>
+  /**
+   * Окно 0.1.16: картинка из буфера (скриншот без файла, картинка из браузера) → PNG в
+   * `PULT_HOME/attachments/<сессия>/<дата>/paste-<время>-<hex>.png` (shell/src/clipboardImage.ts). Из окна — ТОЛЬКО имя
+   * сессии (main проверяет его правилом имён демона): путь выбирает main, байты main читает из системного буфера сам.
+   * Своя папка у сессии — claude получает `--add-dir` только на неё. Ответ — путь, который окно вставляет в поле как
+   * путь файла, или `{error}` словами. Необязательный: старая оболочка его не знает, интерфейс подсказывает обновить окно.
+   */
+  clipboardImage?: ClipboardImageBridge
   /** Open a local document after a click; executable/unknown types are only revealed in Finder. */
   openFile?(path: string): Promise<'opened' | 'revealed'>
   listFiles?(sessionId: string, source?: string, showHidden?: boolean): Promise<FileListing>
@@ -220,6 +228,14 @@ export interface PultBridge {
   readImage?(sessionId: string, source: string): Promise<{ dataUrl: string; name: string }>
   saveImage?(sessionId: string, source: string): Promise<boolean>
   openImage?(sessionId: string, source: string): Promise<void>
+
+}
+
+/** Ответ `clipboardImage.save()`. */
+export type ClipboardImageResult = { path: string; width: number; height: number; bytes: number } | { error: string }
+
+export interface ClipboardImageBridge {
+  save(session: string): Promise<ClipboardImageResult>
 }
 
 /** Каналы IPC между preload и main. Имена в одном месте: опечатка в строке канала молчит. */
@@ -240,6 +256,7 @@ export const IPC = {
   copyText: 'pult:copy-text',
   notify: 'pult:notify',
   clipboardPaths: 'pult:clipboard-paths',
+  clipboardImage: 'pult:clipboard-image',
   openExternal: 'pult:open-external',
   readImage: 'pult:read-image',
   saveImage: 'pult:save-image',

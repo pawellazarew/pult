@@ -16,8 +16,22 @@ export function insertPaths(text: string, start: number, end: number, paths: rea
   return { text: head + after, caret: head.length }
 }
 
+/** Вставить текст как есть на место выделения (обычная вставка, которую пришлось отменить ради файлов). */
+export function insertText(text: string, start: number, end: number, ins: string): { text: string; caret: number } {
+  const head = text.slice(0, start) + ins
+  return { text: head + text.slice(end), caret: head.length }
+}
+
+/** Картинка из буфера, сохранённая main: путь к PNG или отказ словами (shell/src/contract.ts `ClipboardImageResult`). */
+export type SavedClipboardImage = { path: string; width: number; height: number; bytes: number } | { error: string }
+
 /** Как окно узнаёт пути: из буфера (все скопированные файлы) и из перетащенных `File`. */
 export interface FilePathSource {
   clipboard(): Promise<string[]>
   files(files: File[]): string[]
+  /**
+   * Окно 0.1.16: сохранить картинку из буфера в PULT_HOME/attachments/<сессия>. Нет — окно старше, вставка картинок не
+   * умеет. Имя сессии проверяет main (правило имён демона); пустое или чужое — отказ словами.
+   */
+  image?(session: string): Promise<SavedClipboardImage>
 }

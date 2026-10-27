@@ -213,7 +213,7 @@ Every question from every session goes to the Inbox (⌘I in the window, `pult p
 - **Silence is a no.** Nobody answered within 10 minutes, the daemon went away, the agent was stopped — the answer is
   "deny".
 
-**Approval mode** is chosen when a session is created (`--approval`, or the "Подтверждения" field in "+ Сессия"):
+**Approval mode** is chosen when a session is created (`--approval`, or the "Подтверждения" field in "Новая сессия"):
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/new-session-dark.png">
@@ -223,6 +223,15 @@ Every question from every session goes to the Inbox (⌘I in the window, `pult p
 
 In the dialog, drop a folder onto the form to use it as the session folder; files dropped into the first message, or
 copied in Finder and pasted with ⌘V, become their full paths (quoted when they contain spaces), as in the chat input.
+
+**Images from the clipboard** (window 0.1.20). ⌘V on an image without a file — a screenshot copied to the clipboard,
+"Copy image" in a browser — saves it as a PNG under `~/.pult/attachments/<session>/<date>/` (folders 0700, file 0600, PNG or JPEG source, up to
+25 MB, one per second, 1 GB a day) and pastes its path, in the chat input and in the first message (there, type the
+session name first). When the clipboard also holds plain text, the text is
+pasted, as everywhere else (Office and editors put a picture of the copied text next to it). Each Claude session gets only
+its own folder via `--add-dir` and reads its images without a question (without it, Claude asks about any file outside
+the session folder); Codex reads it within its sandbox. Pult deletes
+attachments older than 30 days. An older window says where to update it (Settings → Updates → Update window).
 
 | mode (window label) | Claude | Codex |
 |---|---|---|
@@ -381,6 +390,9 @@ token in `~/.pult/run/token` controls every session. What Pult does about that, 
   refuses a replaced input. The journal records which client answered (`shell#3`, `cli#7`).
 - **Cards say when they hide something** (masked secrets, clipped fields), and ⌘Enter approves only a card you can see.
 - **Session folders can't cover `~/.pult`**, so an agent with write access to its folder can't rewrite Pult's config.
+- **Pasted images live outside the run folder.** `~/.pult/attachments` is a sibling of `~/.pult/run`, not inside it:
+  `--add-dir` opens to each Claude session only the images pasted into that session, and the deny rules on the run folder
+  stay as they are.
 - **Network guard.** Turns don't start from refused exit countries (see [Network guard](#network-guard)).
 
 **What Pult doesn't protect**

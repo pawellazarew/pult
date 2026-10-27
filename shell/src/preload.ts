@@ -5,7 +5,7 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { IpcRendererEvent } from 'electron'
 import { BRIDGE_VERSION, IPC } from './contract.js'
-import type { AllowedMethod, CallReply, ConnState, NavTarget, NotifyKind, NotifyTarget, PultBridge, PultEvent } from './contract.js'
+import type { AllowedMethod, CallReply, ClipboardImageResult, ConnState, NavTarget, NotifyKind, NotifyTarget, PultBridge, PultEvent } from './contract.js'
 
 const testMode = ipcRenderer.sendSync(IPC.testMode) === true
 
@@ -97,6 +97,21 @@ const bridge: PultBridge = {
   async clipboardFilePaths(): Promise<string[]> {
     const r = await ipcRenderer.invoke(IPC.clipboardPaths)
     return Array.isArray(r) ? r.filter((p): p is string => typeof p === 'string') : []
+  },
+
+  clipboardImage: {
+    // Только имя сессии (строкой): путь и байты решает main (contract.ts). Ответ чужой формы — отказ словами.
+    async save(session: string): Promise<ClipboardImageResult> {
+      const r = (await ipcRenderer.invoke(IPC.clipboardImage, typeof session === 'string' ? session : '')) as unknown
+      if (r && typeof r === 'object') {
+        const o = r as Record<string, unknown>
+        if (typeof o['path'] === 'string' && typeof o['width'] === 'number' && typeof o['height'] === 'number' && typeof o['bytes'] === 'number') {
+          return { path: o['path'], width: o['width'], height: o['height'], bytes: o['bytes'] }
+        }
+        if (typeof o['error'] === 'string') return { error: o['error'] }
+      }
+      return { error: 'картинка не сохранилась' }
+    },
   },
 
   async openExternal(url: string): Promise<void> {

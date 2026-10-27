@@ -3,11 +3,11 @@
 // «Стоп» посреди хода; закрыть окно посреди хода — ход дошёл, после открытия история на месте.
 
 import assert from 'node:assert/strict'
-import { writeFileSync } from 'node:fs'
+import { existsSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { after, before, describe, it } from 'node:test'
 import type { Page } from 'playwright-core'
-import { launch, waitFor } from './harness.js'
+import { launch, ONE_PX_PNG, sleep, waitFor } from './harness.js'
 import type { Harness } from './harness.js'
 
 type Client = Awaited<ReturnType<Harness['client']>>
@@ -96,6 +96,63 @@ describe('окно: рабочие сценарии', () => {
     })
     assert.ok(await waitFor(async () => (await box.inputValue()) === "глянь '/srv/p/Отчёт 1.txt' /tmp/b.txt", 3000), `в поле: ${await box.inputValue()}`)
     await h.app.evaluate(() => { delete (globalThis as { __pultTestClipboardPaths?: string[] }).__pultTestClipboardPaths })
+    await box.fill('')
+  })
+
+  it('⌘V картинки без файла (скриншот): PNG в PULT_HOME/attachments, путь — в поле реплики и в «первую реплику»', async () => {
+    // Системный буфер тест не трогает: картинку (байты PNG) кладёт в main, а paste несёт то, что Chromium отдаёт для
+    // битмапа, — `Files` с image.png без пути на диске.
+    await h.app.evaluate((_e, b64) => { (globalThis as { __pultTestClipboardImage?: Uint8Array }).__pultTestClipboardImage = Buffer.from(b64, 'base64') }, ONE_PX_PNG)
+    const pasteImage = async (testId: string): Promise<void> => {
+      await h.win.getByTestId(testId).evaluate((el) => {
+        const dt = new DataTransfer()
+        dt.items.add(new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], 'image.png', { type: 'image/png' }))
+        el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }))
+      })
+    }
+    const attachments = path.join(h.home, 'attachments')
+    const escRe = (x: string): string => x.replace(/[.*+?^$|()[\]{}\\]/g, '\\$&')
+    const re = (session: string): RegExp => new RegExp(`^глянь ${escRe(path.join(attachments, session))}/\\d{4}-\\d{2}-\\d{2}/paste-\\d{6}-[0-9a-f]{6}\\.png$`)
+    try {
+      const box = h.win.getByTestId('composer')
+      await box.fill('глянь ')
+      await pasteImage('composer')
+      // Поле разговора сессии alpha — папка attachments/alpha (своя у сессии: --add-dir claude только на неё).
+      assert.ok(await waitFor(async () => re('alpha').test(await box.inputValue()), 5000), `в поле: ${await box.inputValue()}`)
+      const p1 = (await box.inputValue()).slice('глянь '.length)
+      assert.ok(existsSync(p1), `файла нет: ${p1}`)
+      assert.equal(statSync(p1).mode & 0o777, 0o600)
+      await box.fill('')
+
+      await h.win.keyboard.press('Meta+N')
+      const dlg = h.win.getByTestId('new-agent-dialog')
+      await dlg.waitFor({ timeout: 5000 })
+      const prompt = dlg.getByTestId('new-agent-prompt')
+      // Без имени — отказ словами: папку картинке даёт имя будущей сессии.
+      await dlg.getByTestId('new-agent-name').fill('')
+      await sleep(1100)
+      await prompt.fill('глянь ')
+      await pasteImage('new-agent-prompt')
+      assert.ok(await waitFor(async () => /сессия/.test((await dlg.getByTestId('new-agent-paste-notice').textContent({ timeout: 500 }).catch(() => null)) ?? ''), 5000), 'нет заметки «нужно имя»')
+      assert.equal(await prompt.inputValue(), 'глянь ')
+      await dlg.getByTestId('new-agent-name').fill('pic')
+      await sleep(1100)
+      await pasteImage('new-agent-prompt')
+      assert.ok(await waitFor(async () => re('pic').test(await prompt.inputValue()), 5000), `в «первой реплике»: ${await prompt.inputValue()}`)
+      const p2 = (await prompt.inputValue()).slice('глянь '.length)
+      assert.ok(existsSync(p2) && p2 !== p1, `второй файл: ${p2}`)
+      await h.win.keyboard.press('Escape')
+      await dlg.waitFor({ state: 'detached', timeout: 5000 })
+    } finally {
+      await h.app.evaluate(() => { delete (globalThis as { __pultTestClipboardImage?: Uint8Array }).__pultTestClipboardImage })
+    }
+    // Буфер без картинки: отказ словами под полем, поле не тронуто.
+    await sleep(1100)
+    const box = h.win.getByTestId('composer')
+    await box.fill('abc')
+    await pasteImage('composer')
+    assert.ok(await waitFor(async () => ((await h.win.getByTestId('paste-notice').textContent({ timeout: 500 }).catch(() => null)) ?? '').includes('нет картинки'), 5000), 'нет заметки об отказе')
+    assert.equal(await box.inputValue(), 'abc')
     await box.fill('')
   })
 

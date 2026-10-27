@@ -346,7 +346,7 @@ export function NewAgentDialog({ taken, pickFolder, onCreate, onClose, catalog, 
     applyFolder(dir)
   }
   // Файлы в «первую реплику» — пути, как в поле ввода разговора; папка на остальную форму — папка сессии.
-  const prompt = useFilePaths({ source: filePaths, box: promptBox, text: form.prompt, setText: (v) => setForm((f) => ({ ...f, prompt: v })) })
+  const prompt = useFilePaths({ source: filePaths, box: promptBox, text: form.prompt, setText: (v) => setForm((f) => ({ ...f, prompt: v })), session: form.name })
   const [folderOver, setFolderOver] = useState(false)
   const [dropHint, setDropHint] = useState<string | null>(null)
   const inPrompt = (e: DragEvent<HTMLElement>): boolean => !!promptBox.current?.contains(e.target as Node)
@@ -497,6 +497,7 @@ export function NewAgentDialog({ taken, pickFolder, onCreate, onClose, catalog, 
             className={prompt.over ? 'drop' : undefined} data-drop={prompt.over ? '1' : undefined}
             onChange={(e) => setForm({ ...form, prompt: e.target.value })}
             onPaste={prompt.onPaste} onDragEnter={prompt.onDragEnter} onDragOver={prompt.onDragOver} onDragLeave={prompt.onDragLeave} onDrop={prompt.onDrop} />
+          {prompt.notice && <span className="note" role="status" data-testid="new-agent-paste-notice">{prompt.notice}</span>}
           {prefill && form.prompt && (() => {
             const st = promptStats(form.prompt)
             return <span className="note" data-testid="new-agent-prompt-stats">{`${st.lines} ${plural(st.lines, 'строка', 'строки', 'строк')} · ${st.chars} ${plural(st.chars, 'знак', 'знака', 'знаков')}`}</span>

@@ -61,6 +61,12 @@ export interface PultPaths {
   readonly apps: string
   /** `app-update.json` — версии окна, не вставшие на этой машине (bad), и последняя попытка обновить окно. */
   readonly appUpdateState: string
+  /**
+   * `attachments/<ГГГГ-ММ-ДД>/paste-*.png` — картинки, вставленные из буфера в окне (окно 0.1.16, shell/src/clipboardImage.ts).
+   * Пишет окно, читают агенты (Claude — через `--add-dir`), старше 30 дней удаляет демон (src/core/attachments.ts).
+   * НЕ внутри `run/`: та закрыта агентам правилами deny (0.3.7).
+   */
+  readonly attachments: string
 }
 
 /**
@@ -114,6 +120,7 @@ export function layout(home: string): PultPaths {
     newSessionLast: join(home, 'new-session-last.json'),
     apps: join(home, 'apps'),
     appUpdateState: join(home, 'app-update.json'),
+    attachments: join(home, 'attachments'),
   }
 }
 

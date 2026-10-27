@@ -879,7 +879,7 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
     })
   }
   // ⌘V на файлах из Finder и перетаскивание кладут в поле пути (model/filePathsInput.ts).
-  const { onPaste, onDragOver, onDrop } = useFilePaths({ source: filePaths, box: ta, text, setText })
+  const { onPaste, onDragOver, onDrop, notice: pasteNotice } = useFilePaths({ source: filePaths, box: ta, text, setText, session: agentName })
   const onKey = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
     if (e.nativeEvent.isComposing || e.key !== 'Enter' || e.shiftKey || e.altKey) return
     const cmd = IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey
@@ -919,6 +919,8 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
       </div>
       {/* Подсказки клавиш — в справке «?» под полем (⌘/); здесь остаётся только ошибка отправки. */}
       {error && <div className="hint"><span className="err" role="alert" data-testid="send-error">{error}</span></div>}
+      {/* Картинка из буфера не сохранилась или окно старое — словами под полем (model/filePathsInput.ts). */}
+      {pasteNotice && <div className="hint"><span className="paste-notice" role="status" data-testid="paste-notice">{pasteNotice}</span></div>}
     </div>
   )
 }

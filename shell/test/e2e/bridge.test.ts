@@ -4,9 +4,11 @@
 // ни одно не пришло дважды.
 
 import assert from 'node:assert/strict'
+import { existsSync, readFileSync, statSync } from 'node:fs'
+import path from 'node:path'
 import { after, before, describe, it } from 'node:test'
 import type { DaemonStatus } from '../../src/contract.js'
-import { launch, sleep, waitFor } from './harness.js'
+import { launch, ONE_PX_PNG, sleep, waitFor } from './harness.js'
 import type { Harness } from './harness.js'
 
 type Debug = { ids: number[]; conn: Array<{ state: string; at: number }>; boot: number | null }
@@ -44,9 +46,41 @@ describe('окно: мост, подписка, переподключение',
     assert.equal(probe.process, 'undefined')
     assert.equal(probe.version, 1)
     assert.deepEqual(probe.bridgeKeys, [
-      'call', 'clipboardFilePaths', 'copyText', 'listFiles', 'notify', 'onConnection', 'onNavigate', 'openExternal', 'openFile', 'openImage', 'pathsForFiles', 'pickFolder', 'previewFile', 'readImage', 'revealPath', 'saveImage',
+      'call', 'clipboardFilePaths', 'clipboardImage', 'copyText', 'listFiles', 'notify', 'onConnection', 'onNavigate', 'openExternal', 'openFile', 'openImage', 'pathsForFiles', 'pickFolder', 'previewFile', 'readImage', 'revealPath', 'saveImage',
       'startDaemon', 'stopDaemon', 'subscribe', 'testMode', 'version',
     ])
+  })
+
+  it('окно 0.1.16: clipboardImage.save(сессия) пишет только под PULT_HOME/attachments/<сессия> — путь и байты окна мимо', async () => {
+    const png = Buffer.from(ONE_PX_PNG, 'base64')
+    const save = async (...args: unknown[]): Promise<unknown> =>
+      h.win.evaluate(async (a) => (window.pult!.clipboardImage!.save as unknown as (...x: unknown[]) => Promise<unknown>)(...a), args)
+    await h.app.evaluate((_e, b64) => { (globalThis as { __pultTestClipboardImage?: Uint8Array }).__pultTestClipboardImage = Buffer.from(b64, 'base64') }, ONE_PX_PNG)
+    try {
+      const evil = path.join(h.home, 'evil.png')
+      // Лишние аргументы из окна (путь, байты) — мимо: preload передаёт только имя сессии, main — только его и читает.
+      const r = await save('w', evil, 'AAAA')
+      const saved = r as { path: string; width: number; height: number; bytes: number }
+      assert.equal(typeof saved.path, 'string', JSON.stringify(r))
+      assert.equal(path.dirname(path.dirname(saved.path)), path.join(h.home, 'attachments', 'w'))
+      assert.match(path.basename(saved.path), /^paste-\d{6}-[0-9a-f]{6}\.png$/)
+      assert.deepEqual([saved.width, saved.height], [1, 1])
+      assert.equal(statSync(saved.path).mode & 0o777, 0o600)
+      assert.equal(statSync(path.dirname(saved.path)).mode & 0o777, 0o700)
+      assert.deepEqual(readFileSync(saved.path).subarray(0, 8), png.subarray(0, 8), 'PNG-подпись')
+      assert.equal(existsSync(evil), false)
+      // Сразу вторая — отказ частоты; через секунду — имя сессии с выходом из папки — отказ, файла снаружи нет.
+      assert.deepEqual(await save('w'), { error: 'не чаще одной картинки в секунду' })
+      await sleep(1100)
+      const out = await save('../../evil') as { error?: string }
+      assert.match(String(out.error), /сессия/)
+      assert.equal(existsSync(path.join(h.home, 'evil')), false)
+    } finally {
+      await h.app.evaluate(() => { delete (globalThis as { __pultTestClipboardImage?: Uint8Array }).__pultTestClipboardImage })
+    }
+    // Буфер без картинки — отказ словами, файла нет.
+    await sleep(1100)
+    assert.deepEqual(await save('w'), { error: 'в буфере нет картинки' })
   })
 
   it('мост отвергает методы вне белого списка, не доходя до демона', async () => {
