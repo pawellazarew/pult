@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { after, it } from 'node:test'
@@ -17,6 +17,10 @@ it('локальный PDF с пробелами и кириллицей отк�
   const shortcut = path.join(root, 'looks-like.pdf')
   symlinkSync(path.join(root, 'run.command'), shortcut)
   assert.equal(localFile(shortcut).action, 'reveal')
+  const executable = path.join(root, 'executable.pdf')
+  writeFileSync(executable, '#!/bin/sh\n')
+  chmodSync(executable, 0o755)
+  assert.equal(localFile(executable).action, 'reveal')
 })
 
 it('отсутствующие файлы, папки, приложения, URI и управляющие символы отвергаются', () => {
