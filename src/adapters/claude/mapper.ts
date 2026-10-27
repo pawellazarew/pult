@@ -19,6 +19,7 @@
 // туда попасть.
 
 import { stripBlobs } from '../../core/blobs.js'
+import type { ImageCapture } from '../../core/images.js'
 import type { EventDraft } from '../../core/events.js'
 import { redact, redactString } from '../../core/log.js'
 import type { LiveSignal } from '../../sessions/phaseTracker.js'
@@ -104,6 +105,7 @@ export interface MapOutput {
 }
 
 export interface MapperOptions {
+  images?: ImageCapture
   /** Имя сессии Пульта — оно же `sessionId` конверта события. */
   sessionId: string
   /** Сколько подряд `api_retry` считаем штормом. Потолок из DELTA v0.5 §1 — три. */
@@ -376,11 +378,12 @@ export function createClaudeMapper(opts: MapperOptions): ClaudeMapper {
           const id = str(b['tool_use_id'])
           if (id === null) continue
           const isError = b['is_error'] === true
+          const images = opts.images?.capture(b['content']) ?? []
           out.drafts.push({
             ...base,
             kind: agentIds.has(id) ? 'agent.finished' : 'tool.finished',
-            // Скриншоты (браузер агента, О3) — заглушкой: base64 в журнале рвал бы строку окна (core/blobs.ts).
-            data: { toolUseId: id, isError, content: redact(stripBlobs(b['content'])) },
+            // Base64 заменяется заглушкой, сохранённые изображения передаются отдельными небольшими ссылками.
+            data: { toolUseId: id, isError, content: redact(stripBlobs(b['content'])), ...(images.length ? { images } : {}) },
           })
         }
         return out

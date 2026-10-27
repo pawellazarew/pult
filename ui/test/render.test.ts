@@ -119,7 +119,7 @@ const tree = (agents: AgentView[], projects: string[] = []) => ({
 })
 
 describe('дерево проектов: сколько запросов ждёт — словами, в чипе', () => {
-  it('проект — строка с папкой и «+», под ней его сессии; папка сессии в корне проекта не повторяется', () => {
+  it('проект доступен в управлении, беседы — в одном списке с подписью проекта', () => {
     const out = html(ProjectTree, tree([agent({ cwd: '/srv/w/app' }), agent({ name: 'sub', cwd: '/srv/w/app/pkg' })], ['/srv/w/app']))
     assert.match(out, /data-project="\/srv\/w\/app" data-pinned="1"/)
     assert.match(out, /class="proj-name">app</)
@@ -127,12 +127,16 @@ describe('дерево проектов: сколько запросов ждё�
     assert.match(out, /data-testid="project-menu"/)
     assert.doesNotMatch(out, /project-unpin|project-pin/, 'закрепить/убрать — в меню «⋯», а не значками на строке')
     assert.match(out, /data-testid="row-menu"/)
-    assert.equal((out.match(/class="path"/g) ?? []).length, 1, 'путь показан только у сессии в подпапке')
+    assert.equal((out.match(/class="chat-project"/g) ?? []).length, 2, 'проект — подпись обеих бесед')
+    assert.equal((out.match(/data-testid="agent-row"/g) ?? []).length, 2, 'управление проектами не дублирует беседы')
+    assert.match(out, /data-testid="chats-recent"/)
+    assert.match(out, /data-testid="project-manager"/)
+    assert.match(out, /data-testid="chat-filter"/)
   })
 
-  it('«ждёт тебя · 2» вместо загадочного «2?»', () => {
+  it('«Ждёт ответа · 2» вместо загадочного «2?»', () => {
     const out = text(html(ProjectTree, tree([agent({ pending: 2 })])))
-    assert.match(out, /ждёт тебя · 2/)
+    assert.match(out, /Ждёт ответа · 2/)
     assert.doesNotMatch(out, /2\?/)
   })
 })
@@ -181,10 +185,13 @@ describe('шапка', () => {
     assert.doesNotMatch(up, /hdr-stale/)
   })
 
-  it('статус провайдера — в строке с его именем, а не вторым рядом под шкалами (шапка 50 px)', () => {
+  it('технические статусы доступны по требованию в компактной шапке', () => {
     const up = html(Header, { ...base, conn: { state: 'up', daemon: { version: '0.1.0', pid: 1, startedAt: 'x' } },
       providers: { checkedAt: 'x', claude: { provider: 'claude', state: 'ready', detail: 'Вход выполнен · готов', models: [] },
         codex: { provider: 'codex', state: 'login_required', detail: 'Нужен вход', fixCmd: 'codex login', models: [] } } })
+    assert.match(up, /<details class="health-menu" data-testid="health-menu"><summary/)
+    assert.doesNotMatch(up, /<details[^>]* open/)
+    assert.match(up, /Подключено/)
     assert.match(up, /<div class="cell-top"><span class="lbl who-claude">claude<\/span><button[^>]*class="pstat t-ok"[^>]*>.*?готов<\/button><\/div>/)
     assert.match(up, /class="pstat t-wait"[^>]*title="Нужен вход — починить: codex login/)
     assert.doesNotMatch(up, /Вход выполнен · готов<\/button>/)
@@ -298,11 +305,11 @@ describe('контекстное окно сессии', () => {
     assert.match(out, /data-tone="queued"/)
   })
 
-  it('строка дерева: доля только от половины окна; вкладка — в подсказке всегда', () => {
+  it('строка списка: контекст виден от 80%; старая модель вкладок сохраняет подсказку', () => {
     const calm = html(ProjectTree, tree([agent({ context: ctx(48_000, 200_000) })]))
     assert.doesNotMatch(calm, /row-context/, 'строка не шумит, пока окно свободно')
-    const full = html(ProjectTree, tree([agent({ context: ctx(150_000, 200_000) })]))
-    assert.match(full, /<span class="ctx t-wait"[^>]*data-testid="row-context"[^>]*>ctx 75%<\/span>/)
+    const full = html(ProjectTree, tree([agent({ context: ctx(170_000, 200_000) })]))
+    assert.match(full, /<span class="ctx t-wait"[^>]*data-testid="row-context"[^>]*>ctx 85%<\/span>/)
     const tabs = html(SessionTabs, { tabs: [agent({ context: ctx(48_000, 200_000) })], active: 'fix-limits', onSelect: noop, onClose: noop })
     assert.match(tabs, /title="fix-limits · [^"]*1 · контекст 24%"/)
     const bare = html(SessionTabs, { tabs: [agent()], active: 'fix-limits', onSelect: noop, onClose: noop })

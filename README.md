@@ -7,7 +7,7 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/hero-dark.png">
   <source media="(prefers-color-scheme: light)" srcset="docs/images/hero-light.png">
-  <img alt="The Pult window: projects with their sessions on the left (two of them waiting for you), a Claude conversation in the middle with the tool calls it made, subscription limits for Claude and Codex at the top" src="docs/images/hero-light.png" width="100%">
+  <img alt="The Pult window: conversations grouped by attention on the left, a Claude conversation in the middle and collapsed tool activity" src="docs/images/hero-light.png" width="100%">
 </picture>
 
 > [!NOTE]
@@ -155,6 +155,16 @@ whole conversation. Closing the window does not stop the agent. While a turn run
 it is doing right now, with a seconds counter — starting, thinking, writing, running `Bash npm test`, or waiting for
 you (with a link to the Inbox card); reasoning text, when the provider streams it, sits under a collapsed
 "Размышления". The line is never written to the event journal.
+
+The sidebar groups conversations into waiting, working and recent, with search by title, project or provider.
+⌘1…9 selects the first nine conversations in the visible list. Technical connection details are under the
+connection indicator; subscription usage remains available beside the conversation.
+
+Local PNG, JPEG, GIF and WebP references appear as previews. Click to zoom, save a copy or open the file.
+New MCP screenshots and Codex image-generation results are stored separately from the journal and survive
+restarts. Images are limited to 20 MB and read only from the project, Codex generation folder or this session's
+image store. Remote images stay links. Older screenshot blobs already discarded by previous versions cannot
+be recovered. Routine tool calls collapse into groups; errors, permission requests and images stay visible.
 
 More: `pult agent list`, `pult agent stop w` (stop the current turn), `pult agent rm w`, `pult usage` (your 5-hour and
 7-day subscription windows), `pult --help` for everything.

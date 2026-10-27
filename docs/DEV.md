@@ -1823,3 +1823,20 @@ Workflow — `.github/workflows/ci.yml`: нога ubuntu идёт всегда, 
 `spike/env/service/**`, `scripts/**` или `.github/**`, либо на push в `main` (минуты macOS на приватном
 репозитории Free-плана списываются 10x). e2e окна (`PULT_E2E=1`) — только на ноге macOS и только когда менялись
 `ui/`, `shell/` или `src/` (или push в `main`); на ubuntu e2e не идёт никогда.
+
+## 0.3.8: спокойный чат и изображения
+
+Видимая навигация — один список (`ui/src/model/navigation.ts`), ⌘1…9 учитывает поиск. Вкладки остаются
+внутренней совместимой историей выбора, но не рисуются. Группы инструментов (`model/activity.ts`) не включают
+ошибки, разрешения или изображения; переход из поиска раскрывает группу. Stop доступен рядом с отправкой,
+очередь — над вводом.
+
+`src/core/images.ts` сохраняет изображения отдельно в `PULT_HOME/media/<session>` по SHA-256. Адаптеры извлекают
+их до `stripBlobs`; `tool.finished.data.images` содержит небольшие ссылки и сохраняется в лёгкой истории.
+Оболочка получает cwd по `agent.list`, проверяет realpath, размер и сигнатуру, возвращает data URL через
+optional `readImage` bridge. Renderer не получает файловый API и не ходит в сеть; CSP не менялась.
+SVG не поддерживается. Изображения загружаются при приближении к области просмотра.
+
+Проверки: `test/images.test.ts`, `ui/test/activity.test.ts`, `ui/test/navigation.test.ts`,
+`shell/test/e2e/images.test.ts` (галерея, zoom, Esc, недоступный файл, повторное открытие) и
+`shell/test/e2e/navigation.test.ts` (60 бесед, поиск, узкое окно).

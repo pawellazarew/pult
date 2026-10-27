@@ -243,12 +243,15 @@ describe('кадры README', () => {
     await until('release-notes', 'idle')
 
     // Статус провайдеров в шапке — после настройки фальшивого codex (его список моделей читается при проверке).
+    await h.win.getByTestId('health-menu').locator('summary').click()
     for (const p of ['claude', 'codex'] as const) {
       const btn = h.win.getByTestId(`provider-status-${p}`)
       if (await btn.isEnabled()) await btn.click()
     }
     assert.ok(await waitFor(async () => /готов/.test((await h.win.getByTestId('provider-status-codex').textContent()) ?? '')
       && /готов/.test((await h.win.getByTestId('provider-status-claude').textContent()) ?? ''), 20_000), 'провайдеры не «готов»')
+
+    await h.win.getByTestId('health-menu').locator('summary').click()
 
     // Лимиты — последним событием: записи несут прошедшие даты сброса, окно показало бы «—».
     const now = Math.floor(Date.now() / 1000)

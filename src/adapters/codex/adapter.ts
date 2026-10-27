@@ -35,6 +35,7 @@
 //     правило сети) — M8d, решение владельца 19.10.2026: ТОЛЬКО по явной кнопке человека и только когда
 //     сервер их на этот запрос предложил; ⌘Enter и голое `perm approve` — всегда один раз.
 
+import { createImageCapture } from '../../core/images.js'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import type { PultConfig } from '../../core/config.js'
@@ -1754,6 +1755,7 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
         confirmed: false,
         mapper: createCodexMapper({
           sessionId: spec.name,
+          images: createImageCapture({ home: opts.paths.home, sessionId: spec.name, cwd: spec.cwd, codexHome: process.env['CODEX_HOME'] }),
           model: spec.model ?? null,
           onUnknown: (what) => logger.warn('незнакомое событие codex — пропущено', { session: spec.name, what }),
         }),
@@ -1840,6 +1842,7 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
         confirmed: threadId !== null,
         mapper: createCodexMapper({
           sessionId: name,
+          images: createImageCapture({ home: opts.paths.home, sessionId: name, cwd: rec.cwd, codexHome: process.env['CODEX_HOME'] }),
           model: rec.model ?? null,
           onUnknown: (what) => logger.warn('незнакомое событие codex — пропущено', { session: name, what }),
         }),

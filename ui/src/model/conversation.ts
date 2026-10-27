@@ -52,6 +52,7 @@ export interface ToolItem extends Base {
   endTs?: string
   exitCode?: number
   /** Номер `tool.finished`: по нему раскрытая строка догружает вывод (`events.get`). */
+  images?: string[]
   endId?: number
   /** Из лёгкой истории (src/core/history.ts): вход урезан и/или вывода нет — полное по `events.get`. */
   elided?: boolean
@@ -293,12 +294,14 @@ export function applyConversation(conv: Conversation, ev: PultEvent): Conversati
       const isError = d['isError'] === true
       const result = resultText(d['content'])
       const exitCode = num(d['exitCode'])
+      const images = Array.isArray(d['images']) ? d['images'].filter((x): x is string => typeof x === 'string') : []
       const where = toolUseId ? locate(conv.items, (it) => it.type === 'tool' && it.toolUseId === toolUseId) : null
       const patch = {
         state: (isError ? 'error' : 'ok') as ItemState,
         endTs: ev.ts,
         endId: ev.id,
         ...(result !== undefined ? { result } : {}),
+        ...(images.length ? { images } : {}),
         ...(exitCode !== undefined ? { exitCode } : {}),
         ...(d['elided'] === true ? { elided: true } : {}),
       }

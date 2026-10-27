@@ -91,6 +91,18 @@ const bridge: PultBridge = {
     await ipcRenderer.invoke(IPC.openExternal, url)
   },
 
+  async readImage(sessionId: string, source: string): Promise<{ dataUrl: string; name: string }> {
+    return unwrap(await ipcRenderer.invoke(IPC.readImage, sessionId, source) as CallReply) as { dataUrl: string; name: string }
+  },
+
+  async saveImage(sessionId: string, source: string): Promise<boolean> {
+    return unwrap(await ipcRenderer.invoke(IPC.saveImage, sessionId, source) as CallReply) === true
+  },
+
+  async openImage(sessionId: string, source: string): Promise<void> {
+    unwrap(await ipcRenderer.invoke(IPC.openImage, sessionId, source) as CallReply)
+  },
+
   pathsForFiles(files: File[]): string[] {
     // Путь знает только preload: с Electron 32 у File нет поля `path`.
     return Array.from(files ?? []).flatMap((f) => { try { const p = webUtils.getPathForFile(f); return p ? [p] : [] } catch { return [] } })

@@ -20,6 +20,9 @@ import { useFilePaths } from './useFilePaths.js'
 import type { FilePathSource } from '../model/paths.js'
 import { APPROVAL_FULL_WARNING, approvalFooter, approvalHint } from '../model/newAgent.js'
 import { Chip, CMD, hhmm, Icon, IS_MAC, Kbd, ProviderTag } from './common.js'
+import { ImageContext, ImageGallery } from './Images.js'
+import { plural } from '../lib/ru.js'
+import { friendlyTool, groupActivity } from '../model/activity.js'
 import { ContextMenu } from './ContextMenu.js'
 import type { MenuEntry } from './ContextMenu.js'
 import { settingsMenu } from '../model/sessionSettings.js'
@@ -120,6 +123,7 @@ const flashTimers = new WeakMap<Element, number>()
 
 export function Conversation(p: ConversationProps): ReactElement {
   const { agent } = p
+  const imageBridge = useContext(MdBridgeContext)
   const sv = statusView(agent.status)
   const feed = useRef<HTMLDivElement>(null)
   const qe = useQueueEdit(p.onQueueEdit)
@@ -149,6 +153,9 @@ export function Conversation(p: ConversationProps): ReactElement {
     const box = feed.current
     const el = box?.querySelector<HTMLElement>(`[data-event-id="${itemId}"]`)
     if (!box || !el) return false
+    for (let parent = el.parentElement; parent && parent !== box; parent = parent.parentElement) {
+      if (parent instanceof HTMLDetailsElement) parent.open = true
+    }
     stick.current = false
     box.scrollTop = Math.max(0, block === 'start' ? topIn(el, box) - 8 : topIn(el, box) - (box.clientHeight - el.offsetHeight) / 2)
     // Повторная подсветка того же элемента: прежний таймер снятия не должен погасить новую раньше срока.
@@ -193,24 +200,23 @@ export function Conversation(p: ConversationProps): ReactElement {
   const holds = limitHolds(agent.status, resetsAt, p.now)
 
   return (
+    <ImageContext.Provider value={imageBridge ? { bridge: imageBridge, sessionId: agent.name } : null}>
     <section className="conv" aria-label={`Разговор с ${agentLabel(agent)}`} data-testid="conversation" data-agent={agent.name}>
       <header className="conv-head">
         <div className="conv-title">
           <div className="top">
             <Title agent={agent} onRename={p.onRename} />
             <ProviderTag provider={agent.provider} />
-            <Chip tone={sv.tone} label={sv.label} testId="conv-status" />
+            <Chip tone={sv.tone} label={agent.status === 'cold' ? 'Можно продолжить' : sv.label} testId="conv-status" />
           </div>
         </div>
-        {sv.busy && (
-          <button type="button" className="btn btn-danger" onClick={p.onStop} data-testid="stop-turn" title="Остановить ход">
-            <Icon name="stop" />Стоп<Kbd>Esc</Kbd>
-          </button>
-        )}
         {!sv.busy && (
-          <button type="button" className="btn btn-ghost btn-sm" onClick={p.onRemove} data-testid="remove-agent" title="Удалить сессию">
-            <Icon name="trash" />удалить
-          </button>
+          <details className="conv-actions">
+            <summary aria-label="Действия с беседой">···</summary>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={p.onRemove} data-testid="remove-agent" title="Удалить сессию">
+              <Icon name="trash" />Удалить беседу
+            </button>
+          </details>
         )}
       </header>
 
@@ -225,7 +231,7 @@ export function Conversation(p: ConversationProps): ReactElement {
 
       <div className="feed-wrap">
       {marks.length > 0 && <UserRail marks={marks} items={p.items} feed={feed} onJump={(id) => reveal(id, 'start')} />}
-      <div className="feed" ref={feed} onScroll={onScroll} data-testid="feed">
+      <div className="feed" ref={feed} onScroll={onScroll} onLoadCapture={() => { const el = feed.current; if (el && stick.current) el.scrollTop = el.scrollHeight }} data-testid="feed">
         {p.items.length === 0 && !p.pending && p.historyLoading ? (
           <div className="conv-empty" data-testid="history-loading">
             <h3>Загружаю историю…</h3>
@@ -242,7 +248,7 @@ export function Conversation(p: ConversationProps): ReactElement {
                 {p.earlier.loading ? 'Загружаю…' : 'Показать раньше'}
               </button>
             )}
-            {p.items.map((it) => <Item key={it.key} it={it} {...p} />)}
+            <ActivityItems items={p.items} props={p} />
             {p.pending && (
               // M8e: реплика в пути. Тот же вид, что у реплики человека, но бледнее и без «копировать»;
               // настоящая придёт событием `message.user` и встанет на это место.
@@ -260,16 +266,17 @@ export function Conversation(p: ConversationProps): ReactElement {
       </div>
       </div>
 
-      <Composer busy={sv.busy} needsYou={sv.needsYou} permFocused={p.focusedPerm !== null} link={p.link ?? 'up'} disabled={holds} sending={p.sending} error={p.sendError} onSend={p.onSend} agentName={agent.name} label={agentLabel(agent)} filePaths={p.filePaths ?? null}
-        queueable={!!p.onQueueRemove} inject={qe.inject} />
       {p.onQueueRemove && (agent.queue?.length || agent.queuePaused || qe.edit || qe.notice) ? (
         <QueueList queue={agent.queue ?? []} paused={agent.queuePaused === true} onRemove={p.onQueueRemove}
           onMove={p.onQueueMove ?? (() => {})} onResume={p.onQueueResume ?? (() => {})}
           {...(p.onQueueEdit ? { edit: qe.view } : {})} notice={qe.notice} />
       ) : null}
+      <Composer busy={sv.busy} needsYou={sv.needsYou} permFocused={p.focusedPerm !== null} link={p.link ?? 'up'} disabled={holds} sending={p.sending} error={p.sendError} onSend={p.onSend} agentName={agent.name} label={agentLabel(agent)} filePaths={p.filePaths ?? null}
+        onStop={p.onStop} queueable={!!p.onQueueRemove} inject={qe.inject} />
       <ChatFooter agent={agent} usage={p.usage} now={p.now} onReveal={p.onReveal} {...(p.onHelp ? { onHelp: p.onHelp } : {})}
         {...(p.onConfigure ? { onConfigure: p.onConfigure } : {})} catalog={p.catalog ?? null} windows={p.windows ?? EMPTY_WINDOWS} />
     </section>
+    </ImageContext.Provider>
   )
 }
 
@@ -505,6 +512,17 @@ export function MsgCopy({ text, what }: { text: string; what: string }): ReactEl
   )
 }
 
+function ActivityItems({ items, props }: { items: readonly ConvItem[]; props: ConversationProps }): ReactElement {
+  return <>{groupActivity(items).map((entry) => {
+    if (entry.type === 'item') return <Item key={entry.item.key} it={entry.item} {...props} />
+    const running = entry.items.findLast((it) => it.state === 'running')
+    return <details className="activity-group" key={entry.key} data-testid="activity-group">
+      <summary>{entry.items.length} {plural(entry.items.length, 'действие', 'действия', 'действий')}<span className="activity-live">{running ? `· ${friendlyTool(running.name)} ${toolSummary(running.name, running.input)}` : '· выполнено'}</span></summary>
+      {entry.items.map((it) => <Item key={it.key} it={it} {...props} />)}
+    </details>
+  })}</>
+}
+
 function Item({ it, ...p }: { it: ConvItem } & ConversationProps): ReactElement | null {
   const prov = p.agent.provider
   const src = messageSource(it)
@@ -557,7 +575,8 @@ function StateMark({ state }: { state: ItemState }): ReactElement {
 type ToolDetail = { input: Record<string, unknown>; result?: string } | 'loading' | 'error'
 
 function ToolRow({ it, loadEvents }: { it: ToolItem; loadEvents?: (ids: number[]) => Promise<PultEvent[]> }): ReactElement {
-  const [open, setOpen] = useState(false)
+  const [open, setOpen] = useState(it.state === 'error')
+  useEffect(() => { if (it.state === 'error') setOpen(true) }, [it.state])
   const [detail, setDetail] = useState<ToolDetail | null>(null)
   useEffect(() => {
     if (!open || !it.elided || detail !== null || !loadEvents) return
@@ -590,7 +609,7 @@ function ToolRow({ it, loadEvents }: { it: ToolItem; loadEvents?: (ids: number[]
       <div className="body">
         <button type="button" className="tool-row" aria-expanded={open} onClick={() => setOpen(!open)}>
           <Icon name="chev" className="chev" />
-          <span className="nm">{it.name}</span>
+          <span className="nm" title={it.name}>{friendlyTool(it.name)}</span>
           <span className="sum">{sum}</span>
           <span className={`st t-${stateTone(it.state)}`}>
             <StateMark state={it.state} />
@@ -598,6 +617,7 @@ function ToolRow({ it, loadEvents }: { it: ToolItem; loadEvents?: (ids: number[]
             {it.exitCode !== undefined ? ` код ${it.exitCode}` : ''}
           </span>
         </button>
+        <ImageGallery sources={it.images ?? []} />
         {open && (
           <div className="tool-detail">
             <div className="k">вход</div>
@@ -625,7 +645,7 @@ function SubAgent({ it, ...p }: { it: AgentItem } & ConversationProps): ReactEle
         </div>
         {it.items.length > 0 && (
           <div className="sub-body">
-            {it.items.map((c) => <Item key={c.key} it={c} {...p} />)}
+            <ActivityItems items={it.items} props={p} />
           </div>
         )}
       </div>
@@ -753,13 +773,14 @@ const draftStore: DraftStore = {
   set(k, v) { try { window.localStorage.setItem(k, v) } catch { /* хранилище недоступно */ } },
 }
 
-function Composer({ busy, needsYou, permFocused, link, disabled, sending, error, onSend, agentName, label, filePaths, queueable, inject }: {
+function Composer({ busy, needsYou, permFocused, link, disabled, sending, error, onSend, onStop, agentName, label, filePaths, queueable, inject }: {
   /** В Inbox есть выделенный запрос (любой сессии): ⌘Enter — его «разрешить», а не «прервать и сказать». */
   permFocused: boolean
   busy: boolean; needsYou: boolean; link: ConnState['state']; disabled: boolean; sending: boolean; error: string | null
   /** `agentName` — ключ (смена агента возвращает фокус в поле), `label` — как агент подписан. */
   agentName: string; label: string
   onSend(text: string, mode?: SendMode): Promise<boolean>
+  onStop(): void
   filePaths: FilePathSource | null
   /** Демон знает очередь (О2): во время хода поле не заперто — Enter ставит в очередь, ⌘Enter прерывает. */
   queueable: boolean
@@ -805,7 +826,7 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
     const el = ta.current
     if (!el) return
     el.style.height = 'auto'
-    el.style.height = `${Math.min(180, el.scrollHeight + 2)}px`
+    el.style.height = `${Math.max(84, Math.min(240, el.scrollHeight + 2))}px`
   }, [text])
   // Сессию открыла ссылка pult:// — фокус в поле не ставим: окно всплыло само, а не по воле человека.
   useLayoutEffect(() => { if (takeAutoFocus(agentName, Date.now())) ta.current?.focus() }, [agentName])
@@ -852,10 +873,11 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
   return (
     <div className="composer">
       <div className="box">
-        <textarea ref={ta} rows={1} value={text} onChange={(e) => setText(e.target.value)} onKeyDown={onKey}
+        <textarea ref={ta} rows={3} value={text} onChange={(e) => setText(e.target.value)} onKeyDown={onKey}
           onPaste={onPaste} onDragOver={onDragOver} onDrop={onDrop}
           placeholder={placeholderFor({ link, needsYou, busy, disabled, label, queueable })}
           data-testid="composer" aria-label="Реплика в сессию" />
+        {busy && <button type="button" className="btn btn-danger composer-stop" onClick={onStop} data-testid="stop-turn" title="Остановить ход (Esc)"><Icon name="stop" />Стоп</button>}
         <button type="button" className="btn btn-primary" onClick={() => void send()} disabled={blocked || !text.trim()} data-testid="send"
           title={busy && queueable ? `Идёт ход: реплика уйдёт, когда он кончится. ${CMD}Enter — прервать и сказать` : undefined}>
           <Icon name="send" />{busy && queueable ? 'В очередь' : 'Отправить'}
@@ -936,7 +958,7 @@ function QueueEditor({ n, st, edit }: { n: number | null; st: QueueEditState; ed
     const el = ta.current
     if (!el) return
     el.style.height = 'auto'
-    el.style.height = `${Math.min(180, el.scrollHeight + 2)}px`
+    el.style.height = `${Math.max(84, Math.min(240, el.scrollHeight + 2))}px`
   }, [st.text])
   const onKey = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
     const k = queueEditKey({ key: e.key, shiftKey: e.shiftKey, altKey: e.altKey, metaKey: e.metaKey, ctrlKey: e.ctrlKey, isComposing: e.nativeEvent.isComposing })
@@ -953,7 +975,7 @@ function QueueEditor({ n, st, edit }: { n: number | null; st: QueueEditState; ed
       <span className="n mono">{n ?? '—'}</span>
       <div className="queue-edit-body">
         {/* `readOnly`, а не `disabled`, пока сохраняется: выключенное поле теряет фокус, и Esc ушёл бы в «Стоп». */}
-        <textarea ref={ta} rows={1} value={st.text} readOnly={st.saving} onChange={(e) => edit.onChange(e.target.value)} onKeyDown={onKey}
+        <textarea ref={ta} rows={3} value={st.text} readOnly={st.saving} onChange={(e) => edit.onChange(e.target.value)} onKeyDown={onKey}
           aria-label="Изменить реплику в очереди" data-testid="queue-edit-text" />
         {n === null && <div className="queue-edit-note">реплики уже нет в очереди — сохранение вернёт текст в поле ввода</div>}
         {st.error && <div className="queue-edit-err" role="alert" data-testid="queue-edit-error">{st.error}</div>}

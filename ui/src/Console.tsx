@@ -6,8 +6,7 @@ import type { ReactElement } from 'react'
 import type { ConnState, PultBridge, PultEvent } from '../../shell/src/contract.js'
 import { errorText, isBridgeError } from './bridge.js'
 import { ProjectTree } from './components/ProjectTree.js'
-import { SessionTabs } from './components/SessionTabs.js'
-import { CMD, Icon, IS_MAC } from './components/common.js'
+import { CMD, Icon, IS_MAC, Kbd } from './components/common.js'
 import { Conversation } from './components/Conversation.js'
 import type { SendMode } from './components/Conversation.js'
 import { Header } from './components/Header.js'
@@ -113,7 +112,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set(store.list('pult.collapsed')))
   const [projects, setProjects] = useState<string[]>([])
   const [loaded, setLoaded] = useState(false)
-  const [inboxOpen, setInboxOpen] = useState<boolean>(() => store.get('pult.inbox') !== '0')
+  const [inboxOpen, setInboxOpen] = useState<boolean>(() => store.get('pult.inbox') === '1')
   const [inboxFilter, setInboxFilter] = useState<InboxFilter>(() => { const f = store.get('pult.inboxFilter'); return isInboxFilter(f) ? f : 'all' })
   // M8c: плашка обновления. Скрытая крестиком версия помнится до следующей; версия окна — из user agent.
   // Скрытые крестиком «Доступна X» и «не встало» — списком: скрыть одно не должно воскрешать другое.
@@ -895,10 +894,10 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         if (conn.state === 'up') setModal({ type: 'new', cwd: currentProject })
         return
       case 'selectAgent': {
-        // ⌘1…9 — вкладки открытых сессий, слева направо.
+        // ⌘1…9 — первые видимые беседы единственного списка, с учётом поиска.
         if (modal) return
-        const t = tabViews[a.index]
-        if (t) { e.preventDefault(); select(t.name) }
+        const name = document.querySelectorAll<HTMLElement>('.chat-section [data-testid="agent-row"]')[a.index]?.dataset.agent
+        if (name) { e.preventDefault(); select(name) }
         return
       }
       case 'search':
@@ -1040,10 +1039,10 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
             onArchive={archiveSession} onRemove={(name) => setModal({ type: 'rm', name })} onExport={exportAgent}
             onReveal={(p) => void bridge.revealPath(p)} onBrowser={setBrowser} />
           <button type="button" className="btn external-open" disabled={conn.state !== 'up'} onClick={() => setModal({ type: 'external' })} data-testid="open-external-sessions"><Icon name="folder" />Существующие чаты</button>
+          <button type="button" className="btn sidebar-settings" onClick={() => setModal({ type: 'settings' })} data-testid="open-settings"><Icon name="tool" />Настройки<Kbd>{`${CMD},`}</Kbd></button>
           <div className="ag-foot mono" data-testid="event-count">журнал #{ui.lastId}</div>
         </div>
         <div className="conv-col">
-        <SessionTabs tabs={tabViews} active={current?.name ?? null} onSelect={select} onClose={closeSessionTab} />
         {current ? (
           <Conversation key={current.name} agent={current} items={withEarlier(ui, current.name)} now={now}
             historyLoading={ui.hydration[current.name] === 'loading'} loadEvents={loadEvents}
@@ -1071,9 +1070,9 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
             <div className="conv-empty" data-testid="conv-empty">
               <h3>{conn.state !== 'up' ? 'Жду демона' : agents.length ? 'Открой сессию слева' : 'Здесь будет разговор'}</h3>
               <div>{agents.length
-                ? 'Клик по сессии в дереве проектов открывает её вкладкой. «+» на строке проекта заводит новую сессию в этой папке.'
+                ? 'Выбери беседу слева. Вверху списка — агенты, которые ждут ответа, затем работающие и недавние.'
                 : 'Заведи сессию — выбери папку и провайдера, напиши, что сделать. Разрешения всех сессий собираются в Inbox справа.'}</div>
-              <div className="keys mono"><span>{CMD}N — сессия</span><span>{CMD}1…9 — вкладки</span><span>{CMD}I — Inbox</span><span>{CMD}⇧F — поиск</span><span>{CMD}/ — все клавиши</span></div>
+              <div className="keys mono"><span>{CMD}N — сессия</span><span>{CMD}1…9 — беседы</span><span>{CMD}I — Inbox</span><span>{CMD}⇧F — поиск</span><span>{CMD}/ — все клавиши</span></div>
             </div>
           </section>
         )}

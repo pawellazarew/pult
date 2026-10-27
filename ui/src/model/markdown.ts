@@ -4,7 +4,7 @@
 // http(s)://. Выход — дерево, компонент рисует его элементами React (никакого innerHTML: текст
 // модели — чужой текст). Чистые функции, без зависимостей.
 //
-// Чего нарочно нет: картинок (окну запрещена сеть, CSP), сырого HTML (кроме <br> — модели ставят
+// Изображения читает локальный мост оболочки, без сети. Чего нарочно нет: сырого HTML (кроме <br> — модели ставят
 // его в ячейки таблиц), ссылок-сносок [x][ref], кода отступом в 4 пробела. Текст идёт дельтами,
 // поэтому всё недописанное (таблица без строки-разделителя, `[текст](адр`) остаётся текстом, а
 // незакрытый блок кода — блоком кода.
@@ -25,6 +25,7 @@ export type Inline =
   | { t: 'del'; c: Inline[] }
   /** `href` — только http(s) и mailto; иная схема или относительный адрес — `null`: рисуется текстом. */
   | { t: 'link'; href: string | null; url: string; title?: string; c: Inline[] }
+  | { t: 'image'; url: string; alt: string }
   | { t: 'br' }
 
 export type Align = 'left' | 'center' | 'right' | null
@@ -238,8 +239,8 @@ function inline(s: string, o: Opts): Inline[] {
       const at = c === '!' ? i + 1 : i
       const l = scanLink(s, at)
       if (l) {
-        // Картинка ![alt](src) — ссылкой с подписью alt: картинки окно не грузит.
-        push(link(l.url, inline(l.text || l.url, { noLinks: true }), l.title))
+        // Изображение загружает только проверяющий локальные файлы мост оболочки.
+        push(c === '!' ? { t: 'image', url: l.url, alt: l.text } : link(l.url, inline(l.text || l.url, { noLinks: true }), l.title))
         i = l.end
         continue
       }

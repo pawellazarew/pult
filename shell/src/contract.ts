@@ -210,6 +210,10 @@ export interface PultBridge {
    * Необязательный: старая оболочка его не знает, интерфейс тогда копирует адрес.
    */
   openExternal?(url: string): Promise<void>
+  /** Растровое изображение только из папки сессии, кэша генерации или её media-хранилища. */
+  readImage?(sessionId: string, source: string): Promise<{ dataUrl: string; name: string }>
+  saveImage?(sessionId: string, source: string): Promise<boolean>
+  openImage?(sessionId: string, source: string): Promise<void>
 }
 
 /** Каналы IPC между preload и main. Имена в одном месте: опечатка в строке канала молчит. */
@@ -228,6 +232,9 @@ export const IPC = {
   notify: 'pult:notify',
   clipboardPaths: 'pult:clipboard-paths',
   openExternal: 'pult:open-external',
+  readImage: 'pult:read-image',
+  saveImage: 'pult:save-image',
+  openImage: 'pult:open-image',
   navigate: 'pult:navigate',
   testMode: 'pult:test-mode',
 } as const

@@ -1,13 +1,15 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import type { MouseEvent, ReactElement, ReactNode } from 'react'
-import { parseMarkdown } from '../model/markdown.js'
+import type { ImageBridge } from './Images.js'
+import { ImagePreview, isImagePath } from './Images.js'
+import { parseMarkdown, safeHref } from '../model/markdown.js'
 import type { Align, Block, Inline, ListItem } from '../model/markdown.js'
 
 /**
  * Что реплике нужно от моста: буфер обмена и внешний браузер. `openExternal` необязателен —
  * интерфейс ездит отдельно от Pult.app, и в старой оболочке его нет: тогда ссылка копируется.
  */
-export interface MdBridge {
+export interface MdBridge extends ImageBridge {
   copyText(text: string): Promise<void>
   openExternal?(url: string): Promise<void>
 }
@@ -97,7 +99,12 @@ function Inl({ parts }: { parts: Inline[] }): ReactElement {
       case 'em': return <em key={i}><Inl parts={p.c} /></em>
       case 'del': return <del key={i}><Inl parts={p.c} /></del>
       case 'br': return <br key={i} />
+      case 'image': {
+        const href = safeHref(p.url)
+        return href ? <Link key={i} href={href} url={p.url}>{p.alt || 'Открыть изображение'}</Link> : <ImagePreview key={i} source={p.url} label={p.alt} />
+      }
       case 'link':
+        if (isImagePath(p.url)) return <ImagePreview key={i} source={p.url} label={p.c.map((c) => c.t === 'text' ? c.v : '').join('') || undefined} />
         return p.href
           ? <Link key={i} href={p.href} url={p.url} {...(p.title ? { title: p.title } : {})}><Inl parts={p.c} /></Link>
           // Схема не из белого списка (javascript:, file:, путь в репозитории) — просто текст.

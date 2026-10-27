@@ -1,7 +1,5 @@
-/* Окно Пульта. Визуальный язык — страница дизайна v0.6: токены цвета, шрифты
-   Geologica / Onest / JetBrains Mono (локально в dist/ui/fonts, @font-face дописывает
-   scripts/build-ui.mjs), провайдеры и статусы, острые углы (2–3 px), волосяные линии, моно-метки
-   капсом. Тема — системная. Плотный инструмент: диспетчерская, а не лендинг. */
+/* Пульт: спокойная беседа, компактный список внимания и техническая сводка по требованию.
+   Цветовые токены и локальные шрифты общие для светлой и тёмной системной темы. */
 
 :root {
   color-scheme: light dark;
@@ -843,3 +841,96 @@ button { font: inherit; color: inherit; }
 .guard-chip button:hover, .guard-chip button:focus-visible { color: var(--fail); background: var(--fail-soft); }
 .guard-found { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px; }
 .guard-exits { display: flex; flex-direction: column; gap: 2px; font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
+
+/* Чат — главное рабочее место. Техническая сводка открывается по требованию. */
+.hdr { height: 48px; align-items: center; gap: 12px; border-bottom-color: var(--hair); }
+.hdr-brand { width: 284px; flex: none; border: 0; font-size: 17px; }
+.hdr-actions { padding-right: 16px; gap: 8px; }
+.hdr-actions .btn { border-color: transparent; border-radius: 8px; }
+.health-menu { position: relative; z-index: 30; font-size: 12px; }
+.health-summary { display: flex; align-items: center; gap: 7px; padding: 6px 10px; border-radius: 7px; cursor: pointer; list-style: none; }
+.health-summary::-webkit-details-marker { display: none; }
+.health-summary:hover { background: var(--sunk); }
+.health-summary .ic { width: 10px; height: 10px; transform: rotate(90deg); color: var(--faint); }
+.health-popover { position: absolute; top: calc(100% + 8px); left: 0; width: 340px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); box-shadow: var(--shadow); padding: 8px; }
+.health-popover .cell { border: 0; padding: 10px; min-height: 52px; }
+.health-popover .cell + .cell { border-top: 1px solid var(--hair); }
+.health-popover .meters { display: flex; gap: 20px; }
+.header-guard-alert { font-size: 12px; max-width: 230px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agents-col { background: var(--ground); border-right-color: var(--hair); }
+.sidebar-top { padding: 14px 12px 8px; display: flex; flex-direction: column; gap: 12px; }
+.new-chat { width: 100%; justify-content: flex-start; border-radius: 9px; height: 40px; padding: 0 12px; }
+.new-chat .grow { flex: 1; }
+.new-chat kbd { opacity: .85; }
+.chat-search { display: flex; align-items: center; gap: 8px; padding: 0 10px; border: 1px solid var(--hair); border-radius: 8px; background: var(--panel); min-height: 35px; color: var(--faint); }
+.chat-search:focus-within { border-color: var(--accent); }
+.chat-search input { width: 100%; min-width: 0; border: 0; background: transparent; color: var(--ink); outline: 0; font: 12px var(--body); padding: 8px 0; }
+.chat-search input::placeholder { color: var(--faint); }
+.chat-search .row-btn { opacity: 1; flex: none; }
+.chat-section { padding: 6px 8px 4px; }
+.chat-section-title { display: flex; align-items: center; gap: 8px; padding: 8px 8px 6px; margin: 0; color: var(--mut); font: 500 11px var(--body); }
+.chat-section-title > span { margin-left: auto; color: var(--faint); font-size: 10px; }
+.tree .chat-section .ag-list { padding: 0; }
+.tree .ag { margin: 2px 0; padding: 9px 9px 8px; gap: 5px 5px; border: 0; border-radius: 8px; cursor: pointer; }
+.tree .ag::before { display: none; }
+.ag-name { font: 500 12.5px var(--body); letter-spacing: 0; }
+.ag[aria-selected="true"] .ag-name { color: var(--ink); }
+.ag[data-needs="1"][aria-selected="true"] { background: var(--accent-soft); outline: 1px solid var(--accent-edge); outline-offset: -1px; }
+.ag-right { gap: 4px; }
+.chat-row-status { font: 10px var(--body); white-space: nowrap; }
+.ag-meta { gap: 6px; font: 10.5px var(--body); }
+.chat-project { min-width: 0; max-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-provider { font-size: 10px; }
+.chat-provider::before { content: '·'; margin-right: 6px; color: var(--faint); }
+.chat-action { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.ag-meta .when { font-size: 10px; }
+.tree .project-manager { margin: 12px 8px 8px; padding-top: 8px; border-top: 1px solid var(--hair); }
+.project-manager > summary { cursor: pointer; color: var(--mut); font-size: 12px; padding: 8px; }
+.project-manager > summary .count { margin-left: 8px; font-size: 10px; color: var(--faint); }
+.project-manager .proj-h { padding: 7px 8px; border-radius: 6px; font: 12px var(--body); }
+.project-manager .proj + .proj { border: 0; }
+.project-manager .proj-btn { opacity: 1; }
+.project-manager .project-add { margin: 0 0 4px 4px; font-size: 11px; }
+.project-manager .proj-h > .ic { color: var(--faint); width: 14px; height: 14px; }
+.ag-foot { display: none; }
+.external-open { border: 0; background: transparent; justify-content: flex-start; color: var(--mut); margin: 4px 12px 12px; padding: 10px; font-size: 12px; }
+.external-open:hover { background: var(--sunk); }
+.conv-head { padding: 14px 24px; border-bottom-color: var(--hair); background: var(--panel); min-height: 62px; }
+.conv-title h2 { font-size: 15px; }
+.conv-title .tag { font-size: 9px; background: transparent; }
+.feed-inner { max-width: 900px; padding: 28px 30px 32px; gap: 18px; }
+.it { grid-template-columns: 48px minmax(0, 1fr); gap: 12px; }
+.it-user .bubble { border: 0; border-radius: 12px; padding: 12px 16px; }
+.it-model .bubble { line-height: 1.65; }
+.composer { padding: 12px 24px 16px; border: 0; background: var(--ground); }
+.composer .box { max-width: 840px; border: 1px solid var(--line); border-radius: 13px; background: var(--panel); padding: 10px; box-shadow: 0 2px 12px rgba(0,0,0,.025); }
+.composer .box:focus-within { border-color: var(--accent-edge); }
+.composer textarea { border: 0; background: transparent; min-height: 72px; padding: 4px 6px; font-size: 14px; line-height: 1.5; }
+.composer textarea:focus { background: transparent; border: 0; }
+.composer .btn { border-radius: 8px; }
+.chat-status { border-top-color: var(--hair); background: var(--ground); padding: 8px 18px; font-size: 10px; }
+@media (max-width: 1200px) {
+  .grid { grid-template-columns: 260px minmax(0, 1fr); }
+  .grid.with-inbox { grid-template-columns: 240px minmax(0, 1fr) 330px; }
+  .hdr-brand { width: 260px; }
+  .feed-inner { padding: 24px 20px; }
+  .chat-status .ctx-meter .bar { width: 70px; }
+}
+@media (max-width: 1050px) {
+  .grid.with-inbox { grid-template-columns: 230px minmax(0, 1fr); }
+  .grid.with-inbox > .inbox { position: fixed; top: 48px; bottom: 0; right: 0; width: min(384px, 55vw); z-index: 20; box-shadow: var(--shadow); }
+  .doctor-label { display: none; }
+  .conv-head { padding: 12px 18px; }
+  .composer { padding: 12px 16px; }
+}
+.sidebar-settings { margin: 0 12px 12px; border: 0; border-radius: 8px; background: transparent; justify-content: flex-start; color: var(--mut); font-size: 12px; padding: 9px 10px; }
+.sidebar-settings kbd { margin-left: auto; }
+.sidebar-settings:hover { background: var(--sunk); }
+/* Короткий разговор остаётся рядом с полем ввода; длинный растёт и листается как обычно. */
+.feed-inner { min-height: 100%; justify-content: flex-end; }
+.it-user .body { border: 0; border-radius: 12px; padding: 12px 16px; background: var(--accent-soft); }
+.it-model .body { line-height: 1.65; }
+.conv-actions > summary { cursor: pointer; list-style: none; padding: 6px 10px; border-radius: 6px; }
+.conv-actions > summary::-webkit-details-marker { display: none; }
+.conv-actions > summary:hover { background: var(--sunk); }
+.chat-row-status.t-queued { color: var(--faint); }
