@@ -14,6 +14,14 @@ import {
   captureLoginEnv, parseNulEnv, readEnvCache, sanitizePathEntries, toCacheFile, writeEnvCache,
 } from '../dist/env/loginShell.js'
 import { tempHome } from './helpers.js'
+import { daemonSpawnEnv } from '../dist/cli/startOnDemand.js'
+import { layout } from '../dist/core/paths.js'
+
+it('тестовая задержка обновления доходит до демона и не проходит вне PULT_TEST=1', () => {
+  const paths = layout('/tmp/pult-env-test')
+  assert.equal(daemonSpawnEnv(paths, { PULT_TEST: '1', PULT_TEST_UPDATE_HOLD_MS: '8000' })['PULT_TEST_UPDATE_HOLD_MS'], '8000')
+  assert.equal(daemonSpawnEnv(paths, { PULT_TEST_UPDATE_HOLD_MS: '8000' })['PULT_TEST_UPDATE_HOLD_MS'], undefined)
+})
 
 /**
  * Пульс событийного цикла: самый длинный промежуток между тиками таймера, пока идёт `fn`.
