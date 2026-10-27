@@ -262,7 +262,13 @@ button { font: inherit; color: inherit; }
 .proj-unread::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 
 /* --- проекты: дерево «папка → её сессии» ------------------------------------------ */
-.tree { overflow: auto; flex: 1; min-height: 0; padding-bottom: 6px; }
+.tree { display: flex; flex-direction: column; overflow: hidden; flex: 1; min-height: 0; padding-bottom: 6px; }
+.active-chats { flex: 1 1 50%; min-height: 0; overflow: auto; }
+.sidebar-projects { flex: 0 1 auto; min-height: 38px; max-height: 32%; overflow: auto; }
+.tree .chat-recent { display: flex; flex-direction: column; flex: 1 1 45%; min-height: min(160px, 45%); overflow: hidden; border-top: 1px solid var(--hair); }
+.tree .chat-recent .chat-section-title { flex: none; }
+.tree .chat-recent .ag-list { flex: 1; min-height: 0; overflow: auto; }
+.recent-empty { padding: 8px 10px; color: var(--faint); font: 12px/1.5 var(--body); }
 .proj + .proj { border-top: 1px solid var(--hair); }
 .proj-h {
   display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 8px 0 10px;
@@ -907,8 +913,8 @@ button { font: inherit; color: inherit; }
 .chat-action { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .ag-meta .when { font-size: 10.5px; opacity: 0; transition: opacity 140ms ease; }
 .ag:hover .when, .ag:focus-within .when { opacity: 1; }
-.tree .project-manager { margin: 8px 10px; padding-top: 6px; border-top: 1px solid var(--hair); }
-.project-manager > summary { cursor: pointer; color: var(--mut); font-size: 12px; padding: 8px; }
+.tree .project-manager { margin: 0 10px; padding-top: 0; border-top: 1px solid var(--hair); }
+.project-manager > summary { position: sticky; top: 0; z-index: 1; background: var(--sidebar); cursor: pointer; color: var(--mut); font-size: 12px; padding: 8px; }
 .project-manager > summary .count { margin-left: 8px; font-size: 11px; color: var(--faint); }
 .project-manager .proj-h { padding: 7px 8px; border-radius: 6px; font: 12px var(--body); }
 .project-manager .proj + .proj { border: 0; }

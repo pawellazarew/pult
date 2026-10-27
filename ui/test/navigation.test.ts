@@ -36,6 +36,16 @@ describe('единый список бесед', () => {
     assert.equal(recent[0]?.projectPath, '/srv')
   })
 
+  it('работающие идут по созданию, новые сверху; активность и переименование не меняют порядок', () => {
+    const older = a('older', { status: 'working', createdAt: '2026-10-27T08:00:00Z', lastActivity: '2026-10-27T12:00:00Z' })
+    const newer = a('newer', { status: 'working', createdAt: '2026-10-27T09:00:00Z', lastActivity: '2026-10-27T10:00:00Z' })
+    const order = (xs: AgentView[]): string[] => chatSections(groupByProject(['/srv'], xs))[1]!.rows.map((r) => r.agent.name)
+    assert.deepEqual(order([older, newer]), ['newer', 'older'])
+    assert.deepEqual(order([{ ...older, lastActivity: '2026-10-28T12:00:00Z', title: 'А новое название' }, newer]), ['newer', 'older'])
+    const same = { ...newer, createdAt: older.createdAt }
+    assert.deepEqual(order([older, same]), order([{ ...older, title: 'Я последнее название' }, same]))
+  })
+
   it('состояние не маскирует ожидание зелёным готово; cold — история, без технического жаргона', () => {
     assert.equal(chatStatus(a('x', { status: 'idle', pending: 1 })).label, 'Ждёт ответа')
     assert.equal(chatStatus(a('x', { status: 'idle', pending: 1 })).tone, 'wait')

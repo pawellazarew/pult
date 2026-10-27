@@ -51,6 +51,44 @@ describe('спокойный чат: навигация', () => {
     assert.ok(await waitFor(async () => await h.win.getByTestId('agent-row').count() === 60))
   })
 
+  it('недавние остаются под проектами при длинных активных списках; новые события не переставляют работающие чаты', async () => {
+    const c = await h.client()
+    for (let i = 0; i < 35; i++) await c.request('events.emit', { kind: 'status.changed', sessionId: `chat-${String(i).padStart(2, '0')}`, provider: i % 2 ? 'codex' : 'claude', data: { status: 'working' } })
+    const working = h.win.getByTestId('chats-working').getByTestId('agent-row')
+    assert.ok(await waitFor(async () => await working.count() === 36))
+    const order = () => working.evaluateAll((rows) => rows.map((el) => (el as HTMLElement).dataset.agent))
+    const before = await order()
+    assert.equal(before[0], 'chat-59', 'последняя созданная беседа должна быть первой среди работающих')
+    const result = await c.request('events.emit', { kind: 'status.changed', sessionId: 'chat-00', provider: 'claude', data: { status: 'working' } }) as { ids: number[] }
+    await h.win.getByTestId('event-count').filter({ hasText: `#${result.ids.at(-1)}` }).waitFor({ state: 'attached' })
+    assert.deepEqual(await order(), before, 'событие переставило работающие беседы')
+    for (let i = 0; i < 12; i++) await c.request('project.add', { path: h.workDir(`project-${i}`) })
+    const projects = h.win.getByTestId('project-manager')
+    await projects.locator('summary').click()
+    const recent = h.win.getByTestId('chats-recent')
+    for (const [width, height] of [[1280, 800], [1024, 642], [900, 560]]) {
+      await h.app.evaluate(({ BrowserWindow }, [w, hh]) => { BrowserWindow.getAllWindows()[0]?.setContentSize(w!, hh!) }, [width, height])
+      await h.win.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))))
+      await h.win.getByTestId('active-chats').evaluate((el) => { el.scrollTop = el.scrollHeight })
+      await h.win.getByTestId('sidebar-projects').evaluate((el) => { el.scrollTop = el.scrollHeight })
+      const bounds = await recent.boundingBox()
+      const first = await recent.getByTestId('agent-row').first().boundingBox()
+      const viewport = await h.win.evaluate(() => ({ width: innerWidth, height: innerHeight, overflow: document.documentElement.scrollWidth - innerWidth }))
+      assert.ok(bounds && first)
+      assert.ok(bounds.y >= 0 && bounds.y + bounds.height <= viewport.height, 'недавние вышли за край окна')
+      assert.ok(first.y >= bounds.y && first.y + first.height <= bounds.y + bounds.height, 'в недавних не видна даже первая беседа')
+      assert.ok(viewport.overflow <= 1, 'sidebar раздвигает окно')
+      assert.ok(await h.win.getByTestId('sidebar-projects').evaluate((el) => el.getBoundingClientRect().bottom) <= bounds.y + 1, 'проекты должны находиться над недавними')
+      const projectBox = await h.win.getByTestId('sidebar-projects').boundingBox()
+      const projectHeading = await projects.locator('summary').boundingBox()
+      assert.ok(projectBox && projectHeading && projectHeading.y >= projectBox.y - 1 && projectHeading.y + projectHeading.height <= projectBox.y + projectBox.height + 1, 'заголовок проектов исчез при прокрутке')
+      await h.shot(`pinned-recent-${width}`)
+    }
+    // Возвращаем место для проверки меню следующего сценария.
+    await projects.locator('summary').click()
+    await h.app.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows()[0]?.setContentSize(1280, 800) })
+  })
+
   it('Enter и Space на кнопке меню открывают меню, не выбирают беседу; Enter на строке выбирает её', async () => {
     const row = h.win.locator('.chat-section [data-testid="agent-row"][data-agent="chat-58"]')
     const button = row.getByTestId('row-menu')

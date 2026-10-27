@@ -156,7 +156,10 @@ it is doing right now, with a seconds counter — starting, thinking, writing, r
 you (with a link to the Inbox card); reasoning text, when the provider streams it, sits under a collapsed
 "Размышления". The line is never written to the event journal.
 
-The sidebar groups conversations into waiting, working and recent, with search by title, project or provider.
+The sidebar keeps waiting and working conversations above Projects, with Recent in a separate lower area.
+Each area scrolls independently, so active chats and expanded projects cannot push Recent out of view.
+Working chats are ordered by creation date (newest first), keeping their positions stable as events arrive.
+Recent stays ordered by activity. Search matches the title, project or provider.
 ⌘1…9 selects the first nine conversations in the visible list. Technical connection details are under the
 connection indicator. ⌘K focuses conversation search; ⌘B hides or shows the sidebar. Model, effort and
 approval mode sit in the composer. Context, subscription usage and session details open from its info button.

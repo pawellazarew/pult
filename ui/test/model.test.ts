@@ -58,6 +58,7 @@ describe('агенты: статусы и порядок', () => {
     }
     const [a] = buildAgents([rec], { w: { status: 'working', lastTs: '2026-09-28T09:05:00Z' } })
     assert.deepEqual([a?.status, a?.lastActivity, a?.branch], ['working', '2026-09-28T09:05:00Z', 'feat/ui'])
+    assert.equal(a?.createdAt, rec.createdAt)
   })
 
   it('название: подпись агента — оно, а без него имя; предел тот же, что у демона', () => {

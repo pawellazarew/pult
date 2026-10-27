@@ -1,5 +1,4 @@
-// Единственный список бесед: сначала ждут ответа, затем работают и недавние.
-// Управление проектами и архив доступны ниже, без дублирования навигации.
+// Активные беседы, проекты и постоянно доступные недавние — с раздельной прокруткой.
 
 import { useCallback, useState } from 'react'
 import type { MouseEvent, ReactElement } from 'react'
@@ -70,6 +69,8 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
   const [archiveOpen, setArchiveOpen] = useState(false)
   const [query, setQuery] = useState('')
   const sections = chatSections(p.groups, query)
+  const active = sections.filter((s) => s.key !== 'recent' && s.rows.length > 0)
+  const recent = sections.find((s) => s.key === 'recent')!
   const closeMenu = useCallback(() => setMenu(null), [])
 
   const projectMenu = (e: MouseEvent<HTMLElement>, g: ProjectGroup): void => {
@@ -128,7 +129,8 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
         </label>
       </div>
       <div className="tree" data-testid="agent-list">
-        {sections.filter((s) => s.rows.length > 0).map((section) => (
+        {(active.length > 0 || sections.every((s) => s.rows.length === 0)) && <div className="active-chats" data-testid="active-chats">
+        {active.map((section) => (
           <section key={section.key} className="chat-section" data-testid={`chats-${section.key}`}>
             <h3 className="chat-section-title">{section.label}<span>{section.rows.length}</span></h3>
             <ul className="ag-list" role="listbox" aria-label={section.label}>
@@ -140,6 +142,8 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
           <h3>{query ? 'Ничего не найдено' : 'Начни с нового чата'}</h3>
           {query ? 'Попробуй другое название или имя проекта.' : 'Выбери папку проекта и напиши, что сделать.'}
         </div>}
+        </div>}
+        <div className="sidebar-projects" data-testid="sidebar-projects">
         <details className="project-manager" data-testid="project-manager">
           <summary>Проекты<span className="count">{p.groups.length}</span></summary>
           <button type="button" className="btn btn-sm btn-ghost project-add" onClick={p.onAddProject} data-testid="add-project" title="Добавить папку проекта">
@@ -174,6 +178,14 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
               )}
             </section>
           )}
+        </div>
+        <section className="chat-section chat-recent" data-testid="chats-recent">
+          <h3 className="chat-section-title">Недавние<span>{recent.rows.length}</span></h3>
+          <ul className="ag-list" role="listbox" aria-label="Недавние">
+            {recent.rows.map(({ agent: a, projectPath }) => row(a, projectPath))}
+          </ul>
+          {recent.rows.length === 0 && <div className="recent-empty">{query ? 'Нет совпадений среди недавних' : 'Здесь будут недавние беседы'}</div>}
+        </section>
       </div>
       {menu && <ContextMenu at={menu.at} items={menu.items} onClose={closeMenu} testId={menu.testId} />}
     </nav>
