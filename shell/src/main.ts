@@ -17,6 +17,8 @@ import {
 import type { IpcMainEvent, IpcMainInvokeEvent, MenuItemConstructorOptions, NativeImage, WebContents } from 'electron'
 import { readScopedImage } from '../../src/core/images.js'
 import { localFile } from './localFile.js'
+import { listWorkspaceFiles, readWorkspaceFile } from '../../src/core/fileBrowser.js'
+import { referencesFile } from '../../src/core/fileReferences.js'
 import { APP_INDEX, APP_ORIGIN, APP_SCHEME, appHeaders, mimeOf, resolveAppPath } from './appPath.js'
 import { parseBackoff } from './backoff.js'
 import { readClipboardPaths } from './clipboardPaths.js'
@@ -395,6 +397,34 @@ async function imageForSession(sessionId: unknown, source: unknown) {
 function registerIpc(): void {
   ipcMain.on(IPC.testMode, (e) => { e.returnValue = trusted(e) ? TEST_MODE : false })
   ipcMain.on(IPC.connectionGet, (e) => { e.returnValue = trusted(e) && link ? link.current : null })
+
+  const workspace = async (sessionId: unknown): Promise<{ cwd: string }> => {
+    if (!link || typeof sessionId !== 'string') throw new Error('Сессия недоступна')
+    const result = await link.call('agent.list', {}) as { sessions?: Array<{ name?: unknown; cwd?: unknown }> }
+    const rec = result.sessions?.find((s) => s.name === sessionId)
+    if (!rec || typeof rec.cwd !== 'string') throw new Error('Сессия недоступна')
+    return { cwd: rec.cwd }
+  }
+  ipcMain.handle(IPC.listFiles, async (e, sessionId: unknown, source: unknown = '.', hidden: unknown = false): Promise<CallReply> => {
+    if (!trusted(e)) return fail('forbidden', 'Вызов не из окна Пульта')
+    try {
+      if (typeof source !== 'string' || typeof hidden !== 'boolean') throw new Error('Неверная папка')
+      return { ok: true, result: await listWorkspaceFiles(await workspace(sessionId), source, hidden) }
+    } catch { return fail('files_unavailable', 'Не удалось прочитать папку проекта') }
+  })
+  ipcMain.handle(IPC.previewFile, async (e, sessionId: unknown, source: unknown): Promise<CallReply> => {
+    if (!trusted(e)) return fail('forbidden', 'Вызов не из окна Пульта')
+    try {
+      if (typeof source !== 'string' || typeof sessionId !== 'string' || !link) throw new Error('Неверный файл')
+      const scope = await workspace(sessionId)
+      try { return { ok: true, result: await readWorkspaceFile(scope, source) } } catch {
+        // Files outside the workspace are only previewed when the conversation actually linked them.
+        const history = await link.call('agent.read', { name: sessionId, format: 'json' }) as { events?: Array<{ kind?: string; data?: Record<string, unknown> }> }
+        if (!referencesFile(history.events ?? [], source)) throw new Error('Файл вне проекта')
+        return { ok: true, result: await readWorkspaceFile({ ...scope, allowedFiles: [source] }, source) }
+      }
+    } catch { return fail('file_unavailable', 'Файл недоступен: он перемещён, вне проекта или доступ к нему закрыт') }
+  })
 
   ipcMain.handle(IPC.call, async (e, method: unknown, params: unknown): Promise<CallReply> => {
     if (!trusted(e)) return fail('forbidden', 'вызов не из окна Пульта')

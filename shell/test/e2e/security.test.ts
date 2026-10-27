@@ -49,11 +49,13 @@ describe('окно: границы безопасности и тема', () => 
     assert.equal(h.app.windows().length, 1)
   })
 
-  it('CSP окна не пускает внешние ресурсы и fetch', async () => {
+  it('CSP разрешает локальные PDF-ресурсы и блокирует внешний fetch', async () => {
     const blocked = await h.win.evaluate(async () => {
-      try { await fetch('app://pult/app.js'); return false } catch { return true }
+      try { await fetch('https://example.invalid/pult-csp-test'); return false } catch { return true }
     })
-    assert.equal(blocked, true, 'connect-src none обязан резать fetch')
+    assert.equal(blocked, true, 'connect-src self обязан блокировать внешний fetch')
+    const local = await h.win.evaluate(async () => (await fetch('app://pult/pdf/pdf.worker.mjs')).ok)
+    assert.equal(local, true, 'локальный PDF worker доступен без внешней сети')
   })
 
   it('тема системная: светлая и тёмная (снимки для судьи визуала)', async () => {

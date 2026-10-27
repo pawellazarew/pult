@@ -10,6 +10,9 @@ import { CMD, Icon, IS_MAC, Kbd } from './components/common.js'
 import { Conversation } from './components/Conversation.js'
 import type { SendMode } from './components/Conversation.js'
 import { Header } from './components/Header.js'
+import { FileWorkspace } from './components/FileWorkspace.js'
+import type { FileRequest } from './components/FileWorkspace.js'
+import { FilePreviewContext } from './model/filePreviewContext.js'
 import { ExternalSessions } from './components/ExternalSessions.js'
 import { followLink, MdBridgeContext } from './components/Markdown.js'
 import { Confirm, DoctorPanel, HotkeysHelp, Inbox, McpServersDialog, NewAgentDialog, RenameDialog } from './components/Panels.js'
@@ -115,6 +118,15 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   const [sidebarHidden, setSidebarHidden] = useState(() => store.get('pult.sidebarHidden') === '1')
   useEffect(() => { store.set('pult.sidebarHidden', sidebarHidden ? '1' : '0') }, [sidebarHidden])
   const [inboxOpen, setInboxOpen] = useState<boolean>(() => store.get('pult.inbox') === '1')
+  const [filesOpen, setFilesOpen] = useState(false)
+  const [filesExpanded, setFilesExpanded] = useState(false)
+  const [fileRequest, setFileRequest] = useState<FileRequest | null>(null)
+  useEffect(() => { if (inboxOpen) setFilesOpen(false) }, [inboxOpen])
+  useEffect(() => {
+    const resize = (): void => { if (window.innerWidth < 1200) setFilesExpanded(true) }
+    window.addEventListener('resize', resize)
+    return () => window.removeEventListener('resize', resize)
+  }, [])
   const [inboxFilter, setInboxFilter] = useState<InboxFilter>(() => { const f = store.get('pult.inboxFilter'); return isInboxFilter(f) ? f : 'all' })
   // M8c: плашка обновления. Скрытая крестиком версия помнится до следующей; версия окна — из user agent.
   // Скрытые крестиком «Доступна X» и «не встало» — списком: скрыть одно не должно воскрешать другое.
@@ -456,6 +468,15 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   const archivedViews = useMemo(() => agents.filter((a) => a.archived), [agents])
   const tabViews = useMemo(() => tabs.flatMap((n) => agents.filter((a) => a.name === n)), [tabs, agents])
   const current = agents.find((a) => a.name === selected && tabs.includes(a.name)) ?? tabViews[0] ?? null
+  const showFiles = (source?: string): void => {
+    if (!current || !bridge.previewFile || !bridge.listFiles) return
+    setFilesOpen(true); setInboxOpen(false); setFilesExpanded(window.innerWidth < 1200)
+    setFileRequest((r) => ({ sessionId: current.name, path: source ?? '', nonce: (r?.nonce ?? 0) + 1 }))
+  }
+  const closeFiles = (): void => {
+    setFilesOpen(false)
+    requestAnimationFrame(() => document.querySelector<HTMLButtonElement>('[data-testid="toggle-files"]')?.focus())
+  }
   // Лента открытой сессии — из истории, один раз (model/state.ts finishHydrate). Отказ не
   // повторяется в цикле: следующая попытка — при новом открытии или переподключении.
   const uiRef = useRef(ui)
@@ -890,6 +911,9 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   const onHot = useRef<(a: HotAction, e: KeyboardEvent) => void>(() => {})
   onHot.current = (a, e) => {
     switch (a.type) {
+      case 'openFiles':
+        if (modal) return
+        e.preventDefault(); showFiles(); return
       case 'quickSwitch':
         if (modal) return
         e.preventDefault()
@@ -935,6 +959,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
       case 'toggleInbox':
         if (modal) return
         e.preventDefault()
+        setFilesOpen(false)
         setInboxOpen((v) => !v)
         return
       case 'nextWaiting': {
@@ -963,7 +988,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         // ⌘↵ из поля реплики — только свой запрос текущей сессии; вне поля — любой видимый (свой или в открытом Inbox).
         const fromComposer = (e.target as { getAttribute?(n: string): string | null } | null)?.getAttribute?.('data-testid') === 'composer'
         const target = fromComposer ? composerApproves(focused, current?.name ?? null) : focused
-        if (modal || !target) return
+        if (modal || !target || (filesOpen && filesExpanded)) return
         // Вопрос модели ⌘↵ не «разрешает»: на него отвечают выбором в карточке.
         if (isQuestionTool(target.toolName)) return
         e.preventDefault()
@@ -974,6 +999,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         const info = document.querySelector<HTMLDetailsElement>('.chat-info[open], .health-menu[open]')
         if (!modal && info) { e.preventDefault(); const fromInfo = info.contains(document.activeElement); info.open = false; if (fromInfo) info.querySelector('summary')?.focus(); return }
         if (modal) { e.preventDefault(); setModal(null); return }
+        if (filesOpen) { e.preventDefault(); closeFiles(); return }
         if (current && statusView(current.status).busy) { e.preventDefault(); setModal({ type: 'stop', name: current.name }) }
         return
       }
@@ -991,13 +1017,15 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   return (
     // Реплики модели копируют код и открывают ссылки через мост — без прокидывания пропсов по ленте.
     <MdBridgeContext.Provider value={bridge}>
+    <FilePreviewContext.Provider value={current && bridge.previewFile && bridge.listFiles ? { open: showFiles, basePath: current.cwd } : null}>
     <div className="app" data-conn={conn.state}>
       <Header conn={conn} status={status} statusAt={statusAt} now={now} guard={guard} usage={ui.usage}
         providers={providers} providersChecking={providersChecking} onProvidersCheck={() => void checkProviders()}
         doctorTone={doctorTone(doctor.report)} inboxCount={inboxNums.all} inboxOpen={inboxOpen}
         sidebarHidden={sidebarHidden} onToggleSidebar={() => setSidebarHidden((v) => !v)}
+        filesOpen={filesOpen} filesAvailable={!!current && !!bridge.listFiles && !!bridge.previewFile} onFiles={() => filesOpen ? closeFiles() : showFiles()}
         onDoctor={() => { setModal({ type: 'doctor' }); if (!doctor.loading) void runDoctor() }}
-        onInbox={() => setInboxOpen((v) => !v)} />
+        onInbox={() => { setFilesOpen(false); setInboxOpen((v) => !v) }} />
 
       {view.banner && (
         <div className="banner banner-fail" role="alert" data-testid="conn-banner">
@@ -1046,7 +1074,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         </div>
       )}
 
-      <main className={`grid${sidebarHidden ? ' sidebar-hidden' : ''}${inboxOpen ? ' with-inbox' : ''}`}>
+      <main className={`grid${sidebarHidden ? ' sidebar-hidden' : ''}${inboxOpen ? ' with-inbox' : ''}${filesOpen ? ` with-files${filesExpanded ? ' files-focused' : ''}` : ''}`}>
         <div className="agents-col">
           <ProjectTree groups={groups} selected={current?.name ?? null} now={now} collapsed={collapsed}
             onSelect={select} onNew={(cwd) => setModal({ type: 'new', cwd })} onToggle={toggleProject}
@@ -1094,6 +1122,9 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
           </section>
         )}
         </div>
+        {current && bridge.previewFile && bridge.listFiles && <FileWorkspace bridge={bridge} sessionId={current.name} cwd={current.cwd}
+          open={filesOpen} expanded={filesExpanded} request={fileRequest} onClose={closeFiles}
+          onExpand={() => setFilesExpanded((v) => window.innerWidth < 1200 ? true : !v)} />}
         {inboxOpen && (
           <Inbox items={inboxShown.perms} cards={inboxShown.sessions} filter={inboxFilter} counts={inboxNums} onFilter={setInboxFilter}
             agents={agents} focused={focused?.id ?? null} busy={permBusy} retrying={retrying} now={now}
@@ -1178,6 +1209,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
           onOk={() => removeAgent(modal.name)} onCancel={() => setModal(null)} />
       )}
     </div>
+    </FilePreviewContext.Provider>
     </MdBridgeContext.Provider>
   )
 }

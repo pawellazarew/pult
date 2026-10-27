@@ -28,6 +28,9 @@ export function Header(p: {
   onToggleSidebar?(): void
   onDoctor(): void
   onInbox(): void
+  filesOpen?: boolean
+  filesAvailable?: boolean
+  onFiles?(): void
 }): ReactElement {
   const up = p.conn.state === 'up'
   const uptime = p.status ? p.status.uptimeMs + Math.max(0, p.now - p.statusAt) : null
@@ -88,6 +91,9 @@ export function Header(p: {
       {up && p.guard.tone !== 'ok' && <span className={`header-guard-alert t-${p.guard.tone}`} title={guardTitle}>{p.guard.label}</span>}
       <div className="hdr-spacer" />
       <div className="hdr-actions">
+        {p.onFiles && <button type="button" className="btn" aria-pressed={p.filesOpen} disabled={!p.filesAvailable} onClick={p.onFiles} data-testid="toggle-files" title={`Файлы проекта (${CMD}P)`}>
+          <Icon name="folder" />Файлы
+        </button>}
         <button type="button" className="btn" onClick={p.onDoctor} data-testid="open-doctor" title="Проверка окружения">
           <span className={`t-${p.doctorTone} ic-wrap`}><Icon name="pulse" /></span><span className="doctor-label">Диагностика</span>
         </button>

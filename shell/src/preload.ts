@@ -78,6 +78,14 @@ const bridge: PultBridge = {
     return unwrap(await ipcRenderer.invoke(IPC.openFile, p) as CallReply) as 'opened' | 'revealed'
   },
 
+  async listFiles(sessionId: string, source = '.', showHidden = false) {
+    return unwrap(await ipcRenderer.invoke(IPC.listFiles, sessionId, source, showHidden) as CallReply) as import('./contract.js').FileListing
+  },
+
+  async previewFile(sessionId: string, source: string) {
+    return unwrap(await ipcRenderer.invoke(IPC.previewFile, sessionId, source) as CallReply) as import('./contract.js').FilePreview
+  },
+
   async copyText(text: string): Promise<void> {
     await ipcRenderer.invoke(IPC.copyText, text)
   },

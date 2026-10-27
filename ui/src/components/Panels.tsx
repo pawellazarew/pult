@@ -162,6 +162,7 @@ export function Dialog({ title, children, footer, onClose, size, testId, extra }
 /** Горячие клавиши окна — то, что раньше стояло строкой под полем ввода (открывается «?» и ⌘/). */
 export const HOTKEYS: ReadonlyArray<readonly [string, string]> = [
   [`${CMD}K`, 'найти беседу в списке'],
+  [`${CMD}P`, 'файлы текущего проекта'],
   [`${CMD}B`, 'скрыть или показать список бесед'],
   ['Enter', 'отправить реплику · идёт ход — поставить её в очередь'],
   ['Shift+Enter', 'новая строка в реплике'],

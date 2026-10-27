@@ -5,10 +5,12 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { followFile, Markdown } from '../src/components/Markdown.js'
 import { parseInline } from '../src/model/markdown.js'
 import { fileCitation } from '../src/model/fileReferences.js'
+import { relativeDocument } from '../src/model/filePreviewContext.js'
+import { hotkeyAction } from '../src/model/hotkeys.js'
 
 it('выходной codex-file-citation становится ссылкой на PDF с кириллицей и пробелами', () => {
   const out = renderToStaticMarkup(createElement(Markdown, {
-    text: ':codex-file-citation{path="/Users/tester/Downloads/Резюме — LLM Engineer.pdf" purpose="output"}',
+    text: ':codex-file-citation{path="/Users/user/Downloads/Резюме — LLM Engineer.pdf" purpose="output"}',
   }))
   assert.match(out, /data-testid="file-link"/)
   assert.match(out, /Резюме — LLM Engineer.pdf/)
@@ -45,4 +47,11 @@ it('обычная абсолютная Markdown-ссылка на докуме�
   const out = renderToStaticMarkup(createElement(Markdown, { text: '[Отчёт](/tmp/report.pdf)' }))
   assert.match(out, /data-testid="file-link"/)
   assert.match(out, /Отчёт/)
+})
+
+it('локальные относительные ссылки получают папку файла; URI и якорь не становятся файловыми путями', () => {
+  assert.equal(relativeDocument('/tmp/project/docs', '../README.md'), '/tmp/project/docs/../README.md')
+  assert.equal(relativeDocument('/tmp/project', 'src/main.ts'), '/tmp/project/src/main.ts')
+  for (const source of ['https://example.com', 'javascript:alert(1)', '//example.com/x', '#section', 'обычный текст']) assert.equal(relativeDocument('/tmp/project', source), null)
+  assert.deepEqual(hotkeyAction({ key: 'з', code: 'KeyP', metaKey: true, ctrlKey: false, altKey: false, shiftKey: false }, true), { type: 'openFiles' })
 })

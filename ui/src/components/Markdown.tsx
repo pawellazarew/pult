@@ -4,6 +4,7 @@ import type { ImageBridge } from './Images.js'
 import { ImagePreview, isImagePath } from './Images.js'
 import { Icon } from './common.js'
 import { localFilePath } from '../model/fileReferences.js'
+import { FilePreviewContext, relativeDocument } from '../model/filePreviewContext.js'
 import { parseMarkdown, safeHref } from '../model/markdown.js'
 import type { Align, Block, Inline, ListItem } from '../model/markdown.js'
 
@@ -103,15 +104,17 @@ export async function followFile(bridge: MdBridge, path: string, reveal = false)
 
 function FileLink({ path, label }: { path: string; label?: string }): ReactElement {
   const bridge = useContext(MdBridgeContext)
+  const preview = useContext(FilePreviewContext)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [flash, show] = useFlash()
   const name = path.split('/').pop() || path
-  const finder = !bridge?.openFile
+  const finder = !bridge?.openFile && !preview
   const open = async (reveal = false): Promise<void> => {
     if (!bridge || busy) return
     setBusy(true); setError(null)
     try {
+      if (!reveal && preview) { preview.open(path); return }
       const result = await followFile(bridge, path, reveal)
       if (result !== 'opened') show(result === 'revealed' ? 'Показан в Finder' : 'Путь скопирован')
     } catch { setError('Файл недоступен: проверь, не перемещён ли он') }
@@ -129,6 +132,7 @@ function FileLink({ path, label }: { path: string; label?: string }): ReactEleme
 }
 
 function Inl({ parts }: { parts: Inline[] }): ReactElement {
+  const preview = useContext(FilePreviewContext)
   return <>{parts.map((p, i) => {
     switch (p.t) {
       case 'text': return <span key={i}>{p.v}</span>
@@ -145,6 +149,10 @@ function Inl({ parts }: { parts: Inline[] }): ReactElement {
       case 'link':
         if (isImagePath(p.url)) return <ImagePreview key={i} source={p.url} label={p.c.map((c) => c.t === 'text' ? c.v : '').join('') || undefined} />
         if (localFilePath(p.url)) return <FileLink key={i} path={p.url} label={p.c.map((c) => c.t === 'text' ? c.v : '').join('') || undefined} />
+        if (preview && !p.href) {
+          const source = relativeDocument(preview.basePath, p.url)
+          if (source) return <FileLink key={i} path={source} label={p.c.map((c) => c.t === 'text' ? c.v : '').join('') || undefined} />
+        }
         return p.href
           ? <Link key={i} href={p.href} url={p.url} {...(p.title ? { title: p.title } : {})}><Inl parts={p.c} /></Link>
           // Схема не из белого списка (javascript:, file:, путь в репозитории) — просто текст.
