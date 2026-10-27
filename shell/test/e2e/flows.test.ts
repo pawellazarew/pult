@@ -22,6 +22,7 @@ describe('окно: рабочие сценарии', () => {
     h = await launch({ name: 'flows' })
     assert.ok(await waitFor(async () => (await h.win.getAttribute('.app', 'data-conn')) === 'up', 20_000), 'окно не подключилось')
     c = await h.client()
+    await h.win.getByTestId('toggle-inbox').click()
   })
   after(async () => {
     // Гигиена: ни одного неотвеченного вопроса брокера после прогона.
@@ -292,6 +293,7 @@ describe('окно: рабочие сценарии', () => {
   it('M8d: «Убрать из списка…» у папки с сессиями — вопрос, сессии в архив, папка пропадает; новая сессия её возвращает', async () => {
     const dir = h.workDir('hideme', { scenario: 'simple' })
     await c.request('agent.start', { name: 'hideme', kind: 'claude', cwd: dir })
+    await h.win.getByTestId('project-manager').locator('summary').evaluate((el) => { (el.parentElement as HTMLDetailsElement).open = true })
     const proj = h.win.locator(`[data-testid="project"][data-project="${dir}"]`)
     await proj.waitFor({ timeout: 10_000 })
     await proj.hover()
@@ -499,14 +501,14 @@ describe('окно: рабочие сценарии', () => {
     assert.ok(await waitFor(async () => (await statusOf('eps')) === 'interrupted', 10_000))
   })
 
-  it('горячие клавиши: ⌘I прячет и показывает Inbox, ⌘1…9 переключают вкладки сессий', async () => {
+  it('горячие клавиши: ⌘I прячет и показывает Inbox, ⌘1…9 выбирают беседы в видимом списке', async () => {
     assert.equal(await h.win.getByTestId('inbox').count(), 1)
     await h.win.keyboard.press('Meta+I')
     await h.win.getByTestId('inbox').waitFor({ state: 'detached', timeout: 3000 })
     await h.win.keyboard.press('Meta+I')
     await h.win.getByTestId('inbox').waitFor({ timeout: 3000 })
-    const second = await h.win.getByTestId('session-tab').nth(1).getAttribute('data-agent')
-    assert.ok(second, 'вкладок меньше двух')
+    const second = await h.win.locator('.chat-section [data-testid="agent-row"]').nth(1).getAttribute('data-agent')
+    assert.ok(second, 'бесед меньше двух')
     await h.win.keyboard.press('Meta+2')
     await h.win.locator(`[data-testid="conversation"][data-agent="${second}"]`).waitFor({ timeout: 3000 })
   })
@@ -518,16 +520,19 @@ describe('окно: рабочие сценарии', () => {
     assert.match((await help.textContent()) ?? '', /Shift\+Enter/)
     await h.win.keyboard.press('Escape')
     await help.waitFor({ state: 'detached', timeout: 3000 })
+    await h.win.getByTestId('chat-info').locator('summary').click()
     await h.win.getByTestId('hotkeys-open').click()
     await help.waitFor({ timeout: 3000 })
     await h.win.keyboard.press('Escape')
     await help.waitFor({ state: 'detached', timeout: 3000 })
   })
 
-  it('проекты: папка «+» → проект в дереве; «+» на проекте заводит сессию в его папке; вкладка закрывается, сессия остаётся', async () => {
+  it('проекты: добавление и новая беседа в папке; единый список без вкладок, открепление не удаляет беседу', async () => {
     const dir = h.workDir('proj', { scenario: 'simple' })
     await h.stubPickFolder(dir)
+    await h.win.getByTestId('project-manager').locator('summary').evaluate((el) => { (el.parentElement as HTMLDetailsElement).open = true })
     await h.win.getByTestId('add-project').click()
+    await h.win.getByTestId('project-manager').locator('summary').evaluate((el) => { (el.parentElement as HTMLDetailsElement).open = true })
     const proj = h.win.locator(`[data-testid="project"][data-project="${dir}"]`)
     await proj.waitFor({ timeout: 5000 })
     assert.equal(await proj.getAttribute('data-pinned'), '1')
@@ -539,18 +544,16 @@ describe('окно: рабочие сценарии', () => {
     assert.equal(await dlg.getByTestId('new-agent-name').inputValue(), 'proj')
     await dlg.getByTestId('new-agent-submit').click()
     await dlg.waitFor({ state: 'detached', timeout: 10_000 })
-    await proj.locator('[data-testid="agent-row"][data-agent="proj"]').waitFor({ timeout: 10_000 })
-    const tab = h.win.locator('[data-testid="session-tab"][data-agent="proj"]')
-    assert.equal(await tab.getAttribute('aria-selected'), 'true', 'новая сессия открылась активной вкладкой')
-    await tab.getByTestId('tab-close').click()
-    await tab.waitFor({ state: 'detached', timeout: 3000 })
-    assert.equal(await proj.locator('[data-testid="agent-row"][data-agent="proj"]').count(), 1, 'закрыть вкладку ≠ удалить сессию')
+    const row = h.win.locator('.chat-section [data-testid="agent-row"][data-agent="proj"]')
+    await row.waitFor({ timeout: 10_000 })
+    assert.equal(await row.getAttribute('aria-selected'), 'true', 'новая беседа выбрана в списке')
+    assert.equal(await h.win.getByTestId('session-tab').count(), 0, 'второй навигации по тем же беседам нет')
     // Убрать проект из списка (меню «⋯» проекта) — сессия не теряется: её папка становится неявным проектом.
     await proj.hover()
     await proj.getByTestId('project-menu').click()
     await h.win.getByTestId('project-menu-list').getByTestId('project-unpin').click()
     assert.ok(await waitFor(async () => (await proj.getAttribute('data-pinned')) === '0', 5000), 'проект не открепился')
-    assert.equal(await proj.locator('[data-testid="agent-row"][data-agent="proj"]').count(), 1)
+    assert.equal(await h.win.locator('.chat-section [data-testid="agent-row"][data-agent="proj"]').count(), 1)
   })
 
   it('меню сессии: правый клик → переименовать; «В архив» прячет в «Архив», «Вернуть» возвращает; Esc закрывает меню', async () => {
@@ -575,12 +578,12 @@ describe('окно: рабочие сценарии', () => {
     await menu.getByTestId('row-archive').click()
     const archive = h.win.getByTestId('archive-section')
     await archive.waitFor({ timeout: 8000 })
-    assert.equal(await h.win.locator('[data-testid="project"] [data-testid="agent-row"][data-agent="proj"]').count(), 0, 'архивная сессия осталась в проекте')
+    assert.equal(await h.win.locator('.chat-section [data-testid="agent-row"][data-agent="proj"]').count(), 0, 'архивная сессия осталась в проекте')
     await archive.locator('.proj-h').click()
     await archive.locator('[data-testid="agent-row"][data-agent="proj"]').click({ button: 'right' })
     await menu.getByTestId('row-unarchive').click()
     await archive.waitFor({ state: 'detached', timeout: 8000 })
-    await h.win.locator('[data-testid="project"] [data-testid="agent-row"][data-agent="proj"]').waitFor({ timeout: 5000 })
+    await h.win.locator('.chat-section [data-testid="agent-row"][data-agent="proj"]').waitFor({ timeout: 5000 })
   })
 
   it('закрыть окно посреди хода: ход дошёл без окна, после открытия история на месте', async () => {

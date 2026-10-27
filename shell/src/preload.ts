@@ -74,6 +74,18 @@ const bridge: PultBridge = {
     await ipcRenderer.invoke(IPC.revealPath, p)
   },
 
+  async openFile(p: string): Promise<'opened' | 'revealed'> {
+    return unwrap(await ipcRenderer.invoke(IPC.openFile, p) as CallReply) as 'opened' | 'revealed'
+  },
+
+  async listFiles(sessionId: string, source = '.', showHidden = false) {
+    return unwrap(await ipcRenderer.invoke(IPC.listFiles, sessionId, source, showHidden) as CallReply) as import('./contract.js').FileListing
+  },
+
+  async previewFile(sessionId: string, source: string) {
+    return unwrap(await ipcRenderer.invoke(IPC.previewFile, sessionId, source) as CallReply) as import('./contract.js').FilePreview
+  },
+
   async copyText(text: string): Promise<void> {
     await ipcRenderer.invoke(IPC.copyText, text)
   },
@@ -104,6 +116,18 @@ const bridge: PultBridge = {
 
   async openExternal(url: string): Promise<void> {
     await ipcRenderer.invoke(IPC.openExternal, url)
+  },
+
+  async readImage(sessionId: string, source: string): Promise<{ dataUrl: string; name: string }> {
+    return unwrap(await ipcRenderer.invoke(IPC.readImage, sessionId, source) as CallReply) as { dataUrl: string; name: string }
+  },
+
+  async saveImage(sessionId: string, source: string): Promise<boolean> {
+    return unwrap(await ipcRenderer.invoke(IPC.saveImage, sessionId, source) as CallReply) === true
+  },
+
+  async openImage(sessionId: string, source: string): Promise<void> {
+    unwrap(await ipcRenderer.invoke(IPC.openImage, sessionId, source) as CallReply)
   },
 
   pathsForFiles(files: File[]): string[] {

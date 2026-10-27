@@ -6,11 +6,13 @@ import type { ReactElement } from 'react'
 import type { ConnState, PultBridge, PultEvent } from '../../shell/src/contract.js'
 import { errorText, isBridgeError } from './bridge.js'
 import { ProjectTree } from './components/ProjectTree.js'
-import { SessionTabs } from './components/SessionTabs.js'
-import { CMD, Icon, IS_MAC } from './components/common.js'
+import { CMD, Icon, IS_MAC, Kbd } from './components/common.js'
 import { Conversation } from './components/Conversation.js'
 import type { SendMode } from './components/Conversation.js'
 import { Header } from './components/Header.js'
+import { FileWorkspace } from './components/FileWorkspace.js'
+import type { FileRequest } from './components/FileWorkspace.js'
+import { FilePreviewContext } from './model/filePreviewContext.js'
 import { ExternalSessions } from './components/ExternalSessions.js'
 import { followLink, MdBridgeContext } from './components/Markdown.js'
 import { Confirm, DoctorPanel, HotkeysHelp, Inbox, McpServersDialog, NewAgentDialog, RenameDialog } from './components/Panels.js'
@@ -113,7 +115,18 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set(store.list('pult.collapsed')))
   const [projects, setProjects] = useState<string[]>([])
   const [loaded, setLoaded] = useState(false)
-  const [inboxOpen, setInboxOpen] = useState<boolean>(() => store.get('pult.inbox') !== '0')
+  const [sidebarHidden, setSidebarHidden] = useState(() => store.get('pult.sidebarHidden') === '1')
+  useEffect(() => { store.set('pult.sidebarHidden', sidebarHidden ? '1' : '0') }, [sidebarHidden])
+  const [inboxOpen, setInboxOpen] = useState<boolean>(() => store.get('pult.inbox') === '1')
+  const [filesOpen, setFilesOpen] = useState(false)
+  const [filesExpanded, setFilesExpanded] = useState(false)
+  const [fileRequest, setFileRequest] = useState<FileRequest | null>(null)
+  useEffect(() => { if (inboxOpen) setFilesOpen(false) }, [inboxOpen])
+  useEffect(() => {
+    const resize = (): void => { if (window.innerWidth < 1200) setFilesExpanded(true) }
+    window.addEventListener('resize', resize)
+    return () => window.removeEventListener('resize', resize)
+  }, [])
   const [inboxFilter, setInboxFilter] = useState<InboxFilter>(() => { const f = store.get('pult.inboxFilter'); return isInboxFilter(f) ? f : 'all' })
   // M8c: плашка обновления. Скрытая крестиком версия помнится до следующей; версия окна — из user agent.
   // Скрытые крестиком «Доступна X» и «не встало» — списком: скрыть одно не должно воскрешать другое.
@@ -462,6 +475,15 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   const archivedViews = useMemo(() => agents.filter((a) => a.archived), [agents])
   const tabViews = useMemo(() => tabs.flatMap((n) => agents.filter((a) => a.name === n)), [tabs, agents])
   const current = agents.find((a) => a.name === selected && tabs.includes(a.name)) ?? tabViews[0] ?? null
+  const showFiles = (source?: string): void => {
+    if (!current || !bridge.previewFile || !bridge.listFiles) return
+    setFilesOpen(true); setInboxOpen(false); setFilesExpanded(window.innerWidth < 1200)
+    setFileRequest((r) => ({ sessionId: current.name, path: source ?? '', nonce: (r?.nonce ?? 0) + 1 }))
+  }
+  const closeFiles = (): void => {
+    setFilesOpen(false)
+    requestAnimationFrame(() => document.querySelector<HTMLButtonElement>('[data-testid="toggle-files"]')?.focus())
+  }
   // Лента открытой сессии — из истории, один раз (model/state.ts finishHydrate). Отказ не
   // повторяется в цикле: следующая попытка — при новом открытии или переподключении.
   const uiRef = useRef(ui)
@@ -896,16 +918,30 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   const onHot = useRef<(a: HotAction, e: KeyboardEvent) => void>(() => {})
   onHot.current = (a, e) => {
     switch (a.type) {
+      case 'openFiles':
+        if (modal) return
+        e.preventDefault(); showFiles(); return
+      case 'quickSwitch':
+        if (modal) return
+        e.preventDefault()
+        setSidebarHidden(false)
+        requestAnimationFrame(() => document.querySelector<HTMLInputElement>('[data-testid="chat-filter"]')?.focus())
+        return
+      case 'toggleSidebar':
+        if (modal) return
+        e.preventDefault()
+        setSidebarHidden((v) => !v)
+        return
       case 'newAgent':
         if (modal) return
         e.preventDefault()
         if (conn.state === 'up') setModal({ type: 'new', cwd: currentProject })
         return
       case 'selectAgent': {
-        // ⌘1…9 — вкладки открытых сессий, слева направо.
+        // ⌘1…9 — первые видимые беседы единственного списка, с учётом поиска.
         if (modal) return
-        const t = tabViews[a.index]
-        if (t) { e.preventDefault(); select(t.name) }
+        const name = document.querySelectorAll<HTMLElement>('.chat-section [data-testid="agent-row"]')[a.index]?.dataset.agent
+        if (name) { e.preventDefault(); select(name) }
         return
       }
       case 'search':
@@ -930,6 +966,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
       case 'toggleInbox':
         if (modal) return
         e.preventDefault()
+        setFilesOpen(false)
         setInboxOpen((v) => !v)
         return
       case 'nextWaiting': {
@@ -958,17 +995,21 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         // ⌘↵ из поля реплики — только свой запрос текущей сессии; вне поля — любой видимый (свой или в открытом Inbox).
         const fromComposer = (e.target as { getAttribute?(n: string): string | null } | null)?.getAttribute?.('data-testid') === 'composer'
         const target = fromComposer ? composerApproves(focused, current?.name ?? null) : focused
-        if (modal || !target) return
+        if (modal || !target || (filesOpen && filesExpanded)) return
         // Вопрос модели ⌘↵ не «разрешает»: на него отвечают выбором в карточке.
         if (isQuestionTool(target.toolName)) return
         e.preventDefault()
         approve(target.id)
         return
       }
-      case 'escape':
+      case 'escape': {
+        const info = document.querySelector<HTMLDetailsElement>('.chat-info[open], .health-menu[open]')
+        if (!modal && info) { e.preventDefault(); const fromInfo = info.contains(document.activeElement); info.open = false; if (fromInfo) info.querySelector('summary')?.focus(); return }
         if (modal) { e.preventDefault(); setModal(null); return }
+        if (filesOpen) { e.preventDefault(); closeFiles(); return }
         if (current && statusView(current.status).busy) { e.preventDefault(); setModal({ type: 'stop', name: current.name }) }
         return
+      }
     }
   }
   useEffect(() => {
@@ -983,12 +1024,15 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   return (
     // Реплики модели копируют код и открывают ссылки через мост — без прокидывания пропсов по ленте.
     <MdBridgeContext.Provider value={bridge}>
+    <FilePreviewContext.Provider value={current && bridge.previewFile && bridge.listFiles ? { open: showFiles, basePath: current.cwd } : null}>
     <div className="app" data-conn={conn.state}>
       <Header conn={conn} status={status} statusAt={statusAt} now={now} guard={guard} usage={ui.usage}
         providers={providers} providersChecking={providersChecking} onProvidersCheck={() => void checkProviders()}
         doctorTone={doctorTone(doctor.report)} inboxCount={inboxNums.all} inboxOpen={inboxOpen}
+        sidebarHidden={sidebarHidden} onToggleSidebar={() => setSidebarHidden((v) => !v)}
+        filesOpen={filesOpen} filesAvailable={!!current && !!bridge.listFiles && !!bridge.previewFile} onFiles={() => filesOpen ? closeFiles() : showFiles()}
         onDoctor={() => { setModal({ type: 'doctor' }); if (!doctor.loading) void runDoctor() }}
-        onInbox={() => setInboxOpen((v) => !v)} />
+        onInbox={() => { setFilesOpen(false); setInboxOpen((v) => !v) }} />
 
       {view.banner && (
         <div className="banner banner-fail" role="alert" data-testid="conn-banner">
@@ -1037,7 +1081,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         </div>
       )}
 
-      <main className={`grid${inboxOpen ? ' with-inbox' : ''}`}>
+      <main className={`grid${sidebarHidden ? ' sidebar-hidden' : ''}${inboxOpen ? ' with-inbox' : ''}${filesOpen ? ` with-files${filesExpanded ? ' files-focused' : ''}` : ''}`}>
         <div className="agents-col">
           <ProjectTree groups={groups} selected={current?.name ?? null} now={now} collapsed={collapsed}
             onSelect={select} onNew={(cwd) => setModal({ type: 'new', cwd })} onToggle={toggleProject}
@@ -1047,10 +1091,10 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
             onArchive={archiveSession} onRemove={(name) => setModal({ type: 'rm', name })} onExport={exportAgent}
             onReveal={(p) => void bridge.revealPath(p)} onBrowser={setBrowser} />
           <button type="button" className="btn external-open" disabled={conn.state !== 'up'} onClick={() => setModal({ type: 'external' })} data-testid="open-external-sessions"><Icon name="folder" />Существующие чаты</button>
+          <button type="button" className="btn sidebar-settings" onClick={() => setModal({ type: 'settings' })} data-testid="open-settings"><Icon name="tool" />Настройки<Kbd>{`${CMD},`}</Kbd></button>
           <div className="ag-foot mono" data-testid="event-count">журнал #{ui.lastId}</div>
         </div>
         <div className="conv-col">
-        <SessionTabs tabs={tabViews} active={current?.name ?? null} onSelect={select} onClose={closeSessionTab} />
         {current ? (
           <Conversation key={current.name} agent={current} items={withEarlier(ui, current.name)} now={now}
             historyLoading={ui.hydration[current.name] === 'loading'} loadEvents={loadEvents}
@@ -1078,13 +1122,16 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
             <div className="conv-empty" data-testid="conv-empty">
               <h3>{conn.state !== 'up' ? 'Жду демона' : agents.length ? 'Открой сессию слева' : 'Здесь будет разговор'}</h3>
               <div>{agents.length
-                ? 'Клик по сессии в дереве проектов открывает её вкладкой. «+» на строке проекта заводит новую сессию в этой папке.'
+                ? 'Выбери беседу слева. Вверху списка — агенты, которые ждут ответа, затем работающие и недавние.'
                 : 'Заведи сессию — выбери папку и провайдера, напиши, что сделать. Разрешения всех сессий собираются в Inbox справа.'}</div>
-              <div className="keys mono"><span>{CMD}N — сессия</span><span>{CMD}1…9 — вкладки</span><span>{CMD}I — Inbox</span><span>{CMD}⇧F — поиск</span><span>{CMD}/ — все клавиши</span></div>
+              <div className="keys mono"><span>{CMD}N — сессия</span><span>{CMD}1…9 — беседы</span><span>{CMD}I — Inbox</span><span>{CMD}⇧F — поиск</span><span>{CMD}/ — все клавиши</span></div>
             </div>
           </section>
         )}
         </div>
+        {current && bridge.previewFile && bridge.listFiles && <FileWorkspace bridge={bridge} sessionId={current.name} cwd={current.cwd}
+          open={filesOpen} expanded={filesExpanded} request={fileRequest} onClose={closeFiles}
+          onExpand={() => setFilesExpanded((v) => window.innerWidth < 1200 ? true : !v)} />}
         {inboxOpen && (
           <Inbox items={inboxShown.perms} cards={inboxShown.sessions} filter={inboxFilter} counts={inboxNums} onFilter={setInboxFilter}
             agents={agents} focused={focused?.id ?? null} busy={permBusy} retrying={retrying} now={now}
@@ -1169,6 +1216,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
           onOk={() => removeAgent(modal.name)} onCancel={() => setModal(null)} />
       )}
     </div>
+    </FilePreviewContext.Provider>
     </MdBridgeContext.Provider>
   )
 }

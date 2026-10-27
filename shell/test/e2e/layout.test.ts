@@ -70,9 +70,9 @@ describe('окно: раскладка', () => {
       assert.ok(textBox.width > notice.width / 2, `${where}: текст сжат в столбик ${textBox.width}px из ${notice.width}px`)
       assert.ok(resume.x >= textBox.x + textBox.width - 0.5, `${where}: «Продолжить» налезает на текст`)
       assert.ok(resume.y >= notice.y && resume.y + resume.height <= notice.y + notice.height + 0.5, `${where}: «Продолжить» вне строки плашки`)
-      // Очередь живёт ПОД полем ввода (О2): поле, сразу под ним — очередь, и оба внизу окна, под лентой.
+      // Очередь над полем ввода: видны ожидающие отправки сообщения, затем место для новой реплики.
       assert.ok(composer.y >= feed.y + feed.height - 0.5, `${where}: поле ввода над лентой`)
-      assert.ok(notice.y >= composer.y + composer.height - 0.5, `${where}: плашка не под полем ввода`)
+      assert.ok(notice.y + notice.height <= composer.y + 0.5, `${where}: плашка не над полем ввода`)
       // До починки лента схлопывалась в ноль; на окне раннера (1024×645) под ней ещё поле, плашка в три строки и подвал.
       assert.ok(feed.height >= 150, `${where}: лента сжата до ${feed.height}px`)
       assert.ok(composer.y > size.height / 2, `${where}: поле ввода уехало наверх (y=${composer.y})`)

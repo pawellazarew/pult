@@ -7,7 +7,7 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/hero-dark.png">
   <source media="(prefers-color-scheme: light)" srcset="docs/images/hero-light.png">
-  <img alt="The Pult window: projects with their sessions on the left (two of them waiting for you), a Claude conversation in the middle with the tool calls it made, subscription limits for Claude and Codex at the top" src="docs/images/hero-light.png" width="100%">
+  <img alt="The Pult window: conversations grouped by attention on the left, a Claude conversation in the middle and collapsed tool activity" src="docs/images/hero-light.png" width="100%">
 </picture>
 
 > [!NOTE]
@@ -156,6 +156,29 @@ it is doing right now, with a seconds counter — starting, thinking, writing, r
 you (with a link to the Inbox card); reasoning text, when the provider streams it, sits under a collapsed
 "Размышления". The line is never written to the event journal.
 
+The sidebar keeps waiting and working conversations above Projects, with Recent in a separate lower area.
+Each area scrolls independently, so active chats and expanded projects cannot push Recent out of view.
+Working chats are ordered by creation date (newest first), keeping their positions stable as events arrive.
+Recent stays ordered by activity. Search matches the title, project or provider.
+⌘1…9 selects the first nine conversations in the visible list. Technical connection details are under the
+connection indicator. ⌘K focuses conversation search; ⌘B hides or shows the sidebar. Model, effort and
+approval mode sit in the composer. Context, subscription usage and session details open from its info button.
+When reading older messages, “К последним” returns to the latest reply. Errors show a short excerpt first;
+the full input and output remain available in a separate disclosure.
+
+Local PNG, JPEG, GIF and WebP references appear as previews. Click to zoom, save a copy or open the file.
+New MCP screenshots and Codex image-generation results are stored separately from the journal and survive
+restarts. Images are limited to 20 MB and read only from the project, Codex generation folder or this session's
+image store. Remote images stay links. Older screenshot blobs already discarded by previous versions cannot
+be recovered. Routine tool calls collapse into groups; errors, permission requests and images stay visible.
+
+**Files beside the conversation.** Click **Files** or press **Cmd+P** for the project tree and file tabs.
+Read code, Markdown, images and PDFs inside Pult; PDFs support page navigation, zoom and selectable text.
+On narrow windows the viewer fills the workspace; Esc returns to the conversation and keeps your draft.
+Codex output-file citations and local Markdown links open the same viewer. Files outside the project are
+available only when explicitly linked in the conversation. Use the toolbar to open externally or reveal in Finder.
+Unsupported formats have an explicit fallback; missing files show an error. Older windows retain external opening.
+
 More: `pult agent list`, `pult agent stop w` (stop the current turn), `pult agent rm w`, `pult usage` (your 5-hour and
 7-day subscription windows), `pult --help` for everything.
 
@@ -201,7 +224,7 @@ Every question from every session goes to the Inbox (⌘I in the window, `pult p
 In the dialog, drop a folder onto the form to use it as the session folder; files dropped into the first message, or
 copied in Finder and pasted with ⌘V, become their full paths (quoted when they contain spaces), as in the chat input.
 
-**Images from the clipboard** (window 0.1.16). ⌘V on an image without a file — a screenshot copied to the clipboard,
+**Images from the clipboard** (window 0.1.20). ⌘V on an image without a file — a screenshot copied to the clipboard,
 "Copy image" in a browser — saves it as a PNG under `~/.pult/attachments/<session>/<date>/` (folders 0700, file 0600, PNG or JPEG source, up to
 25 MB, one per second, 1 GB a day) and pastes its path, in the chat input and in the first message (there, type the
 session name first). When the clipboard also holds plain text, the text is
@@ -223,12 +246,12 @@ attachments older than 30 days. An older window says where to update it (Setting
 ## Changing a session later
 
 Model, effort and approval mode of a live session can be changed at any time: click "model · effort · mode" in the
-conversation footer, or run `pult agent set <name> [--model M] [--effort E] [--approval A] [--yes]`.
+composer, or run `pult agent set <name> [--model M] [--effort E] [--approval A] [--yes]`.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/settings-menu-dark.png">
   <source media="(prefers-color-scheme: light)" srcset="docs/images/settings-menu-light.png">
-  <img alt="The footer menu of a session: model (haiku, sonnet, opus, fable), effort (low to max) and approval mode, with a note that changes apply from the next turn" src="docs/images/settings-menu-light.png" width="720">
+  <img alt="The composer menu of a session: model (haiku, sonnet, opus, fable), effort (low to max) and approval mode, with a note that changes apply from the next turn" src="docs/images/settings-menu-light.png" width="720">
 </picture>
 
 - The change applies from the next turn; the running turn and pending Inbox questions are untouched.
@@ -466,7 +489,7 @@ every `[fail]`.
   `pult doctor` shows the detected country per provider.
 - **The window says the daemon is not running** ("демон недоступен"). Click "запустить" ("start") in the banner, or
   run `pult daemon stop && pult daemon start`. The reason is in `pult daemon logs`.
-- **Permission questions don't appear.** Check the session's approval mode in the conversation footer: in `workspace`
+- **Permission questions don't appear.** Check the session's approval mode in the composer: in `workspace`
   and `full` there are no questions by design. In `ask`, Claude follows your own Claude settings, so actions those
   settings already allow won't ask. `pult perm list` shows what is waiting right now.
 - **macOS asks "“node” would like to access files in your Desktop folder".** Click "Allow": the agent works in a folder

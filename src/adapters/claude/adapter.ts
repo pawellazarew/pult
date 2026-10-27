@@ -30,6 +30,7 @@
 //   * больше трёх подряд `system/api_retry` — `claude` сам не останавливается (10 повторов за
 //     ~149 с), поэтому его прерываем мы.
 
+import { createImageCapture } from '../../core/images.js'
 import { spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
@@ -712,6 +713,7 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
         })
         mapper = createClaudeMapper({
           sessionId: name,
+          images: createImageCapture({ home: opts.paths.home, sessionId: name, cwd: l.spec.cwd, codexHome: process.env['CODEX_HOME'] }),
           onUnknown: (t) => logger.warn('незнакомое событие claude — пропущено', { session: name, type: t }),
         })
         l.mapper = mapper

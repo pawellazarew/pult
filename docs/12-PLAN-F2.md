@@ -28,7 +28,7 @@ devDependencies корня. Electron и всё его — только в `shell
   `project.list|add|remove` (07.10: проекты-папки для дерева «проект → сессии») — и ничего больше
   (никаких `perm.request` и `events.emit`; `daemon.stop` — только кнопкой с подтверждением через отдельный метод моста).
 - Безопасность окна: `contextIsolation`, `sandbox`, без `nodeIntegration`, `webSecurity`; навигация и `window.open` запрещены; CSP
-  `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'none'`. Fuses: `RunAsNode` off,
+  `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; worker-src 'self'; connect-src 'self'`. Fuses: `RunAsNode` off,
   `EnableNodeOptionsEnvironmentVariable` off, `EnableNodeCliInspectArguments` off, `EnableEmbeddedAsarIntegrityValidation` on, `OnlyLoadAppFromAsar` on.
 - Переподключение: демон ушёл (стоп, обновление, падение) — плашка «демон недоступен», повтор с растущей паузой, после подключения —
   `events.subscribe {since: последний увиденный id}`: окно доигрывает пропущенное, ничего не теряет.
@@ -133,3 +133,9 @@ devDependencies корня. Electron и всё его — только в `shell
 доктор шёл через `spawnSync` на событийном цикле демона — под службой с `ProcessType Background` демон не отвечал на `hello`
 44–94 с. Исправлено в 0.2.2: запуски доктора асинхронные, служба — `Standard`. Медленный первый ход под службой (тот же фоновый
 приоритет наследовал и `claude`) после `pult daemon install` должен уйти — настоящим ходом это ещё не перемерено.
+
+
+Просмотр файлов использует optional IPC `listFiles`/`previewFile`: область проекта сверяется в main по
+agent.list; для отдельного файла вне проекта нужна точная ссылка из реплик agent.read. Папки вне проекта
+не перечисляются. PDF.js и worker/fonts/cmaps вшиты локально; connect-src self нужен только этим статичным
+ресурсам app://pult. Внешние соединения и исполнения HTML документов по-прежнему запрещены.

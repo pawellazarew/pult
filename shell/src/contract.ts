@@ -1,3 +1,5 @@
+import type { FileListing, FilePreview } from '../../src/core/fileBrowserTypes.js'
+export type { FileListing, FilePreview, FileEntry } from '../../src/core/fileBrowserTypes.js'
 // Контракт моста `window.pult` (docs/12 §2): то, что видит интерфейс, и белый список методов демона,
 // которые main пропускает из окна. Один файл на обе стороны: main и preload реализуют его, ui/
 // импортирует ТОЛЬКО типы (import type) — рантайм этого файла в бандл интерфейса не попадает.
@@ -116,7 +118,7 @@ export function sanitizeParams(method: AllowedMethod, params: Record<string, unk
 
 /** CSP окна — дословно docs/12 §2. Тот же текст стоит мета-тегом в ui/index.html (тест сверяет). */
 export const CSP =
-  "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'none'"
+  "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; worker-src 'self'; connect-src 'self'"
 
 /** Ошибка вызова. Через contextBridge Error теряет всё, кроме message, поэтому отказ — простой объект. */
 export interface BridgeError {
@@ -218,6 +220,15 @@ export interface PultBridge {
    * путь файла, или `{error}` словами. Необязательный: старая оболочка его не знает, интерфейс подсказывает обновить окно.
    */
   clipboardImage?: ClipboardImageBridge
+  /** Open a local document after a click; executable/unknown types are only revealed in Finder. */
+  openFile?(path: string): Promise<'opened' | 'revealed'>
+  listFiles?(sessionId: string, source?: string, showHidden?: boolean): Promise<FileListing>
+  previewFile?(sessionId: string, source: string): Promise<FilePreview>
+  /** Растровое изображение только из папки сессии, кэша генерации или её media-хранилища. */
+  readImage?(sessionId: string, source: string): Promise<{ dataUrl: string; name: string }>
+  saveImage?(sessionId: string, source: string): Promise<boolean>
+  openImage?(sessionId: string, source: string): Promise<void>
+
 }
 
 /** Ответ `clipboardImage.save()`. */
@@ -239,11 +250,17 @@ export const IPC = {
   stopDaemon: 'pult:stop-daemon',
   pickFolder: 'pult:pick-folder',
   revealPath: 'pult:reveal-path',
+  openFile: 'pult:open-file',
+  listFiles: 'pult:list-files',
+  previewFile: 'pult:preview-file',
   copyText: 'pult:copy-text',
   notify: 'pult:notify',
   clipboardPaths: 'pult:clipboard-paths',
   clipboardImage: 'pult:clipboard-image',
   openExternal: 'pult:open-external',
+  readImage: 'pult:read-image',
+  saveImage: 'pult:save-image',
+  openImage: 'pult:open-image',
   navigate: 'pult:navigate',
   testMode: 'pult:test-mode',
 } as const

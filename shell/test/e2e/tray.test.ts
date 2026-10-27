@@ -65,7 +65,7 @@ describe('строка меню', () => {
     assert.match(m?.tooltip ?? '', /^Пульт · 1 ждёт тебя/)
 
     // Окно смотрит на другую сессию, Inbox спрятан: клик в меню обязан привести к запросу.
-    await h.win.keyboard.press('Meta+I')
+    if (await h.win.getByTestId('inbox').count()) await h.win.keyboard.press('Meta+I')
     await h.win.getByTestId('inbox').waitFor({ state: 'detached', timeout: 3000 })
     await h.win.locator('[data-testid="agent-row"][data-agent="eta"]').click()
     await h.win.locator('[data-testid="conversation"][data-agent="eta"]').waitFor({ timeout: 5000 })

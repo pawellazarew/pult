@@ -1,21 +1,18 @@
-// Слева — проекты и их сессии (как в нативных Claude Code и Codex): проект — папка, под ним его
-// сессии, «+» на строке проекта — новая сессия в этой папке. Строка сессии — провайдер кромкой,
-// статус чипом, ветка worktree, время последней активности; ждущие тебя — первыми и подсвечены.
-// Раскладка — model/projects.ts, порядок сессий — model/agents.ts. Действия над сессией и проектом —
-// в меню «⋯» и по правому клику (как везде); на строке проекта видны только «+» и «⋯».
+// Активные беседы, проекты и постоянно доступные недавние — с раздельной прокруткой.
 
 import { useCallback, useState } from 'react'
 import type { MouseEvent, ReactElement } from 'react'
 import { ContextMenu } from './ContextMenu.js'
 import type { MenuEntry } from './ContextMenu.js'
 import type { AgentView } from '../model/agents.js'
-import { agentLabel, ago, shortPath, statusView } from '../model/agents.js'
-import { treePhaseLabel } from '../model/phase.js'
+import { agentLabel, ago, shortPath } from '../model/agents.js'
+import { chatSections, chatStatus } from '../model/navigation.js'
+import { projectName } from '../model/projects.js'
 import { contextRowView } from '../model/context.js'
 import type { ProjectGroup } from '../model/projects.js'
 import { projectRemoval } from '../model/projects.js'
 import { plural } from '../lib/ru.js'
-import { Chip, CMD, Icon, Kbd } from './common.js'
+import { CMD, Icon, Kbd } from './common.js'
 
 export interface ProjectTreeProps {
   groups: readonly ProjectGroup[]
@@ -67,10 +64,13 @@ export function browserItems(a: AgentView, onBrowser: (name: string, on: boolean
 }
 
 export function ProjectTree(p: ProjectTreeProps): ReactElement {
-  const total = p.groups.reduce((n, g) => n + g.sessions.length, 0)
   const archived = p.archived ?? []
   const [menu, setMenu] = useState<OpenMenu | null>(null)
   const [archiveOpen, setArchiveOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  const sections = chatSections(p.groups, query)
+  const active = sections.filter((s) => s.key !== 'recent' && s.rows.length > 0)
+  const recent = sections.find((s) => s.key === 'recent')!
   const closeMenu = useCallback(() => setMenu(null), [])
 
   const projectMenu = (e: MouseEvent<HTMLElement>, g: ProjectGroup): void => {
@@ -109,51 +109,62 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
     <SessionRow key={a.name} a={a} project={project} selected={a.name === p.selected} now={p.now} onSelect={p.onSelect} onMenu={sessionMenu} />
   return (
     <nav className="agents" aria-label="Проекты и сессии">
-      <div className="pane-h">
-        <span className="lbl">Проекты</span>
-        <span className="count" title={`${p.groups.length} ${plural(p.groups.length, 'проект', 'проекта', 'проектов')}, ${total} ${plural(total, 'сессия', 'сессии', 'сессий')}`}>{p.groups.length || ''}</span>
-        <span className="grow" />
-        <button type="button" className="btn btn-sm btn-ghost" onClick={p.onAddProject} data-testid="add-project" title="Добавить папку проекта">
-          <Icon name="folder" />+
+      <div className="sidebar-top">
+        <button type="button" className="btn btn-primary new-chat" onClick={() => p.onNew(null)} data-testid="new-agent">
+          <Icon name="plus" />Новый чат<span className="grow" /><Kbd>{`${CMD}N`}</Kbd>
         </button>
-        <button type="button" className="btn btn-sm" onClick={() => p.onNew(null)} data-testid="new-agent">
-          <Icon name="plus" />Сессия<Kbd>{`${CMD}N`}</Kbd>
-        </button>
+        <label className="chat-search"><Icon name="search" /><input value={query} onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              e.preventDefault(); e.stopPropagation()
+              if (query) setQuery('')
+              else document.querySelector<HTMLTextAreaElement>('[data-testid="composer"]')?.focus()
+            } else if (e.key === 'Enter') {
+              const first = sections.flatMap((s) => s.rows)[0]?.agent
+              if (first) { e.preventDefault(); e.stopPropagation(); p.onSelect(first.name); setQuery(''); requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('[data-testid="composer"]')?.focus()) }
+            }
+          }}
+          placeholder="Поиск бесед и проектов" aria-label="Поиск бесед и проектов" data-testid="chat-filter" title={`Поиск бесед (${CMD}K)`} /><Kbd>{`${CMD}K`}</Kbd>
+          {query && <button type="button" className="row-btn" onClick={() => setQuery('')} aria-label="Очистить поиск"><Icon name="x" /></button>}
+        </label>
       </div>
-      {p.groups.length === 0 ? (
-        <div className="empty-hint" data-testid="agents-empty">
-          <h3>Проектов пока нет</h3>
-          Добавь папку проекта кнопкой с папкой — или сразу заведи сессию: папка, провайдер, модель и первая реплика. <Kbd>{`${CMD}N`}</Kbd>
-        </div>
-      ) : (
-        <div className="tree" data-testid="agent-list">
-          {p.groups.map((g) => {
-            const folded = p.collapsed.has(g.path)
-            return (
-              <section key={g.path} className="proj" data-testid="project" data-project={g.path} data-pinned={g.pinned ? '1' : '0'}>
-                <div className="proj-h" onClick={() => p.onToggle(g.path)} onContextMenu={(e) => projectMenu(e, g)} title={g.path} aria-expanded={!folded}>
-                  <Icon name="chev" className={`ic proj-chev${folded ? '' : ' open'}`} />
-                  <span className="proj-name">{g.name}</span>
-                  {!g.pinned && <span className="proj-loose" title="папка сессии — её нет в списке проектов">папка</span>}
-                  {g.waiting > 0 && <span className="badge" title={`${g.waiting} ${plural(g.waiting, 'сессия ждёт', 'сессии ждут', 'сессий ждут')} тебя`}>{g.waiting}</span>}
-                  {g.unread > 0 && <span className="proj-unread" data-testid="project-unread"
-                    title={`${g.unread} ${plural(g.unread, 'непрочитанная сессия', 'непрочитанные сессии', 'непрочитанных сессий')}`}>{g.unread}</span>}
-                  <span className="grow" />
-                  <button type="button" className="proj-btn" title={`Новая сессия в ${shortPath(g.path, 60)}`} data-testid="project-new-session"
-                    onClick={(e) => { e.stopPropagation(); p.onNew(g.path) }}><Icon name="plus" /></button>
-                  <button type="button" className="proj-btn" data-testid="project-menu" title="Действия с проектом"
-                    aria-label={`Действия с проектом ${g.name}`} onClick={(e) => projectMenu(e, g)}><span className="dots" aria-hidden="true">⋯</span></button>
-                </div>
-                {!folded && (g.sessions.length === 0
-                  ? <div className="proj-empty">сессий нет — «+» заведёт первую</div>
-                  : (
-                    <ul className="ag-list" role="listbox" aria-label={`Сессии проекта ${g.name}`}>
-                      {g.sessions.map((a) => row(a, g.path))}
-                    </ul>
-                  ))}
-              </section>
-            )
-          })}
+      <div className="tree" data-testid="agent-list">
+        {(active.length > 0 || sections.every((s) => s.rows.length === 0)) && <div className="active-chats" data-testid="active-chats">
+        {active.map((section) => (
+          <section key={section.key} className="chat-section" data-testid={`chats-${section.key}`}>
+            <h3 className="chat-section-title">{section.label}<span>{section.rows.length}</span></h3>
+            <ul className="ag-list" role="listbox" aria-label={section.label}>
+              {section.rows.map(({ agent: a, projectPath }) => row(a, projectPath))}
+            </ul>
+          </section>
+        ))}
+        {sections.every((s) => s.rows.length === 0) && <div className="empty-hint" data-testid="agents-empty">
+          <h3>{query ? 'Ничего не найдено' : 'Начни с нового чата'}</h3>
+          {query ? 'Попробуй другое название или имя проекта.' : 'Выбери папку проекта и напиши, что сделать.'}
+        </div>}
+        </div>}
+        <div className="sidebar-projects" data-testid="sidebar-projects">
+        <details className="project-manager" data-testid="project-manager">
+          <summary>
+            <span className="project-heading"><Icon name="chev" className="ic proj-chev" />Проекты<span className="count">{p.groups.length}</span></span>
+            <button type="button" className="proj-btn project-add" onClick={(e) => { e.preventDefault(); e.stopPropagation(); p.onAddProject() }}
+              onKeyDown={(e) => e.stopPropagation()} data-testid="add-project" title="Добавить папку проекта" aria-label="Добавить проект"><Icon name="plus" /></button>
+          </summary>
+          {p.groups.map((g) => (
+            <section key={g.path} className="proj" data-testid="project" data-project={g.path} data-pinned={g.pinned ? '1' : '0'}>
+              <div className="proj-h" onContextMenu={(e) => projectMenu(e, g)} title={g.path}>
+                <Icon name="folder" />
+                <span className="proj-name">{g.name}</span>
+                {g.unread > 0 && <span className="proj-unread" data-testid="project-unread" title={`${g.unread} ${plural(g.unread, 'непрочитанная беседа', 'непрочитанные беседы', 'непрочитанных бесед')}`}>{g.unread}</span>}
+                <span className="grow" />
+                <button type="button" className="proj-btn" title={`Новая сессия в ${shortPath(g.path, 60)}`} data-testid="project-new-session"
+                  onClick={(e) => { e.stopPropagation(); p.onNew(g.path) }}><Icon name="plus" /></button>
+                <button type="button" className="proj-btn" data-testid="project-menu" title="Действия с проектом"
+                  aria-label={`Действия с проектом ${g.name}`} onClick={(e) => projectMenu(e, g)}><span className="dots" aria-hidden="true">⋯</span></button>
+              </div>
+            </section>
+          ))}
+        </details>
           {archived.length > 0 && (
             <section className="proj proj-archive" data-testid="archive-section">
               <div className="proj-h" onClick={() => setArchiveOpen((v) => !v)} aria-expanded={archiveOpen} title="Сессии в архиве: реплика возвращает сессию из архива">
@@ -169,7 +180,14 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
             </section>
           )}
         </div>
-      )}
+        <section className="chat-section chat-recent" data-testid="chats-recent">
+          <h3 className="chat-section-title">Недавние<span>{recent.rows.length}</span></h3>
+          <ul className="ag-list" role="listbox" aria-label="Недавние">
+            {recent.rows.map(({ agent: a, projectPath }) => row(a, projectPath))}
+          </ul>
+          {recent.rows.length === 0 && <div className="recent-empty">{query ? 'Нет совпадений среди недавних' : 'Здесь будут недавние беседы'}</div>}
+        </section>
+      </div>
       {menu && <ContextMenu at={menu.at} items={menu.items} onClose={closeMenu} testId={menu.testId} />}
     </nav>
   )
@@ -179,31 +197,27 @@ function SessionRow({ a, project, selected, now, onSelect, onMenu }: {
   a: AgentView; project: string; selected: boolean; now: number; onSelect(name: string): void
   onMenu(e: MouseEvent<HTMLElement>, a: AgentView): void
 }): ReactElement {
-  const sv = statusView(a.status)
-  const needs = sv.needsYou || a.pending > 0
-  // 0.3.5: вместо «идёт» — что именно делает ход («думает», «пишет», «Bash»).
-  const phaseLabel = sv.busy && !needs ? treePhaseLabel(a.phase) : null
-  // Папку пишем, только если сессия не в корне проекта: корень уже виден в строке проекта.
-  const sub = (a.repo ?? a.cwd) === project ? null : a.cwd
-  // Контекст в строке — только когда окно занято хотя бы наполовину: иначе строка шумит.
-  const ctx = contextRowView(a.context)
+  const sv = chatStatus(a)
+  const needs = sv.tone === 'wait'
+  const ctx = a.context && a.context.window && a.context.used / a.context.window >= .8 ? contextRowView(a.context) : null
   return (
     <li className="ag" role="option" aria-selected={selected}
       data-provider={a.provider} data-needs={needs ? '1' : '0'} data-unread={a.unread ? '1' : '0'} data-testid="agent-row" data-agent={a.name}
+      tabIndex={0} onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onSelect(a.name) } }}
       onClick={() => onSelect(a.name)} onContextMenu={(e) => onMenu(e, a)}>
       <span className="ag-name" title={a.title ? `${a.title} · имя для CLI: ${a.name}` : undefined}>
         {a.unread && <UnreadDot a={a} testId="row-unread" />}{agentLabel(a)}
       </span>
       <span className="ag-right" title={a.pending > 0 ? `${a.pending} ${plural(a.pending, 'запрос', 'запроса', 'запросов')} в Inbox` : undefined}>
-        {/* Счёт — словами в самом чипе: отдельное «1?» читалось загадкой. */}
-        <Chip tone={needs ? 'wait' : sv.tone} label={`${needs && !sv.needsYou ? 'ждёт тебя' : phaseLabel ?? sv.label}${a.pending > 0 ? ` · ${a.pending}` : ''}`} testId="row-status" />
+        {/* Однозначное состояние рядом с названием, текущее действие — во второй строке. */}
+        <span className={`chat-row-status t-${sv.tone}${a.status === 'cold' || a.status === 'idle' || a.status === 'done' ? ' is-quiet' : ''}`} data-testid="row-status" title={sv.detail}>{sv.label}{a.pending > 0 ? ` · ${a.pending}` : ''}</span>
         <button type="button" className="row-btn" data-testid="row-menu" title="Действия с сессией" aria-label={`Действия с сессией ${agentLabel(a)}`}
           onClick={(e) => onMenu(e, a)}><span className="dots" aria-hidden="true">⋯</span></button>
       </span>
       <span className="ag-meta">
-        <span className={`tag tag-${a.provider}`}>{a.provider}</span>
-        {sub && <span className="path" title={a.cwd}>{shortPath(sub, 26)}</span>}
-        {a.branch && <span className="br" title="ветка worktree"><Icon name="branch" />{a.branch}</span>}
+        <span className="chat-project" title={a.cwd}>{projectName(project)}</span>
+        <span className={`chat-provider who-${a.provider}`}>{a.provider === 'claude' ? 'Claude' : a.provider === 'codex' ? 'Codex' : a.provider}</span>
+        {a.status === 'working' && <span className="chat-action" title={sv.detail}>{sv.detail}</span>}
         {a.background && <span className="bg" title={`фоновые задачи:\n${a.background.tasks.join('\n')}`} data-testid="row-background">фон · {a.background.count}</span>}
         {ctx && <span className={`ctx t-${ctx.tone}`} title={ctx.title} data-testid="row-context">ctx {ctx.short}</span>}
         <span className="when">{ago(a.lastActivity, now)}</span>

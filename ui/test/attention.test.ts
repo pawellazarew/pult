@@ -230,7 +230,7 @@ describe('точка «непрочитано» в дереве и на вкла
     assert.match(out, /data-agent="b"[^]*?class="unread-dot" data-error="1"/)
     assert.match(out, /data-unread="0" data-testid="agent-row" data-agent="c"/)
     assert.equal((out.match(/data-testid="row-unread"/g) ?? []).length, 2)
-    assert.match(out, /data-testid="project-unread" title="2 непрочитанные сессии">2</)
+    assert.match(out, /data-testid="project-unread" title="2 непрочитанные беседы">2</)
     assert.doesNotMatch(html(ProjectTree, tree([ag('c')])), /project-unread|row-unread/)
   })
 

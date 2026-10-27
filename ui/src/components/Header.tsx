@@ -24,8 +24,13 @@ export function Header(p: {
   doctorTone: Tone
   inboxCount: number
   inboxOpen: boolean
+  sidebarHidden?: boolean
+  onToggleSidebar?(): void
   onDoctor(): void
   onInbox(): void
+  filesOpen?: boolean
+  filesAvailable?: boolean
+  onFiles?(): void
 }): ReactElement {
   const up = p.conn.state === 'up'
   const uptime = p.status ? p.status.uptimeMs + Math.max(0, p.now - p.statusAt) : null
@@ -40,6 +45,14 @@ export function Header(p: {
     <header className={`hdr${stale ? ' hdr-stale' : ''}`}>
       <div className="hdr-brand"><Icon name="mark" className="mark" />Пульт</div>
 
+      {p.onToggleSidebar && <button type="button" className="btn btn-ghost sidebar-toggle" data-testid="toggle-sidebar"
+        aria-label={p.sidebarHidden ? 'Показать беседы' : 'Скрыть беседы'} aria-expanded={!p.sidebarHidden}
+        title={`Список бесед (${CMD}B)`} onClick={p.onToggleSidebar}><Icon name="sidebar" /></button>}
+      <details className="health-menu" data-testid="health-menu">
+        <summary className={`health-summary t-${!up ? daemonTone : p.doctorTone === 'fail' ? 'fail' : p.guard.tone === 'fail' ? 'fail' : 'ok'}`}>
+          <span className="dot" /><span>{!up ? p.conn.state === 'connecting' ? 'Подключение…' : 'Нет соединения' : p.doctorTone === 'fail' ? 'Нужна проверка' : 'Подключено'}</span><Icon name="chev" />
+        </summary>
+        <div className="health-popover">
       <div className="cell cell-state" data-testid="hdr-daemon">
         <span className="lbl">демон</span>
         <span className={`val t-${daemonTone}`}>
@@ -73,13 +86,19 @@ export function Header(p: {
         )
       })}
 
+        </div>
+      </details>
+      {up && p.guard.tone !== 'ok' && <span className={`header-guard-alert t-${p.guard.tone}`} title={guardTitle}>{p.guard.label}</span>}
       <div className="hdr-spacer" />
       <div className="hdr-actions">
+        {p.onFiles && <button type="button" className="btn" aria-pressed={p.filesOpen} disabled={!p.filesAvailable} onClick={p.onFiles} data-testid="toggle-files" title={`Файлы проекта (${CMD}P)`}>
+          <Icon name="folder" />Файлы
+        </button>}
         <button type="button" className="btn" onClick={p.onDoctor} data-testid="open-doctor" title="Проверка окружения">
-          <span className={`t-${p.doctorTone} ic-wrap`}><Icon name="pulse" /></span>doctor
+          <span className={`t-${p.doctorTone} ic-wrap`}><Icon name="pulse" /></span><span className="doctor-label">Диагностика</span>
         </button>
         <button type="button" className="btn" aria-pressed={p.inboxOpen} onClick={p.onInbox} data-testid="toggle-inbox" title={`Inbox (${CMD}I)`}>
-          <Icon name="inbox" />Inbox
+          <Icon name="inbox" />Ответы
           <span className={`badge${p.inboxCount ? '' : ' zero'}`} data-testid="inbox-count">{p.inboxCount}</span>
           <Kbd>{`${CMD}I`}</Kbd>
         </button>

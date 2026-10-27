@@ -1,4 +1,5 @@
-// Картинки и прочие base64-блоки в выводе инструментов (О3: скриншоты браузера агента) — в заглушку ДО журнала.
+// Картинки и прочие base64-блоки в выводе инструментов — в заглушку ДО журнала.
+// Адаптер сначала сохраняет растровые картинки через core/images.ts; событие несёт отдельный массив images.
 //
 // ЗАЧЕМ. Скриншот страницы — сотни килобайт base64 в одном событии `tool.finished`. Журнал раздувается, а
 // строка NDJSON больше 1 МиБ рвёт соединение окна (`MAX_LINE_BYTES` клиента). Человеку в ленте сама картинка
@@ -19,7 +20,10 @@ export const blobPlaceholder = (chars: number, what = 'изображение'):
  * Остальное — как было. Чистая функция.
  */
 export function stripBlobs(v: unknown): unknown {
-  if (typeof v === 'string') return v.length >= BLOB_MIN_CHARS && BASE64_RE.test(v) ? blobPlaceholder(v.length, 'данные') : v
+  if (typeof v === 'string') {
+    if (/^data:image\/[^;,]+;base64,/i.test(v)) return blobPlaceholder(v.length)
+    return v.length >= BLOB_MIN_CHARS && BASE64_RE.test(v) ? blobPlaceholder(v.length, 'данные') : v
+  }
   if (Array.isArray(v)) return v.map(stripBlobs)
   if (v === null || typeof v !== 'object') return v
   const o = v as Record<string, unknown>
