@@ -16,6 +16,7 @@ import {
 } from 'electron'
 import type { IpcMainEvent, IpcMainInvokeEvent, MenuItemConstructorOptions, NativeImage, WebContents } from 'electron'
 import { readScopedImage } from '../../src/core/images.js'
+import { localFile } from './localFile.js'
 import { APP_INDEX, APP_ORIGIN, APP_SCHEME, appHeaders, mimeOf, resolveAppPath } from './appPath.js'
 import { parseBackoff } from './backoff.js'
 import { readClipboardPaths } from './clipboardPaths.js'
@@ -469,6 +470,17 @@ function registerIpc(): void {
       const image = await imageForSession(sessionId, source)
       return { ok: true, result: { dataUrl: `data:${image.mimeType};base64,${image.bytes.toString('base64')}`, name: image.name } }
     } catch { return fail('image_unavailable', 'Изображение недоступно: файл отсутствует, вне папки проекта или формат не поддерживается') }
+  })
+
+  ipcMain.handle(IPC.openFile, async (e, raw: unknown): Promise<CallReply> => {
+    if (!trusted(e)) return fail('forbidden', 'вызов не из окна Пульта')
+    try {
+      const file = localFile(raw)
+      if (TEST_MODE) ((globalThis as { __pultTestFiles?: unknown[] }).__pultTestFiles ??= []).push(file)
+      else if (file.action === 'reveal') shell.showItemInFolder(file.path)
+      else { const error = await shell.openPath(file.path); if (error) throw new Error(error) }
+      return { ok: true, result: file.action === 'open' ? 'opened' : 'revealed' }
+    } catch { return fail('file_unavailable', 'Файл недоступен: он удалён, перемещён или нет доступа') }
   })
 
   ipcMain.handle(IPC.saveImage, async (e, sessionId: unknown, source: unknown): Promise<CallReply> => {

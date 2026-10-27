@@ -169,6 +169,10 @@ restarts. Images are limited to 20 MB and read only from the project, Codex gene
 image store. Remote images stay links. Older screenshot blobs already discarded by previous versions cannot
 be recovered. Routine tool calls collapse into groups; errors, permission requests and images stay visible.
 
+Codex output-file citations and absolute local Markdown file links show a file button. Documents open in the
+system application; a nearby button reveals them in Finder. Opening is always by click. Missing files show an
+error; executable and unknown file types are only revealed in Finder. Older windows fall back to Finder.
+
 More: `pult agent list`, `pult agent stop w` (stop the current turn), `pult agent rm w`, `pult usage` (your 5-hour and
 7-day subscription windows), `pult --help` for everything.
 

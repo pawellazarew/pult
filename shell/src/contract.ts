@@ -210,6 +210,8 @@ export interface PultBridge {
    * Необязательный: старая оболочка его не знает, интерфейс тогда копирует адрес.
    */
   openExternal?(url: string): Promise<void>
+  /** Open a local document after a click; executable/unknown types are only revealed in Finder. */
+  openFile?(path: string): Promise<'opened' | 'revealed'>
   /** Растровое изображение только из папки сессии, кэша генерации или её media-хранилища. */
   readImage?(sessionId: string, source: string): Promise<{ dataUrl: string; name: string }>
   saveImage?(sessionId: string, source: string): Promise<boolean>
@@ -228,6 +230,7 @@ export const IPC = {
   stopDaemon: 'pult:stop-daemon',
   pickFolder: 'pult:pick-folder',
   revealPath: 'pult:reveal-path',
+  openFile: 'pult:open-file',
   copyText: 'pult:copy-text',
   notify: 'pult:notify',
   clipboardPaths: 'pult:clipboard-paths',

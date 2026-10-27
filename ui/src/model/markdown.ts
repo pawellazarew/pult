@@ -17,6 +17,8 @@
 // обрезаются: человек вставляет код, diff и логи — `# комментарий`, `- строка`/`+ строка` и отступы должны
 // остаться как набраны.
 
+import { fileCitation } from './fileReferences.js'
+
 export type Inline =
   | { t: 'text'; v: string }
   | { t: 'code'; v: string }
@@ -26,6 +28,7 @@ export type Inline =
   /** `href` — только http(s) и mailto; иная схема или относительный адрес — `null`: рисуется текстом. */
   | { t: 'link'; href: string | null; url: string; title?: string; c: Inline[] }
   | { t: 'image'; url: string; alt: string }
+  | { t: 'file'; path: string }
   | { t: 'br' }
 
 export type Align = 'left' | 'center' | 'right' | null
@@ -215,6 +218,10 @@ function inline(s: string, o: Opts): Inline[] {
   while (i < s.length) {
     const c = s[i] as string
     if (c === '\\' && i + 1 < s.length && PUNCT.has(s[i + 1] as string)) { buf += s[i + 1]; i += 2; continue }
+    if (!o.noLinks && c === ':' && s.startsWith(':codex-file-citation{', i)) {
+      const citation = fileCitation(s.slice(i, i + 8400))
+      if (citation) { push({ t: 'file', path: citation.path }); i += citation.length; continue }
+    }
     if (c === '`') {
       const e = codeEnd(s, i)
       const n = runLen(s, i)

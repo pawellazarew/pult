@@ -2,6 +2,8 @@ import { createContext, useContext, useEffect, useMemo, useRef, useState } from 
 import type { MouseEvent, ReactElement, ReactNode } from 'react'
 import type { ImageBridge } from './Images.js'
 import { ImagePreview, isImagePath } from './Images.js'
+import { Icon } from './common.js'
+import { localFilePath } from '../model/fileReferences.js'
 import { parseMarkdown, safeHref } from '../model/markdown.js'
 import type { Align, Block, Inline, ListItem } from '../model/markdown.js'
 
@@ -12,6 +14,8 @@ import type { Align, Block, Inline, ListItem } from '../model/markdown.js'
 export interface MdBridge extends ImageBridge {
   copyText(text: string): Promise<void>
   openExternal?(url: string): Promise<void>
+  openFile?(path: string): Promise<'opened' | 'revealed'>
+  revealPath?(path: string): Promise<void>
 }
 
 /** Мост для реплик. Нет провайдера (тесты, окно вне оболочки) — кнопки рисуются, но молчат. */
@@ -90,6 +94,40 @@ function Link({ href, url, title, children }: { href: string; url: string; title
   )
 }
 
+export async function followFile(bridge: MdBridge, path: string, reveal = false): Promise<'opened' | 'revealed' | 'copied'> {
+  if (!reveal && bridge.openFile) return bridge.openFile(path)
+  if (bridge.revealPath) { await bridge.revealPath(path); return 'revealed' }
+  await bridge.copyText(path)
+  return 'copied'
+}
+
+function FileLink({ path, label }: { path: string; label?: string }): ReactElement {
+  const bridge = useContext(MdBridgeContext)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [flash, show] = useFlash()
+  const name = path.split('/').pop() || path
+  const finder = !bridge?.openFile
+  const open = async (reveal = false): Promise<void> => {
+    if (!bridge || busy) return
+    setBusy(true); setError(null)
+    try {
+      const result = await followFile(bridge, path, reveal)
+      if (result !== 'opened') show(result === 'revealed' ? 'Показан в Finder' : 'Путь скопирован')
+    } catch { setError('Файл недоступен: проверь, не перемещён ли он') }
+    finally { setBusy(false) }
+  }
+  return <span className="file-reference">
+    <button type="button" className="file-link" data-testid="file-link" title={path} disabled={!bridge || busy}
+      aria-label={`${finder ? 'Показать в Finder' : 'Открыть файл'}: ${name}`} onClick={() => void open()}>
+      <Icon name="file" /><span className="file-link-name">{label || name}</span><span className="file-link-action">{flash || (finder ? 'Finder' : 'Открыть')}</span>
+    </button>
+    {!finder && bridge?.revealPath && <button type="button" className="file-reveal" data-testid="file-reveal" disabled={busy}
+      title={`Показать в Finder: ${path}`} aria-label={`Показать в Finder: ${name}`} onClick={() => void open(true)}><Icon name="folder" /></button>}
+    {error && <span className="file-link-error" role="alert">{error}</span>}
+  </span>
+}
+
 function Inl({ parts }: { parts: Inline[] }): ReactElement {
   return <>{parts.map((p, i) => {
     switch (p.t) {
@@ -99,12 +137,14 @@ function Inl({ parts }: { parts: Inline[] }): ReactElement {
       case 'em': return <em key={i}><Inl parts={p.c} /></em>
       case 'del': return <del key={i}><Inl parts={p.c} /></del>
       case 'br': return <br key={i} />
+      case 'file': return <FileLink key={i} path={p.path} />
       case 'image': {
         const href = safeHref(p.url)
         return href ? <Link key={i} href={href} url={p.url}>{p.alt || 'Открыть изображение'}</Link> : <ImagePreview key={i} source={p.url} label={p.alt} />
       }
       case 'link':
         if (isImagePath(p.url)) return <ImagePreview key={i} source={p.url} label={p.c.map((c) => c.t === 'text' ? c.v : '').join('') || undefined} />
+        if (localFilePath(p.url)) return <FileLink key={i} path={p.url} label={p.c.map((c) => c.t === 'text' ? c.v : '').join('') || undefined} />
         return p.href
           ? <Link key={i} href={p.href} url={p.url} {...(p.title ? { title: p.title } : {})}><Inl parts={p.c} /></Link>
           // Схема не из белого списка (javascript:, file:, путь в репозитории) — просто текст.

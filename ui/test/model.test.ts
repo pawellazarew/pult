@@ -435,7 +435,7 @@ describe('Markdown реплик', () => {
   // Ссылки из дерева строки — для проверок «что стало ссылкой и куда ведёт».
   const links = (xs: Inline[]): Array<{ href: string | null; url: string }> => xs.flatMap((x) =>
     x.t === 'link' ? [{ href: x.href, url: x.url }] : 'c' in x ? links(x.c) : [])
-  const txt = (xs: Inline[]): string => xs.map((x) => (x.t === 'text' || x.t === 'code' ? x.v : x.t === 'br' ? '\n' : x.t === 'image' ? x.alt : txt(x.c))).join('')
+  const txt = (xs: Inline[]): string => xs.map((x) => (x.t === 'text' || x.t === 'code' ? x.v : x.t === 'br' ? '\n' : x.t === 'image' ? x.alt : x.t === 'file' ? x.path : txt(x.c))).join('')
   const T = (v: string): Inline => ({ t: 'text', v })
 
   it('блок кода: язык — первое слово строки сведений; закрывает такая же серия не короче', () => {

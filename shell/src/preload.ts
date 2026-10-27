@@ -74,6 +74,10 @@ const bridge: PultBridge = {
     await ipcRenderer.invoke(IPC.revealPath, p)
   },
 
+  async openFile(p: string): Promise<'opened' | 'revealed'> {
+    return unwrap(await ipcRenderer.invoke(IPC.openFile, p) as CallReply) as 'opened' | 'revealed'
+  },
+
   async copyText(text: string): Promise<void> {
     await ipcRenderer.invoke(IPC.copyText, text)
   },

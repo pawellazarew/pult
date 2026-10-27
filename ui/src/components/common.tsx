@@ -4,6 +4,7 @@ import type { ReactElement } from 'react'
 import type { Tone } from '../model/types.js'
 
 const PATHS: Record<string, ReactElement> = {
+  file: <><path d="M3.5 1.5h5l4 4v9h-9zM8.5 1.5v4h4M5.5 8h5M5.5 10.5h4" /></>,
   sidebar: <><rect x="2" y="2.5" width="12" height="11" rx="2" /><path d="M6 2.5v11" /></>,
   plus: <path d="M8 3v10M3 8h10" />,
   stop: <rect x="4" y="4" width="8" height="8" rx="1" fill="currentColor" stroke="none" />,
