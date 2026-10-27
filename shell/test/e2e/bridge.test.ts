@@ -28,7 +28,7 @@ describe('окно: мост, подписка, переподключение',
   it('окно открывается на app://pult и подключается к демону', async () => {
     assert.equal(h.win.url(), 'app://pult/index.html')
     assert.ok(await waitFor(async () => (await connState()) === 'up', 20_000), 'окно не подключилось к демону')
-    await h.win.getByTestId('daemon-meta').waitFor({ timeout: 10_000 })
+    await h.win.getByTestId('daemon-meta').waitFor({ state: 'attached', timeout: 10_000 })
     assert.equal(await h.win.title(), 'Пульт')
     await h.shot('up')
   })
@@ -44,7 +44,7 @@ describe('окно: мост, подписка, переподключение',
     assert.equal(probe.process, 'undefined')
     assert.equal(probe.version, 1)
     assert.deepEqual(probe.bridgeKeys, [
-      'call', 'clipboardFilePaths', 'copyText', 'notify', 'onConnection', 'onNavigate', 'openExternal', 'pathsForFiles', 'pickFolder', 'revealPath',
+      'call', 'clipboardFilePaths', 'copyText', 'notify', 'onConnection', 'onNavigate', 'openExternal', 'openImage', 'pathsForFiles', 'pickFolder', 'readImage', 'revealPath', 'saveImage',
       'startDaemon', 'stopDaemon', 'subscribe', 'testMode', 'version',
     ])
   })
@@ -81,7 +81,7 @@ describe('окно: мост, подписка, переподключение',
     assert.ok(await waitFor(async () => (await debug()).ids.includes(r.ids.at(-1)!)), 'события не дошли до окна')
     const d = await debug()
     for (const id of r.ids) assert.ok(d.ids.includes(id), `событие ${id} не дошло`)
-    await h.win.getByTestId('event-count').filter({ hasText: `#${r.ids.at(-1)}` }).waitFor({ timeout: 5000 })
+    await h.win.getByTestId('event-count').filter({ hasText: `#${r.ids.at(-1)}` }).waitFor({ state: 'attached', timeout: 5000 })
   })
 
   it('демон убит — плашка «демон недоступен»; поднят — окно доигрывает с курсора без потерь и повторов', async () => {
