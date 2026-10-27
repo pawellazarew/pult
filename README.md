@@ -160,7 +160,7 @@ The sidebar groups conversations into waiting, working and recent, with search b
 ⌘1…9 selects the first nine conversations in the visible list. Technical connection details are under the
 connection indicator. ⌘K focuses conversation search; ⌘B hides or shows the sidebar. Model, effort and
 approval mode sit in the composer. Context, subscription usage and session details open from its info button.
-When reading older messages, “К новым сообщениям” returns to the latest reply. Errors show a short excerpt first;
+When reading older messages, “К последним” returns to the latest reply. Errors show a short excerpt first;
 the full input and output remain available in a separate disclosure.
 
 Local PNG, JPEG, GIF and WebP references appear as previews. Click to zoom, save a copy or open the file.

@@ -7,6 +7,7 @@ describe('полировка: фокус, управление у ввода и 
   let h: Harness
   before(async () => {
     h = await launch({ name: 'polish' })
+    assert.ok(await waitFor(async () => (await h.win.getAttribute('.app', 'data-conn')) === 'up', 20_000))
     h.codexConfig({ scenario: 'hang' })
     const c = await h.client()
     await c.request('agent.start', { name: 'polish', kind: 'codex', cwd: h.workDir('pult'), model: 'gpt-5-codex', approval: 'full', confirm: true })
@@ -23,6 +24,7 @@ describe('полировка: фокус, управление у ввода и 
     await h.win.locator('[data-testid="agent-row"][data-agent="polish"]').click()
     await h.win.getByTestId('composer').waitFor()
     await h.win.getByTestId('stop-turn').waitFor()
+    assert.ok(await waitFor(async () => (await h.win.getByTestId('feed').evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight)) < 3), 'новая беседа не докручена до низа')
   })
   after(async () => { await h?.close() })
 
@@ -32,6 +34,10 @@ describe('полировка: фокус, управление у ввода и 
     assert.doesNotMatch((await preview.textContent()) ?? '', /LONG_INPUT_|строка 0/)
     assert.match((await preview.textContent()) ?? '', /Не найден тестовый пакет/)
     assert.equal(await h.win.locator('.tool-raw').getAttribute('open'), null)
+    for (const open of [true, false]) {
+      await h.win.locator('.tool-raw').evaluate((el, value) => { (el as HTMLDetailsElement).open = value }, open)
+      assert.ok(await waitFor(async () => (await h.win.getByTestId('feed').evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight)) < 3), 'изменение высоты оторвало ленту от низа')
+    }
     await h.win.locator('.composer [data-testid="conv-settings"]').waitFor()
     assert.match((await h.win.locator('.composer [data-testid="conv-approval"]').textContent()) ?? '', /полный доступ/)
     assert.ok(await h.win.getByTestId('stop-turn').isVisible())
@@ -51,7 +57,15 @@ describe('полировка: фокус, управление у ввода и 
     assert.ok(await waitFor(async () => await h.win.getByTestId('chat-filter').evaluate((el) => el === document.activeElement)))
     await h.win.getByTestId('chat-filter').fill('настройки')
     assert.equal(await h.win.getByTestId('agent-row').count(), 1)
-    await h.win.getByTestId('chat-filter').fill('')
+    await h.win.keyboard.press('Escape')
+    assert.equal(await h.win.getByTestId('chat-filter').inputValue(), '')
+    assert.equal(await h.win.getByTestId('confirm-stop').count(), 0)
+    await h.win.keyboard.press('Escape')
+    assert.equal(await h.win.getByTestId('composer').evaluate((el) => el === document.activeElement), true)
+    await h.win.keyboard.press('Meta+K')
+    await h.win.getByTestId('chat-filter').fill('настройки')
+    await h.win.keyboard.press('Enter')
+    assert.ok(await waitFor(async () => await h.win.getByTestId('composer').evaluate((el) => el === document.activeElement)))
     await h.win.getByTestId('feed').evaluate((el) => { el.scrollTop = 0 })
     await h.win.getByTestId('jump-latest').waitFor()
     await h.win.getByTestId('jump-latest').click()
@@ -61,7 +75,7 @@ describe('полировка: фокус, управление у ввода и 
     await h.win.getByTestId('chat-info').locator('summary').click()
     await h.win.keyboard.press('Escape')
     assert.equal(await h.win.getByTestId('chat-info').getAttribute('open'), null)
-    assert.equal(await h.win.getByTestId('confirm-dialog').count(), 0)
+    assert.equal(await h.win.getByTestId('confirm-stop').count(), 0)
     assert.equal(await h.win.getByTestId('composer').inputValue(), 'Проверь ещё контраст подписи')
     assert.ok(await h.win.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1))
   })

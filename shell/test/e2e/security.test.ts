@@ -63,7 +63,7 @@ describe('окно: границы безопасности и тема', () => 
       await h.win.emulateMedia({ colorScheme: theme })
       assert.ok(await waitFor(async () => (await h.win.evaluate(() => matchMedia('(prefers-color-scheme: dark)').matches)) === (theme === 'dark')))
       const bg = await h.win.evaluate(() => getComputedStyle(document.body).backgroundColor)
-      assert.equal(bg, theme === 'dark' ? 'rgb(14, 20, 27)' : 'rgb(242, 245, 248)')
+      assert.equal(bg, theme === 'dark' ? 'rgb(25, 27, 29)' : 'rgb(250, 250, 249)')
       await sleep(100)
       await h.shot(theme)
     }

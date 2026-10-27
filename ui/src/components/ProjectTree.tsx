@@ -113,6 +113,16 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
           <Icon name="plus" />Новый чат<span className="grow" /><Kbd>{`${CMD}N`}</Kbd>
         </button>
         <label className="chat-search"><Icon name="search" /><input value={query} onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              e.preventDefault(); e.stopPropagation()
+              if (query) setQuery('')
+              else document.querySelector<HTMLTextAreaElement>('[data-testid="composer"]')?.focus()
+            } else if (e.key === 'Enter') {
+              const first = sections.flatMap((s) => s.rows)[0]?.agent
+              if (first) { e.preventDefault(); e.stopPropagation(); p.onSelect(first.name); setQuery(''); requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('[data-testid="composer"]')?.focus()) }
+            }
+          }}
           placeholder="Поиск бесед и проектов" aria-label="Поиск бесед и проектов" data-testid="chat-filter" title={`Поиск бесед (${CMD}K)`} /><Kbd>{`${CMD}K`}</Kbd>
           {query && <button type="button" className="row-btn" onClick={() => setQuery('')} aria-label="Очистить поиск"><Icon name="x" /></button>}
         </label>

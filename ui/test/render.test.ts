@@ -341,11 +341,19 @@ describe('контраст приглушённого текста (WCAG ≥ 4.5
       const faint = hex(t['faint']!)
       const panel = hex(t['panel']!)
       const bgs: Array<[string, RGB]> = [
-        ['panel', panel], ['ground', hex(t['ground']!)], ['sunk', hex(t['sunk']!)], ['wait-row', over(rgba(t['wait-soft']!), panel)],
+        ['panel', panel], ['ground', hex(t['ground']!)], ['sunk', hex(t['sunk']!)], ['sidebar', hex(t['sidebar']!)],
+        ['selected', hex(t['selected']!)], ['wait-row', over(rgba(t['wait-soft']!), hex(t['sidebar']!))],
       ]
       for (const [bg, c] of bgs) {
         const r = ratio(faint, c)
         assert.ok(r >= 4.5, `${name}: --faint ${t['faint']} на ${bg} = ${r.toFixed(2)}:1`)
+      }
+    })
+    it(`${name} тема: состояния и провайдеры читаются на строках sidebar`, () => {
+      const bgs = [hex(t['sidebar']!), hex(t['selected']!), over(rgba(t['wait-soft']!), hex(t['sidebar']!))]
+      for (const token of ['wait', 'amber', 'teal', 'accent', 'oc', 'fail']) for (const bg of bgs) {
+        const r = ratio(hex(t[token]!), bg)
+        assert.ok(r >= 4.5, `${name}: --${token} = ${r.toFixed(2)}:1`)
       }
     })
   }

@@ -972,7 +972,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
       }
       case 'escape': {
         const info = document.querySelector<HTMLDetailsElement>('.chat-info[open], .health-menu[open]')
-        if (!modal && info) { e.preventDefault(); info.open = false; info.querySelector('summary')?.focus(); return }
+        if (!modal && info) { e.preventDefault(); const fromInfo = info.contains(document.activeElement); info.open = false; if (fromInfo) info.querySelector('summary')?.focus(); return }
         if (modal) { e.preventDefault(); setModal(null); return }
         if (current && statusView(current.status).busy) { e.preventDefault(); setModal({ type: 'stop', name: current.name }) }
         return

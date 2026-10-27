@@ -6,15 +6,15 @@
   --ground: #FAFAF9; --panel: #FFFFFF; --sunk: #F1F2EE; --sidebar: #F1F2EE;
   --hair: #E3E5DF; --line: #D4D8D0;
   /* Самый приглушённый текст остаётся читаемым и на поверхностях, и в строках внимания. */
-  --ink: #252924; --mut: #535B54; --faint: #626B63;
-  --accent: #4267C8; --accent-soft: rgba(66,103,200,.08); --accent-edge: rgba(66,103,200,.42);
+  --ink: #252924; --mut: #535B54; --faint: #5A635B;
+  --accent: #3D60BE; --accent-soft: rgba(66,103,200,.08); --accent-edge: rgba(66,103,200,.42);
   --selected: #E9EDF5; --user-surface: #EFF1ED;
-  --amber: #9B5E1F; --amber-soft: rgba(155,94,31,.09); --amber-edge: rgba(155,94,31,.32);
-  --teal: #28766C; --teal-soft: rgba(40,118,108,.09); --teal-edge: rgba(40,118,108,.32);
+  --amber: #86551A; --amber-soft: rgba(155,94,31,.09); --amber-edge: rgba(155,94,31,.32);
+  --teal: #236A61; --teal-soft: rgba(40,118,108,.09); --teal-edge: rgba(40,118,108,.32);
   --oc: #7154A8; --oc-soft: rgba(113,84,168,.09); --oc-edge: rgba(113,84,168,.32);
   --ok: #28734D; --ok-soft: rgba(40,115,77,.10);
-  --run: #4267C8; --run-soft: rgba(66,103,200,.09);
-  --wait: #956218; --wait-soft: rgba(149,98,24,.10);
+  --run: #3D60BE; --run-soft: rgba(66,103,200,.09);
+  --wait: #86570F; --wait-soft: rgba(149,98,24,.10);
   --queued: #626E64; --queued-soft: rgba(98,110,100,.10);
   --fail: #B33A31; --fail-soft: rgba(179,58,49,.08); --fail-edge: rgba(179,58,49,.32);
   --add: #28734D; --add-soft: rgba(40,115,77,.08);
@@ -965,7 +965,7 @@ button { font: inherit; color: inherit; }
 .tool-detail pre { max-height: 200px; overflow: auto; font: 11.5px/1.6 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .tool-detail .k { font: 500 11px/1.5 var(--body); letter-spacing: 0; text-transform: none; color: var(--faint); }
 .tool-error-preview { padding: 10px 12px; border: 1px solid var(--fail-edge); border-left: 2px solid var(--fail); border-radius: 8px; background: var(--fail-soft); color: var(--ink); font-size: 12.5px; }
-.tool-error-preview > strong, .tool-error-preview > span { display: block; }
+.tool-error-preview > strong, .tool-error-preview > span { display: block; font-family: var(--body); }
 .tool-error-preview > span { margin-top: 6px; color: var(--mut); }
 .tool-error-preview pre { max-height: 160px; margin: 6px 0 0; font: 11.5px/1.6 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; overflow: auto; color: var(--mut); }
 .tool-raw { margin-top: 8px; }
@@ -1010,7 +1010,7 @@ button { font: inherit; color: inherit; }
 .queue { padding: 0 24px 2px; background: var(--ground); }
 .queue > * { max-width: 764px; }
 .queue-list { font-size: 12px; }
-.jump-latest { position: absolute; bottom: 12px; right: 24px; max-width: calc(100% - 48px); z-index: 5; height: 34px; padding: 0 13px; display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 18px; background: var(--panel); color: var(--ink); box-shadow: 0 3px 14px rgba(20,25,20,.1); cursor: pointer; font: 12px var(--body); white-space: nowrap; }
+.jump-latest { position: absolute; bottom: 12px; right: max(24px, calc((100% - 764px) / 2)); max-width: calc(100% - 48px); z-index: 5; height: 34px; padding: 0 13px; display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 18px; background: var(--panel); color: var(--ink); box-shadow: 0 3px 14px rgba(20,25,20,.1); cursor: pointer; font: 12px var(--body); white-space: nowrap; }
 .jump-latest .ic { width: 14px; height: 14px; }
 .feed-wrap:has(.jump-latest) .feed-inner { padding-bottom: 60px; }
 .inbox { background: var(--ground); border-left-color: var(--hair); }

@@ -135,11 +135,25 @@ export function Conversation(p: ConversationProps): ReactElement {
   useLayoutEffect(() => { if (pendingText !== undefined) stick.current = true }, [pendingText])
   // Строка фазы растёт и меняется (размышления, подпись инструмента) — прилипшая лента едет за ней.
   const phaseKey = agent.phase ? `${agent.phase.phase}:${agent.phase.since}:${agent.phase.reasoning?.length ?? 0}` : ''
+  useLayoutEffect(() => { stick.current = true; setAway(false) }, [agent.name])
   useLayoutEffect(() => {
     const el = feed.current
     if (el && stick.current) el.scrollTop = el.scrollHeight
   }, [p.items, agent.name, pendingText, phaseKey])
-  useLayoutEffect(() => { stick.current = true; setAway(false) }, [agent.name])
+  useLayoutEffect(() => {
+    const el = feed.current
+    if (!el) return
+    const sync = (): void => {
+      if (stick.current) { el.scrollTop = el.scrollHeight; setAway(false) }
+      else setAway(el.scrollHeight - el.scrollTop - el.clientHeight >= 80)
+    }
+    const observer = new ResizeObserver(sync)
+    observer.observe(el)
+    const inner = el.querySelector('.feed-inner')
+    if (inner) observer.observe(inner)
+    sync()
+    return () => observer.disconnect()
+  }, [agent.name, p.items.length])
 
   const onScroll = (): void => {
     const el = feed.current
@@ -268,7 +282,7 @@ export function Conversation(p: ConversationProps): ReactElement {
       </div>
       {away && <button type="button" className="jump-latest btn" data-testid="jump-latest" onClick={() => {
         const el = feed.current; if (el) { stick.current = true; setAway(false); el.scrollTop = el.scrollHeight }
-      }}>К новым сообщениям ↓</button>}
+      }}>К последним ↓</button>}
       </div>
 
       {p.onQueueRemove && (agent.queue?.length || agent.queuePaused || qe.edit || qe.notice) ? (
@@ -620,7 +634,7 @@ function ToolRow({ it, loadEvents }: { it: ToolItem; loadEvents?: (ids: number[]
         <ImageGallery sources={it.images ?? []} />
         {open && (
           <div className="tool-detail">
-            {it.state === 'error' && <div className="tool-error-preview" role="status" data-testid="tool-error-preview">
+            {it.state === 'error' && <div className="tool-error-preview" data-testid="tool-error-preview">
               <strong>Действие завершилось с ошибкой{it.exitCode !== undefined ? ` · код ${it.exitCode}` : ''}</strong>
               {shown.result ? <pre>{shown.result.split('\n').filter((line) => line.trim()).slice(-6).join('\n').slice(-1600)}</pre> : <span>Подробности доступны в полном выводе.</span>}
             </div>}
