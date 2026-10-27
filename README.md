@@ -213,7 +213,7 @@ Every question from every session goes to the Inbox (⌘I in the window, `pult p
 - **Silence is a no.** Nobody answered within 10 minutes, the daemon went away, the agent was stopped — the answer is
   "deny".
 
-**Approval mode** is chosen when a session is created (`--approval`, or the "Подтверждения" field in "+ Сессия"):
+**Approval mode** is chosen when a session is created (`--approval`, or the "Подтверждения" field in "Новая сессия"):
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/new-session-dark.png">
