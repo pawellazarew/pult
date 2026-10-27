@@ -113,7 +113,7 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
           <Icon name="plus" />Новый чат<span className="grow" /><Kbd>{`${CMD}N`}</Kbd>
         </button>
         <label className="chat-search"><Icon name="search" /><input value={query} onChange={(e) => setQuery(e.target.value)}
-          placeholder="Поиск бесед и проектов" aria-label="Поиск бесед и проектов" data-testid="chat-filter" />
+          placeholder="Поиск бесед и проектов" aria-label="Поиск бесед и проектов" data-testid="chat-filter" title={`Поиск бесед (${CMD}K)`} /><Kbd>{`${CMD}K`}</Kbd>
           {query && <button type="button" className="row-btn" onClick={() => setQuery('')} aria-label="Очистить поиск"><Icon name="x" /></button>}
         </label>
       </div>
@@ -187,7 +187,7 @@ function SessionRow({ a, project, selected, now, onSelect, onMenu }: {
       </span>
       <span className="ag-right" title={a.pending > 0 ? `${a.pending} ${plural(a.pending, 'запрос', 'запроса', 'запросов')} в Inbox` : undefined}>
         {/* Однозначное состояние рядом с названием, текущее действие — во второй строке. */}
-        <span className={`chat-row-status t-${sv.tone}`} data-testid="row-status" title={sv.detail}>{sv.label}{a.pending > 0 ? ` · ${a.pending}` : ''}</span>
+        <span className={`chat-row-status t-${sv.tone}${a.status === 'cold' || a.status === 'idle' || a.status === 'done' ? ' is-quiet' : ''}`} data-testid="row-status" title={sv.detail}>{sv.label}{a.pending > 0 ? ` · ${a.pending}` : ''}</span>
         <button type="button" className="row-btn" data-testid="row-menu" title="Действия с сессией" aria-label={`Действия с сессией ${agentLabel(a)}`}
           onClick={(e) => onMenu(e, a)}><span className="dots" aria-hidden="true">⋯</span></button>
       </span>

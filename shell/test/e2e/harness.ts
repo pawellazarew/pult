@@ -140,6 +140,8 @@ export async function launch(opts: {
     env,
     timeout: 30_000,
   })
+  // Playwright может освободить канал после внешнего SIGTERM раньше close().
+  const appProcess = app.process()
   const win = await app.firstWindow()
   await win.waitForLoadState('domcontentloaded')
   // Размер окна и экрана — в вывод: у раннера CI экран меньше рабочего мака, и окно 1280×820 туда не
@@ -244,7 +246,7 @@ export async function launch(opts: {
       // `app.close()` ждёт выхода Electron без предела. Изредка (07.10.2026: 1 из ~20 локально,
       // на macOS-раннере CI — до таймаута задания в 20 мин) главный процесс выходит десятки секунд;
       // корень не найден. Тест о выходе не судит — ждём 10 с и добиваем, чтобы набор не висел.
-      const proc = app.process()
+      const proc = appProcess
       const closed = await Promise.race([app.close().then(() => true, () => true), sleep(10_000).then(() => false)])
       if (!closed) {
         process.stderr.write(`e2e: Electron не вышел за 10 с после app.close() — SIGKILL (pid ${proc.pid})\n`)

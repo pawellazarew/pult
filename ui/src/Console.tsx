@@ -112,6 +112,8 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set(store.list('pult.collapsed')))
   const [projects, setProjects] = useState<string[]>([])
   const [loaded, setLoaded] = useState(false)
+  const [sidebarHidden, setSidebarHidden] = useState(() => store.get('pult.sidebarHidden') === '1')
+  useEffect(() => { store.set('pult.sidebarHidden', sidebarHidden ? '1' : '0') }, [sidebarHidden])
   const [inboxOpen, setInboxOpen] = useState<boolean>(() => store.get('pult.inbox') === '1')
   const [inboxFilter, setInboxFilter] = useState<InboxFilter>(() => { const f = store.get('pult.inboxFilter'); return isInboxFilter(f) ? f : 'all' })
   // M8c: плашка обновления. Скрытая крестиком версия помнится до следующей; версия окна — из user agent.
@@ -888,6 +890,17 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   const onHot = useRef<(a: HotAction, e: KeyboardEvent) => void>(() => {})
   onHot.current = (a, e) => {
     switch (a.type) {
+      case 'quickSwitch':
+        if (modal) return
+        e.preventDefault()
+        setSidebarHidden(false)
+        requestAnimationFrame(() => document.querySelector<HTMLInputElement>('[data-testid="chat-filter"]')?.focus())
+        return
+      case 'toggleSidebar':
+        if (modal) return
+        e.preventDefault()
+        setSidebarHidden((v) => !v)
+        return
       case 'newAgent':
         if (modal) return
         e.preventDefault()
@@ -957,10 +970,13 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         approve(target.id)
         return
       }
-      case 'escape':
+      case 'escape': {
+        const info = document.querySelector<HTMLDetailsElement>('.chat-info[open], .health-menu[open]')
+        if (!modal && info) { e.preventDefault(); info.open = false; info.querySelector('summary')?.focus(); return }
         if (modal) { e.preventDefault(); setModal(null); return }
         if (current && statusView(current.status).busy) { e.preventDefault(); setModal({ type: 'stop', name: current.name }) }
         return
+      }
     }
   }
   useEffect(() => {
@@ -979,6 +995,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
       <Header conn={conn} status={status} statusAt={statusAt} now={now} guard={guard} usage={ui.usage}
         providers={providers} providersChecking={providersChecking} onProvidersCheck={() => void checkProviders()}
         doctorTone={doctorTone(doctor.report)} inboxCount={inboxNums.all} inboxOpen={inboxOpen}
+        sidebarHidden={sidebarHidden} onToggleSidebar={() => setSidebarHidden((v) => !v)}
         onDoctor={() => { setModal({ type: 'doctor' }); if (!doctor.loading) void runDoctor() }}
         onInbox={() => setInboxOpen((v) => !v)} />
 
@@ -1029,7 +1046,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         </div>
       )}
 
-      <main className={`grid${inboxOpen ? ' with-inbox' : ''}`}>
+      <main className={`grid${sidebarHidden ? ' sidebar-hidden' : ''}${inboxOpen ? ' with-inbox' : ''}`}>
         <div className="agents-col">
           <ProjectTree groups={groups} selected={current?.name ?? null} now={now} collapsed={collapsed}
             onSelect={select} onNew={(cwd) => setModal({ type: 'new', cwd })} onToggle={toggleProject}

@@ -463,6 +463,7 @@ describe('окно: рабочие сценарии', () => {
     assert.match((await help.textContent()) ?? '', /Shift\+Enter/)
     await h.win.keyboard.press('Escape')
     await help.waitFor({ state: 'detached', timeout: 3000 })
+    await h.win.getByTestId('chat-info').locator('summary').click()
     await h.win.getByTestId('hotkeys-open').click()
     await help.waitFor({ timeout: 3000 })
     await h.win.keyboard.press('Escape')

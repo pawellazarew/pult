@@ -7,6 +7,8 @@
 
 export type HotAction =
   | { type: 'newAgent' }
+  | { type: 'quickSwitch' }
+  | { type: 'toggleSidebar' }
   | { type: 'selectAgent'; index: number }
   | { type: 'toggleInbox' }
   | { type: 'approveFocused' }
@@ -92,6 +94,8 @@ export function hotkeyAction(e: KeyLike, mac: boolean): HotAction | null {
   if (e.shiftKey) return null
   // По коду клавиши, а не по символу: в русской раскладке ⌘N даёт `т`, ⌘I — `ш`.
   const code = e.code ?? ''
+  if (code === 'KeyK' || e.key.toLowerCase() === 'k') return { type: 'quickSwitch' }
+  if (code === 'KeyB' || e.key.toLowerCase() === 'b') return { type: 'toggleSidebar' }
   if (code === 'KeyN' || e.key.toLowerCase() === 'n') return { type: 'newAgent' }
   if (code === 'KeyI' || e.key.toLowerCase() === 'i') return { type: 'toggleInbox' }
   if (code === 'Slash' || e.key === '/') return { type: 'help' }

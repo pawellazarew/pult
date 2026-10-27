@@ -24,6 +24,8 @@ export function Header(p: {
   doctorTone: Tone
   inboxCount: number
   inboxOpen: boolean
+  sidebarHidden?: boolean
+  onToggleSidebar?(): void
   onDoctor(): void
   onInbox(): void
 }): ReactElement {
@@ -40,6 +42,9 @@ export function Header(p: {
     <header className={`hdr${stale ? ' hdr-stale' : ''}`}>
       <div className="hdr-brand"><Icon name="mark" className="mark" />Пульт</div>
 
+      {p.onToggleSidebar && <button type="button" className="btn btn-ghost sidebar-toggle" data-testid="toggle-sidebar"
+        aria-label={p.sidebarHidden ? 'Показать беседы' : 'Скрыть беседы'} aria-expanded={!p.sidebarHidden}
+        title={`Список бесед (${CMD}B)`} onClick={p.onToggleSidebar}><Icon name="sidebar" /></button>}
       <details className="health-menu" data-testid="health-menu">
         <summary className={`health-summary t-${!up ? daemonTone : p.doctorTone === 'fail' ? 'fail' : p.guard.tone === 'fail' ? 'fail' : 'ok'}`}>
           <span className="dot" /><span>{!up ? p.conn.state === 'connecting' ? 'Подключение…' : 'Нет соединения' : p.doctorTone === 'fail' ? 'Нужна проверка' : 'Подключено'}</span><Icon name="chev" />

@@ -2,7 +2,7 @@
 // здесь только отрисовка, прокрутка «прилипает» к низу, пока человек сам не отлистал вверх.
 
 import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import type { KeyboardEvent, ReactElement } from 'react'
+import type { KeyboardEvent, ReactElement, ReactNode } from 'react'
 import type { ConnState, PultEvent } from '../../../shell/src/contract.js'
 import type { AgentView } from '../model/agents.js'
 import { AGENT_TITLE_MAX, agentLabel, shortPath, statusView } from '../model/agents.js'
@@ -128,6 +128,7 @@ export function Conversation(p: ConversationProps): ReactElement {
   const feed = useRef<HTMLDivElement>(null)
   const qe = useQueueEdit(p.onQueueEdit)
   const stick = useRef(true)
+  const [away, setAway] = useState(false)
 
   // Своя реплика ушла — лента едет вниз к ней, даже если человек перед этим листал вверх.
   const pendingText = p.pending?.text
@@ -138,11 +139,11 @@ export function Conversation(p: ConversationProps): ReactElement {
     const el = feed.current
     if (el && stick.current) el.scrollTop = el.scrollHeight
   }, [p.items, agent.name, pendingText, phaseKey])
-  useLayoutEffect(() => { stick.current = true }, [agent.name])
+  useLayoutEffect(() => { stick.current = true; setAway(false) }, [agent.name])
 
   const onScroll = (): void => {
     const el = feed.current
-    if (el) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+    if (el) { stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80; setAway(!stick.current) }
   }
 
   // --- О2: переход к событию, метки реплик человека, ⌥↑/⌥↓ ---------------------------------
@@ -209,6 +210,7 @@ export function Conversation(p: ConversationProps): ReactElement {
             <ProviderTag provider={agent.provider} />
             <Chip tone={sv.tone} label={agent.status === 'cold' ? 'Можно продолжить' : sv.label} testId="conv-status" />
           </div>
+          <div className="conv-location" data-testid="conv-location" title={agent.cwd}><Icon name="folder" />{agent.cwd.split('/').filter(Boolean).pop() ?? agent.cwd}{agent.branch ? ` / ${agent.branch}` : ''}</div>
         </div>
         {!sv.busy && (
           <details className="conv-actions">
@@ -264,6 +266,9 @@ export function Conversation(p: ConversationProps): ReactElement {
           </div>
         )}
       </div>
+      {away && <button type="button" className="jump-latest btn" data-testid="jump-latest" onClick={() => {
+        const el = feed.current; if (el) { stick.current = true; setAway(false); el.scrollTop = el.scrollHeight }
+      }}>К новым сообщениям ↓</button>}
       </div>
 
       {p.onQueueRemove && (agent.queue?.length || agent.queuePaused || qe.edit || qe.notice) ? (
@@ -272,9 +277,8 @@ export function Conversation(p: ConversationProps): ReactElement {
           {...(p.onQueueEdit ? { edit: qe.view } : {})} notice={qe.notice} />
       ) : null}
       <Composer busy={sv.busy} needsYou={sv.needsYou} permFocused={p.focusedPerm !== null} link={p.link ?? 'up'} disabled={holds} sending={p.sending} error={p.sendError} onSend={p.onSend} agentName={agent.name} label={agentLabel(agent)} filePaths={p.filePaths ?? null}
-        onStop={p.onStop} queueable={!!p.onQueueRemove} inject={qe.inject} />
-      <ChatFooter agent={agent} usage={p.usage} now={p.now} onReveal={p.onReveal} {...(p.onHelp ? { onHelp: p.onHelp } : {})}
-        {...(p.onConfigure ? { onConfigure: p.onConfigure } : {})} catalog={p.catalog ?? null} windows={p.windows ?? EMPTY_WINDOWS} />
+        onStop={p.onStop} queueable={!!p.onQueueRemove} inject={qe.inject} footer={<ChatFooter agent={agent} usage={p.usage} now={p.now} onReveal={p.onReveal} {...(p.onHelp ? { onHelp: p.onHelp } : {})}
+        {...(p.onConfigure ? { onConfigure: p.onConfigure } : {})} catalog={p.catalog ?? null} windows={p.windows ?? EMPTY_WINDOWS} />} />
     </section>
     </ImageContext.Provider>
   )
@@ -366,7 +370,7 @@ function ChatFooter({ agent, usage, now, onReveal, onHelp, onConfigure, catalog,
     ? <span title="модель · усилие" data-testid="conv-model">{[agent.model, agent.effort].filter(Boolean).join(' · ')}</span> : null
   const approvalSpan = (
     <span className={`approval${agent.approval === 'full' ? ' t-fail' : ''}`} data-testid="conv-approval" data-approval={agent.approval ?? 'ask'} title={approvalTitle}>
-      {approvalFooter(agent.provider, agent.approval ?? 'ask', agent.claudeMode)}
+      {agent.provider === 'claude' && !agent.approval && agent.claudeMode ? `по настройкам: ${agent.claudeMode}` : approvalFooter(agent.provider, agent.approval ?? 'ask', agent.claudeMode)}
     </span>
   )
   const menuItems = (): MenuEntry[] => settingsMenu(agent, catalog, ctxWindows).map((r): MenuEntry => {
@@ -375,49 +379,45 @@ function ChatFooter({ agent, usage, now, onReveal, onHelp, onConfigure, catalog,
     if (r.type === 'note') return { note: r.label, ...(r.testId ? { testId: r.testId } : {}) }
     return { label: r.label, checked: r.checked, testId: r.testId, onSelect: () => onConfigure?.(r.pick), ...(r.danger ? { danger: true } : {}), ...(r.title ? { title: r.title } : {}) }
   })
+  const context = contextView(agent.context)
   return (
     <div className="chat-status" data-testid="chat-status">
-      <span className="chat-meta">
-        <button type="button" className="path" title={`Показать в Finder: ${agent.cwd}`} onClick={() => onReveal(agent.cwd)} data-testid="conv-path">{shortPath(agent.cwd, 40)}</button>
-        {agent.branch && <span className="br" title="ветка worktree" data-testid="conv-branch"><Icon name="branch" />{agent.branch}</span>}
-        {/* M8f: модель · усилие · режим — кнопка меню настроек сессии (со следующего хода). Старая оболочка — просто текст. */}
+      <span className="composer-preferences">
         {onConfigure ? (
           <button type="button" className="settings" data-testid="conv-settings" aria-haspopup="menu" aria-expanded={menuAt !== null}
-            title="Сменить модель, усилие или режим подтверждений — со следующего хода"
+            title="Модель, усилие и подтверждения — со следующего хода"
             onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); setMenuAt(menuAt ? null : { x: r.left, y: r.top - 6 }) }}>
-            {modelSpan}{approvalSpan}
+            {modelSpan ?? <span>{provider === 'claude' ? 'Claude' : 'Codex'}</span>}{approvalSpan}<Icon name="chev" />
           </button>
         ) : <>{modelSpan}{approvalSpan}</>}
-        {agent.title && <span title="имя сессии — им её зовут демон и CLI, оно не меняется" data-testid="conv-name">{agent.name}</span>}
-        {agent.browser && (
-          // О3: браузер для агента — клик показывает папку скачиваний и снимков страниц в Finder.
-          <button type="button" className="browser" data-testid="conv-browser" disabled={!agent.browserDownloads}
-            title={`Браузер для агента${agent.browser.headed ? ' (окно видно)' : ''}: свой профиль сессии, каждый вызов — через Inbox.${agent.browserDownloads ? `\nСкачивания: ${agent.browserDownloads}` : ''}`}
-            onClick={() => { if (agent.browserDownloads) onReveal(agent.browserDownloads) }}>
-            браузер{agent.browser.headed ? ' (окно)' : ''} · скачивания
-          </button>
-        )}
-        {agent.background && (
-          <span className="bg" data-testid="conv-background" title={`Фоновые задачи доделывают работу; итог придёт отдельным ходом.\n${agent.background.tasks.join('\n')}`}>
-            в фоне · {agent.background.count}
-          </span>
-        )}
+        {agent.background && <span className="bg" data-testid="conv-background" title={agent.background.tasks.join('\n')}>в фоне · {agent.background.count}</span>}
       </span>
-      <span className="grow" />
-      <ContextMeter ctx={agent.context} />
-      {windows.length > 0 && (
-        <span className="chat-limits" data-testid="chat-limits">
-          <span className={`lbl who-${provider}`}>{provider}</span>
-          {windows.map((w) => (
-            <span key={w.key} className={`chat-limit t-${w.tone}`} title={w.title} data-testid={`chat-limit-${w.key}`}>
+      <details className="chat-info" data-testid="chat-info" onKeyDown={(e) => {
+        if (e.key === 'Escape' && e.currentTarget.open) { e.preventDefault(); e.stopPropagation(); e.currentTarget.open = false; e.currentTarget.querySelector('summary')?.focus() }
+      }}>
+        <summary title={context?.title ?? 'Папка, контекст и лимиты сессии'}>
+          <Icon name="info" />{context ? <span className={`t-${context.tone}`}>Контекст {context.short}</span> : 'Сведения'}
+        </summary>
+        <div className="chat-info-panel">
+          <div className="chat-meta">
+            <button type="button" className="path" title={`Показать в Finder: ${agent.cwd}`} onClick={() => onReveal(agent.cwd)} data-testid="conv-path">{shortPath(agent.cwd, 40)}</button>
+            {agent.branch && <span className="br" title="ветка worktree" data-testid="conv-branch"><Icon name="branch" />{agent.branch}</span>}
+            {agent.title && <span title="имя сессии для CLI" data-testid="conv-name">{agent.name}</span>}
+            {agent.browser && <button type="button" className="browser" data-testid="conv-browser" disabled={!agent.browserDownloads}
+              title={`Браузер для агента: свой профиль, каждый вызов через Inbox.${agent.browserDownloads ? `\nСкачивания: ${agent.browserDownloads}` : ''}`}
+              onClick={() => { if (agent.browserDownloads) onReveal(agent.browserDownloads) }}>браузер{agent.browser.headed ? ' (окно)' : ''} · скачивания</button>}
+          </div>
+          <ContextMeter ctx={agent.context} />
+          {windows.length > 0 && <span className="chat-limits" data-testid="chat-limits">
+            <span className={`lbl who-${provider}`}>{provider}</span>
+            {windows.map((w) => <span key={w.key} className={`chat-limit t-${w.tone}`} title={w.title} data-testid={`chat-limit-${w.key}`}>
               <span className="k">{w.key}</span> {w.pct}{w.reset && <span className="reset"> · {w.reset}</span>}
-            </span>
-          ))}
-        </span>
-      )}
-      {/* Меню — вне строки .chat-meta: её разделитель «·» встаёт перед каждым ребёнком. */}
+            </span>)}
+          </span>}
+          {onHelp && <button type="button" className="help-btn" onClick={(e) => { const info = e.currentTarget.closest('details'); if (info) { info.open = false; info.querySelector('summary')?.focus() }; onHelp() }} title={`Горячие клавиши (${CMD}/)`} aria-label="Горячие клавиши" data-testid="hotkeys-open">?</button>}
+        </div>
+      </details>
       {menuAt && <ContextMenu at={menuAt} items={menuItems()} onClose={closeMenu} testId="settings-menu" label="Настройки сессии" above />}
-      {onHelp && <button type="button" className="help-btn" onClick={onHelp} title={`Горячие клавиши (${CMD}/)`} aria-label="Горячие клавиши" data-testid="hotkeys-open">?</button>}
     </div>
   )
 }
@@ -620,9 +620,15 @@ function ToolRow({ it, loadEvents }: { it: ToolItem; loadEvents?: (ids: number[]
         <ImageGallery sources={it.images ?? []} />
         {open && (
           <div className="tool-detail">
-            <div className="k">вход</div>
-            <pre>{JSON.stringify(shown.input, null, 2)}</pre>
-            {shown.result !== undefined && <><div className="k">результат</div><pre>{shown.result}</pre></>}
+            {it.state === 'error' && <div className="tool-error-preview" role="status" data-testid="tool-error-preview">
+              <strong>Действие завершилось с ошибкой{it.exitCode !== undefined ? ` · код ${it.exitCode}` : ''}</strong>
+              {shown.result ? <pre>{shown.result.split('\n').filter((line) => line.trim()).slice(-6).join('\n').slice(-1600)}</pre> : <span>Подробности доступны в полном выводе.</span>}
+            </div>}
+            <details className="tool-raw" open={it.state !== 'error'}>
+              <summary>Полный ввод и вывод</summary>
+              <div className="k">вход</div><pre>{JSON.stringify(shown.input, null, 2)}</pre>
+              {shown.result !== undefined && <><div className="k">результат</div><pre>{shown.result}</pre></>}
+            </details>
             {detail === 'loading' && <div className="k" data-testid="tool-detail-loading">загружаю полный вход и вывод…</div>}
             {detail === 'error' && <div className="k t-fail">полный вход и вывод не загрузились — показан урезанный</div>}
           </div>
@@ -773,7 +779,7 @@ const draftStore: DraftStore = {
   set(k, v) { try { window.localStorage.setItem(k, v) } catch { /* хранилище недоступно */ } },
 }
 
-function Composer({ busy, needsYou, permFocused, link, disabled, sending, error, onSend, onStop, agentName, label, filePaths, queueable, inject }: {
+function Composer({ busy, needsYou, permFocused, link, disabled, sending, error, onSend, onStop, agentName, label, filePaths, queueable, inject, footer }: {
   /** В Inbox есть выделенный запрос (любой сессии): ⌘Enter — его «разрешить», а не «прервать и сказать». */
   permFocused: boolean
   busy: boolean; needsYou: boolean; link: ConnState['state']; disabled: boolean; sending: boolean; error: string | null
@@ -781,6 +787,7 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
   agentName: string; label: string
   onSend(text: string, mode?: SendMode): Promise<boolean>
   onStop(): void
+  footer: ReactNode
   filePaths: FilePathSource | null
   /** Демон знает очередь (О2): во время хода поле не заперто — Enter ставит в очередь, ⌘Enter прерывает. */
   queueable: boolean
@@ -877,11 +884,16 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
           onPaste={onPaste} onDragOver={onDragOver} onDrop={onDrop}
           placeholder={placeholderFor({ link, needsYou, busy, disabled, label, queueable })}
           data-testid="composer" aria-label="Реплика в сессию" />
+        <div className="composer-toolbar">
+          {footer}
+          <div className="composer-actions">
         {busy && <button type="button" className="btn btn-danger composer-stop" onClick={onStop} data-testid="stop-turn" title="Остановить ход (Esc)"><Icon name="stop" />Стоп</button>}
         <button type="button" className="btn btn-primary" onClick={() => void send()} disabled={blocked || !text.trim()} data-testid="send"
           title={busy && queueable ? `Идёт ход: реплика уйдёт, когда он кончится. ${CMD}Enter — прервать и сказать` : undefined}>
           <Icon name="send" />{busy && queueable ? 'В очередь' : 'Отправить'}
         </button>
+          </div>
+        </div>
       </div>
       {/* Подсказки клавиш — в справке «?» под полем (⌘/); здесь остаётся только ошибка отправки. */}
       {error && <div className="hint"><span className="err" role="alert" data-testid="send-error">{error}</span></div>}

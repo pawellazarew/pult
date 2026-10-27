@@ -186,9 +186,12 @@ function Blocks({ blocks, caret }: { blocks: Block[]; caret?: boolean }): ReactE
       }
       case 'quote': return <blockquote key={i}><Blocks blocks={b.c} /></blockquote>
       case 'p': {
+        const content = b.v.filter((p) => !(p.t === 'text' && !p.v.trim()) && p.t !== 'br')
+        const gallery = content.length > 0 && content.every((p) =>
+          (p.t === 'image' && !safeHref(p.url)) || (p.t === 'link' && isImagePath(p.url)))
         // Курсор «печатает» — в конце последнего абзаца, а не отдельной строкой под ним.
         const tail = caret && i === blocks.length - 1
-        return <p key={i}><Inl parts={b.v} />{tail && <span className="caret" aria-label="печатает" />}</p>
+        return <p key={i} className={gallery ? 'image-gallery' : undefined}><Inl parts={gallery ? content : b.v} />{tail && <span className="caret" aria-label="печатает" />}</p>
       }
     }
   })}</>

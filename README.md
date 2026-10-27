@@ -158,7 +158,10 @@ you (with a link to the Inbox card); reasoning text, when the provider streams i
 
 The sidebar groups conversations into waiting, working and recent, with search by title, project or provider.
 ⌘1…9 selects the first nine conversations in the visible list. Technical connection details are under the
-connection indicator; subscription usage remains available beside the conversation.
+connection indicator. ⌘K focuses conversation search; ⌘B hides or shows the sidebar. Model, effort and
+approval mode sit in the composer. Context, subscription usage and session details open from its info button.
+When reading older messages, “К новым сообщениям” returns to the latest reply. Errors show a short excerpt first;
+the full input and output remain available in a separate disclosure.
 
 Local PNG, JPEG, GIF and WebP references appear as previews. Click to zoom, save a copy or open the file.
 New MCP screenshots and Codex image-generation results are stored separately from the journal and survive
@@ -224,12 +227,12 @@ copied in Finder and pasted with ⌘V, become their full paths (quoted when they
 ## Changing a session later
 
 Model, effort and approval mode of a live session can be changed at any time: click "model · effort · mode" in the
-conversation footer, or run `pult agent set <name> [--model M] [--effort E] [--approval A] [--yes]`.
+composer, or run `pult agent set <name> [--model M] [--effort E] [--approval A] [--yes]`.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/settings-menu-dark.png">
   <source media="(prefers-color-scheme: light)" srcset="docs/images/settings-menu-light.png">
-  <img alt="The footer menu of a session: model (haiku, sonnet, opus, fable), effort (low to max) and approval mode, with a note that changes apply from the next turn" src="docs/images/settings-menu-light.png" width="720">
+  <img alt="The composer menu of a session: model (haiku, sonnet, opus, fable), effort (low to max) and approval mode, with a note that changes apply from the next turn" src="docs/images/settings-menu-light.png" width="720">
 </picture>
 
 - The change applies from the next turn; the running turn and pending Inbox questions are untouched.
@@ -464,7 +467,7 @@ every `[fail]`.
   `pult doctor` shows the detected country per provider.
 - **The window says the daemon is not running** ("демон недоступен"). Click "запустить" ("start") in the banner, or
   run `pult daemon stop && pult daemon start`. The reason is in `pult daemon logs`.
-- **Permission questions don't appear.** Check the session's approval mode in the conversation footer: in `workspace`
+- **Permission questions don't appear.** Check the session's approval mode in the composer: in `workspace`
   and `full` there are no questions by design. In `ask`, Claude follows your own Claude settings, so actions those
   settings already allow won't ask. `pult perm list` shows what is waiting right now.
 - **macOS asks "“node” would like to access files in your Desktop folder".** Click "Allow": the agent works in a folder
