@@ -1,15 +1,22 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import type { MouseEvent, ReactElement, ReactNode } from 'react'
-import { parseMarkdown } from '../model/markdown.js'
+import type { ImageBridge } from './Images.js'
+import { ImagePreview, isImagePath } from './Images.js'
+import { Icon } from './common.js'
+import { localFilePath } from '../model/fileReferences.js'
+import { FilePreviewContext, relativeDocument } from '../model/filePreviewContext.js'
+import { parseMarkdown, safeHref } from '../model/markdown.js'
 import type { Align, Block, Inline, ListItem } from '../model/markdown.js'
 
 /**
  * Что реплике нужно от моста: буфер обмена и внешний браузер. `openExternal` необязателен —
  * интерфейс ездит отдельно от Pult.app, и в старой оболочке его нет: тогда ссылка копируется.
  */
-export interface MdBridge {
+export interface MdBridge extends ImageBridge {
   copyText(text: string): Promise<void>
   openExternal?(url: string): Promise<void>
+  openFile?(path: string): Promise<'opened' | 'revealed'>
+  revealPath?(path: string): Promise<void>
 }
 
 /** Мост для реплик. Нет провайдера (тесты, окно вне оболочки) — кнопки рисуются, но молчат. */
@@ -88,7 +95,44 @@ function Link({ href, url, title, children }: { href: string; url: string; title
   )
 }
 
+export async function followFile(bridge: MdBridge, path: string, reveal = false): Promise<'opened' | 'revealed' | 'copied'> {
+  if (!reveal && bridge.openFile) return bridge.openFile(path)
+  if (bridge.revealPath) { await bridge.revealPath(path); return 'revealed' }
+  await bridge.copyText(path)
+  return 'copied'
+}
+
+function FileLink({ path, label }: { path: string; label?: string }): ReactElement {
+  const bridge = useContext(MdBridgeContext)
+  const preview = useContext(FilePreviewContext)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [flash, show] = useFlash()
+  const name = path.split('/').pop() || path
+  const finder = !bridge?.openFile && !preview
+  const open = async (reveal = false): Promise<void> => {
+    if (!bridge || busy) return
+    setBusy(true); setError(null)
+    try {
+      if (!reveal && preview) { preview.open(path); return }
+      const result = await followFile(bridge, path, reveal)
+      if (result !== 'opened') show(result === 'revealed' ? 'Показан в Finder' : 'Путь скопирован')
+    } catch { setError('Файл недоступен: проверь, не перемещён ли он') }
+    finally { setBusy(false) }
+  }
+  return <span className="file-reference">
+    <button type="button" className="file-link" data-testid="file-link" title={path} disabled={!bridge || busy}
+      aria-label={`${finder ? 'Показать в Finder' : 'Открыть файл'}: ${name}`} onClick={() => void open()}>
+      <Icon name="file" /><span className="file-link-name">{label || name}</span><span className="file-link-action">{flash || (finder ? 'Finder' : 'Открыть')}</span>
+    </button>
+    {!finder && bridge?.revealPath && <button type="button" className="file-reveal" data-testid="file-reveal" disabled={busy}
+      title={`Показать в Finder: ${path}`} aria-label={`Показать в Finder: ${name}`} onClick={() => void open(true)}><Icon name="folder" /></button>}
+    {error && <span className="file-link-error" role="alert">{error}</span>}
+  </span>
+}
+
 function Inl({ parts }: { parts: Inline[] }): ReactElement {
+  const preview = useContext(FilePreviewContext)
   return <>{parts.map((p, i) => {
     switch (p.t) {
       case 'text': return <span key={i}>{p.v}</span>
@@ -97,7 +141,18 @@ function Inl({ parts }: { parts: Inline[] }): ReactElement {
       case 'em': return <em key={i}><Inl parts={p.c} /></em>
       case 'del': return <del key={i}><Inl parts={p.c} /></del>
       case 'br': return <br key={i} />
+      case 'file': return <FileLink key={i} path={p.path} />
+      case 'image': {
+        const href = safeHref(p.url)
+        return href ? <Link key={i} href={href} url={p.url}>{p.alt || 'Открыть изображение'}</Link> : <ImagePreview key={i} source={p.url} label={p.alt} />
+      }
       case 'link':
+        if (isImagePath(p.url)) return <ImagePreview key={i} source={p.url} label={p.c.map((c) => c.t === 'text' ? c.v : '').join('') || undefined} />
+        if (localFilePath(p.url)) return <FileLink key={i} path={p.url} label={p.c.map((c) => c.t === 'text' ? c.v : '').join('') || undefined} />
+        if (preview && !p.href) {
+          const source = relativeDocument(preview.basePath, p.url)
+          if (source) return <FileLink key={i} path={source} label={p.c.map((c) => c.t === 'text' ? c.v : '').join('') || undefined} />
+        }
         return p.href
           ? <Link key={i} href={p.href} url={p.url} {...(p.title ? { title: p.title } : {})}><Inl parts={p.c} /></Link>
           // Схема не из белого списка (javascript:, file:, путь в репозитории) — просто текст.
@@ -179,9 +234,12 @@ function Blocks({ blocks, caret }: { blocks: Block[]; caret?: boolean }): ReactE
       }
       case 'quote': return <blockquote key={i}><Blocks blocks={b.c} /></blockquote>
       case 'p': {
+        const content = b.v.filter((p) => !(p.t === 'text' && !p.v.trim()) && p.t !== 'br')
+        const gallery = content.length > 0 && content.every((p) =>
+          (p.t === 'image' && !safeHref(p.url)) || (p.t === 'link' && isImagePath(p.url)))
         // Курсор «печатает» — в конце последнего абзаца, а не отдельной строкой под ним.
         const tail = caret && i === blocks.length - 1
-        return <p key={i}><Inl parts={b.v} />{tail && <span className="caret" aria-label="печатает" />}</p>
+        return <p key={i} className={gallery ? 'image-gallery' : undefined}><Inl parts={gallery ? content : b.v} />{tail && <span className="caret" aria-label="печатает" />}</p>
       }
     }
   })}</>

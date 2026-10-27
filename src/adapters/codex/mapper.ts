@@ -21,6 +21,7 @@
 // через `redact`/`redactString` — инвариант 7 требует этого и от журнала, и от событий.
 
 import { stripBlobs } from '../../core/blobs.js'
+import type { ImageCapture } from '../../core/images.js'
 import type { EventDraft } from '../../core/events.js'
 import { redact, redactString } from '../../core/log.js'
 import type { LiveSignal } from '../../sessions/phaseTracker.js'
@@ -88,6 +89,7 @@ export interface MapOutput {
 }
 
 export interface CodexMapperOptions {
+  images?: ImageCapture
   /** Имя сессии Пульта — оно же `sessionId` конверта события. */
   sessionId: string
   /**
@@ -327,17 +329,42 @@ export function createCodexMapper(opts: CodexMapperOptions): CodexMapper {
           const status = str(item['status'])
           const result = obj(item['result'])
           const error = obj(item['error'])
+          const images = done ? opts.images?.capture(result?.['content']) ?? [] : []
           out.drafts.push(done
             ? {
               ...base,
               kind: 'tool.finished',
               data: {
                 toolUseId: id, name, isError: status === 'failed' || error !== null, status,
+                ...(images.length ? { images } : {}),
                 ...(result ? { content: redact(stripBlobs(result['content'])) } : {}),
                 ...(error ? { content: redactString(str(error['message']) ?? 'ошибка') } : {}),
               },
             }
             : { ...base, kind: 'tool.called', data: { toolUseId: id, name, input: (redact(obj(item['arguments']) ?? {}) as Record<string, unknown>) } })
+          return out
+        }
+
+        // ImageViewThreadItem в app-server содержит путь уже просмотренного изображения.
+        if (type === 'imageView') {
+          const images = done ? opts.images?.captureFile(item['path']) ?? [] : []
+          out.drafts.push(done
+            ? { ...base, kind: 'tool.finished', data: { toolUseId: id, name: type, ...(images.length ? { images } : {}) } }
+            : { ...base, kind: 'tool.called', data: { toolUseId: id, name: type, input: {} } })
+          return out
+        }
+
+        // Схема app-server ImageGenerationThreadItem: savedPath (optional), result (string).
+        // Бинарные результаты кладём отдельно, result не попадает в JSONL.
+        if (type === 'imageGeneration') {
+          const images = done ? [...new Set([
+            ...(opts.images?.captureFile(item['savedPath']) ?? []),
+            ...(opts.images?.captureFile(item['result']) ?? []),
+            ...(opts.images?.capture({ type: 'image', data: item['result'] }) ?? []),
+          ])] : []
+          out.drafts.push(done
+            ? { ...base, kind: 'tool.finished', data: { toolUseId: id, name: type, status: str(item['status']), isError: item['status'] === 'failed', ...(images.length ? { images } : {}) } }
+            : { ...base, kind: 'tool.called', data: { toolUseId: id, name: type, input: {} } })
           return out
         }
 

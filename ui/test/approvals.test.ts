@@ -144,7 +144,7 @@ describe('M8d: «Как подтверждать действия»', () => {
     })
     assert.match(html(Conversation, props(plain!)), /data-testid="conv-approval" data-approval="ask"[^>]*>спрашивать</)
     const [auto] = buildAgents([rec({ claudeMode: 'auto' }) as never], {})
-    assert.match(html(Conversation, props(auto!)), />спрашивать — у Claude по твоим настройкам: auto</)
+    assert.match(html(Conversation, props(auto!)), />по настройкам: auto</)
     assert.match(html(Conversation, props(full!)), /class="approval t-fail" data-testid="conv-approval" data-approval="full"/)
   })
 })

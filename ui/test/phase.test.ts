@@ -120,23 +120,24 @@ describe('строка фазы в ленте', () => {
   })
 })
 
-describe('дерево: фаза вместо «идёт»', () => {
+describe('список: устойчивый статус и фаза в подробностях', () => {
   const tree = (agents: AgentView[]): Record<string, unknown> => ({
     groups: groupByProject([], agents), selected: null, now: NOW, collapsed: new Set<string>(),
     onSelect: noop, onNew: noop, onToggle: noop, onAddProject: noop, onPin: noop,
   })
-  const chip = (a: AgentView): string => /data-testid="row-status"><span[^>]*><\/span>([^<]*)</.exec(html(ProjectTree, tree([a])))?.[1] ?? ''
+  const chip = (a: AgentView): string => /data-testid="row-status"[^>]*>([^<]*)</.exec(html(ProjectTree, tree([a])))?.[1] ?? ''
 
-  it('коротко: думает, пишет, Bash, запуск; без фазы — «идёт»; ждёт тебя — как было', () => {
+  it('статус «Работает» стабилен, фаза видна отдельно; ожидание не маскируется фазой', () => {
     assert.equal(treePhaseLabel(ph({ phase: 'starting' })), 'запуск')
     assert.equal(treePhaseLabel(ph({ phase: 'tool', tool: { name: 'mcp__browser__browser_take_screenshot', detail: '' } })), 'browser_take_sc…')
     assert.equal(treePhaseLabel(ph({ phase: 'background', background: 1 })), null)
-    assert.equal(chip(agent({ phase: ph() })), 'думает')
-    assert.equal(chip(agent({ phase: ph({ phase: 'writing' }) })), 'пишет')
-    assert.equal(chip(agent({ phase: ph({ phase: 'tool', tool: { name: 'Bash', detail: 'npm test' } }) })), 'Bash')
-    assert.equal(chip(agent()), 'идёт')
-    assert.equal(chip(agent({ status: 'blocked_permission', pending: 1, phase: ph({ phase: 'waiting' }) })), 'ждёт тебя · 1')
-    assert.equal(chip(agent({ status: 'idle', phase: ph({ phase: 'background', background: 2 }) })), 'готов')
+    assert.equal(chip(agent({ phase: ph() })), 'Работает')
+    assert.match(html(ProjectTree, tree([agent({ phase: ph() })])), /class="chat-action" title="думает">думает</)
+    assert.equal(chip(agent({ phase: ph({ phase: 'writing' }) })), 'Работает')
+    assert.equal(chip(agent({ phase: ph({ phase: 'tool', tool: { name: 'Bash', detail: 'npm test' } }) })), 'Работает')
+    assert.equal(chip(agent()), 'Работает')
+    assert.equal(chip(agent({ status: 'blocked_permission', pending: 1, phase: ph({ phase: 'waiting' }) })), 'Ждёт ответа · 1')
+    assert.equal(chip(agent({ status: 'idle', phase: ph({ phase: 'background', background: 2 }) })), 'Готово')
   })
 
   it('фаза из живого канала доезжает до строки (buildAgents)', () => {

@@ -53,6 +53,8 @@ export interface AgentView {
   pending: number
   /** ISO последней активности: последнее событие сессии или момент заведения. */
   lastActivity: string
+  /** Неизменная дата из реестра: порядок работающих бесед не зависит от событий потока. */
+  createdAt?: string
   /** В архиве: в дереве — в секции «Архив», а не под проектом. */
   archived?: boolean
   /** Фоновые задачи сессии (субагенты, команды), которые ещё идут после ответа. */
@@ -99,6 +101,10 @@ export function sortAgents(list: readonly AgentView[]): AgentView[] {
   return [...list].sort((a, b) => {
     const r = statusRank(a.status, a.pending) - statusRank(b.status, b.pending)
     if (r !== 0) return r
+    if (statusRank(a.status, a.pending) === 1) {
+      const created = (x: AgentView): number => { const t = Date.parse(x.createdAt ?? ''); return Number.isFinite(t) ? t : 0 }
+      return created(b) - created(a) || a.name.localeCompare(b.name)
+    }
     const t = Date.parse(b.lastActivity) - Date.parse(a.lastActivity)
     if (Number.isFinite(t) && t !== 0) return t
     return agentLabel(a).localeCompare(agentLabel(b))
@@ -133,6 +139,7 @@ export function buildAgents(
       ...(r.effort ? { effort: r.effort } : {}),
       pending: l.pending ?? r.pendingPermissions,
       lastActivity,
+      createdAt: r.createdAt,
       ...(l.background?.count ? { background: l.background } : {}),
       ...(context ? { context } : {}),
       ...(attention ? { attention } : {}),

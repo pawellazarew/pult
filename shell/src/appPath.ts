@@ -33,6 +33,10 @@ export function resolveAppPath(root: string, url: string): string | null {
 export const MIME: Readonly<Record<string, string>> = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.pfb': 'application/octet-stream',
+  '.ttf': 'font/ttf',
+  '.bcmap': 'application/octet-stream',
   '.css': 'text/css; charset=utf-8',
   '.woff2': 'font/woff2',
   '.svg': 'image/svg+xml',

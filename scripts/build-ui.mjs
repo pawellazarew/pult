@@ -15,7 +15,7 @@
 // dist/ui/fonts/ вместе с текстом лицензии. Источник и лицензии — ui/fonts/LICENSES.md. Берём
 // только подмножества cyrillic(-ext) и latin(-ext): интерфейс русский, идентификаторы латиницей.
 
-import { copyFileSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, cpSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -127,6 +127,11 @@ rmSync(OUT, { recursive: true, force: true })
 mkdirSync(OUT, { recursive: true })
 const faces = buildFonts()
 copyBundledLicenses()
+const pdfRoot = dirname(require.resolve('pdfjs-dist/package.json'))
+mkdirSync(join(OUT, 'pdf'), { recursive: true })
+copyFileSync(join(pdfRoot, 'build/pdf.worker.mjs'), join(OUT, 'pdf/pdf.worker.mjs'))
+for (const dir of ['standard_fonts', 'cmaps']) cpSync(join(pdfRoot, dir), join(OUT, 'pdf', dir), { recursive: true })
+copyFileSync(join(pdfRoot, 'LICENSE'), join(OUT, 'pdfjs-LICENSE.txt'))
 
 if (WATCH) {
   const ctx = await esbuild.context(appOptions(faces))

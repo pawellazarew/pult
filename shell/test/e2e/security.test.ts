@@ -49,11 +49,13 @@ describe('окно: границы безопасности и тема', () => 
     assert.equal(h.app.windows().length, 1)
   })
 
-  it('CSP окна не пускает внешние ресурсы и fetch', async () => {
+  it('CSP разрешает локальные PDF-ресурсы и блокирует внешний fetch', async () => {
     const blocked = await h.win.evaluate(async () => {
-      try { await fetch('app://pult/app.js'); return false } catch { return true }
+      try { await fetch('https://example.invalid/pult-csp-test'); return false } catch { return true }
     })
-    assert.equal(blocked, true, 'connect-src none обязан резать fetch')
+    assert.equal(blocked, true, 'connect-src self обязан блокировать внешний fetch')
+    const local = await h.win.evaluate(async () => (await fetch('app://pult/pdf/pdf.worker.mjs')).ok)
+    assert.equal(local, true, 'локальный PDF worker доступен без внешней сети')
   })
 
   it('тема системная: светлая и тёмная (снимки для судьи визуала)', async () => {
@@ -63,7 +65,7 @@ describe('окно: границы безопасности и тема', () => 
       await h.win.emulateMedia({ colorScheme: theme })
       assert.ok(await waitFor(async () => (await h.win.evaluate(() => matchMedia('(prefers-color-scheme: dark)').matches)) === (theme === 'dark')))
       const bg = await h.win.evaluate(() => getComputedStyle(document.body).backgroundColor)
-      assert.equal(bg, theme === 'dark' ? 'rgb(14, 20, 27)' : 'rgb(242, 245, 248)')
+      assert.equal(bg, theme === 'dark' ? 'rgb(25, 27, 29)' : 'rgb(250, 250, 249)')
       await sleep(100)
       await h.shot(theme)
     }

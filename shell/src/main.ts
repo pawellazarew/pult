@@ -8,13 +8,17 @@
 // сокета и PULT_HOME виден ему в daemon.status/doctor.run — это не секрет: без токена рукопожатие
 // не пройдёт, а песочница рендерера unix-сокетов не открывает).
 
-import { realpathSync, readFileSync, statSync, accessSync, constants as fsConstants } from 'node:fs'
+import { realpathSync, readFileSync, writeFileSync, statSync, accessSync, constants as fsConstants } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, Notification, powerMonitor, protocol, session, shell, Tray,
 } from 'electron'
 import type { IpcMainEvent, IpcMainInvokeEvent, MenuItemConstructorOptions, NativeImage, WebContents } from 'electron'
+import { readScopedImage } from '../../src/core/images.js'
+import { localFile } from './localFile.js'
+import { listWorkspaceFiles, readWorkspaceFile } from '../../src/core/fileBrowser.js'
+import { referencesFile } from '../../src/core/fileReferences.js'
 import { APP_INDEX, APP_ORIGIN, APP_SCHEME, appHeaders, mimeOf, resolveAppPath } from './appPath.js'
 import { parseBackoff } from './backoff.js'
 import { readClipboardPaths } from './clipboardPaths.js'
@@ -57,6 +61,7 @@ function log(msg: string, extra?: Record<string, unknown>): void {
 let mainWindow: BrowserWindow | null = null
 let link: DaemonLink | null = null
 let uiRoot = ''
+let pultHome = ''
 let tray: Tray | null = null
 
 /** Только наше окно и только наша страница: IPC из чужого фрейма молча отвергается. */
@@ -380,9 +385,46 @@ function hardenWebContents(): void {
   })
 }
 
+/** cwd берём у демона, не от renderer. Даже знакомый sessionId не даёт доступ к чужому media. */
+async function imageForSession(sessionId: unknown, source: unknown) {
+  if (!link || !pultHome || typeof sessionId !== 'string' || typeof source !== 'string') throw new Error('Изображение недоступно')
+  const result = await link.call('agent.list', {}) as { sessions?: Array<{ name?: unknown; cwd?: unknown }> }
+  const rec = result.sessions?.find((s) => s.name === sessionId)
+  if (!rec || typeof rec.cwd !== 'string') throw new Error('Сессия недоступна')
+  return readScopedImage({ home: pultHome, sessionId, cwd: rec.cwd, codexHome: process.env['CODEX_HOME'] }, source)
+}
+
 function registerIpc(): void {
   ipcMain.on(IPC.testMode, (e) => { e.returnValue = trusted(e) ? TEST_MODE : false })
   ipcMain.on(IPC.connectionGet, (e) => { e.returnValue = trusted(e) && link ? link.current : null })
+
+  const workspace = async (sessionId: unknown): Promise<{ cwd: string }> => {
+    if (!link || typeof sessionId !== 'string') throw new Error('Сессия недоступна')
+    const result = await link.call('agent.list', {}) as { sessions?: Array<{ name?: unknown; cwd?: unknown }> }
+    const rec = result.sessions?.find((s) => s.name === sessionId)
+    if (!rec || typeof rec.cwd !== 'string') throw new Error('Сессия недоступна')
+    return { cwd: rec.cwd }
+  }
+  ipcMain.handle(IPC.listFiles, async (e, sessionId: unknown, source: unknown = '.', hidden: unknown = false): Promise<CallReply> => {
+    if (!trusted(e)) return fail('forbidden', 'Вызов не из окна Пульта')
+    try {
+      if (typeof source !== 'string' || typeof hidden !== 'boolean') throw new Error('Неверная папка')
+      return { ok: true, result: await listWorkspaceFiles(await workspace(sessionId), source, hidden) }
+    } catch { return fail('files_unavailable', 'Не удалось прочитать папку проекта') }
+  })
+  ipcMain.handle(IPC.previewFile, async (e, sessionId: unknown, source: unknown): Promise<CallReply> => {
+    if (!trusted(e)) return fail('forbidden', 'Вызов не из окна Пульта')
+    try {
+      if (typeof source !== 'string' || typeof sessionId !== 'string' || !link) throw new Error('Неверный файл')
+      const scope = await workspace(sessionId)
+      try { return { ok: true, result: await readWorkspaceFile(scope, source) } } catch {
+        // Files outside the workspace are only previewed when the conversation actually linked them.
+        const history = await link.call('agent.read', { name: sessionId, format: 'json' }) as { events?: Array<{ kind?: string; data?: Record<string, unknown> }> }
+        if (!referencesFile(history.events ?? [], source)) throw new Error('Файл вне проекта')
+        return { ok: true, result: await readWorkspaceFile({ ...scope, allowedFiles: [source] }, source) }
+      }
+    } catch { return fail('file_unavailable', 'Файл недоступен: он перемещён, вне проекта или доступ к нему закрыт') }
+  })
 
   ipcMain.handle(IPC.call, async (e, method: unknown, params: unknown): Promise<CallReply> => {
     if (!trusted(e)) return fail('forbidden', 'вызов не из окна Пульта')
@@ -450,6 +492,48 @@ function registerIpc(): void {
   ipcMain.handle(IPC.revealPath, (e, p: unknown): void => {
     if (!trusted(e) || typeof p !== 'string' || !path.isAbsolute(p) || p.includes('\0')) return
     shell.showItemInFolder(p)
+  })
+
+  ipcMain.handle(IPC.readImage, async (e, sessionId: unknown, source: unknown): Promise<CallReply> => {
+    if (!trusted(e)) return fail('forbidden', 'вызов не из окна Пульта')
+    try {
+      const image = await imageForSession(sessionId, source)
+      return { ok: true, result: { dataUrl: `data:${image.mimeType};base64,${image.bytes.toString('base64')}`, name: image.name } }
+    } catch { return fail('image_unavailable', 'Изображение недоступно: файл отсутствует, вне папки проекта или формат не поддерживается') }
+  })
+
+  ipcMain.handle(IPC.openFile, async (e, raw: unknown): Promise<CallReply> => {
+    if (!trusted(e)) return fail('forbidden', 'вызов не из окна Пульта')
+    try {
+      const file = localFile(raw)
+      if (TEST_MODE) ((globalThis as { __pultTestFiles?: unknown[] }).__pultTestFiles ??= []).push(file)
+      else if (file.action === 'reveal') shell.showItemInFolder(file.path)
+      else { const error = await shell.openPath(file.path); if (error) throw new Error(error) }
+      return { ok: true, result: file.action === 'open' ? 'opened' : 'revealed' }
+    } catch { return fail('file_unavailable', 'Файл недоступен: он удалён, перемещён или нет доступа') }
+  })
+
+  ipcMain.handle(IPC.saveImage, async (e, sessionId: unknown, source: unknown): Promise<CallReply> => {
+    if (!trusted(e)) return fail('forbidden', 'вызов не из окна Пульта')
+    try {
+      const image = await imageForSession(sessionId, source)
+      const win = BrowserWindow.fromWebContents(e.sender)
+      const opts = { title: 'Сохранить изображение', defaultPath: image.name }
+      const selected = win ? await dialog.showSaveDialog(win, opts) : await dialog.showSaveDialog(opts)
+      if (selected.canceled || !selected.filePath) return { ok: true, result: false }
+      writeFileSync(selected.filePath, image.bytes)
+      return { ok: true, result: true }
+    } catch { return fail('image_unavailable', 'Не удалось сохранить изображение') }
+  })
+
+  ipcMain.handle(IPC.openImage, async (e, sessionId: unknown, source: unknown): Promise<CallReply> => {
+    if (!trusted(e)) return fail('forbidden', 'вызов не из окна Пульта')
+    try {
+      const image = await imageForSession(sessionId, source)
+      if (TEST_MODE) ((globalThis as { __pultTestOpened?: string[] }).__pultTestOpened ??= []).push(image.path)
+      else { const error = await shell.openPath(image.path); if (error) throw new Error(error) }
+      return { ok: true, result: null }
+    } catch { return fail('image_unavailable', 'Не удалось открыть изображение') }
   })
 
   ipcMain.handle(IPC.copyText, (e, text: unknown): void => {
@@ -534,6 +618,7 @@ async function boot(): Promise<void> {
   const startMod = await load<StartModule>('cli/startOnDemand.js')
   const pathsMod = await load<PathsModule>('core/paths.js')
   const paths = pathsMod.paths(process.env)
+  pultHome = paths.home
   const nodePath = resolveNode(process.env, paths.nodePath, realFs)
 
   link = new DaemonLink({
