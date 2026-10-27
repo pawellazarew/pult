@@ -345,6 +345,15 @@ export function createCodexMapper(opts: CodexMapperOptions): CodexMapper {
           return out
         }
 
+        // ImageViewThreadItem в app-server содержит путь уже просмотренного изображения.
+        if (type === 'imageView') {
+          const images = done ? opts.images?.captureFile(item['path']) ?? [] : []
+          out.drafts.push(done
+            ? { ...base, kind: 'tool.finished', data: { toolUseId: id, name: type, ...(images.length ? { images } : {}) } }
+            : { ...base, kind: 'tool.called', data: { toolUseId: id, name: type, input: {} } })
+          return out
+        }
+
         // Схема app-server ImageGenerationThreadItem: savedPath (optional), result (string).
         // Бинарные результаты кладём отдельно, result не попадает в JSONL.
         if (type === 'imageGeneration') {

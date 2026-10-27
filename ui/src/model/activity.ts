@@ -24,6 +24,7 @@ export function friendlyTool(name: string): string {
   if (/fileChange|^Edit$|^Write$|apply_patch/.test(name)) return 'Правка файлов'
   if (/^Read$|read_file/.test(name)) return 'Чтение файла'
   if (/webSearch|web.*run/.test(name)) return 'Поиск в интернете'
+  if (name === 'imageView') return 'Просмотр изображения'
   if (/imageGeneration|imagegen/.test(name)) return 'Создание изображения'
   return name
 }

@@ -73,6 +73,8 @@ describe('изображения отдельно от журнала', () => {
   }))
   it('Codex imageGeneration: savedPath и result-base64 -> долговечная картинка; result не записан в журнал', () => fixture((scope) => {
     const file = path.join(scope.cwd, 'image.png'); writeFileSync(file, png)
+    const viewed = createCodexMapper({ sessionId: 'w', images: createImageCapture(scope) }).push('item/completed', { item: { type: 'imageView', id: 'view', path: file } })
+    assert.equal((viewed.drafts[0]!.data!['images'] as string[]).length, 1)
     for (const data of [{ savedPath: file, result: '' }, { result: png.toString('base64') }]) {
       const result = createCodexMapper({ sessionId: 'w', images: createImageCapture(scope) }).push('item/completed', { item: { type: 'imageGeneration', id: 'img', status: 'completed', ...data } })
       assert.equal((result.drafts[0]!.data!['images'] as string[]).length, 1)
