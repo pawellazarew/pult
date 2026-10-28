@@ -175,6 +175,23 @@ describe('лента по требованию', () => {
     assert.equal(f.inflight['z'], undefined)
   })
 
+  it('начало хода для порядка бесед — только из живого потока: открыть беседу не значит поднять её', () => {
+    let s = bootState({ events: [], activity: {}, cursor: 2000 })
+    s = beginHydrate(s, 'o')
+    s = finishHydrate(s, 'o', page([ev('o', 'message.user', { text: 'давний' }), ev('o', 'status.changed', { status: 'idle', turnId: 't1' })], 2000))
+    assert.equal(s.sessions['o']?.lastTurnTs, undefined, 'реплика из истории строку не двигает')
+    const live = { ...ev('o', 'message.user', { text: 'новая' }), id: 2001 }
+    s = applyEvent(s, live)
+    assert.equal(s.sessions['o']?.lastTurnTs, live.ts)
+    s = beginHydrate(s, 'p')
+    s = applyEvent(s, { ...ev('p', 'message.user', { text: 'пока грузится' }), id: 2002 })
+    const during = s.sessions['p']?.lastTurnTs
+    s = finishHydrate(s, 'p', page([ev('p', 'message.user', { text: 'старая' })], 2000))
+    assert.ok(during && s.sessions['p']?.lastTurnTs === during, 'живая реплика во время загрузки истории не теряется')
+    s = syncStatuses(s, [{ name: 'o', lastStatus: 'working', lastEventId: 0, createdAt: live.ts, provider: 'claude', cwd: '/tmp', mode: 'turn', pendingPermissions: 0 } as AgentRecord])
+    assert.equal(s.sessions['o']?.lastTurnTs, live.ts, 'статусы реестра время хода не стирают')
+  })
+
   it('смена статуса из очереди окна с номером ≤ курсора не теряется: ход «идёт», а не «готов» (e2e «Стоп», «⌘Enter посреди хода»)', () => {
     // Порядок из провала e2e 20.10: агент заведён (реестр — cold), ход начат до открытия ленты. Окно уже
     // свернуло `message.user`; `status.changed working` ждёт в очереди окна (пачка 24 мс), а ответ
