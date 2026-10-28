@@ -606,8 +606,8 @@ describe('codex: фоновая работа после хода — «фон ·
       assert.equal(st.at(-1), 'idle')
       assert.equal(st.lastIndexOf('working') < st.indexOf('idle'), true)
       // Концы пришли верхними событиями, как в живых журналах.
-      assert.ok(r.drafts.some((d) => d.kind === 'agent.finished' && !d.parentId))
-      assert.ok(r.drafts.some((d) => d.kind === 'tool.finished' && !d.parentId && d.data?.['name'] === 'commandExecution'))
+      assert.ok(await waitFor(() => r.drafts.some((d) => d.kind === 'agent.finished' && !d.parentId), 3000), 'нет agent.finished')
+      assert.ok(await waitFor(() => r.drafts.some((d) => d.kind === 'tool.finished' && !d.parentId && d.data?.['name'] === 'commandExecution'), 3000), 'нет tool.finished')
     } finally { await r.adapter.shutdown(); r.remove() }
   })
 
@@ -645,7 +645,8 @@ describe('codex: ход, начатый сервером (сообщение с�
       await r.adapter.startSession(spec(r, 'w'))
       await (await r.adapter.send('w', '[[server-turn]] начни')).done
       assert.ok(await waitFor(() => st(r).includes('working:server_turn'), 3000), `статусы: ${st(r).join(', ')}`)
-      assert.ok(r.drafts.some((d) => d.kind === 'message.done' && d.data?.['text'] === 'субагент отчитался'))
+      // `working` уходит на `turn/started`, ответ субагента — отдельной строкой позже: ждём его, а не берём на лету.
+      assert.ok(await waitFor(() => r.drafts.some((d) => d.kind === 'message.done' && d.data?.['text'] === 'субагент отчитался'), 3000), 'ответ субагента не дошёл')
       // Человек пишет посреди хода сервера.
       const second = await r.adapter.send('w', 'ещё вопрос')
       const outcome = await second.done
