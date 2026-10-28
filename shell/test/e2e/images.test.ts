@@ -32,7 +32,10 @@ describe('изображения: живой ответ, просмотр и и�
     for (let i = 0; i < 6; i++) {
       const card = cards.nth(i)
       await card.scrollIntoViewIfNeeded()
-      assert.ok(await waitFor(async () => (await card.locator('img').count()) > 0 || (await card.textContent())?.includes('недоступно') === true, 5000))
+      // Первая картинка после холодного старта Electron на раннере CI шла дольше 5 с (diag 28.10:
+      // 1 из 21, первый прогон); предел — как у проверки загрузки ниже.
+      assert.ok(await waitFor(async () => (await card.locator('img').count()) > 0 || (await card.textContent())?.includes('недоступно') === true, 15_000),
+        `карточка ${i}: ни картинки, ни «недоступно»: ${await card.textContent()}`)
     }
     const loaded = () => h.win.locator('.image-thumb img').evaluateAll((imgs) => imgs.length === 4 && imgs.every((i) => (i as HTMLImageElement).naturalWidth > 0))
     assert.ok(await waitFor(loaded, 15_000), 'изображения не загружены в ленте')

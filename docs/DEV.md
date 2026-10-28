@@ -1891,6 +1891,16 @@ e2e `search.test` «Target page, context or browser has been closed»; e2e `app-
 теперь ждёт отметку. Вылечены (ждут события, а не времени): `codex-adapter.test` «ЗАВИСШИЙ codex добивается по таймауту» —
 таймер добивания взводится швом `armAfter` после того, как заглушка записала pid; `worktree.test` «prompt посреди git
 worktree remove» — git-обёртка ждёт файла-разрешения вместо `sleep 1`.
+E2e `images.test` «три локальных изображения…» (28.10.2026): звал `h.client()` сразу после `launch()`, а демона
+поднимает окно уже после загрузки страницы — под нагрузкой `нет файла токена … — демон не запущен` (локально ~50 %
+полных прогонов при load average 40–55; воспроизводится всегда, если `PULT_NODE` стартует на 1,5 с медленнее). Теперь
+ждёт `data-conn=up`, как остальные наборы: 10 из 10 с медленным node. Второй вид провала на macOS-раннере —
+`electronApplication.waitForEvent: Target page, context or browser has been closed` в `h.reopen()` (2 из ~9 прогонов
+CI 27–28.10): процесс Electron завершился во время `emit('activate')`. Причина не найдена — ни локально, ни в 21
+прогоне отдельного цикла на macOS-раннере не повторилось, отчётов о падении в DiagnosticReports нет. Теперь harness
+пишет код выхода Electron и хвост его вывода в отказ `reopen()`, в вывод теста и в `test-results/<имя>-electron.log`;
+повторится — разбирать по ним. Навигационные провалы CI (`navigation.test` «фильтр работающих…», «много проектов…»)
+— отдельная история.
 
 Workflow — `.github/workflows/ci.yml`: нога ubuntu идёт всегда, нога macOS — только когда менялись
 `spike/env/service/**`, `scripts/**` или `.github/**`, либо на push в `main` (минуты macOS на приватном
