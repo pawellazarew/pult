@@ -6,6 +6,7 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
+import zlib from 'node:zlib'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, describe, it } from 'node:test'
@@ -28,6 +29,27 @@ describe('один номер: пакет и окно', () => {
     assert.equal(lock(join('shell', 'package-lock.json')), VERSION)
   })
 })
+
+/** Info.plist окна с номером версии. */
+const plistOf = (v: string): string => `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>CFBundleShortVersionString</key><string>${v}</string></dict></plist>\n`
+
+/** Минимальный zip (без сжатия) с одним файлом — `unzip -p` его читает на macOS и Linux. */
+function storedZip(name: string, text: string): Buffer {
+  const data = Buffer.from(text, 'utf8')
+  const n = Buffer.from(name, 'utf8')
+  const crc = zlib.crc32(data)
+  const local = Buffer.alloc(30)
+  local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt32LE(crc, 14)
+  local.writeUInt32LE(data.length, 18); local.writeUInt32LE(data.length, 22); local.writeUInt16LE(n.length, 26)
+  const central = Buffer.alloc(46)
+  central.writeUInt32LE(0x02014b50, 0); central.writeUInt16LE(20, 4); central.writeUInt16LE(20, 6); central.writeUInt32LE(crc, 16)
+  central.writeUInt32LE(data.length, 20); central.writeUInt32LE(data.length, 24); central.writeUInt16LE(n.length, 28)
+  const cdOff = local.length + n.length + data.length
+  const end = Buffer.alloc(22)
+  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(1, 8); end.writeUInt16LE(1, 10)
+  end.writeUInt32LE(central.length + n.length, 12); end.writeUInt32LE(cdOff, 16)
+  return Buffer.concat([local, n, data, central, n, end])
+}
 
 let dir = ''
 let env: Record<string, string> = {}
@@ -121,7 +143,8 @@ describe('release.mjs: сухой прогон', () => {
   it('окно: Pult-<v>-arm64.zip и те же байты под постоянным именем Pult-arm64.zip; в манифесте — имя с версией', () => {
     const out = join(dir, 'out-app')
     const zip = join(dir, 'fake-app.zip')
-    writeFileSync(zip, 'PK\u0003\u0004 не настоящий zip — release.mjs его только копирует и хэширует')
+    // Настоящий zip с одним Info.plist: release.mjs сверяет CFBundleShortVersionString окна с версией релиза.
+    writeFileSync(zip, storedZip('Pult.app/Contents/Info.plist', plistOf(VERSION)))
     const r = node(RELEASE, [VERSION, '--skip-checks', '--app-zip', zip, '--out', out, '--key', key, '--trust', pub])
     assert.equal(r.code, 0, r.stderr + r.stdout)
     const versioned = `Pult-${VERSION}-arm64.zip`
@@ -138,6 +161,12 @@ describe('release.mjs: сухой прогон', () => {
     // Готовый zip — только для репетиции: публикуется окно, собранное этим прогоном.
     assert.match(node(RELEASE, [VERSION, '--publish', '--app-zip', zip]).stderr, /--app-zip с --publish нельзя/)
     assert.match(node(RELEASE, [VERSION, '--skip-checks', '--no-app', '--app-zip', zip, '--key', key]).stderr, /--no-app и --app-zip вместе не бывают/)
+    // Ревью: окно другой версии в zip — отказ (каждый Пульт отверг бы такую замену).
+    const old = join(dir, 'old-app.zip')
+    writeFileSync(old, storedZip('Pult.app/Contents/Info.plist', plistOf('0.1.21')))
+    const bad = node(RELEASE, [VERSION, '--skip-checks', '--app-zip', old, '--out', join(dir, 'out-old'), '--key', key, '--trust', pub])
+    assert.equal(bad.code, 1)
+    assert.match(bad.stderr, new RegExp(`окно 0\\.1\\.21, а релиз ${VERSION.replace(/\./g, '\\.')} — у окна тот же номер, что у пакета`))
     // Релиз без окна не публикуется: окно обновляется той же кнопкой, что пакет.
     assert.match(node(RELEASE, [VERSION, '--publish', '--no-app']).stderr, /--no-app с --publish нельзя/)
     assert.equal(m.app?.version, m.version)

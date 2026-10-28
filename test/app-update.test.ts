@@ -1468,6 +1468,67 @@ describe('0.3.16: окно готовится заранее (apps/ready-<v>)', 
     }
   })
 
+  it('ревью: замена сорвалась до rename («закрой окно из …») — подготовленное остаётся, повтор без загрузки', async () => {
+    const w = world()
+    const z = countingZip(w)
+    w.shells = [{ version: '44.4.5', execPath: '/w/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron', pid: 7 }]
+    const u = updaterOf(w, { tools: z.tools })
+    try {
+      assert.equal(await u.stage(manifestOf(w)), true)
+      await u.apply()
+      await u.idle()
+      assert.match(readAppState(w.home.paths).last?.message ?? '', /закрой окно из/)
+      assert.equal(u.readyFor('0.1.16'), true, 'подготовленное окно вернулось в apps/ready-0.1.16')
+      assert.deepEqual(readdirSync(w.appsDir), ['Pult.app'])
+      w.shells = []
+      await u.apply()
+      await u.idle()
+      assert.equal(readAppState(w.home.paths).last?.result, 'done', readAppState(w.home.paths).last?.message)
+      assert.equal(z.gets(), 1, 'второй загрузки не было')
+      assert.equal(u.readyFor('0.1.16'), false, 'после замены подготовленное израсходовано')
+    } finally {
+      w.remove()
+    }
+  })
+
+  it('ревью: подготовленное привязано к sha256 архива — перевыложенный релиз с другим zip качается заново и ставится он', async () => {
+    const w = world()
+    const z = countingZip(w)
+    const u = updaterOf(w, { tools: z.tools })
+    try {
+      await u.stage(manifestOf(w))
+      const first = createHash('sha256').update(w.zip).digest('hex')
+      assert.equal(readFileSync(join(w.home.paths.apps, 'ready-0.1.16', '.sha256'), 'utf8').trim(), first)
+      // Тот же номер, другой архив (лишний файл в бандле).
+      const src = join(w.root, 'release2')
+      mkdirSync(src)
+      const app2 = makeBundle(src, { version: '0.1.16' })
+      writeFileSync(join(app2, 'Contents', 'Resources-extra'), 'x')
+      w.zip = zipOf(entriesOf(app2))
+      assert.equal(u.status().ready, '0.1.16', 'без адреса архива статус версию знает')
+      assert.equal(await u.stage(manifestOf(w)), true)
+      assert.equal(z.gets(), 2, 'другой sha256 — заново')
+      await u.apply()
+      await u.idle()
+      assert.equal(readAppState(w.home.paths).last?.result, 'done', readAppState(w.home.paths).last?.message)
+      assert.equal(z.gets(), 2)
+      assert.ok(existsSync(join(w.app, 'Contents', 'Resources-extra')), 'встало окно из нового архива')
+    } finally {
+      w.remove()
+    }
+  })
+
+  it('ревью: stage ничего не сделал (идёт замена окна, не нужно) — false, а не «готово»', async () => {
+    const w = world({ release: { version: '0.1.15' } })
+    const u = updaterOf(w)
+    try {
+      assert.equal(await u.stage(manifestOf(w)), false)
+      assert.deepEqual(apps(w), [])
+    } finally {
+      w.remove()
+    }
+  })
+
   it('не готовится: не новее стоящего, bad, нет прав на папку окна; старт демона убирает ready не новее окна', async () => {
     const w = world()
     const u = updaterOf(w)
@@ -1557,6 +1618,81 @@ describe('0.3.16: applyAll — одна кнопка для окна', () => {
   })
 })
 
+describe('ревью 0.3.16: перезапуск окна — один за раз, после lock проверяется снова, другое окно — отказ', () => {
+  const staleWorld = (): { w: World; exe: string; running: number; tools: Partial<AppTools> } => {
+    const w = world({ installed: '0.1.16', release: { version: '0.1.16' } })
+    const running = [...w.procs.keys()][0] as number
+    const exe = join(w.app, 'Contents', 'MacOS', 'Pult')
+    const base = w.tools()
+    const tools: Partial<AppTools> = {
+      ...base,
+      open: async (a) => {
+        w.opens.push(a)
+        const pid = nextPid++
+        w.procs.set(pid, { exe, alive: true, startedAt: Date.now() })
+        // Новое окно здоровается с интерфейсом пакета демона — и больше не «stale».
+        w.shells = [{ version: '0.1.16', execPath: exe, pid, pkg: '9.9.9' }]
+        setTimeout(() => w.updater?.onShellReady({ version: '0.1.16', execPath: exe, pid, pkg: '9.9.9' }), 20)
+      },
+    }
+    w.shells = [{ version: '0.1.16', execPath: exe, pid: running, pkg: '9.9.8' }]
+    return { w, exe, running, tools }
+  }
+
+  it('два нажатия разом (продолжение после рестарта и клик) — один перезапуск', async () => {
+    const { w, running, tools } = staleWorld()
+    const u = updaterOf(w, { tools, packageVersion: '9.9.9' })
+    try {
+      const [a, b] = await Promise.all([u.applyAll(), u.applyAll()])
+      assert.deepEqual(a, b)
+      await u.idle()
+      assert.deepEqual(w.signals, [[running, 'SIGTERM']])
+      assert.equal(w.opens.length, 1)
+      // Окно уже с новым интерфейсом — повтор ничего не делает.
+      assert.equal(await u.applyAll(), null)
+      assert.equal(w.opens.length, 1)
+    } finally {
+      w.remove()
+    }
+  })
+
+  it('пока ждали lock, окно уже перезапустили — отказ «уже перезапущено», сигналов нет', async () => {
+    const { w, exe, tools } = staleWorld()
+    const u = updaterOf(w, { tools, packageVersion: '9.9.9' })
+    const held = acquireLock(w.home.paths.updateLock)
+    try {
+      assert.ok(held.ok)
+      const p = u.applyAll({ waitLockMs: 3000 })
+      await new Promise((r) => setTimeout(r, 150))
+      w.shells = [{ version: '0.1.16', execPath: exe, pid: 1, pkg: '9.9.9' }]
+      if (held.ok) held.lock.release()
+      await assert.rejects(p, /окно уже перезапущено/)
+      assert.deepEqual(w.signals, [])
+    } finally {
+      if (held.ok) held.lock.release()
+      w.remove()
+    }
+  })
+
+  it('открыто и другое окно (рабочая копия) — отказ «закрой окно из …» до сигнала: поставленное не закрывается', async () => {
+    const { w, exe, running, tools } = staleWorld()
+    w.shells = [{ version: '0.1.16', execPath: exe, pid: running, pkg: '9.9.8' }, { version: '44.4.5', execPath: '/w/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron', pid: 7, pkg: '9.9.8' }]
+    const u = updaterOf(w, { tools, packageVersion: '9.9.9' })
+    try {
+      await assert.rejects(u.applyAll(), /закрой окно из \/w\/node_modules\/electron\/dist\/Electron\.app/)
+      assert.deepEqual(w.signals, [])
+      assert.deepEqual(w.opens, [])
+      // То же, если другое окно было открыто при нажатии и ещё не переподключилось (журнал) — и отказ в итог.
+      w.shells = [{ version: '0.1.16', execPath: exe, pid: running, pkg: '9.9.8' }]
+      await assert.rejects(u.applyAll({ others: ['/w/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron'], record: true }), /закрой окно из/)
+      assert.match(readAppState(w.home.paths).last?.message ?? '', /закрой окно из/)
+      assert.deepEqual(w.signals, [])
+    } finally {
+      w.remove()
+    }
+  })
+})
+
 describe('0.3.16: «Перезапустить и обновить» через рестарт демона (журнал update-apply.json)', () => {
   async function shellConn(w: World, app: { version: string | null; execPath: string; pid: number; pkg?: string }) {
     const c = await rawConnect(w.home.paths)
@@ -1636,6 +1772,48 @@ describe('0.3.16: «Перезапустить и обновить» через 
         await d.stop('тест')
         w.remove()
       }
+    }
+  })
+
+  it('ревью: окно, открытое при нажатии, переподключается позже пробы — новый демон его ждёт и перезапускает', async () => {
+    // Бандл уже новый (замена не нужна), а в окне интерфейс прежнего пакета; hello приходит через 1,2 с после пробы.
+    const w = world({ installed: '0.1.16', release: { version: '0.1.16' } })
+    const running = [...w.procs.keys()][0] as number
+    const exe = join(w.app, 'Contents', 'MacOS', 'Pult')
+    writeApplyJournal(w.home.paths, { from: '0.0.1', to: PKG, at: new Date().toISOString(), windows: [exe] })
+    probe(w, 'ok')
+    const d = await daemonWorld(w)
+    let sh: Awaited<ReturnType<typeof shellConn>> | null = null
+    try {
+      await new Promise((r) => setTimeout(r, 1200))
+      assert.deepEqual(w.signals, [], 'без hello окна демон его не трогает')
+      sh = await shellConn(w, { version: '0.1.16', execPath: exe, pid: running, pkg: '0.0.1' })
+      assert.ok(await waitFor(() => readAppState(w.home.paths).last?.result === 'done', 10_000), readAppState(w.home.paths).last?.message ?? 'нет итога')
+      assert.deepEqual(w.signals, [[running, 'SIGTERM']])
+      assert.deepEqual(w.opens, [w.app])
+    } finally {
+      sh?.end()
+      await d.stop('тест')
+      w.remove()
+    }
+  })
+
+  it('ревью: при нажатии было открыто окно рабочей копии, и оно не переподключилось — замены нет, отказ «закрой окно из …» в итоге, версия не bad', async () => {
+    const w = world({ release: { version: PKG } })
+    const dev = '/w/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron'
+    writeApplyJournal(w.home.paths, { from: '0.0.1', to: PKG, at: new Date().toISOString(), windows: [dev] })
+    probe(w, 'ok')
+    const d = await daemonWorld(w)
+    try {
+      assert.ok(await waitFor(() => readAppState(w.home.paths).last !== null, 20_000), 'итога нет')
+      const st = readAppState(w.home.paths)
+      assert.equal(st.last?.result, 'failed')
+      assert.match(st.last?.message ?? '', /закрой окно из \/w\/node_modules\/electron\/dist\/Electron\.app/)
+      assert.deepEqual(st.bad, [])
+      untouched(w)
+    } finally {
+      await d.stop('тест')
+      w.remove()
     }
   })
 

@@ -80,7 +80,7 @@ import type { SessionBrowser, SessionRecord, SessionStatus } from '../sessions/r
 import { ApplyError, createUpdateChecker } from '../update/checker.js'
 import type { CheckerOptions, UpdateChecker } from '../update/checker.js'
 import { AppUpdateError, createAppUpdater, shellHelloOf } from '../update/appUpdate.js'
-import { dropApplyJournal, journalApplies, readApplyJournal, waitPackageProbe, writeApplyJournal } from '../update/applyJournal.js'
+import { APPLY_SHELLS_WAIT_MS, dropApplyJournal, journalApplies, readApplyJournal, waitPackageProbe, writeApplyJournal } from '../update/applyJournal.js'
 import type { AppTools, AppUpdater, ShellHello } from '../update/appUpdate.js'
 import { bundleOf, insideApp } from '../update/appUpdate.js'
 import type { UpdateStatus } from '../core/rpc.js'
@@ -462,13 +462,14 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
         if (ok) void appUpdaterRef?.applyAll({}).catch((e: unknown) => { logger.warn('окно после обновления не обновилось', { error: (e as Error).message }) })
       }
     },
-    onLaunch: (to) => { writeApplyJournal(paths, { from: VERSION, to, at: new Date().toISOString() }) },
+    // Какие окна были открыты при нажатии: новый демон дождётся, пока они переподключатся, прежде чем трогать окно.
+    onLaunch: (to) => { writeApplyJournal(paths, { from: VERSION, to, at: new Date().toISOString(), windows: shellHellos().map((h) => h.execPath).filter((e): e is string => e !== null) }) },
     blocked: () => (appUpdaterRef?.busy() ? 'идёт обновление окна — пакет обновится после него' : null),
     // 0.3.16: окно готовится заранее вместе с пакетом (ссылка заполняется ниже, до первой проверки).
     app: {
       wanted: (v) => appUpdaterRef?.wanted(v) ?? false,
       ready: (v) => appUpdaterRef?.readyFor(v) ?? false,
-      stage: async (m) => { await appUpdaterRef?.stage(m) },
+      stage: async (m) => (await appUpdaterRef?.stage(m)) ?? false,
     },
     ...(opts.testMode && !opts.updates
       ? { schedule: !!process.env['PULT_TEST_UPDATE_DIR'], ...(Number.isFinite(testFirst) && testFirst >= 0 ? { firstDelayMs: testFirst } : {}) }
@@ -498,11 +499,25 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     ...(opts.appUpdate?.killWaitMs !== undefined ? { killWaitMs: opts.appUpdate.killWaitMs } : {}),
     ...(opts.appUpdate?.pollMs !== undefined ? { pollMs: opts.appUpdate.pollMs } : {}),
     ...(opts.appUpdate?.stopWaitMs !== undefined ? { stopWaitMs: opts.appUpdate.stopWaitMs } : {}),
-    shells: () => [...connections.values()].filter((c) => c.authed && c.client === 'shell' && c.app).map((c) => c.app as ShellHello),
+    shells: shellHellos,
     packageVersion: VERSION,
     packageStaging: () => updater.staging(),
   })
   appUpdaterRef = appUpdater
+  /** Окна (hello оболочек), подключённые сейчас. */
+  function shellHellos(): ShellHello[] {
+    return [...connections.values()].filter((c) => c.authed && c.client === 'shell' && c.app).map((c) => c.app as ShellHello)
+  }
+  /** Дождаться hello окон с этими путями (не дольше `ms`); вернуть те, что так и не подключились. */
+  const waitShells = async (want: readonly string[], ms: number): Promise<string[]> => {
+    const deadline = Date.now() + ms
+    for (;;) {
+      const have = new Set(shellHellos().map((h) => h.execPath))
+      const missing = want.filter((e) => !have.has(e))
+      if (!missing.length || Date.now() >= deadline || stopping) return missing
+      await new Promise((r) => { setTimeout(r, 200) })
+    }
+  }
   /** 0.3.16: новый демон доводит «Перезапустить и обновить» по журналу — окно показывает «Перезапускаю…». */
   let continuing: { to: string } | null = null
   /** Статус канала вместе с окном: одним объектом в `update.*` и `daemon.status.update`. */
@@ -530,7 +545,11 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
       const ok = await waitPackageProbe(paths, VERSION, { stopped: () => stopping })
       dropApplyJournal(paths)
       if (!ok || stopping) { logger.warn('проба нового пакета не подтвердилась — окно не трогаю', { version: VERSION }); return }
-      const r = await appUpdater.applyAll({ expect: VERSION, waitLockMs: 60_000, record: true })
+      // Окна переподключаются к новому демону со своей паузой (до 5 с): без их hello не видно ни окна с прежним
+      // интерфейсом (перезапуск), ни другого окна, которое помешало бы замене. Ждём тех, что были открыты при нажатии.
+      const missing = await waitShells(j.windows, APPLY_SHELLS_WAIT_MS)
+      if (missing.length) logger.warn('не все окна переподключились к новому демону', { missing })
+      const r = await appUpdater.applyAll({ expect: VERSION, waitLockMs: 60_000, record: true, others: missing })
       logger.info('обновление окна после пакета', { started: r !== null, from: j.from, version: VERSION })
     } catch (e) {
       logger.warn('окно после обновления пакета не обновилось', { error: (e as Error).message })

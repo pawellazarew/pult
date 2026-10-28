@@ -33,7 +33,7 @@ import { keyIdOf, MANIFEST_MAX_BYTES, ManifestError, rawPublicKey, verifyEnvelop
 import type { Manifest } from './manifest.js'
 import { installTarball, pruneStaged, stageTarball, stagedReady, switchStaged, withUpdateLock } from './update.js'
 import type { UpdateOptions } from './update.js'
-import { currentName, packageIn, readState } from './versions.js'
+import { currentName, isVersionName, packageIn, readState } from './versions.js'
 import { readAppState } from './appState.js'
 import { plistString } from './plist.js'
 
@@ -283,8 +283,12 @@ export async function updateLatest(paths: PultPaths, io: Io, opts: ChannelOption
       m = await fetchManifest({ ...opts, env, url })
     } catch (e) {
       if (!(e instanceof ChannelError)) throw e
+      // Те же правила, что у пути с сетью: только вперёд, не bad, не рабочая копия — иначе `--expect <previous>` без
+      // сети тихо откатил бы на прежнюю версию (у неё тоже метка канала).
       const exp = opts.expect
-      if (exp !== undefined && installedVersion(paths).version !== exp && stagedReady(paths, exp)) {
+      const inst = installedVersion(paths)
+      const forward = exp !== undefined && isVersionName(exp) && (inst.version === null || compareVersions(exp, inst.version) > 0)
+      if (exp !== undefined && forward && !inst.dev && !readState(paths).bad.includes(exp) && stagedReady(paths, exp)) {
         io.err(`pult update: ${e.message} — ${exp} уже подготовлена заранее, ставлю её`)
         return switchStaged(paths, io, exp, tail)
       }
@@ -375,5 +379,5 @@ export async function updateStage(paths: PultPaths, io: Io, opts: ChannelOptions
     } finally {
       try { unlinkSync(tgz) } catch { /* уже нет */ }
     }
-  })
+  }, { stage: true })
 }

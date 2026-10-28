@@ -319,7 +319,8 @@ pult update --app --rollback   # put the previous window back if the new one fai
 - `pult update` from the terminal updates the package only. The window then offers «Пульт X готов · Перезапустить»,
   which replaces or restarts the window; `pult update --app` does the same from the terminal.
 - `pult update` (also `--from`, `--to`) restarts the daemon, so it refuses while turns are running
-  («идут ходы: N … дождись или --force»); `--force` updates anyway and cuts them off.
+  («идут ходы: N … дождись или --force»); `--force` updates anyway and cuts them off. If the daemon is preparing an
+  update in the background at that moment, `pult update` waits for it (up to 10 minutes) instead of refusing.
 - `latest.json` of the latest GitHub release is signed with Ed25519 (the public key is built into Pult); the package
   and the window zip must match the size and sha256 in the signed manifest. Anything else is refused and nothing is
   installed. A version prepared in the background is not downloaded again; without network, `pult update` can still

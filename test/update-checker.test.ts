@@ -724,6 +724,14 @@ describe('обновление из окна: срок 6 ч, проверка п
   })
 })
 
+/** Подготовленная версия на диске — как её оставил бы `pult update --stage`. */
+function stageOnDisk(home: TempHome, v: string): void {
+  const root = join(home.paths.versions, v, 'lib', 'node_modules', 'pult')
+  mkdirSync(root, { recursive: true })
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'pult', version: v }))
+  writeFileSync(join(home.paths.versions, v, '.channel-sha256'), 'c'.repeat(64) + '\n')
+}
+
 // 0.3.16: фоновая подготовка. Проверка нашла новую версию — демон сразу готовит её (ребёнок `pult update --stage`,
 // окно — `app.stage`), только при автопроверке или по ручной проверке; «Перезапустить» посреди подготовки ждёт её.
 describe('0.3.16: фоновая подготовка и «Перезапустить»', () => {
@@ -742,17 +750,23 @@ describe('0.3.16: фоновая подготовка и «Перезапуст�
     return { c, stages, applies, launched }
   }
 
-  it('ручная проверка: «скачиваю в фоне» → ребёнок вышел 0 → «готово»; повторная проверка второй раз не готовит', async () => {
+  it('ручная проверка: «скачиваю в фоне» → ребёнок вышел 0 → «готово» (сверено с диском); повтор не готовит; пропало с диска — готовит снова', async () => {
     const home = tempHome()
     const { c, stages } = staging(home)
     try {
       const st = await c.check()
       assert.equal(stages.length, 1, 'pult update --stage не запущен')
       assert.deepEqual([st.staged?.to, st.staged?.state], ['0.2.28', 'downloading'])
+      stageOnDisk(home, '0.2.28')
       stages[0]?.emit('exit', 0, null)
       assert.ok(await waitFor(() => c.status().staged?.state === 'ready', 2000))
       await c.check()
       assert.equal(stages.length, 1, 'готовое не готовится заново')
+      // Подготовленное убрали (или израсходовали) — «готово» больше не врёт, следующая проверка готовит заново.
+      rmSync(join(home.paths.versions, '0.2.28'), { recursive: true, force: true })
+      assert.equal(c.status().staged, null)
+      await c.check()
+      assert.equal(stages.length, 2)
     } finally {
       c.stop()
       home.remove()
@@ -826,6 +840,7 @@ describe('0.3.16: фоновая подготовка и «Перезапуст�
     const { c, stages, applies, launched } = staging(home)
     try {
       await c.check()
+      stageOnDisk(home, '0.2.28')
       stages[0]?.emit('exit', 0, null)
       assert.ok(await waitFor(() => c.status().staged?.state === 'ready', 2000))
       await c.apply(false)
@@ -843,10 +858,11 @@ describe('0.3.16: фоновая подготовка и «Перезапуст�
     const home = tempHome()
     let release: () => void = () => {}
     const staged: string[] = []
+    let onDisk = false
     const app = {
       wanted: (v: string) => v === '0.1.14',
-      ready: () => false,
-      stage: async (m: { app?: { version: string } }) => { staged.push(m.app?.version ?? '?'); await new Promise<void>((r) => { release = r }) },
+      ready: () => onDisk,
+      stage: async (m: { app?: { version: string } }) => { staged.push(m.app?.version ?? '?'); await new Promise<void>((r) => { release = r }); onDisk = true; return true },
     }
     // В манифесте у окна должен быть архив — иначе готовить нечего.
     const withZip: HttpGet = async (url) => {
@@ -867,6 +883,77 @@ describe('0.3.16: фоновая подготовка и «Перезапуст�
       assert.equal(c.status().staged?.state, 'downloading')
       release()
       assert.ok(await waitFor(() => c.status().staged?.state === 'ready', 2000))
+    } finally {
+      c.stop()
+      home.remove()
+    }
+  })
+  it('ревью: провал «Перезапустить» и ожидание ходов подготовку не держат (готовится во время waiting)', async () => {
+    const home = tempHome()
+    let turns = 1
+    const { c, stages, applies } = staging(home, { runningTurns: () => turns, stage: true })
+    try {
+      // Ходы идут — ожидание; проверка в это время готовит.
+      await c.check()
+      stages[0]?.emit('exit', 1, null)
+      assert.ok(await waitFor(() => c.status().staged?.state === 'failed', 2000))
+      assert.deepEqual(await c.apply(false, true), { waiting: 1 })
+      await c.check()
+      assert.equal(stages.length, 2, 'во время ожидания ходов подготовка идёт')
+      stageOnDisk(home, '0.2.28')
+      stages[1]?.emit('exit', 0, null)
+      assert.ok(await waitFor(() => c.status().staged?.state === 'ready', 2000))
+      turns = 0
+      c.poke()
+      assert.ok(await waitFor(() => applies.length === 1, 2000))
+      applies[0]?.emit('exit', 1, null)
+      assert.ok(await waitFor(() => c.status().apply.state === 'failed', 2000))
+      // После провала — снова можно готовить (раньше `failed` залипал и держал подготовку навсегда).
+      rmSync(join(home.paths.versions, '0.2.28'), { recursive: true, force: true })
+      await c.check()
+      assert.equal(stages.length, 3)
+    } finally {
+      c.stop()
+      home.remove()
+    }
+  })
+
+  it('ревью: «Перезапустить» ждёт только подготовку пакета (update.lock), а не окно, которое ещё качается', async () => {
+    const home = tempHome()
+    const withZip: HttpGet = async (url) => {
+      if (url !== URL_LATEST) return { status: 404, header: () => null, body: null }
+      const m = {
+        schema: 1, version: '0.2.28', released: '2026-10-19T10:00:00.000Z', notes: 'https://github.com/pawellazarew/pult/releases/tag/v0.2.28',
+        package: { url: 'https://example.invalid/pult-0.2.28.tgz', sha256: 'c'.repeat(64), size: 10 },
+        app: { version: '0.2.28', minVersion: '0.1.13', 'darwin-arm64': { url: 'https://example.invalid/Pult.zip', sha256: 'd'.repeat(64), size: 10 } },
+      }
+      const b = Buffer.from(signEnvelope(Buffer.from(JSON.stringify(m)), privateKey))
+      return { status: 200, header: () => null, body: (async function* () { yield b })() }
+    }
+    let windowStarted = false
+    const app = { wanted: () => true, ready: () => false, stage: () => { windowStarted = true; return new Promise<boolean>(() => { /* качается вечно */ }) } }
+    const { c, stages, applies } = staging(home, { http: withZip, app })
+    try {
+      await c.check()
+      await c.apply(false, true)
+      assert.equal(applies.length, 0)
+      stages[0]?.emit('exit', 0, null)
+      assert.ok(await waitFor(() => windowStarted, 2000))
+      assert.ok(await waitFor(() => applies.length === 1, 2000), 'pult update ждёт подготовку окна')
+    } finally {
+      c.stop()
+      home.remove()
+    }
+  })
+
+  it('ревью: окно не подготовилось и не сломалось (stage → false) — не «готово» и не провал', async () => {
+    const home = tempHome()
+    const app = { wanted: () => true, ready: () => false, stage: async () => false }
+    const { c } = staging(home, { app, stage: true, http: channel(() => '0.2.27').http })
+    try {
+      await c.check()
+      // Пакет последний (0.2.27), в манифесте теста окна-архива нет — готовить нечего.
+      assert.equal(c.status().staged, null)
     } finally {
       c.stop()
       home.remove()

@@ -71,6 +71,8 @@ export interface PendingUpdate {
   downloading: boolean
   /** Подготовка не удалась (тихо) — почему; при нажатии демон скачает заново. */
   stageError: string | null
+  /** Ключ «скрыть крестиком»: версия; только перезапуск окна — `stale:<версия>` (скрытый «готов X» его не прячет). */
+  key: string
 }
 
 /**
@@ -92,6 +94,7 @@ export function pendingUpdate(u: UpdateStatus | undefined | null): PendingUpdate
     ready: (mine && s.state === 'ready') || (pkg === null && win === null),
     downloading: mine && s.state === 'downloading',
     stageError: mine && s.state === 'failed' ? s.error : null,
+    key: pkg === null && win === null ? `stale:${u.current}` : (pkg ?? u.current),
   }
 }
 
@@ -154,11 +157,11 @@ export function updateBanner(u: UpdateStatus | undefined | null, _windowVersion:
   }
   const p = pendingUpdate(u)
   // Пока качается в фоне — тишина: кнопка, которая сначала минуту качает, выглядела бы зависшей.
-  if (!p || p.downloading || dismissed.includes(p.to)) return null
+  if (!p || p.downloading || dismissed.includes(p.key)) return null
   return {
     kind: 'available',
     text: p.ready ? `Пульт ${p.to} готов` : `Доступен Пульт ${p.to}`,
-    notes: u.available ? notes : null, action: RESTART, dismissKey: p.to,
+    notes: u.available ? notes : null, action: RESTART, dismissKey: p.key,
   }
 }
 

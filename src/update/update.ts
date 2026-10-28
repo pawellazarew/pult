@@ -77,20 +77,43 @@ function prepareDirs(paths: PultPaths): void {
   }
 }
 
+/** Сколько `pult update` ждёт фоновую подготовку (`pult update --stage`), прежде чем отказать. */
+export const STAGE_WAIT_MS = 10 * 60_000
+
+/** Метка «lock держит фоновая подготовка»: pid держателя. Рядом с lock, живёт ровно столько, сколько он. */
+const stageMark = (paths: PultPaths): string => `${paths.updateLock}.stage`
+const stageHolder = (paths: PultPaths): number | null => {
+  try { const n = Number(readFileSync(stageMark(paths), 'utf8').trim()); return Number.isInteger(n) && n > 0 ? n : null } catch { return null }
+}
+
 /**
  * Один `pult update` за раз: `open(O_CREAT|O_EXCL)` + живость pid со временем старта — тот же
  * lock, что у демона (core/lock.ts), со всеми его уроками про переиспользованный pid.
+ * 0.3.16: lock держит фоновая подготовка (`pult update --stage`, её запускает демон) — не отказ, а ожидание её конца
+ * (не дольше STAGE_WAIT_MS): человек, набравший `pult update`, не должен гадать, что за «другое обновление».
  */
-export async function withUpdateLock(paths: PultPaths, io: Io, fn: () => Promise<number>): Promise<number> {
+export async function withUpdateLock(paths: PultPaths, io: Io, fn: () => Promise<number>, opts: { stage?: boolean; stageWaitMs?: number } = {}): Promise<number> {
   prepareDirs(paths)
-  const got = acquireLock(paths.updateLock)
+  const deadline = Date.now() + (opts.stageWaitMs ?? STAGE_WAIT_MS)
+  let said = false
+  let got = acquireLock(paths.updateLock)
+  while (!got.ok && !opts.stage && got.holderPid !== null && stageHolder(paths) === got.holderPid && Date.now() < deadline) {
+    if (!said) { io.err(`pult update: демон готовит обновление в фоне (pid ${got.holderPid}) — жду конца подготовки, потом продолжу`); said = true }
+    await new Promise((r) => { setTimeout(r, 500) })
+    got = acquireLock(paths.updateLock)
+  }
   if (!got.ok) {
-    io.err(`pult update: уже идёт другое обновление (pid ${got.holderPid ?? '?'}${got.holderCmd ? `, ${got.holderCmd}` : ''}) — дождись его конца`)
+    const bg = got.holderPid !== null && stageHolder(paths) === got.holderPid
+    io.err(bg
+      ? `pult update: фоновая подготовка обновления (pid ${got.holderPid}) идёт дольше ${Math.round((opts.stageWaitMs ?? STAGE_WAIT_MS) / 60_000)} мин — повтори позже; журнал: ${paths.updateLog}`
+      : `pult update: уже идёт другое обновление (pid ${got.holderPid ?? '?'}${got.holderCmd ? `, ${got.holderCmd}` : ''}) — дождись его конца`)
     return 1
   }
+  if (opts.stage) { try { atomicWrite(stageMark(paths), `${process.pid}\n`, 0o600) } catch { /* без метки — просто отказ другим */ } }
   try {
     return await fn()
   } finally {
+    if (opts.stage) { try { unlinkSync(stageMark(paths)) } catch { /* уже нет */ } }
     got.lock.release()
   }
 }

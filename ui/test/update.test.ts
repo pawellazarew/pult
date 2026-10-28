@@ -340,6 +340,10 @@ describe('0.3.16: окно той же кнопкой; строка про ок�
     assert.equal(stale?.text, 'Пульт 1.0.3 готов')
     assert.equal(pendingUpdate(st(app({ available: false, latest: '1.0.2', stale: true })))?.ready, true)
     assert.equal(updateBanner(st(app({ available: false, latest: '1.0.2', stale: false })), null), null)
+    // Ревью: скрыть «Пульт 1.0.3 готов» (пакет) не прячет просьбу перезапустить окно на 1.0.3 — у неё свой ключ.
+    assert.equal(stale?.dismissKey, 'stale:1.0.3')
+    assert.notEqual(updateBanner(st(app({ available: false, latest: '1.0.2', stale: true })), null, ['1.0.3']), null)
+    assert.equal(updateBanner(st(app({ available: false, latest: '1.0.2', stale: true })), null, ['stale:1.0.3']), null)
     // Есть и пакет, и окно — одна плашка про Пульт.
     assert.equal(updateBanner(status({ app: app({ latest: '1.0.3' }) }), null)?.text, 'Доступен Пульт 1.0.3')
   })

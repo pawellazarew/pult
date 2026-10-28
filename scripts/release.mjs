@@ -208,7 +208,15 @@ try {
     // Постоянное имя для README и ссылки releases/latest/download/Pult-arm64.zip: ссылка на «последнее окно» без
     // номера. Те же байты; в манифесте — имя с версией.
     const appAliasName = 'Pult-arm64.zip'
+    // Номер окна — из Info.plist самого бандла (CFBundleShortVersionString), а не из shell/package.json: собранное или
+    // поданное окно другой версии каждый Пульт отверг бы при замене («версия в архиве …»).
+    const bundleVersion = (plistText, where) => {
+      const m = /<key>CFBundleShortVersionString<\/key>\s*<string>([^<]*)<\/string>/.exec(plistText ?? '')
+      if (!m) die(`${where}: в Info.plist нет CFBundleShortVersionString (или plist не XML)`)
+      if (m[1] !== version) die(`${where}: окно ${m[1]}, а релиз ${version} — у окна тот же номер, что у пакета`)
+    }
     if (opt.appZip) {
+      bundleVersion(run('unzip', ['-p', resolve(opt.appZip), 'Pult.app/Contents/Info.plist']), `--app-zip ${opt.appZip}`)
       const zip = join(out, appZipName)
       copyFileSync(resolve(opt.appZip), zip)
       copyFileSync(zip, join(out, appAliasName))
@@ -222,6 +230,7 @@ try {
       run('npm', ['run', 'dist:mac'], { cwd: shellDir })
       const app = join(shellDir, 'out', 'mac-arm64', 'Pult.app')
       if (!existsSync(app)) die(`после dist:mac нет ${app}`)
+      bundleVersion(readFileSync(join(app, 'Contents', 'Info.plist'), 'utf8'), app)
       const zip = join(out, appZipName)
       run('ditto', ['-c', '-k', '--keepParent', app, zip])
       copyFileSync(zip, join(out, appAliasName))

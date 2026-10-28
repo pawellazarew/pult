@@ -533,9 +533,12 @@ export interface AppUpdater {
    * 0.3.16, «Перезапустить» для окна: есть новое окно — замена (`apply`); нет, а открыто окно из поставленного
    * бандла с интерфейсом другой версии пакета — его перезапуск; нечего — null.
    */
-  applyAll(req?: { expect?: string; waitLockMs?: number; record?: boolean }): Promise<{ applying: true; to: string; target: 'app' } | null>
-  /** 0.3.16: фоновая подготовка окна релиза `m` в `apps/ready-<v>` (шаги 1–4). Ошибка — исключением. */
-  stage(m: Manifest): Promise<void>
+  applyAll(req?: { expect?: string; waitLockMs?: number; record?: boolean; others?: readonly string[] }): Promise<{ applying: true; to: string; target: 'app' } | null>
+  /**
+   * 0.3.16: фоновая подготовка окна релиза `m` в `apps/ready-<v>` (шаги 1–4). true — подготовлено (или уже было тем же
+   * архивом); false — нечего или нельзя сейчас (идёт обновление окна, окно не нужно). Ошибка — исключением.
+   */
+  stage(m: Manifest): Promise<boolean>
   /** 0.3.16: окно `v` стоит ставить (поддерживается, новее стоящего, не bad, права есть). */
   wanted(v: string): boolean
   /** 0.3.16: окно `v` уже подготовлено (`apps/ready-<v>/Pult.app`). */
@@ -627,10 +630,17 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
   }
 
   const readyDir = (v: string): string => path.join(o.paths.apps, `ready-${v}`)
-  /** Подготовлено заранее: `apps/ready-<v>/Pult.app` той версии (проверки — снова при замене). */
-  const readyFor = (v: string): boolean => {
+  /** Метка подготовленного окна: sha256 zip из подписанного манифеста, из которого оно распаковано. */
+  const READY_MARK = '.sha256'
+  /**
+   * Подготовлено заранее: `apps/ready-<v>/Pult.app` той версии (проверки — снова при замене). `sha256` задан (адрес
+   * архива известен из манифеста) — и из того же архива: перевыложенный релиз с другим zip заново качается.
+   */
+  const readyFor = (v: string, sha256?: string): boolean => {
     if (!isStableVersion(v)) return false
-    return readBundle(path.join(readyDir(v), 'Pult.app'))?.version === v
+    if (readBundle(path.join(readyDir(v), 'Pult.app'))?.version !== v) return false
+    if (sha256 === undefined) return true
+    try { return readFileSync(path.join(readyDir(v), READY_MARK), 'utf8').trim() === sha256 } catch { return false }
   }
   /** Заменить бандл нельзя — что сделать руками (адрес zip здесь не известен: «со страницы релиза»). */
   const blockedText = (loc: InstalledApp): string | null => {
@@ -942,7 +952,8 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
    * манифест, исполняемый файл — Mach-O с arm64, дерево без ссылок наружу, подпись сходится. Возвращает путь к бандлу.
    */
   const verifyUnpacked = async (dir: string, to: string, locId: string | null): Promise<string> => {
-    const top = readdirSync(dir)
+    // Метка подготовленного (`.sha256`) лежит рядом с бандлом — не часть архива.
+    const top = readdirSync(dir).filter((n) => n !== READY_MARK)
     if (top.length !== 1 || top[0] !== 'Pult.app') throw new AppUpdateError(`в архиве не ровно один Pult.app: ${top.slice(0, 5).join(', ') || 'пусто'}`)
     const staged = path.join(dir, 'Pult.app')
     const sst = lstatSync(staged)
@@ -1006,14 +1017,16 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
     const prevDir = path.join(o.paths.apps, `previous-${from}`)
     const prevApp = path.join(prevDir, 'Pult.app')
     let swapped = false
+    /** Новое окно взято из подготовленного заранее: сорвалось до замены — вернуть его туда (повтор без загрузки). */
+    let fromPre = false
     try {
       ensureAppsDirs()
       // 1–2. Подготовлено заранее (0.3.16) — проверки бандла заново, без загрузки; не прошло — качаем заново.
       if (stagingJob) await stagingJob.catch(() => { /* итог подготовки не важен: ниже — своя проверка */ })
       let staged: string | null = null
-      if (readyFor(to)) {
+      if (readyFor(to, asset?.sha256)) {
         step('verify')
-        try { staged = await verifyUnpacked(pre, to, loc.id) } catch (e) {
+        try { staged = await verifyUnpacked(pre, to, loc.id); fromPre = true } catch (e) {
           o.logger.warn('подготовленное окно не прошло проверку — качаю заново', { to, error: (e as Error).message })
           safe('подготовленное окно не убрано', () => rmSync(pre, { recursive: true, force: true }))
         }
@@ -1160,9 +1173,14 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
       }
       o.logger.warn('обновление окна не удалось', { to, error: msg })
     } finally {
+      // До замены сорвалось («закрой окно из …», окно не закрылось) — подготовленное остаётся подготовленным: новое
+      // окно уходит из `.incoming` обратно в apps/ready-<v> (другой том — там осталась исходная копия).
+      if (!swapped && fromPre && !existsSync(path.join(pre, 'Pult.app'))) {
+        safe('подготовленное окно не вернулось на место', () => { lstatSync(incoming); tools.rename(incoming, path.join(pre, 'Pult.app')) })
+      }
       safe('zip не убран', () => rmSync(zip, { force: true }))
       safe('staging не убран', () => rmSync(staging, { recursive: true, force: true }))
-      safe('подготовленное окно не убрано', () => rmSync(pre, { recursive: true, force: true }))
+      if (swapped || !fromPre) safe('подготовленное окно не убрано', () => rmSync(pre, { recursive: true, force: true }))
       safe('новое окно рядом не убрано', () => rmSync(incoming, { recursive: true, force: true }))
     }
   }
@@ -1194,15 +1212,15 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
    * Шаги 1–4 заранее: zip в `apps/stage-<v>` (не в downloads/: его чистит `pult update` под своим lock), разбор,
    * распаковка, проверки бандла; удалось — `apps/ready-<v>/Pult.app`, zip удалён. Окно и Pult.app не трогаются.
    */
-  const stage = async (m: Manifest): Promise<void> => {
+  const stage = async (m: Manifest): Promise<boolean> => {
     await ready
     const asset = m.app?.['darwin-arm64']
-    if (!m.app || !asset || stopped) return
+    if (!m.app || !asset || stopped) return false
     const to = m.app.version
     if (asset.size > APP_ZIP_MAX_BYTES) throw new AppUpdateError(`архив окна ${asset.size} байт — больше потолка ${APP_ZIP_MAX_BYTES}`)
-    if (!wanted(to) || job) return
-    if (readyFor(to)) { cleanReady(to); return }
-    if (stagingJob) return stagingJob
+    if (!wanted(to) || job) return false
+    if (readyFor(to, asset.sha256)) { cleanReady(to); return true }
+    if (stagingJob) { await stagingJob; return readyFor(to, asset.sha256) }
     const loc = locateInstalledApp(tools.appDirs(), preferred()) as InstalledApp
     stagingJob = (async () => {
       ensureAppsDirs()
@@ -1223,13 +1241,15 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
         await tools.lsregister(['-u', path.join(out, 'Pult.app')]).catch(() => { /* не был на учёте */ })
         if (stopped) throw new AppUpdateError('демон останавливается')
         rmSync(readyDir(to), { recursive: true, force: true })
+        atomicWrite(path.join(out, READY_MARK), `${asset.sha256}\n`, 0o600)
         tools.rename(out, readyDir(to))
         o.logger.info('окно подготовлено', { to })
       } finally {
         safe('папка подготовки не убрана', () => rmSync(dir, { recursive: true, force: true }))
       }
     })().finally(() => { stagingJob = null })
-    return stagingJob
+    await stagingJob
+    return readyFor(to, asset.sha256)
   }
 
   /**
@@ -1444,19 +1464,49 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
     return { applying: true, to, target: 'app' }
   }
 
-  /** Перезапуск окна с интерфейсом другой версии пакета (0.3.16). */
-  const startRestart = async (waitLockMs = 0): Promise<{ applying: true; to: string; target: 'app' }> => {
-    const loc = locateInstalledApp(tools.appDirs(), preferred())
-    const no = unsupported(loc)
-    if (no) throw new AppUpdateError(no)
-    if (!loc?.version || !loc.executable) throw new AppUpdateError(`Info.plist окна ${loc?.app ?? 'Pult.app'} не читается`)
-    if (!shells().some((h) => isStale(h, loc))) throw new AppUpdateError(`окно ${loc.version} — последнее, и его интерфейс той же версии, что Пульт`)
+  /** Другое открытое окно (не из поставленного бандла) пережило бы закрытие этого и заняло замок одного экземпляра. */
+  const otherWindow = (app: string, also: readonly string[] = []): string | null => {
+    const other = [...shells().map((h) => h.execPath), ...also].find((e): e is string => e !== null && !insideApp(e, app))
+    return other ? `закрой окно из ${bundleOf(other)} и повтори — пока оно открыто, новое окно не запустится; ничего не тронуто` : null
+  }
+
+  /**
+   * Перезапуск окна с интерфейсом другой версии пакета (0.3.16). Одна попытка за раз (как preflight замены); после
+   * lock — снова «интерфейс старый?»: окно могли уже перезапустить, пока ждали.
+   */
+  const startRestart = async (waitLockMs = 0, others: readonly string[] = []): Promise<{ applying: true; to: string; target: 'app' }> => {
+    const locate = (): InstalledApp & { version: string; executable: string } => {
+      const loc = locateInstalledApp(tools.appDirs(), preferred())
+      const no = unsupported(loc)
+      if (no) throw new AppUpdateError(no)
+      if (!loc?.version || !loc.executable) throw new AppUpdateError(`Info.plist окна ${loc?.app ?? 'Pult.app'} не читается`)
+      return { ...loc, version: loc.version, executable: loc.executable }
+    }
+    let loc = locate()
+    const stale = (): boolean => shells().some((h) => isStale(h, loc))
+    if (!stale()) throw new AppUpdateError(`окно ${loc.version} — последнее, и его интерфейс той же версии, что Пульт`)
+    const other = otherWindow(loc.app, others)
+    if (other) throw new AppUpdateError(other)
     const lock = await takeLockWait(waitLockMs)
-    const version = loc.version
-    const executable = loc.executable
-    runJob({ to: version, from: version, step: 'quit', since: new Date().toISOString(), done: Promise.resolve() }, lock,
-      () => restartWork({ ...loc, version, executable }))
-    return { applying: true, to: version, target: 'app' }
+    try {
+      if (job) throw new AppUpdateError('окно уже обновляется')
+      loc = locate()
+      if (!stale()) throw new AppUpdateError('окно уже перезапущено')
+      const other2 = otherWindow(loc.app)
+      if (other2) throw new AppUpdateError(other2)
+    } catch (e) {
+      safe('update.lock не снят', () => lock.release())
+      throw e
+    }
+    const l = loc
+    runJob({ to: l.version, from: l.version, step: 'quit', since: new Date().toISOString(), done: Promise.resolve() }, lock, () => restartWork(l))
+    return { applying: true, to: l.version, target: 'app' }
+  }
+  const restartOnce = (waitLockMs = 0, others: readonly string[] = []): Promise<{ applying: true; to: string; target: 'app' }> => {
+    if (job) return Promise.resolve({ applying: true, to: job.to, target: 'app' })
+    if (preflight) return preflight
+    preflight = startRestart(waitLockMs, others).finally(() => { preflight = null })
+    return preflight
   }
 
   const applyOnce = (req: AppApplyRequest = {}): Promise<{ applying: true; to: string; target: 'app' }> => {
@@ -1476,26 +1526,34 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
       if (preflight) return preflight
       const st = status()
       const stale = (): boolean => shells().some((h) => isStale(h))
+      const fail = (e: unknown): never => {
+        // Продолжение после рестарта (некому показать ответ RPC) — отказ в итог: окно скажет его в «Настройках».
+        if (e instanceof AppUpdateError && req.record) {
+          const inst = locateInstalledApp(tools.appDirs(), preferred())?.version ?? null
+          record({ to: req.expect ?? st.latest ?? '?', from: inst, at: new Date().toISOString(), result: 'failed', message: e.message })
+        }
+        throw e
+      }
+      // Окна, открытые при нажатии (журнал): окно не из поставленного бандла, которое ещё не переподключилось, всё
+      // равно пережило бы замену или перезапуск и заняло замок одного экземпляра.
+      const loc = locateInstalledApp(tools.appDirs(), preferred())
+      const others = loc ? (req.others ?? []).filter((e) => !insideApp(e, loc.app)) : []
       // Канал мог и не проверяться этим демоном (автопроверка выключена — итога в памяти нет): окно старше `expect`
       // (версии пакета после «Перезапустить») — тоже повод заменить его.
       if (st.available || (req.expect !== undefined && wanted(req.expect))) {
         try {
+          if (loc && others.length) throw new AppUpdateError(otherWindow(loc.app, others) as string)
           return await applyOnce({ ...(req.expect !== undefined ? { expect: req.expect } : {}), allowNewer: true, ...(req.waitLockMs !== undefined ? { waitLockMs: req.waitLockMs } : {}) })
         } catch (e) {
           // Окно не заменить (нет прав, канал молчит), но интерфейс в нём старый — хотя бы перезапустить.
-          if (e instanceof AppUpdateError && stale()) {
+          if (e instanceof AppUpdateError && stale() && !others.length) {
             o.logger.warn('окно не заменить — перезапускаю его на новый интерфейс', { error: e.message })
-            return startRestart(req.waitLockMs)
+            return restartOnce(req.waitLockMs).catch(fail)
           }
-          // Продолжение после рестарта (некому показать ответ RPC) — отказ в итог: окно скажет его в «Настройках».
-          if (e instanceof AppUpdateError && req.record) {
-            const inst = locateInstalledApp(tools.appDirs(), preferred())?.version ?? null
-            record({ to: req.expect ?? st.latest ?? '?', from: inst, at: new Date().toISOString(), result: 'failed', message: e.message })
-          }
-          throw e
+          return fail(e)
         }
       }
-      if (stale()) return startRestart(req.waitLockMs)
+      if (stale()) return restartOnce(req.waitLockMs, others).catch(fail)
       return null
     },
     stage,

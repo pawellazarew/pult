@@ -307,4 +307,13 @@ describe('pult update --stage: подготовить заранее, не пе�
     const st = JSON.parse(readFileSync(h.paths.updateState, 'utf8')) as { last: { action: string; result: string; version: string } }
     assert.deepEqual([st.last.action, st.last.result, st.last.version], ['channel', 'ok', '0.0.3'])
   })
+
+  it('ревью: без сети --expect на прежнюю версию (у неё тоже метка канала) — не откатывает, отказ', async () => {
+    // 0.0.1 — previous; помечаем её как поставленную каналом, будто когда-то её ставили из latest.json.
+    writeFileSync(join(h.paths.versions, '0.0.1', '.channel-sha256'), `${sha(tgz.A)}\n`)
+    const r = await cli(h, ['update', '--expect', '0.0.1'])
+    assert.equal(r.code, 1, r.stdout)
+    assert.doesNotMatch(r.stderr, /подготовлена заранее/)
+    assert.equal(current(h), join('versions', '0.0.3'))
+  })
 })

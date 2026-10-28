@@ -21,15 +21,19 @@ export interface ApplyJournal {
   /** Версия, которую он видел в канале (поставиться может и новее — тогда окно догоняет фактическую). */
   to: string
   at: string
+  /** Окна (путь исполняемого файла из hello), подключённые при нажатии: новый демон ждёт их переподключения. */
+  windows: string[]
 }
 
 /** Старше — не доводить: демон, поднятый через полчаса, — уже не тот перезапуск. */
 export const APPLY_JOURNAL_MAX_AGE_MS = 30 * 60_000
 /** Сколько новый демон ждёт итог пробы `pult update`. */
 export const APPLY_PROBE_WAIT_MS = 120_000
+/** Сколько новый демон ждёт, пока окна, открытые при нажатии, переподключатся (пауза оболочки — до 5 с). */
+export const APPLY_SHELLS_WAIT_MS = 10_000
 
-export function writeApplyJournal(paths: PultPaths, j: Omit<ApplyJournal, 'schema'>): void {
-  atomicWrite(paths.updateApply, JSON.stringify({ schema: 1, ...j }, null, 2) + '\n', 0o600)
+export function writeApplyJournal(paths: PultPaths, j: Omit<ApplyJournal, 'schema' | 'windows'> & { windows?: string[] }): void {
+  atomicWrite(paths.updateApply, JSON.stringify({ schema: 1, ...j, windows: j.windows ?? [] }, null, 2) + '\n', 0o600)
 }
 
 export function readApplyJournal(paths: PultPaths): ApplyJournal | null {
@@ -37,7 +41,8 @@ export function readApplyJournal(paths: PultPaths): ApplyJournal | null {
   try { raw = JSON.parse(readFileSync(paths.updateApply, 'utf8')) } catch { return null }
   const o = raw && typeof raw === 'object' ? raw as Record<string, unknown> : null
   if (!o || o['schema'] !== 1 || typeof o['from'] !== 'string' || typeof o['to'] !== 'string' || typeof o['at'] !== 'string') return null
-  return { schema: 1, from: o['from'], to: o['to'], at: o['at'] }
+  const w = Array.isArray(o['windows']) ? (o['windows'] as unknown[]).filter((x): x is string => typeof x === 'string' && x.length <= 4096).slice(0, 16) : []
+  return { schema: 1, from: o['from'], to: o['to'], at: o['at'], windows: w }
 }
 
 export function dropApplyJournal(paths: PultPaths): void {
