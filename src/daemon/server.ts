@@ -10,6 +10,7 @@ import type { ProviderName, PultConfig } from '../core/config.js'
 import type { EventDraft, PultEvent } from '../core/events.js'
 import { DAEMON_SESSION, isEventKind } from '../core/events.js'
 import type { Logger } from '../core/log.js'
+import { redactString } from '../core/log.js'
 import { acquireLock } from '../core/lock.js'
 import type { LockHandle } from '../core/lock.js'
 import { createLineSplitter, encodeLine, NdjsonError } from '../core/ndjson.js'
@@ -29,7 +30,7 @@ import type { EventStore } from '../core/store.js'
 import { rotateToken, tokenEquals } from '../core/token.js'
 import { VERSION } from '../core/version.js'
 import { createClaudeAdapter } from '../adapters/claude/adapter.js'
-import { codexNetworkEnv, createCodexAdapter } from '../adapters/codex/adapter.js'
+import { codexNetworkEnv, createCodexAdapter, shellJoin } from '../adapters/codex/adapter.js'
 import { claudeNetworkEnv } from '../adapters/claude/adapter.js'
 import type { ProviderAdapter } from '../adapters/types.js'
 import { runDoctor } from '../env/doctor.js'
@@ -55,7 +56,9 @@ import type { ApprovalMode, PermissionDecision, PermissionScope } from '../adapt
 import { isApprovalMode, PERMISSION_SCOPES } from '../adapters/types.js'
 import { createBroker, ScopeError } from '../perm/broker.js'
 import { createAskKeys } from '../perm/askKeys.js'
-import { codexRulesPath, createCodexRules, RulesError } from '../perm/codexRules.js'
+import { codexChildRulesPath, createCodexRules, RulesError } from '../perm/codexRules.js'
+import { revokeSummary, ruleWords } from '../perm/rulesText.js'
+import type { RevokeOutcome } from '../perm/rulesText.js'
 import type { CodexRule } from '../perm/codexRules.js'
 import type { AskKeys } from '../perm/askKeys.js'
 import type { PermBroker } from '../perm/broker.js'
@@ -411,22 +414,35 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     ?? process.env['PULT_CODEX_BIN']
     ?? locateToolPath('codex').path
     ?? 'codex'
-  // План 16, № 11: правила «Всегда» Codex — метка над строкой, которую codex допишет, список и «Отозвать».
+  // План 16, № 11: правила «Всегда» Codex — метка над строкой, которую codex допишет, список и «Отозвать». Файл — тот,
+  // куда пишет НАШ app-server: его окружение без CODEX_HOME (белый список), значит `$HOME/.codex` ребёнка.
   const rulesPath = opts.codexRulesPath
-    ?? (opts.testMode ? process.env['PULT_CODEX_RULES'] ?? join(paths.home, 'codex-rules', 'default.rules') : codexRulesPath())
+    ?? (opts.testMode ? process.env['PULT_CODEX_RULES'] ?? join(paths.home, 'codex-rules', 'default.rules') : codexChildRulesPath())
   const rules = createCodexRules({
     path: rulesPath,
     log: (level, msg, data) => { logger[level](msg, data) },
-    onRevoked: (rule, by) => {
-      emit({ sessionId: DAEMON_SESSION, provider: 'pult', kind: 'rule.revoked', data: { id: rule.id, kind: rule.kind, label: rule.label, session: rule.session, at: rule.at, by } })
+    // Метки не будет — человеку заметкой в ленте сессии, откуда нажато «Всегда», а не только строкой в журнале демона.
+    onUnmarked: (g, reason) => {
+      manager.emit({ sessionId: g.sessionId, provider: 'codex', kind: 'session.configured', data: {
+        changes: {},
+        notice: `Правило «Всегда» (${ruleWords({ kind: g.kind, label: g.kind === 'network' ? g.host : redactString(shellJoin(g.argv)) })}) не помечено: ${reason}. Пульт его не покажет и не отзовёт — убрать можно только руками в ${rulesPath}.`,
+      } })
     },
   })
-  const revokeRule = (id: unknown, by: string): CodexRule => {
+  const revokeRule = (id: unknown, by: string): RevokeOutcome => {
     if (typeof id !== 'string' || !id) throw new ManagerError(ERROR_CODES.invalidParams, 'нужен id правила из pult perm rules')
-    try { return rules.revoke(id, by) } catch (e) {
+    let r: { rule: CodexRule; stillAllowedBy: number }
+    try { r = rules.revoke(id) } catch (e) {
       if (e instanceof RulesError) throw new ManagerError(e.code === 'not_found' ? ERROR_CODES.notFound : ERROR_CODES.internal, e.message)
       throw new ManagerError(ERROR_CODES.internal, (e as Error).message)
     }
+    // Codex держит правила в памяти процесса — перезапустить его, как только ходов нет (идущие не рвутся).
+    const codexState = codex.reloadPolicy?.(`Правило «Всегда» отозвано (${ruleWords(r.rule)})`) ?? 'not_running'
+    const outcome: RevokeOutcome = { rule: { id: r.rule.id, kind: r.rule.kind, label: r.rule.label }, stillAllowedBy: r.stillAllowedBy, codex: codexState }
+    emit({ sessionId: DAEMON_SESSION, provider: 'pult', kind: 'rule.revoked', data: {
+      id: r.rule.id, kind: r.rule.kind, label: r.rule.label, session: r.rule.session, at: r.rule.at, by, stillAllowedBy: r.stillAllowedBy, codex: codexState,
+    } })
+    return outcome
   }
   const codex: ProviderAdapter = createCodexAdapter({
     paths, config, logger, bin: codexBin,
@@ -842,8 +858,8 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
           if (keys.length !== 1 || !rk || rk.length !== 1 || rk[0] !== 'revoke' || typeof (r as Record<string, unknown>)['revoke'] !== 'string') {
             throw new ManagerError(ERROR_CODES.invalidParams, 'settings.set: codexRules — только {revoke: id}, отдельным вызовом')
           }
-          revokeRule((r as Record<string, unknown>)['revoke'], `${conn.client}#${conn.id}`)
-          return settingsReply()
+          const outcome = revokeRule((r as Record<string, unknown>)['revoke'], `${conn.client}#${conn.id}`)
+          return { ...settingsReply(), codexRulesRevoked: { ...outcome, text: revokeSummary(outcome) } }
         }
         let ns: NewSessionSettings | undefined
         if (p['newSession'] !== undefined) {
@@ -1162,7 +1178,10 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
       case 'perm.rules':
         return rules.list()
       case 'perm.rules.revoke':
-        return { revoked: revokeRule(p['id'], `${conn.client}#${conn.id}`) }
+      {
+        const outcome = revokeRule(p['id'], `${conn.client}#${conn.id}`)
+        return { revoked: outcome.rule, stillAllowedBy: outcome.stillAllowedBy, codex: outcome.codex, text: revokeSummary(outcome) }
+      }
       case 'perm.resolve': {
         // 0.3.7: подмена входа запрещена. Раньше `updatedInput` разрешал «одно» и исполнял «другое» (одобрить карточку
         // `ls` и подставить `curl … | sh`). Единственный законный автор updatedInput — сам брокер (ответы AskUserQuestion

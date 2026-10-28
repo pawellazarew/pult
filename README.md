@@ -212,8 +212,10 @@ Every question from every session goes to the Inbox (⌘I in the window, `pult p
   only Pult's. The same works for network access to a host. These rules are written to `~/.codex/rules/default.rules`.
   Pult marks the line it caused with a `# pult: rule=…` comment; marked rules are listed (date, source session) in
   Settings → «Правила „Всегда“» (Always rules) and by `pult perm rules`, and can be revoked there or with `pult perm rules revoke <id>` —
-  only the marker and that line are removed, a running turn is not interrupted. Unmarked lines are never touched. Codex
-  sessions that are already open may keep a revoked rule in memory until the daemon restarts.
+  only the marker and that line are removed, a running turn is not interrupted. Codex reads rules only at start-up, so
+  after a revoke Pult restarts it: at once if no Codex turn is running, otherwise when the turns finish (until then the
+  running turn still uses the rule); conversations resume where they were. Pult also tells you if other lines still
+  allow the same thing. Unmarked lines are never touched.
 - **Claude** doesn't offer reusable rules to Pult today, so Claude cards only offer "once".
 - **A card says when it shows less than will run.** The secret filter masks e-mails, tokens and URL credentials on
   the card (`<email>`, `<token>`, `<redacted>`), and Codex fields are clipped; the ORIGINAL command still runs, so

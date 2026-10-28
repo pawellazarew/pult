@@ -880,12 +880,15 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   }
 
   // План 16, № 11: «Отозвать» правило «Всегда» Codex — сразу, мимо «Сохранить»; ответ — свежие настройки со списком.
-  const revokeRule = async (id: string): Promise<string | null> => {
-    try { setSettings(await bridge.call('settings.set', revokeParams(id)) as SettingsReply) } catch (e) {
+  const revokeRule = async (id: string): Promise<{ ok: string } | { error: string }> => {
+    try {
+      const r = await bridge.call('settings.set', revokeParams(id)) as SettingsReply & { codexRulesRevoked?: { text?: string } }
+      setSettings(r)
+      return { ok: r.codexRulesRevoked?.text ?? 'Отозвано.' }
+    } catch (e) {
       void refreshSettings()
-      return errorText(e)
+      return { error: errorText(e) }
     }
-    return null
   }
 
   const resetProvider = (provider: string): void => {

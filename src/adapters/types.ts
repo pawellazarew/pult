@@ -20,6 +20,7 @@ import type { EventDraft } from '../core/events.js'
 import type { SessionMode, SessionProvider, SessionRecord } from '../sessions/registry.js'
 import type { LiveSignal } from '../sessions/phaseTracker.js'
 import type { RuleGrant } from '../perm/codexRules.js'
+import type { CodexReload } from '../perm/rulesText.js'
 
 /**
  * M8d (решение владельца 19.10.2026, пересмотр инварианта 5 Ф1): насколько широко «да».
@@ -232,6 +233,12 @@ export interface ProviderAdapter {
   blocked(): { blocked: boolean; reason?: string }
   /** Снять остановку провайдера — метод демона `provider.reset`. */
   reset(): void
+  /**
+   * План 16, № 11: правило «Всегда» отозвано — провайдер должен перечитать правила. Codex держит их в памяти процесса,
+   * поэтому общий процесс перезапускается, как только ходов нет (`restarted`), иначе — после них (`deferred`); процесса
+   * нет — `not_running`. Идущие ходы не рвутся. Живым сессиям — заметка в ленту. `why` — что отозвано, словами.
+   */
+  reloadPolicy?(why: string): CodexReload
   /** Погасить всё: тёплые процессы, общий процесс Codex, таймеры. */
   shutdown(): Promise<void>
 }

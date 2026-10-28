@@ -52,6 +52,7 @@ import { readSavedNode, resolveChildNode } from '../../env/nodeBin.js'
 import { BROWSER_SERVER_NAME, DENIED_BROWSER_TOOLS } from '../../mcp/browser.js'
 import type { SessionRecord } from '../../sessions/registry.js'
 import type { RuleTarget } from '../../perm/codexRules.js'
+import type { CodexReload } from '../../perm/rulesText.js'
 import type {
   AdapterDeps, ApprovalMode, PermissionDecision, PermissionOffers, PermissionScope, ProviderAdapter, SessionSpec, StartedSession, TurnOutcome, TurnSettings, TurnStarted,
 } from '../types.js'
@@ -77,6 +78,8 @@ export const RESTART_BACKOFF_MS = 500
 export const INTERRUPT_SETTLE_MS = 5_000
 /** Лестница гашения общего процесса в `shutdown()`. */
 export const TERM_WAIT_MS = 3_000
+/** План 16, № 11: как часто проверять, кончились ли ходы Codex, чтобы перезапустить процесс ради отозванного правила. */
+export const RELOAD_POLL_MS = 500
 export const KILL_WAIT_MS = 3_000
 
 /**
@@ -506,6 +509,16 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
   let shuttingDown = false
   /** Поколение процесса: растёт на каждом спавне, им метятся ожидающие разрешения. */
   let generation = 0
+  /**
+   * План 16, № 11: правило «Всегда» отозвано, а codex держит правила в памяти процесса и не перечитывает их — общий
+   * процесс надо перезапустить, как только ходов Codex нет. `reloadWanted` — причина словами, пока перезапуск ждёт.
+   * `retired` — процессы, снятые ради этого: их выход не авария (ходов нет, хоронить нечего). `freeRespawn` — следующий
+   * спавн не считается перезапуском в окне (иначе три отзыва за минуту остановили бы провайдера).
+   */
+  let reloadWanted: string | null = null
+  let reloadTimer: NodeJS.Timeout | null = null
+  const retired = new Set<AppServerClient>()
+  let freeRespawn = false
   let providerBlocked: string | null = null
   let schemaChecked = false
   /** Итог фоновой сверки схемы: его читает журнал, а в Ф1 В4 прочтёт и доска. */
@@ -773,6 +786,62 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
     if (!shuttingDown) logger.error('общий процесс codex умер', { code, signal, sessions: live.size })
   }
 
+  /** Выход процесса, снятого ради перечитывания правил: след в журнале, без похорон ходов (их не было). */
+  const retiredGone = (c: AppServerClient, code: number | null, signal: NodeJS.Signals | null): void => {
+    emit({
+      sessionId: DAEMON_SESSION,
+      provider: 'codex',
+      kind: 'provider.restarted',
+      data: { provider: 'codex', event: 'exited', pid: c.pid ?? null, code, signal, intentional: true, reason: 'policy_reload', sessions: live.size },
+    })
+  }
+
+  /** Заметка в ленту каждой живой сессии Codex (тихая строка, статус не двигает). */
+  const noticeAll = (notice: string): void => {
+    for (const l of live.values()) {
+      if (!l.closing) emit({ sessionId: l.spec.name, provider: 'codex', kind: 'session.configured', data: { changes: {}, notice } })
+    }
+  }
+
+  /** Ничто не держит общий процесс: ни хода (своего, серверного, заводящегося), ни фона, ни вопроса, ни спавна. */
+  const policyIdle = (): boolean => starting === null
+    && ![...live.values()].some((l) => l.turn !== null || l.usingProcess || l.starting || l.serverTurn !== null || l.bg.pending())
+    && ![...approvals.values()].some((p) => !p.answered)
+
+  /**
+   * Перезапустить общий процесс ради правил, если можно сейчас. Процесса нет — нечего перечитывать: следующий старт
+   * прочтёт файл заново. Занят — ждать (таймер), идущие ходы не рвутся. Снятие: процесс в `retired`, сессии
+   * отвязываются (`detachAll`) — следующий ход поднимет новый процесс и вернётся в тред через `thread/resume`, как
+   * после любого перезапуска.
+   */
+  const tryReload = (): CodexReload => {
+    const why = reloadWanted
+    if (why === null) return 'not_running'
+    if (shuttingDown || ((!client || !client.alive()) && starting === null)) {
+      reloadWanted = null
+      return 'not_running'
+    }
+    if (!client || !policyIdle()) {
+      if (!reloadTimer) {
+        reloadTimer = setInterval(() => {
+          if (tryReload() !== 'deferred' && reloadTimer) { clearInterval(reloadTimer); reloadTimer = null }
+        }, RELOAD_POLL_MS)
+        reloadTimer.unref?.()
+      }
+      return 'deferred'
+    }
+    reloadWanted = null
+    const old = client
+    client = null
+    retired.add(old)
+    freeRespawn = true
+    detachAll()
+    logger.info('перезапуск app-server: отозвано правило «Всегда» — codex перечитает правила', { why, pid: old.pid })
+    void killClient(old)
+    noticeAll(`${why}: Codex перезапущен — правило больше не действует; разговор продолжится с того же места.`)
+    return 'restarted'
+  }
+
   const killClient = async (c: AppServerClient): Promise<void> => {
     c.endStdin()
     c.kill('SIGTERM')
@@ -796,7 +865,9 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
   const spawnClient = async (netEnv: Record<string, string>, sessionId: string): Promise<AppServerClient> => {
     const t = now()
     restarts = restarts.filter((x) => t - x < RESTART_WINDOW_MS)
-    if (everSpawned) {
+    if (everSpawned && freeRespawn) {
+      freeRespawn = false
+    } else if (everSpawned) {
       if (restarts.length >= RESTART_CEILING) {
         const reason = `app-server codex перезапускался ${restarts.length} раза за минуту — провайдер остановлен`
         blockProvider(reason, sessionId)
@@ -826,7 +897,10 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
           try { client?.respondError(id, -32603, `pult: внутренняя ошибка: ${(e as Error).message}`) } catch { /* процесс уже ушёл */ }
         })
       },
-      onExit: (code, signal) => { onProcessGone(code, signal) },
+      onExit: (code, signal) => {
+        if (retired.delete(c)) { retiredGone(c, code, signal); return }
+        onProcessGone(code, signal)
+      },
       onSpawnError: (e) => { logger.error('codex app-server не запустился', { bin: opts.bin, error: e.message }) },
       onStderr: (line) => { logger.debug('codex stderr', { line: redactString(line.slice(0, 400)) }) },
       onBadLine: (reason, sample) => {
@@ -2086,6 +2160,14 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
 
     blocked: () => (providerBlocked === null ? { blocked: false } : { blocked: true, reason: providerBlocked }),
 
+    reloadPolicy(why) {
+      reloadWanted = why
+      const r = tryReload()
+      if (r === 'deferred') noticeAll(`${why}: идёт ход Codex — до его конца правило ещё действует, потом Пульт перезапустит Codex.`)
+      if (r === 'not_running') noticeAll(`${why}: Codex не запущен — правило больше не действует.`)
+      return r
+    },
+
     reset() {
       if (providerBlocked === null) return
       logger.info('остановка провайдера codex снята', {})
@@ -2122,6 +2204,8 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
       threadOwner.clear()
       approvals.clear()
       if (bgTimer) { clearInterval(bgTimer); bgTimer = null }
+      if (reloadTimer) { clearInterval(reloadTimer); reloadTimer = null }
+      reloadWanted = null
     },
   }
 }

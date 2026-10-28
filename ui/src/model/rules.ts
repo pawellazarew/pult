@@ -17,6 +17,8 @@ export interface CodexRulesList {
   exists: boolean
   rules: CodexRule[]
   unmarked: number
+  /** Осталась копия прерванной записи — Пульт файл не правит, пока человек её не уберёт. */
+  backup?: string
   error?: string
 }
 

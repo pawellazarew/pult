@@ -4,6 +4,7 @@
 // План 16, № 11: «Правила „Всегда“» — правило с меткой Пульта видно с датой и сессией, «Отозвать» убирает его строку.
 
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { after, before, describe, it } from 'node:test'
@@ -153,7 +154,10 @@ describe('окно: настройки сессии M8f', () => {
     mkdirSync(dir, { recursive: true })
     const file = join(dir, 'default.rules')
     const mine = '# моё\nprefix_rule(pattern=["ls"], decision="allow")\n'
-    writeFileSync(file, `${mine}# pult: rule=r-e2e00001 at=2026-10-29T10:05:00.000Z session=sm cwd=%2Fsrv%2Fp\nprefix_rule(pattern=["git", "push"], decision="allow")\n`)
+    // Метка несёт отпечаток строки под ней (sha256, 8 hex): без совпадения метка — сирота и не в списке.
+    const rule = 'prefix_rule(pattern=["git", "push"], decision="allow")'
+    const sha = createHash('sha256').update(rule, 'utf8').digest('hex').slice(0, 8)
+    writeFileSync(file, `${mine}# pult: rule=r-e2e00001 sha=${sha} at=2026-10-29T10:05:00.000Z session=sm cwd=%2Fsrv%2Fp\n${rule}\n`)
     await h.win.keyboard.press('Meta+,')
     const dlg = h.win.getByTestId('settings-dialog')
     await dlg.waitFor({ timeout: 5000 })
@@ -170,6 +174,8 @@ describe('окно: настройки сессии M8f', () => {
     await h.win.getByTestId('rule-revoke-r-e2e00001').click()
     assert.ok(await waitFor(async () => (await row.count()) === 0, 5000), 'строка правила не ушла из окна')
     assert.equal(readFileSync(file, 'utf8'), mine, 'ушли ровно метка и правило')
+    // Codex в этом прогоне не запускался — итог так и говорит.
+    assert.match((await h.win.getByTestId('rules-done').textContent()) ?? '', /^Отозвано: команды, начинающиеся с «git push»\. Codex не запущен/)
     await h.win.getByTestId('rules-empty').waitFor({ timeout: 5000 })
     const events = ((await c.request('events.tail', { since: 0, sessionId: 'daemon' })) as { events: Array<{ kind: string; data: Record<string, unknown> }> }).events
     assert.equal(events.find((e) => e.kind === 'rule.revoked')?.data['id'], 'r-e2e00001', 'отзыва нет в журнале')

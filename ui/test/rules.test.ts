@@ -47,26 +47,32 @@ describe('правила «Всегда»: модель', () => {
 
 describe('правила «Всегда»: раздел «Настроек»', () => {
   it('строка на правило с кнопкой «Отозвать», путь файла, счётчик без метки', () => {
-    const out = html(RulesSection, { panel: { list: LIST, onRevoke: async () => null } })
+    const out = html(RulesSection, { panel: { list: LIST, onRevoke: async () => ({ ok: '' }) } })
     assert.equal((out.match(/data-testid="rule-row"/g) ?? []).length, 2)
     assert.match(out, /data-testid="rule-revoke-r-0a1b2c3d"/)
     const t = text(out)
     assert.match(t, /Правила «Всегда»/)
     assert.match(t, /\/h\/\.codex\/rules\/default\.rules/)
     assert.match(t, /Команды, начинающиеся с «git push» 29\.10\.2026 13:05 · сессия w · \/srv\/p Отозвать/)
-    assert.match(t, /Идущий ход не прерывается/)
+    assert.match(t, /Codex читает правила только при запуске, поэтому после отзыва Пульт перезапускает его: сразу, если ходов Codex нет, иначе — когда они закончатся/)
+    assert.doesNotMatch(t, /могут помнить/)
     assert.match(t, /Ещё 3 строки/)
   })
   it('пусто — так и сказано; ошибка чтения — красной строкой', () => {
-    const empty = text(html(RulesSection, { panel: { list: { ...LIST, rules: [], unmarked: 0 }, onRevoke: async () => null } }))
+    const empty = text(html(RulesSection, { panel: { list: { ...LIST, rules: [], unmarked: 0 }, onRevoke: async () => ({ ok: '' }) } }))
     assert.match(empty, /Пульт ещё не записал ни одного правила/)
     assert.doesNotMatch(empty, /без метки/)
-    const bad = html(RulesSection, { panel: { list: { ...LIST, rules: [], error: 'EACCES' }, onRevoke: async () => null } })
+    const bad = html(RulesSection, { panel: { list: { ...LIST, rules: [], error: 'EACCES' }, onRevoke: async () => ({ ok: '' }) } })
     assert.match(bad, /data-testid="rules-read-error"/)
+  })
+  it('осталась копия прерванной записи — предупреждение с путём', () => {
+    const out = html(RulesSection, { panel: { list: { ...LIST, backup: '/h/.codex/rules/default.rules.pult.bak' }, onRevoke: async () => ({ ok: '' }) } })
+    assert.match(out, /data-testid="rules-backup"/)
+    assert.match(text(out), /default\.rules\.pult\.bak.*до этого Пульт файл не правит/)
   })
   it('в диалоге — только когда демон отдаёт правила', () => {
     const base = { settings: null, catalog: null, onSave: async () => null, onClose: () => {} }
     assert.doesNotMatch(html(SettingsDialog, base), /settings-rules/)
-    assert.match(html(SettingsDialog, { ...base, rules: { list: LIST, onRevoke: async () => null } }), /data-testid="settings-rules"/)
+    assert.match(html(SettingsDialog, { ...base, rules: { list: LIST, onRevoke: async () => ({ ok: '' }) } }), /data-testid="settings-rules"/)
   })
 })

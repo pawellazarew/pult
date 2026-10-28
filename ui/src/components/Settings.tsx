@@ -288,28 +288,35 @@ export interface RulesPanel {
   list: CodexRulesList
   /** Имя сессии для строки «сессия …»; null — такой сессии больше нет. Нет функции — имя как есть. */
   sessionLabel?(name: string): string | null
-  /** `null` — отозвано (список придёт новым `settings.get`); строка — отказ демона. */
-  onRevoke(id: string): Promise<string | null>
+  /** `{ok}` — отозвано, текст итога (что стало с Codex); `{error}` — отказ демона. */
+  onRevoke(id: string): Promise<{ ok: string } | { error: string }>
 }
 
 export function RulesSection({ panel }: { panel: RulesPanel }): ReactElement {
   const [busy, setBusy] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
+  const [done, setDone] = useState<string | null>(null)
   const { list } = panel
   const unmarked = unmarkedNote(list.unmarked)
   const revoke = async (id: string): Promise<void> => {
     if (busy) return
     setBusy(id)
     setErr(null)
-    const e = await panel.onRevoke(id)
+    setDone(null)
+    const r = await panel.onRevoke(id)
     setBusy(null)
-    if (e) setErr(e)
+    if ('error' in r) setErr(r.error); else setDone(r.ok)
   }
   return (
     <section className="settings-sec" aria-labelledby="settings-rules-h" data-testid="settings-rules">
       <h3 id="settings-rules-h">Правила «Всегда»</h3>
-      <span className="note">«Всегда …» на карточке разрешения Codex записывает правило в <span className="mono">{list.path}</span> — оно действует во всех сессиях Codex. Здесь — правила, которые записал Пульт; «Отозвать» убирает строку из файла. Идущий ход не прерывается; уже открытые сессии Codex могут помнить правило до перезапуска демона. У Claude кнопки «Всегда» нет.</span>
+      <span className="note">«Всегда …» на карточке разрешения Codex записывает правило в <span className="mono">{list.path}</span> — оно действует во всех сессиях Codex. Здесь — правила, которые записал Пульт; «Отозвать» убирает строку из файла. Codex читает правила только при запуске, поэтому после отзыва Пульт перезапускает его: сразу, если ходов Codex нет, иначе — когда они закончатся (до этого идущий ход ещё пользуется правилом). Разговоры продолжаются с того же места. У Claude кнопки «Всегда» нет.</span>
       {list.error && <span className="err" role="alert" data-testid="rules-read-error">Файл правил не прочитан: {list.error}</span>}
+      {list.backup && (
+        <div className="upd-state upd-warn" role="alert" data-testid="rules-backup">
+          <span className="grow">Осталась копия прерванной записи <span className="mono">{list.backup}</span>. Сверь файл правил с ней и удали копию — до этого Пульт файл не правит.</span>
+        </div>
+      )}
       {!list.rules.length && !list.error && <span className="note" data-testid="rules-empty">Пульт ещё не записал ни одного правила.</span>}
       {list.rules.map((r) => (
         <div key={r.id} className="upd-state" data-testid="rule-row" data-id={r.id} data-kind={r.kind}>
@@ -323,6 +330,7 @@ export function RulesSection({ panel }: { panel: RulesPanel }): ReactElement {
         </div>
       ))}
       {unmarked && <span className="note" data-testid="rules-unmarked">{unmarked}</span>}
+      {done && <span className="note" role="status" data-testid="rules-done">{done}</span>}
       {err && <span className="err" role="alert" data-testid="rules-error">{err}</span>}
     </section>
   )

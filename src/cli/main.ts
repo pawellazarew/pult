@@ -825,15 +825,16 @@ async function cmdPerm(paths: PultPaths, args: ParsedArgs): Promise<number> {
         if (id === 'revoke') {
           const ruleId = args.positional[3]
           if (!ruleId) { err('pult perm rules revoke: нужен id из pult perm rules'); return done(EXIT.error) }
-          const r = (await client.request('perm.rules.revoke', { id: ruleId })) as { revoked: Record<string, unknown> }
-          out(asJson ? JSON.stringify(r) : `${ruleId}: отозвано — строка убрана из файла правил Codex (${ruleText(r.revoked)})`)
+          const r = (await client.request('perm.rules.revoke', { id: ruleId })) as { revoked: Record<string, unknown>; text?: string }
+          out(asJson ? JSON.stringify(r) : `${ruleId}: ${r.text ?? `отозвано (${ruleText(r.revoked)})`}`)
           return done(EXIT.ok)
         }
         if (id !== undefined) { err(`pult perm rules: неизвестное «${id}» — revoke <id> или ничего`); return done(EXIT.error) }
-        const r = (await client.request('perm.rules')) as { path: string; exists: boolean; rules: Array<Record<string, unknown>>; unmarked: number; error?: string }
+        const r = (await client.request('perm.rules')) as { path: string; exists: boolean; rules: Array<Record<string, unknown>>; unmarked: number; backup?: string; error?: string }
         if (asJson) { out(JSON.stringify(r)); return done(EXIT.ok) }
         out(`файл правил Codex: ${r.path}${r.exists ? '' : ' (ещё нет)'}`)
         if (r.error) err(`не прочитан: ${r.error}`)
+        if (r.backup) err(`ВНИМАНИЕ: осталась копия прерванной записи ${r.backup} — сверь файл с ней и удали её; до этого Пульт файл не правит`)
         if (!r.rules.length) out('правил «Всегда», записанных Пультом, нет')
         for (const x of r.rules) {
           out(`${String(x['id'])}  ${String(x['at'])}  сессия ${String(x['session'])}${x['cwd'] ? ` · ${String(x['cwd'])}` : ''}`)
