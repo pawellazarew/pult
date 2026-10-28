@@ -55,6 +55,8 @@ import type { ApprovalMode, PermissionDecision, PermissionScope } from '../adapt
 import { isApprovalMode, PERMISSION_SCOPES } from '../adapters/types.js'
 import { createBroker, ScopeError } from '../perm/broker.js'
 import { createAskKeys } from '../perm/askKeys.js'
+import { codexRulesPath, createCodexRules, RulesError } from '../perm/codexRules.js'
+import type { CodexRule } from '../perm/codexRules.js'
 import type { AskKeys } from '../perm/askKeys.js'
 import type { PermBroker } from '../perm/broker.js'
 import { createManager, ManagerError, publicRecord } from '../sessions/manager.js'
@@ -100,6 +102,11 @@ export interface DaemonOptions {
   paths: PultPaths
   config: PultConfig
   logger: Logger
+  /**
+   * Файл правил Codex (план 16, № 11). Нет — `$CODEX_HOME/rules/default.rules`, а в testMode —
+   * `PULT_CODEX_RULES` или `PULT_HOME/codex-rules/default.rules`: тест никогда не читает и не правит настоящий.
+   */
+  codexRulesPath?: string
   /** PULT_TEST=1: открывает служебный метод `events.emit`. */
   testMode?: boolean
   /** Предел буфера на соединение. Тест ставит его крошечным, чтобы не гонять мегабайты. */
@@ -404,8 +411,26 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     ?? process.env['PULT_CODEX_BIN']
     ?? locateToolPath('codex').path
     ?? 'codex'
+  // План 16, № 11: правила «Всегда» Codex — метка над строкой, которую codex допишет, список и «Отозвать».
+  const rulesPath = opts.codexRulesPath
+    ?? (opts.testMode ? process.env['PULT_CODEX_RULES'] ?? join(paths.home, 'codex-rules', 'default.rules') : codexRulesPath())
+  const rules = createCodexRules({
+    path: rulesPath,
+    log: (level, msg, data) => { logger[level](msg, data) },
+    onRevoked: (rule, by) => {
+      emit({ sessionId: DAEMON_SESSION, provider: 'pult', kind: 'rule.revoked', data: { id: rule.id, kind: rule.kind, label: rule.label, session: rule.session, at: rule.at, by } })
+    },
+  })
+  const revokeRule = (id: unknown, by: string): CodexRule => {
+    if (typeof id !== 'string' || !id) throw new ManagerError(ERROR_CODES.invalidParams, 'нужен id правила из pult perm rules')
+    try { return rules.revoke(id, by) } catch (e) {
+      if (e instanceof RulesError) throw new ManagerError(e.code === 'not_found' ? ERROR_CODES.notFound : ERROR_CODES.internal, e.message)
+      throw new ManagerError(ERROR_CODES.internal, (e as Error).message)
+    }
+  }
   const codex: ProviderAdapter = createCodexAdapter({
     paths, config, logger, bin: codexBin,
+    ruleGranted: (g) => { rules.granted(g) },
     emit: (draft) => { manager.emit(draft) },
     live: (name, sig) => { manager.live(name, sig) },
     askPermission: (req) => broker.request(req),
@@ -620,6 +645,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
   const settingsReply = (): Record<string, unknown> => ({
     newSession: config.newSession, lastUsed: readLastUsed(), updates: { check: config.updates.check },
     network: { guard: { mode: config.guard.mode, countries: [...config.guard.countries] }, exits: lastNetExits() },
+    codexRules: rules.list(),
   })
   const projects = createProjectStore(join(paths.home, 'projects.json'))
   // `PULT_TEST_PROVIDERS=run` (только вместе с PULT_TEST=1): проверка входа идёт по-настоящему — в фальшивые CLI
@@ -805,8 +831,19 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
         // `network.guard` (0.3.6): профили сети, прокси, noProxy, команды, адрес канала (`updates.url`) и всё прочее
         // config.json отсюда не достать. Разбор строгий — кривое поле отказывает целиком, и тогда файл не трогается вовсе.
         const keys = Object.keys(p)
-        if (!keys.length || keys.some((k) => k !== 'newSession' && k !== 'updates' && k !== 'network')) {
-          throw new ManagerError(ERROR_CODES.invalidParams, 'settings.set: можно менять только newSession, updates.check и network.guard')
+        if (!keys.length || keys.some((k) => k !== 'newSession' && k !== 'updates' && k !== 'network' && k !== 'codexRules')) {
+          throw new ManagerError(ERROR_CODES.invalidParams, 'settings.set: можно менять только newSession, updates.check, network.guard и codexRules.revoke')
+        }
+        // План 16, № 11: «Отозвать» из «Настроек» — через уже разрешённый оболочке метод (Pult.app не меняется).
+        // Только `{revoke: id}` и только отдельным вызовом: отзыв — живая кнопка, а не часть черновика «Сохранить».
+        if (p['codexRules'] !== undefined) {
+          const r = p['codexRules']
+          const rk = r !== null && typeof r === 'object' && !Array.isArray(r) ? Object.keys(r) : null
+          if (keys.length !== 1 || !rk || rk.length !== 1 || rk[0] !== 'revoke' || typeof (r as Record<string, unknown>)['revoke'] !== 'string') {
+            throw new ManagerError(ERROR_CODES.invalidParams, 'settings.set: codexRules — только {revoke: id}, отдельным вызовом')
+          }
+          revokeRule((r as Record<string, unknown>)['revoke'], `${conn.client}#${conn.id}`)
+          return settingsReply()
         }
         let ns: NewSessionSettings | undefined
         if (p['newSession'] !== undefined) {
@@ -1122,6 +1159,10 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
       }
       case 'perm.list':
         return { pending: broker.list(str(p['name'])) }
+      case 'perm.rules':
+        return rules.list()
+      case 'perm.rules.revoke':
+        return { revoked: revokeRule(p['id'], `${conn.client}#${conn.id}`) }
       case 'perm.resolve': {
         // 0.3.7: подмена входа запрещена. Раньше `updatedInput` разрешал «одно» и исполнял «другое» (одобрить карточку
         // `ls` и подставить `curl … | sh`). Единственный законный автор updatedInput — сам брокер (ответы AskUserQuestion
@@ -1478,6 +1519,8 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
       case 'agent.tree':
       case 'agent.export':
       case 'perm.list':
+      case 'perm.rules':
+      case 'perm.rules.revoke':
       case 'perm.resolve':
       case 'perm.request':
       case 'usage.get':
@@ -1682,6 +1725,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     // SIGKILL через 5 с; оборванную замену доведёт или откатит следующий старт по журналу apps/swap.json.
     await appUpdater.stop()
     notifyRunner?.close()
+    rules.close()
     // Журнал мог сломаться (диск кончился) — это не повод не доводить остановку до конца.
     try {
       emit({ sessionId: DAEMON_SESSION, provider: 'pult', kind: 'daemon.stopping', data: { reason } })

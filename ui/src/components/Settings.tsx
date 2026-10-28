@@ -1,7 +1,8 @@
 // M8f: «Настройки» (⌘,). Раздел «Новая сессия» — умолчания по провайдерам и «Подставлять последний выбор»;
 // «Обновления» — версия, состояние канала, «Проверить сейчас», «Перезапустить и обновить» и флаг автопроверки (что писать —
 // model/update.ts); «Страж сети» (0.3.6) — режим deny/allow, страны, выходы провайдеров под черновиком
-// (model/netGuard.ts); «Внешний вид» пока пустой (темы и цвета — после редизайна, docs/15). Логика черновика —
+// (model/netGuard.ts); «Правила „Всегда“» (план 16, № 11) — правила Codex с меткой Пульта и «Отозвать» (model/rules.ts);
+// «Внешний вид» пока пустой (темы и цвета — после редизайна, docs/15). Логика черновика —
 // model/sessionSettings.ts.
 
 import { useEffect, useRef, useState } from 'react'
@@ -16,6 +17,8 @@ import type { UpdateAction } from '../model/update.js'
 import { addCountry, canCheckNet, guardOff, sameGuard, countryLabel, exitRows, guardDraftError, NET_CHECK_COOLDOWN_MS, refusedWarning, removeCountry, searchCountries, switchGuardMode } from '../model/netGuard.js'
 import type { GuardMode, GuardRule, GuardStash } from '../model/netGuard.js'
 import type { GuardCheck } from '../model/health.js'
+import { ruleMeta, ruleTitle, unmarkedNote } from '../model/rules.js'
+import type { CodexRulesList } from '../model/rules.js'
 import { CMD, Kbd } from './common.js'
 import { Dialog } from './Panels.js'
 
@@ -279,7 +282,53 @@ export function NetGuardSection({ panel, rule, onChange }: {
   )
 }
 
-export function SettingsDialog({ settings, catalog, updates, autoCheck = null, netGuard, onSave, onClose }: {
+/** Раздел «Правила „Всегда“»: живой — «Отозвать» действует сразу, мимо «Сохранить». */
+export interface RulesPanel {
+  /** `settings.get` → `codexRules`. */
+  list: CodexRulesList
+  /** Имя сессии для строки «сессия …»; null — такой сессии больше нет. Нет функции — имя как есть. */
+  sessionLabel?(name: string): string | null
+  /** `null` — отозвано (список придёт новым `settings.get`); строка — отказ демона. */
+  onRevoke(id: string): Promise<string | null>
+}
+
+export function RulesSection({ panel }: { panel: RulesPanel }): ReactElement {
+  const [busy, setBusy] = useState<string | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const { list } = panel
+  const unmarked = unmarkedNote(list.unmarked)
+  const revoke = async (id: string): Promise<void> => {
+    if (busy) return
+    setBusy(id)
+    setErr(null)
+    const e = await panel.onRevoke(id)
+    setBusy(null)
+    if (e) setErr(e)
+  }
+  return (
+    <section className="settings-sec" aria-labelledby="settings-rules-h" data-testid="settings-rules">
+      <h3 id="settings-rules-h">Правила «Всегда»</h3>
+      <span className="note">«Всегда …» на карточке разрешения Codex записывает правило в <span className="mono">{list.path}</span> — оно действует во всех сессиях Codex. Здесь — правила, которые записал Пульт; «Отозвать» убирает строку из файла. Идущий ход не прерывается; уже открытые сессии Codex могут помнить правило до перезапуска демона. У Claude кнопки «Всегда» нет.</span>
+      {list.error && <span className="err" role="alert" data-testid="rules-read-error">Файл правил не прочитан: {list.error}</span>}
+      {!list.rules.length && !list.error && <span className="note" data-testid="rules-empty">Пульт ещё не записал ни одного правила.</span>}
+      {list.rules.map((r) => (
+        <div key={r.id} className="upd-state" data-testid="rule-row" data-id={r.id} data-kind={r.kind}>
+          <span className="grow">
+            <span className="mono">{ruleTitle(r)}</span>
+            <br />
+            <span className="note" data-testid="rule-meta">{ruleMeta(r, panel.sessionLabel)}</span>
+          </span>
+          <button type="button" className="btn btn-sm" disabled={busy !== null} data-testid={`rule-revoke-${r.id}`}
+            onClick={() => void revoke(r.id)}>{busy === r.id ? 'Отзываю…' : 'Отозвать'}</button>
+        </div>
+      ))}
+      {unmarked && <span className="note" data-testid="rules-unmarked">{unmarked}</span>}
+      {err && <span className="err" role="alert" data-testid="rules-error">{err}</span>}
+    </section>
+  )
+}
+
+export function SettingsDialog({ settings, catalog, updates, autoCheck = null, netGuard, rules, onSave, onClose }: {
   settings: NewSessionSettings | null
   catalog: ProviderCatalog | null
   /** Раздел «Обновления»; нет — раздела нет. */
@@ -288,6 +337,8 @@ export function SettingsDialog({ settings, catalog, updates, autoCheck = null, n
   autoCheck?: boolean | null
   /** Раздел «Страж сети»; нет — демон старше 0.3.6, раздела нет. */
   netGuard?: NetGuardPanel
+  /** Раздел «Правила „Всегда“»; нет — демон их не отдаёт (старый), раздела нет. */
+  rules?: RulesPanel
   /**
    * `null` — записано; строка — отказ демона. `autoCheck` — флаг автопроверки (null — не трогать); `guard` — новое
    * правило стража и то, на котором стоял черновик (null — не менялось или раздела нет).
@@ -357,6 +408,7 @@ export function SettingsDialog({ settings, catalog, updates, autoCheck = null, n
           </div>
         </section>
         {netGuard && guard && <NetGuardSection key={guardKey} panel={netGuard} rule={guard} onChange={setGuard} />}
+        {rules && <RulesSection panel={rules} />}
         {updates && <UpdatesSection panel={updates} auto={auto} onAuto={setAuto} />}
         <section className="settings-sec" aria-labelledby="settings-look-h" data-testid="settings-appearance">
           <h3 id="settings-look-h">Внешний вид</h3>
