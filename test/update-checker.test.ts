@@ -60,6 +60,8 @@ function checker(home: TempHome, over: Partial<CheckerOptions> = {}): ReturnType
     keys: KEYS,
     runningTurns: () => 0,
     schedule: false,
+    // Фоновую подготовку (0.3.16) тесты этого файла включают явно — иначе ручная проверка запустила бы настоящий CLI.
+    stage: false,
     ...over,
   })
 }
@@ -109,7 +111,7 @@ describe('демон: расписание проверок', () => {
     const ch = channel(() => '0.2.28')
     const c = createUpdateChecker({
       paths: home.paths, config: { ...home.config, updates: { check: false, url: URL_LATEST } }, logger: home.logger,
-      current: '0.2.27', keys: KEYS, runningTurns: () => 0, http: ch.http, firstDelayMs: 0, tickMs: 10,
+      current: '0.2.27', keys: KEYS, runningTurns: () => 0, stage: false, http: ch.http, firstDelayMs: 0, tickMs: 10,
     })
     try {
       await sleep(150)
@@ -414,7 +416,7 @@ describe('ревью M8c: гонки, откат, рабочая копия, п�
     let ends = 0
     const c = createUpdateChecker({
       paths: home.paths, config: { ...home.config, updates: { check: true, url: URL_LATEST } }, logger: home.logger,
-      current: '0.2.27', keys: KEYS, runningTurns: () => 0, schedule: false, http: channel(() => '0.2.28').http,
+      current: '0.2.27', keys: KEYS, runningTurns: () => 0, stage: false, schedule: false, http: channel(() => '0.2.28').http,
       spawnApply: () => { const k = new FakeChild(); kids.push(k); return k }, onApplyEnd: () => { ends++ },
     })
     try {
@@ -634,7 +636,7 @@ describe('обновление из окна: срок 6 ч, проверка п
     const ch = channel(() => '0.2.28')
     const off = createUpdateChecker({
       paths: home.paths, config: { ...home.config, updates: { check: false, url: URL_LATEST } }, logger: home.logger,
-      current: '0.2.27', keys: KEYS, runningTurns: () => 0, http: ch.http, firstDelayMs: 100 * hour,
+      current: '0.2.27', keys: KEYS, runningTurns: () => 0, stage: false, http: ch.http, firstDelayMs: 100 * hour,
     })
     const noSeam = checker(home, { http: ch.http, schedule: false })
     try {
@@ -654,7 +656,7 @@ describe('обновление из окна: срок 6 ч, проверка п
     let clock = 1_000_000
     const c = createUpdateChecker({
       paths: home.paths, config: { ...home.config, updates: { check: false, url: URL_LATEST } }, logger: home.logger,
-      current: '0.2.27', keys: KEYS, runningTurns: () => 0, http: ch.http, tickMs: 5, now: () => clock, random: () => 0.5,
+      current: '0.2.27', keys: KEYS, runningTurns: () => 0, stage: false, http: ch.http, tickMs: 5, now: () => clock, random: () => 0.5,
     })
     try {
       clock += 2 * min; await sleep(40)
@@ -717,6 +719,156 @@ describe('обновление из окна: срок 6 ч, проверка п
     } finally {
       c.close()
       await d.stop('тест')
+      home.remove()
+    }
+  })
+})
+
+// 0.3.16: фоновая подготовка. Проверка нашла новую версию — демон сразу готовит её (ребёнок `pult update --stage`,
+// окно — `app.stage`), только при автопроверке или по ручной проверке; «Перезапустить» посреди подготовки ждёт её.
+describe('0.3.16: фоновая подготовка и «Перезапустить»', () => {
+  const staging = (home: TempHome, over: Partial<CheckerOptions> = {}): { c: ReturnType<typeof createUpdateChecker>; stages: FakeChild[]; applies: FakeChild[]; launched: string[] } => {
+    const stages: FakeChild[] = []
+    const applies: FakeChild[] = []
+    const launched: string[] = []
+    const c = checker(home, {
+      http: channel(() => '0.2.28').http,
+      stage: true,
+      spawnStage: () => { const k = new FakeChild(); stages.push(k); return k },
+      spawnApply: () => { const k = new FakeChild(); applies.push(k); return k },
+      onLaunch: (to) => { launched.push(to) },
+      ...over,
+    })
+    return { c, stages, applies, launched }
+  }
+
+  it('ручная проверка: «скачиваю в фоне» → ребёнок вышел 0 → «готово»; повторная проверка второй раз не готовит', async () => {
+    const home = tempHome()
+    const { c, stages } = staging(home)
+    try {
+      const st = await c.check()
+      assert.equal(stages.length, 1, 'pult update --stage не запущен')
+      assert.deepEqual([st.staged?.to, st.staged?.state], ['0.2.28', 'downloading'])
+      stages[0]?.emit('exit', 0, null)
+      assert.ok(await waitFor(() => c.status().staged?.state === 'ready', 2000))
+      await c.check()
+      assert.equal(stages.length, 1, 'готовое не готовится заново')
+    } finally {
+      c.stop()
+      home.remove()
+    }
+  })
+
+  it('автопроверка выключена — плановая/фокусная проверка не готовит, ручная готовит; подготовка выключена — никогда', async () => {
+    const home = tempHome()
+    const off = staging(home, { config: { ...home.config, updates: { check: false, url: URL_LATEST } }, schedule: true })
+    try {
+      await off.c.checkIfStale(0)
+      assert.equal(off.stages.length, 0)
+      await off.c.check()
+      assert.equal(off.stages.length, 1, 'ручная «Проверить сейчас» готовит всегда')
+    } finally {
+      off.c.stop()
+    }
+    const never = staging(home, { stage: false })
+    try {
+      await never.c.check()
+      assert.equal(never.stages.length, 0)
+      assert.equal(never.c.status().staged, null)
+    } finally {
+      never.c.stop()
+      home.remove()
+    }
+  })
+
+  it('провал подготовки — тихо: staged failed с причиной; плановая не повторяет раньше срока, ручная — сразу', async () => {
+    const home = tempHome()
+    const { c, stages } = staging(home, { schedule: true, firstDelayMs: 3_600_000, retryMs: [3_600_000] })
+    try {
+      await c.check()
+      stages[0]?.emit('exit', 1, null)
+      assert.ok(await waitFor(() => c.status().staged?.state === 'failed', 2000))
+      const st = c.status()
+      assert.match(st.staged?.error ?? '', /подготовка вышла с кодом 1 — подробности: .*update\.log/)
+      assert.equal(st.apply.state, 'idle', 'провал подготовки — не провал обновления')
+      assert.equal(st.failure, null)
+      await c.checkIfStale(0) // по фокусу: раньше срока повтора — без подготовки
+      assert.equal(stages.length, 1)
+      await c.check()
+      assert.equal(stages.length, 2, 'ручная проверка повторяет сразу')
+    } finally {
+      c.stop()
+      home.remove()
+    }
+  })
+
+  it('«Перезапустить» посреди подготовки ждёт её, потом запускает pult update; с окном — сначала журнал (onLaunch)', async () => {
+    const home = tempHome()
+    const { c, stages, applies, launched } = staging(home)
+    try {
+      await c.check()
+      const r = await c.apply(false, true)
+      assert.deepEqual(r, { applying: true, to: '0.2.28' })
+      assert.equal(c.status().apply.state, 'applying')
+      assert.equal(applies.length, 0, 'pult update не должен идти поверх --stage (общий update.lock)')
+      assert.equal(c.applying(), true, 'ходы уже придержаны')
+      stages[0]?.emit('exit', 0, null)
+      assert.ok(await waitFor(() => applies.length === 1, 2000))
+      assert.deepEqual(launched, ['0.2.28'])
+    } finally {
+      c.stop()
+      home.remove()
+    }
+  })
+
+  it('без окна (target package) — журнала нет; подготовка не начинается, пока идёт «Перезапустить»', async () => {
+    const home = tempHome()
+    const { c, stages, applies, launched } = staging(home)
+    try {
+      await c.check()
+      stages[0]?.emit('exit', 0, null)
+      assert.ok(await waitFor(() => c.status().staged?.state === 'ready', 2000))
+      await c.apply(false)
+      assert.equal(applies.length, 1)
+      assert.deepEqual(launched, [])
+      await c.check()
+      assert.equal(stages.length, 1, 'во время установки не готовим')
+    } finally {
+      c.stop()
+      home.remove()
+    }
+  })
+
+  it('окно готовится вместе с пакетом: ready — только когда готово и то и другое; окно одно (пакет последний) — без ребёнка', async () => {
+    const home = tempHome()
+    let release: () => void = () => {}
+    const staged: string[] = []
+    const app = {
+      wanted: (v: string) => v === '0.1.14',
+      ready: () => false,
+      stage: async (m: { app?: { version: string } }) => { staged.push(m.app?.version ?? '?'); await new Promise<void>((r) => { release = r }) },
+    }
+    // В манифесте у окна должен быть архив — иначе готовить нечего.
+    const withZip: HttpGet = async (url) => {
+      if (url !== URL_LATEST) return { status: 404, header: () => null, body: null }
+      const m = {
+        schema: 1, version: '0.2.27', released: '2026-10-19T10:00:00.000Z', notes: 'https://github.com/pawellazarew/pult/releases/tag/v0.2.27',
+        package: { url: 'https://example.invalid/pult-0.2.27.tgz', sha256: 'c'.repeat(64), size: 10 },
+        app: { version: '0.1.14', minVersion: '0.1.13', 'darwin-arm64': { url: 'https://example.invalid/Pult.zip', sha256: 'd'.repeat(64), size: 10 } },
+      }
+      const b = Buffer.from(signEnvelope(Buffer.from(JSON.stringify(m)), privateKey))
+      return { status: 200, header: () => null, body: (async function* () { yield b })() }
+    }
+    const { c, stages } = staging(home, { http: withZip, app })
+    try {
+      await c.check()
+      assert.equal(stages.length, 0, 'пакет 0.2.27 — последний: ребёнка нет')
+      assert.ok(await waitFor(() => staged.length === 1, 2000))
+      assert.equal(c.status().staged?.state, 'downloading')
+      release()
+      assert.ok(await waitFor(() => c.status().staged?.state === 'ready', 2000))
+    } finally {
+      c.stop()
       home.remove()
     }
   })

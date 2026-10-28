@@ -236,7 +236,7 @@ describe('⌘V картинки из буфера (окно 0.1.20): PNG в PULT
     await pathsInputHandlers(f.t).onPaste(e)
     assert.deepEqual([e.prevented, f.el.value, f.notices], [true, 'abc', [OLD_WINDOW_IMAGE_HINT]])
     assert.match(OLD_WINDOW_IMAGE_HINT, /0\.1\.20/)
-    assert.match(OLD_WINDOW_IMAGE_HINT, /Настройки → Обновления → Обновить окно/)
+    assert.match(OLD_WINDOW_IMAGE_HINT, /Настройки → Обновления → «Перезапустить и обновить»/)
   })
 
   it('отказ main (больше 25 МБ) или брошенный вызов — словами под полем, поле не тронуто', async () => {

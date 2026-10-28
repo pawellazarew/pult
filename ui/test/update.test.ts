@@ -8,7 +8,7 @@ import { UpdateBanner } from '../src/components/UpdateBanner.js'
 import { SettingsDialog, UpdatesSection } from '../src/components/Settings.js'
 import type { UpdatesPanel } from '../src/components/Settings.js'
 import {
-  appUpdateView,
+  appUpdateView, pendingUpdate,
   addDismissed, applyErrorText, checkedAgoText, checkErrorText, DISMISSED_MAX, FOCUS_CHECK_STALE_MS, focusCheckWanted, updateBanner, updateSection,
   upToDateNote, windowVersionFromUA,
 } from '../src/model/update.js'
@@ -51,12 +51,22 @@ describe('версия окна из user agent Electron', () => {
 })
 
 describe('плашка обновления: состояния', () => {
-  it('доступна — «Доступна 1.0.3 · Что нового · Обновить», можно скрыть', () => {
-    const out = render(status())
-    assert.match(out, /data-testid="update-available"/)
-    assert.equal(text(out), 'Доступна 1.0.3 Что нового Обновить')
-    assert.match(out, /data-testid="update-dismiss"/)
-    assert.match(out, /role="status"/)
+  it('0.3.16: готово заранее — «Пульт 1.0.3 готов · Что нового · Перезапустить»; не подготовлено — «Доступен Пульт 1.0.3»; можно скрыть', () => {
+    const ready = render(status({ staged: { to: '1.0.3', state: 'ready', error: null, at: 'x' } }))
+    assert.match(ready, /data-testid="update-available"/)
+    assert.equal(text(ready), 'Пульт 1.0.3 готов Что нового Перезапустить')
+    assert.match(ready, /data-testid="update-dismiss"/)
+    assert.match(ready, /role="status"/)
+    // Одна кнопка: update.apply без target (пакет и окно разом).
+    assert.deepEqual(updateBanner(status(), null)?.action, { label: 'Перезапустить', force: false })
+    // Демон старше 0.3.16 (поля staged нет) или подготовка не удалась — честное «Доступен», кнопка та же.
+    assert.equal(text(render(status())), 'Доступен Пульт 1.0.3 Что нового Перезапустить')
+    assert.equal(text(render(status({ staged: { to: '1.0.3', state: 'failed', error: 'HTTP 404', at: 'x' } }))), 'Доступен Пульт 1.0.3 Что нового Перезапустить')
+  })
+
+  it('0.3.16: пока качается в фоне — плашки нет; подготовка прошлой версии не в счёт', () => {
+    assert.equal(render(status({ staged: { to: '1.0.3', state: 'downloading', error: null, at: 'x' } })), '')
+    assert.match(render(status({ staged: { to: '1.0.2', state: 'downloading', error: null, at: 'x' } })), /Доступен Пульт 1\.0\.3/)
   })
 
   it('нечего ставить, bad, нет статуса, скрыта крестиком — плашки нет', () => {
@@ -65,7 +75,7 @@ describe('плашка обновления: состояния', () => {
     assert.equal(render(null), '')
     assert.equal(render(status(), '0.1.14', ['1.0.3']), '')
     // Скрыта прошлая версия — новая снова видна.
-    assert.match(render(status(), '0.1.14', ['1.0.2']), /Доступна 1\.0\.3/)
+    assert.match(render(status(), '0.1.14', ['1.0.2']), /Доступен Пульт 1\.0\.3/)
   })
 
   it('ходы идут — «Обновлю после окончания ходов (N идут) · Сейчас»', () => {
@@ -81,10 +91,14 @@ describe('плашка обновления: состояния', () => {
     assert.deepEqual(updateBanner(status({ apply: { state: 'waiting', turns: 2, since: 'x', to: '1.0.3' } }), null)?.action, { label: 'Сейчас', force: true })
   })
 
-  it('ставится — без кнопок; не удалось — причина и «Повторить»', () => {
+  it('перезапуск — коротко «Перезапускаю…» без кнопок (пакет ставится, новый демон доводит окно, окно меняется); не удалось — причина и «Повторить»', () => {
     const applying = render(status({ apply: { state: 'applying', since: 'x', to: '1.0.3' } }))
-    assert.match(text(applying), /Обновляю до 1\.0\.3… Демон перезапустится, окно переподключится само; новые реплики — после перезапуска/)
+    assert.match(applying, /data-testid="update-applying"/)
+    assert.equal(text(applying), 'Перезапускаю…')
     assert.doesNotMatch(applying, /data-testid="update-apply"/)
+    assert.equal(text(render(status({ available: false, current: '1.0.3', continuing: { to: '1.0.3' } }))), 'Перезапускаю…')
+    const app = { unsupported: null, installed: '1.0.2', path: '/Applications/Pult.app', latest: '1.0.3', available: false, bad: false, last: null, applying: { to: '1.0.3', from: '1.0.2', step: 'swap' as const, since: 'x' } }
+    assert.equal(text(render(status({ available: false, current: '1.0.3', app }))), 'Перезапускаю…')
     const failed = render(status({ apply: { state: 'failed', at: 'x', error: 'pult update вышел с кодом 1' } }))
     assert.match(failed, /data-testid="update-failed"/)
     assert.match(text(failed), /Обновление не удалось: pult update вышел с кодом 1/)
@@ -93,17 +107,12 @@ describe('плашка обновления: состояния', () => {
     assert.match(render(status({ apply: { state: 'failed', at: 'x', error: 'e' } }), '0.1.14', ['1.0.3']), /update-failed/)
   })
 
-  it('окно старше app.minVersion — «Нужна новая версия окна», ссылка на релиз, без «Обновить»', () => {
-    const u = status({ latest: { ...status().latest!, app: { version: '0.2.0', minVersion: '0.1.14' } } })
+  it('0.3.16: app.minVersion больше ничего не решает — окно обновится той же кнопкой', () => {
+    const u = status({ latest: { ...status().latest!, app: { version: '1.0.3', minVersion: '0.1.14' } } })
     const out = render(u, '0.1.13')
-    assert.match(out, /data-testid="update-window"/)
-    assert.match(text(out), /Доступна 1\.0\.3 · Нужна новая версия окна \(стоит 0\.1\.13, нужна 0\.1\.14 или новее\)/)
-    assert.match(text(out), /Что нового/)
-    assert.doesNotMatch(out, /data-testid="update-apply"/)
-    // Версия окна неизвестна (не Electron) — про окно молчим, обновление предлагаем.
-    assert.match(render(u, null), /update-available/)
-    // Окно годится — обычная плашка.
-    assert.match(render(u, '0.1.14'), /update-available/)
+    assert.match(out, /data-testid="update-available"/)
+    assert.match(out, /data-testid="update-apply"/)
+    assert.doesNotMatch(text(out), /Нужна новая версия окна/)
   })
 
   it('проба не прошла и откат — «не встало, вернул …», скрывается до следующей неудачи', () => {
@@ -167,10 +176,15 @@ describe('«Настройки» → «Обновления»: состояни�
     renderToStaticMarkup(createElement(UpdatesSection, { panel: p, auto, onAuto: noop }))
   const state = (out: string): string | undefined => /data-state="([a-z]+)"/.exec(out)?.[1]
 
-  it('последняя версия: «Установлена последняя версия (X)», версии пакета и окна, время проверки, «Проверить сейчас»', () => {
+  it('последняя версия: «Установлена последняя версия (X)», одна версия «Пульт X», время проверки, «Проверить сейчас»', () => {
+    const same = section(panel(upToDate(), { windowVersion: '1.0.3' }))
+    assert.match(text(same), /^Обновления Пульт 1\.0\.3 Установлена/)
+    assert.doesNotMatch(same, /settings-window-version/)
+    // Окно другой версии (стоит старое) — второй строкой мелко.
     const out = section(panel(upToDate()))
     assert.equal(state(out), 'uptodate')
     assert.match(text(out), /Пульт 1\.0\.3 окно 0\.1\.15/)
+    assert.match(out, /data-testid="settings-window-version"/)
     assert.match(text(out), /Установлена последняя версия \(1\.0\.3\)/)
     assert.match(text(out), /последняя проверка: 5 мин назад/)
     assert.match(out, /data-testid="settings-update-check"/)
@@ -180,18 +194,26 @@ describe('«Настройки» → «Обновления»: состояни�
     assert.match(text(out), /Проверять обновления автоматически/)
   })
 
-  it('доступна: «Доступна X · Что нового» и «Обновить до X» — тот же apply, что у плашки', () => {
-    const v = updateSection(status(), '0.1.15', { checking: false, error: null }, NOW)
+  it('доступна: «Пульт X готов · Что нового» и одна кнопка «Перезапустить и обновить» — тот же apply, что у плашки', () => {
+    const v = updateSection(status({ staged: { to: '1.0.3', state: 'ready', error: null, at: 'x' } }), '0.1.15', { checking: false, error: null }, NOW)
     assert.equal(v.state, 'available')
-    assert.deepEqual(v.action, { label: 'Обновить до 1.0.3', force: false })
+    assert.equal(v.text, 'Пульт 1.0.3 готов')
+    assert.deepEqual(v.action, { label: 'Перезапустить и обновить', force: false })
     const out = section(panel(status()))
-    assert.match(text(out), /Доступна 1\.0\.3 Что нового/)
-    assert.match(out, /data-testid="settings-update-apply"[^>]*>Обновить до 1\.0\.3</)
+    assert.match(text(out), /Доступен Пульт 1\.0\.3 Что нового/)
+    assert.match(out, /data-testid="settings-update-apply"[^>]*>Перезапустить и обновить</)
     assert.match(out, /data-testid="settings-update-notes"/)
-    // Окну нужна версия новее — кнопки нет, только страница релиза.
-    const win = section(panel(status(), { windowVersion: '0.1.12' }))
-    assert.equal(state(win), 'window')
-    assert.doesNotMatch(win, /settings-update-apply/)
+    // Качается в фоне — тихая строка с крутилкой; кнопка есть (нажатие дождётся подготовки).
+    const dl = section(panel(status({ staged: { to: '1.0.3', state: 'downloading', error: null, at: 'x' } })))
+    assert.equal(state(dl), 'downloading')
+    assert.match(text(dl), /Доступен Пульт 1\.0\.3 · скачиваю в фоне…/)
+    assert.match(dl, /class="spin"/)
+    assert.match(dl, /settings-update-apply/)
+    // Подготовка не удалась — тихо, второй строкой.
+    const sf = section(panel(status({ staged: { to: '1.0.3', state: 'failed', error: 'HTTP 404', at: 'x' } })))
+    assert.match(text(sf), /Заранее скачать не вышло: HTTP 404 — скачаю при перезапуске/)
+    // Отдельной строки «Обновить окно» в обычном пути нет.
+    assert.doesNotMatch(section(panel(status({ app: { unsupported: null, installed: '0.1.15', path: '/Applications/Pult.app', latest: '1.0.3', available: true, bad: false, applying: null, last: null } }))), /settings-app-update/)
     // Известное обновление пережило сбой сети — показываем и его, и сбой второй строкой.
     const withErr = section(panel(status({ error: 'getaddrinfo ENOTFOUND' })))
     assert.equal(state(withErr), 'available')
@@ -224,10 +246,10 @@ describe('«Настройки» → «Обновления»: состояни�
     assert.equal(state(section(panel(null))), 'unsupported')
   })
 
-  it('ставится и ждёт ходы: «Обновляю до X…» без кнопок; «Обновлю … после окончания ходов» и «Сейчас»; провал — «Повторить»', () => {
+  it('перезапуск и ожидание ходов: «Перезапускаю…» без кнопок; «Обновлю … после окончания ходов» и «Сейчас»; провал — «Повторить»', () => {
     const applying = section(panel(status({ apply: { state: 'applying', since: 'x', to: '1.0.3' } })))
     assert.equal(state(applying), 'applying')
-    assert.match(text(applying), /Обновляю до 1\.0\.3…/)
+    assert.match(text(applying), /Перезапускаю…/)
     assert.doesNotMatch(applying, /settings-update-apply/)
     assert.match(applying, /<button[^>]*disabled=""[^>]*data-testid="settings-update-check"/)
     const waiting = updateSection(status({ apply: { state: 'waiting', turns: 2, since: 'x', to: '1.0.3' } }), '0.1.15', { checking: false, error: null }, NOW)
@@ -294,96 +316,71 @@ describe('«Обновления»: время проверки, проверк�
   })
 })
 
-describe('окно обновляется само (0.3.4): «Окно: 0.1.15 → доступно 0.1.16 · Обновить окно»', () => {
+describe('0.3.16: окно той же кнопкой; строка про окно — только когда с ним что-то не так', () => {
   const app = (over: Partial<AppUpdateStatus> = {}): AppUpdateStatus => ({
-    unsupported: null, installed: '0.1.15', path: '/Applications/Pult.app', latest: '0.1.16', available: true, bad: false, applying: null, last: null, ...over,
+    unsupported: null, installed: '1.0.2', path: '/Applications/Pult.app', latest: '1.0.3', available: true, bad: false, applying: null, last: null, ...over,
   })
-  // Пакет последний — плашка про окно не заслонена «Доступна X».
+  // Пакет последний (1.0.3), окно отстало — «Перезапустить» обновит одно окно.
   const st = (a: AppUpdateStatus | undefined, over: Partial<UpdateStatus> = {}): UpdateStatus =>
     status({ current: '1.0.3', available: false, ...(a ? { app: a } : {}), ...over })
   const NOW = Date.parse('2026-10-19T10:05:00Z')
   const section = (u: UpdateStatus): string => renderToStaticMarkup(createElement(UpdatesSection, {
-    panel: { status: u, packageVersion: '1.0.3', windowVersion: '0.1.15', checking: false, error: null, applyError: null, busy: false, now: NOW, onCheck: noop, onApply: noop, onNotes: noop },
+    panel: { status: u, packageVersion: '1.0.3', windowVersion: '1.0.2', checking: false, error: null, applyError: null, busy: false, now: NOW, onCheck: noop, onApply: noop, onNotes: noop },
     auto: true, onAuto: noop,
   }))
 
-  it('модель строки «Окно»: доступно, идёт, откат, провал с повтором, bad, последнее, не поддерживается, старый демон', () => {
-    const v = appUpdateView(st(app()), '0.1.15')
-    assert.equal(v.state, 'available')
-    assert.equal(v.text, 'Окно: 0.1.15 → доступно 0.1.16')
-    assert.deepEqual(v.action, { label: 'Обновить окно', force: false, target: 'app', expect: '0.1.16' })
-    const going = appUpdateView(st(app({ available: false, applying: { to: '0.1.16', from: '0.1.15', step: 'download', since: 'x' } })), null)
-    assert.equal(going.state, 'applying')
-    assert.match(going.text, /Обновляю окно до 0\.1\.16: качаю архив… Окно закроется и откроется само/)
-    assert.equal(going.action, null)
-    const back = appUpdateView(st(app({ available: false, bad: true, last: { to: '0.1.16', from: '0.1.15', at: 't', result: 'rolled_back', message: 'окно 0.1.16 не подключилось к демону за 20 с — вернул 0.1.15' } })), null)
-    assert.equal(back.state, 'rolledback')
-    assert.match(back.text, /не подключилось.*вернул 0\.1\.15/)
-    const failed = appUpdateView(st(app({ last: { to: '0.1.16', from: '0.1.15', at: 't', result: 'failed', message: 'окно не закрылось за 10 с — закрой его сам (⌘Q) и повтори' } })), null)
-    assert.equal(failed.state, 'failed')
-    assert.equal(failed.action?.label, 'Повторить')
-    // Вышла версия новее неудачной — неудача не заслоняет её.
-    const newer = appUpdateView(st(app({ latest: '0.1.17', last: { to: '0.1.16', from: '0.1.15', at: 't', result: 'rolled_back', message: 'x' } })), null)
-    assert.equal(newer.state, 'available')
-    assert.equal(appUpdateView(st(app({ available: false, bad: true })), null).state, 'bad')
-    assert.equal(appUpdateView(st(app({ available: false, latest: '0.1.15' })), null).state, 'uptodate')
-    const linux = appUpdateView(st(app({ available: false, installed: null, unsupported: 'окно само обновляется только на macOS' })), '0.1.15')
+  it('окно отстало от пакета — та же плашка «Пульт 1.0.3 …» и та же кнопка; подготовлено — «готов»', () => {
+    const b = updateBanner(st(app()), '1.0.2')
+    assert.equal(b?.kind, 'available')
+    assert.equal(b?.text, 'Доступен Пульт 1.0.3')
+    assert.deepEqual(b?.action, { label: 'Перезапустить', force: false })
+    assert.equal(updateBanner(st(app({ ready: '1.0.3' }), { staged: { to: '1.0.3', state: 'ready', error: null, at: 'x' } }), null)?.text, 'Пульт 1.0.3 готов')
+    // Окно с интерфейсом другой версии (пакет сменили из терминала) — перезапуск окна, качать нечего: сразу «готов».
+    const stale = updateBanner(st(app({ available: false, latest: '1.0.2', stale: true })), null)
+    assert.equal(stale?.text, 'Пульт 1.0.3 готов')
+    assert.equal(pendingUpdate(st(app({ available: false, latest: '1.0.2', stale: true })))?.ready, true)
+    assert.equal(updateBanner(st(app({ available: false, latest: '1.0.2', stale: false })), null), null)
+    // Есть и пакет, и окно — одна плашка про Пульт.
+    assert.equal(updateBanner(status({ app: app({ latest: '1.0.3' }) }), null)?.text, 'Доступен Пульт 1.0.3')
+  })
+
+  it('строка «Окно» в обычном пути отсутствует; есть — когда окно не обновить: не поддерживается, нет прав, другое окно, bad', () => {
+    assert.equal(appUpdateView(st(app()), '1.0.2').state, 'none')
+    assert.doesNotMatch(section(st(app())), /settings-app-update/)
+    const linux = appUpdateView(st(app({ available: false, installed: null, unsupported: 'окно само обновляется только на macOS' })), '1.0.2')
     assert.equal(linux.state, 'unsupported')
-    assert.match(linux.text, /^Окно 0\.1\.15 · окно само обновляется только на macOS/)
-    assert.equal(appUpdateView(st(undefined), '0.1.15').state, 'none', 'старый демон — строки нет')
+    assert.match(linux.text, /^Окно 1\.0\.2 · окно само обновляется только на macOS/)
+    const ro = appUpdateView(st(app({ blocked: 'нет прав на запись в /Applications (пользователь не администратор?) — обнови окно вручную: …' })), null)
+    assert.equal(ro.state, 'blocked')
+    assert.match(ro.text, /^Окно 1\.0\.2 не обновится само: нет прав на запись в \/Applications/)
+    // Нет прав — плашка молчит про окно (кнопка его не обновит).
+    assert.equal(updateBanner(st(app({ blocked: 'x' })), null), null)
+    assert.equal(appUpdateView(st(app({ available: false, bad: true })), null).state, 'bad')
+    assert.equal(appUpdateView(st(undefined), '1.0.2').state, 'none', 'старый демон — строки нет')
+    assert.equal(appUpdateView(st(app({ available: false, latest: '1.0.2', installed: '1.0.2' })), null).state, 'none', 'окно последнее')
+    assert.equal(appUpdateView(st(app({ applying: { to: '1.0.3', from: '1.0.2', step: 'quit', since: 'x' } })), null).state, 'none', 'идёт — это «Перезапускаю…» выше')
   })
 
-  it('«Настройки»: строка «Окно» с кнопкой «Обновить окно»; версия окна — из Info.plist поставленного Pult.app', () => {
-    const out = section(st(app({ installed: '0.1.15' })))
-    assert.match(out, /data-testid="settings-app-update" data-state="available"/)
-    assert.match(text(out), /Окно: 0\.1\.15 → доступно 0\.1\.16 Обновить окно/)
-    assert.match(out, /data-testid="settings-app-apply"/)
-    const going = section(st(app({ available: false, applying: { to: '0.1.16', from: '0.1.15', step: 'quit', since: 'x' } })))
-    assert.match(going, /data-state="applying"/)
-    assert.doesNotMatch(going, /settings-app-apply/)
-    assert.doesNotMatch(section(st(undefined)), /settings-app-update/)
+  it('окно не встало или не обновилось — строкой и плашкой (скрывается до следующей неудачи); «Повторить» — та же кнопка', () => {
+    const back = appUpdateView(st(app({ available: false, bad: true, last: { to: '1.0.3', from: '1.0.2', at: 't', result: 'rolled_back', message: 'окно 1.0.3 не подключилось к демону за 60 с — вернул 1.0.2' } })), null)
+    assert.equal(back.state, 'rolledback')
+    assert.match(back.text, /не подключилось.*вернул 1\.0\.2/)
+    const failed = updateBanner(st(app({ last: { to: '1.0.3', from: '1.0.2', at: 'T1', result: 'failed', message: 'окно не закрылось за 10 с — закрой его сам (⌘Q) и повтори' } })), null)
+    assert.equal(failed?.kind, 'app-failed')
+    assert.deepEqual(failed?.action, { label: 'Повторить', force: false })
+    assert.equal(failed?.dismissKey, 'app-failure:T1')
+    assert.equal(updateBanner(st(app({ available: false, last: { to: '1.0.3', from: '1.0.2', at: 'T1', result: 'rolled_back', message: 'x' } })), null, ['app-failure:T1']), null)
+    // Вышла версия новее неудачной — неудача не заслоняет её.
+    assert.equal(updateBanner(st(app({ latest: '1.0.4', last: { to: '1.0.3', from: '1.0.2', at: 't', result: 'rolled_back', message: 'x' } })), null)?.kind, 'available')
   })
 
-  it('плашка: «Доступно новое окно» (скрывается до следующей версии), идёт, откат; пакет первым', () => {
-    const avail = updateBanner(st(app()), '0.1.15')
-    assert.equal(avail?.kind, 'app')
-    assert.equal(avail?.text, 'Доступно новое окно 0.1.16 (стоит 0.1.15)')
-    assert.equal(avail?.action?.target, 'app')
-    assert.equal(avail?.dismissKey, 'app:0.1.16')
-    assert.match(render(st(app())), /data-testid="update-apply-app"/)
-    assert.equal(updateBanner(st(app()), '0.1.15', ['app:0.1.16']), null)
-    const going = updateBanner(st(app({ available: false, applying: { to: '0.1.16', from: '0.1.15', step: 'health', since: 'x' } })), null)
-    assert.equal(going?.kind, 'app-applying')
-    assert.equal(going?.dismissKey, null)
-    const back = updateBanner(st(app({ available: false, bad: true, last: { to: '0.1.16', from: '0.1.15', at: 'T1', result: 'rolled_back', message: 'вернул 0.1.15' } })), null)
-    assert.equal(back?.kind, 'app-failed')
-    assert.equal(back?.dismissKey, 'app-failure:T1')
-    assert.equal(updateBanner(st(app({ available: false, last: { to: '0.1.16', from: '0.1.15', at: 'T1', result: 'rolled_back', message: 'x' } })), null, ['app-failure:T1']), null)
-    // Есть и пакет, и окно — плашка про пакет; окно — в «Настройках».
-    assert.equal(updateBanner(status({ app: app() }), '0.1.15')?.kind, 'available')
-  })
-
-  it('пакету нужно окно новее — «сначала обнови окно» с кнопкой, если окно в канале годится', () => {
-    const u = status({ latest: { version: '1.0.4', released: 'x', notes: 'https://github.com/pawellazarew/pult/releases/tag/v1.0.4', app: { version: '0.1.16', minVersion: '0.1.16' } }, app: app() })
-    const v = updateBanner(u, '0.1.15')
-    assert.equal(v?.kind, 'window')
-    assert.match(v?.text ?? '', /сначала обнови окно \(стоит 0\.1\.15, нужна 0\.1\.16/)
-    assert.equal(v?.action?.target, 'app')
-    const old = updateBanner(status({ latest: { version: '1.0.4', released: 'x', notes: 'https://github.com/pawellazarew/pult/releases/tag/v1.0.4', app: { version: '0.1.16', minVersion: '0.1.16' } } }), '0.1.15')
-    assert.equal(old?.action, null, 'старый демон без app — только страница релиза')
-    assert.match(old?.text ?? '', /скачай её на странице релиза/)
-  })
-
-  it('окно не из поставленного бандла (here: false) — без кнопки, с подсказкой, где обновить', () => {
-    const v = appUpdateView(st(app({ here: false, hereFrom: '/w/node_modules/electron/dist/Electron.app' })), '0.1.15')
-    assert.equal(v.state, 'available')
+  it('окно не из поставленного бандла (here: false) — плашка молчит про окно, строка говорит, где обновить', () => {
+    const v = appUpdateView(st(app({ here: false, hereFrom: '/w/node_modules/electron/dist/Electron.app' })), '1.0.2')
+    assert.equal(v.state, 'elsewhere')
     assert.equal(v.action, null)
     assert.match(v.text, /закрой окно из \/w\/node_modules\/electron\/dist\/Electron\.app и обнови из \/Applications\/Pult\.app/)
-    const b = updateBanner(st(app({ here: false, hereFrom: '/x/Pult.app' })), '0.1.15')
-    assert.equal(b?.action, null)
-    assert.match(b?.text ?? '', /закрой окно из \/x\/Pult\.app/)
-    assert.doesNotMatch(section(st(app({ here: false }))), /settings-app-apply/)
-    assert.equal(appUpdateView(st(app({ here: true })), '0.1.15').action?.target, 'app')
+    assert.equal(updateBanner(st(app({ here: false, hereFrom: '/x/Pult.app' })), null), null)
+    assert.match(section(st(app({ here: false }))), /data-state="elsewhere"/)
   })
 
   it('окно заменено закрытым: «ещё не запускалось»; первый запуск не заработал — «Вернуть 0.1.15» (rollback)', () => {

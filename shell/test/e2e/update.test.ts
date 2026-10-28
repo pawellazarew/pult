@@ -1,12 +1,13 @@
 // e2e M8c, канал обновлений в окне: версия окна видна интерфейсу через user agent Electron; демон с
-// тестовым «релизом» (PULT_TEST_UPDATE_DIR, свой ключ) сразу находит 9.9.9 — плашка «Доступна 9.9.9 ·
-// Что нового · Обновить». «Обновить» доходит до демона через мост и запускает НАСТОЯЩИЙ отсоединённый
-// `pult update`; тарбола в «релизе» нет, он выходит с кодом 1 — плашка «Обновление не удалось», демон
-// и окно на месте.
+// тестовым «релизом» (PULT_TEST_UPDATE_DIR, свой ключ) сразу находит 9.9.9 и (0.3.16) тут же пробует подготовить
+// его в фоне — НАСТОЯЩИЙ `pult update --stage`; тарбола в «релизе» нет — подготовка тихо не удаётся, и плашка
+// честно говорит «Доступен Пульт 9.9.9 · Что нового · Перезапустить». «Перезапустить» доходит до демона через мост
+// и запускает НАСТОЯЩИЙ отсоединённый `pult update`; он выходит с кодом 1 — плашка «Обновление не удалось», демон и
+// окно на месте, журнал «Перезапустить и обновить» убран.
 
 import assert from 'node:assert/strict'
 import { createHash, createPublicKey, generateKeyPairSync, sign } from 'node:crypto'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import type { KeyObject } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -15,6 +16,7 @@ import { launch, SHELL_DIR, waitFor } from './harness.js'
 import type { Harness } from './harness.js'
 
 const SHELL_VERSION = (JSON.parse(readFileSync(path.join(SHELL_DIR, 'package.json'), 'utf8')) as { version: string }).version
+const PKG_VERSION = (JSON.parse(readFileSync(path.join(SHELL_DIR, '..', 'package.json'), 'utf8')) as { version: string }).version
 
 /** Подписанный latest.json — формат src/update/manifest.ts, собранный здесь руками, без кода пакета. */
 function release(dir: string, version = '9.9.9', key = generateKeyPairSync('ed25519').privateKey): string {
@@ -58,18 +60,24 @@ describe('окно: плашка обновления', () => {
     rmSync(rel, { recursive: true, force: true })
   })
 
-  it('user agent окна несёт его версию — по ней интерфейс сверяет app.minVersion', async () => {
+  it('user agent окна несёт его версию; окно и пакет — один номер (0.3.16)', async () => {
     const ua = await h.win.evaluate(() => navigator.userAgent)
     assert.match(ua, new RegExp(`(?:^|\\s)(?:Pult|pult-shell)/${SHELL_VERSION.replace(/\./g, '\\.')}(?:\\s|$)`), ua)
+    assert.equal(SHELL_VERSION, PKG_VERSION)
   })
 
-  it('демон нашёл 9.9.9 — «Доступна 9.9.9 · Что нового · Обновить»; update.status через мост', async () => {
+  it('демон нашёл 9.9.9 и пробовал подготовить его — «Доступен Пульт 9.9.9 · Что нового · Перезапустить»; update.status через мост', async () => {
     const st = (await h.win.evaluate(() => window.pult!.call('update.status'))) as { latest: { version: string } | null; available: boolean }
     assert.equal(st.latest?.version, '9.9.9')
     assert.equal(st.available, true)
     const banner = h.win.getByTestId('update-available')
     await banner.waitFor({ timeout: 20_000 })
-    assert.match(await banner.innerText(), /Доступна 9\.9\.9/)
+    assert.match(await banner.innerText(), /Доступен Пульт 9\.9\.9/)
+    assert.equal((await h.win.getByTestId('update-apply').innerText()).trim(), 'Перезапустить')
+    const c = await h.client()
+    const staged = ((await c.request('update.status')) as { staged: { to: string; state: string; error: string | null } | null }).staged
+    assert.deepEqual([staged?.to, staged?.state], ['9.9.9', 'failed'])
+    assert.match(readFileSync(path.join(h.home, 'logs', 'update.log'), 'utf8'), /готовлю 9\.9\.9/)
     await h.win.getByTestId('update-notes').waitFor({ timeout: 2000 })
     await h.shot('available')
   })
@@ -83,6 +91,7 @@ describe('окно: плашка обновления', () => {
     assert.match(st.apply.error ?? '', /с кодом 1 — подробности: .*update\.log/)
     assert.match(readFileSync(path.join(h.home, 'logs', 'update.log'), 'utf8'), /ответил HTTP 404/)
     assert.equal(h.daemonPid(), pid, 'демон не должен был перезапуститься')
+    assert.equal(existsSync(path.join(h.home, 'update-apply.json')), false, 'журнал «Перезапустить и обновить» не убран после провала')
     // Плашка обновится по опросу статуса окна (раз в 15 с).
     await h.win.getByTestId('update-failed').waitFor({ timeout: 25_000 })
     await h.shot('failed')
@@ -114,7 +123,7 @@ describe('окно: пока ставится обновление, реплик
     rmSync(rel, { recursive: true, force: true })
   })
 
-  it('«Обновить» → «Обновляю…»; Enter в поле — отказ «Пульт обновляется», текст в поле на месте', async () => {
+  it('«Перезапустить» → «Перезапускаю…»; Enter в поле — отказ «Пульт обновляется», текст в поле на месте', async () => {
     const c = await h.client()
     await c.request('agent.start', { name: 'w', kind: 'claude', cwd: h.workDir('w') })
     await h.win.locator('[data-testid="agent-row"][data-agent="w"]').click()
@@ -122,7 +131,7 @@ describe('окно: пока ставится обновление, реплик
     await h.win.getByTestId('update-apply').click({ timeout: 20_000 })
     const banner = h.win.getByTestId('update-applying')
     await banner.waitFor({ timeout: 10_000 })
-    assert.match(await banner.innerText(), /Обновляю до 9\.9\.9…/)
+    assert.match(await banner.innerText(), /Перезапускаю…/)
     const box = h.win.getByTestId('composer')
     await box.fill('мой черновик')
     // M8e: поле чистится сразу по Enter, отказ возвращает черновик (поле пустое). Пишем каждое значение, которое
@@ -155,7 +164,8 @@ describe('окно: пока ставится обновление, реплик
 
 // «Настройки» (⌘,) → «Обновления»: ручная проверка без перезапуска окна. Плановая первая проверка отодвинута на
 // час — всё, что видно в разделе, пришло от «Проверить сейчас». Канал сначала отдаёт версию не новее стоящей
-// («последняя версия»), потом — 9.9.9 тем же ключом («Доступна 9.9.9», плашка сразу, «Обновить до 9.9.9»).
+// («последняя версия»), потом — 9.9.9 тем же ключом: ручная проверка сразу готовит её в фоне («скачиваю в фоне…»,
+// тарбола нет — тихо не вышло), потом «Доступен Пульт 9.9.9», плашка, одна кнопка «Перезапустить и обновить».
 describe('окно: «Настройки» → «Обновления» — проверить и обновить без терминала', () => {
   let h: Harness
   let rel = ''
@@ -186,7 +196,9 @@ describe('окно: «Настройки» → «Обновления» — пр
     await h.win.getByTestId('settings-dialog').waitFor({ timeout: 5000 })
     const sec = h.win.getByTestId('settings-updates')
     await sec.waitFor({ timeout: 5000 })
-    assert.match((await h.win.getByTestId('settings-update-versions').innerText()).replace(/\s+/g, ' '), /Пульт \d+\.\d+\.\d+.* окно \d+\.\d+\.\d+/)
+    // Одна версия: окно того же номера, что пакет, — отдельной строкой не показывается.
+    assert.equal((await h.win.getByTestId('settings-update-versions').innerText()).replace(/\s+/g, ' ').trim(), `Пульт ${PKG_VERSION}`)
+    assert.equal(await h.win.getByTestId('settings-window-version').count(), 0)
     await h.win.getByTestId('settings-update-check').click()
     const st = h.win.getByTestId('settings-update-state')
     assert.ok(await waitFor(async () => (await st.getAttribute('data-state')) === 'uptodate', 15_000), `состояние: ${await st.getAttribute('data-state')} · ${await st.innerText()}`)
@@ -197,17 +209,18 @@ describe('окно: «Настройки» → «Обновления» — пр
     await h.shot('settings-uptodate')
   })
 
-  it('вышла 9.9.9 — «Проверить сейчас» → «Доступна 9.9.9», плашка сразу; «Обновить до 9.9.9» запускает обновление', async () => {
+  it('вышла 9.9.9 — «Проверить сейчас» → подготовка в фоне → «Доступен Пульт 9.9.9», плашка; «Перезапустить и обновить» запускает обновление', async () => {
     release(rel, '9.9.9', key)
     await h.win.getByTestId('settings-update-check').click()
     const st = h.win.getByTestId('settings-update-state')
+    // Подготовка идёт секунду-другую («скачиваю в фоне…»), окно переспрашивает раз в 2 с — без 15-секундного опроса.
     assert.ok(await waitFor(async () => (await st.getAttribute('data-state')) === 'available', 15_000), `состояние: ${await st.getAttribute('data-state')} · ${await st.innerText()}`)
-    assert.match(await st.innerText(), /Доступна 9\.9\.9/)
+    assert.match(await st.innerText(), /Доступен Пульт 9\.9\.9/)
+    assert.match(await h.win.getByTestId('settings-update-note').innerText(), /Заранее скачать не вышло: .*скачаю при перезапуске/)
     await h.win.getByTestId('settings-update-notes').waitFor({ timeout: 2000 })
-    // Плашка в окне — без перезагрузки и без 15-секундного опроса статуса.
-    assert.equal(await h.win.getByTestId('update-available').count(), 1, 'плашка «Доступна» не появилась сразу')
+    assert.equal(await h.win.getByTestId('update-available').count(), 1, 'плашка не появилась')
     const apply = h.win.getByTestId('settings-update-apply')
-    assert.equal((await apply.innerText()).trim(), 'Обновить до 9.9.9')
+    assert.equal((await apply.innerText()).trim(), 'Перезапустить и обновить')
     await h.shot('settings-available')
     const pid = h.daemonPid()
     const c = await h.client()

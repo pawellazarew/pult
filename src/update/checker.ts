@@ -26,6 +26,12 @@
 // ПОКА СТАВИТСЯ (`applying`): ребёнок `pult update` секунды-минуты качает тарбол и ставит npm, а потом
 // перезапускает демона — новый ход, начатый в это время, оборвался бы. Поэтому `holdTurns` (менеджер
 // сессий) отказывает ходам кодом `updating`, а очередь реплик стоит до рестарта.
+//
+// ФОНОВАЯ ПОДГОТОВКА (0.3.16): проверка нашла новую подписанную версию — демон сразу, не дожидаясь кнопки, готовит её:
+// пакет — ребёнком `pult update --stage` (npm в `versions/<v>`, `current` не трогается; под тем же update.lock), окно —
+// своим `app.stage` (zip, проверки, `apps/ready-<v>`). Только если автопроверка включена или человек сам нажал
+// «Проверить сейчас». Неудача тихая (`staged.state = failed` — строка в «Настройках»), повтор — 15 мин, 1 ч, 6 ч.
+// «Перезапустить», нажатое посреди подготовки, ждёт её конца (`applying`), а `pult update` потом только переключает.
 
 import { spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
@@ -34,13 +40,15 @@ import { fileURLToPath } from 'node:url'
 import type { PultConfig } from '../core/config.js'
 import type { Logger } from '../core/log.js'
 import type { PultPaths } from '../core/paths.js'
-import type { UpdateApplyState, UpdateFailure, UpdateRelease, UpdateStatus } from '../core/rpc.js'
+import type { UpdateApplyState, UpdateFailure, UpdateRelease, UpdateStaged, UpdateStatus } from '../core/rpc.js'
 import { compareVersions } from '../core/semver.js'
 import { daemonSpawnEnv } from '../cli/startOnDemand.js'
 import { atomicWrite } from '../service/fsutil.js'
 import { ChannelError, fetchManifest, installedVersion, releaseOf, trustedKeys, updateUrl } from './channel.js'
 import type { HttpGet } from './fetch.js'
 import type { TrustedKey } from './keys.js'
+import type { Manifest } from './manifest.js'
+import { stagedReady } from './update.js'
 import { PROBE_PENDING, readState } from './versions.js'
 
 export const FIRST_CHECK_MS = 60_000
@@ -82,12 +90,26 @@ export interface CheckerOptions {
   /** Сколько ходов идёт прямо сейчас (working и ждущие человека). */
   runningTurns: () => number
   /**
-   * «Ставится» кончилось, а демон жив (ребёнок вышел с ошибкой или не запустился): ходы снова можно, и очереди,
-   * притихшие на время обновления, надо разбудить (`SessionManager.resumeQueues`).
+   * «Ставится» кончилось, а демон жив (ребёнок вышел с ошибкой или не запустился, или ставить оказалось нечего —
+   * `ok`): ходы снова можно, и очереди, притихшие на время обновления, надо разбудить (`SessionManager.resumeQueues`).
    */
-  onApplyEnd?: () => void
+  onApplyEnd?: (r: { ok: boolean }) => void
+  /**
+   * 0.3.16: сейчас запустится `pult update` по «Перезапустить и обновить» (`apply(force, true)`) — записать журнал, по
+   * которому новый демон доведёт обновление окна.
+   */
+  onLaunch?: (to: string) => void
   /** Запуск `pult update --expect <to>`; тест подставляет свой. */
   spawnApply?: (to: string) => ApplyChild
+  /** 0.3.16: запуск `pult update --stage` (фоновая подготовка пакета); тест подставляет свой. */
+  spawnStage?: () => ApplyChild
+  /** 0.3.16: готовить ли в фоне вообще (по умолчанию да; тестовый демон без шва канала — нет). */
+  stage?: boolean
+  /**
+   * 0.3.16: окно в фоновой подготовке. `wanted(v)` — окно `v` можно и нужно ставить (новее стоящего, не bad, есть
+   * права); `ready(v)` — уже подготовлено; `stage(m)` — скачать и проверить (ошибка — исключением).
+   */
+  app?: { wanted(v: string): boolean; ready(v: string): boolean; stage(m: Manifest): Promise<void> }
   /** Почему «Обновить» пакет сейчас нельзя (идёт обновление окна, 0.3.4); null — можно. */
   blocked?: () => string | null
   /**
@@ -115,7 +137,10 @@ export interface UpdateChecker {
   checkIfStale(olderThanMs: number): Promise<UpdateStatus>
   /** `updates.check` сменился на лету: включить или снять расписание. */
   setEnabled(on: boolean): void
-  apply(force: boolean): Promise<{ waiting: number } | { applying: true; to: string }>
+  /** `withWindow` (0.3.16) — после пакета довести окно: перед запуском `pult update` зовётся `onLaunch`. */
+  apply(force: boolean, withWindow?: boolean): Promise<{ waiting: number } | { applying: true; to: string }>
+  /** Идёт фоновая подготовка — дождаться её (обновление окна не берёт update.lock посреди `pult update --stage`). */
+  staging(): Promise<void>
   /** Что-то в журнале случилось — может быть, кончился последний ход, которого ждёт «Обновить». */
   poke(): void
   /** Идёт `pult update` — демон вот-вот перезапустится; новые ходы не заводятся. */
@@ -194,6 +219,30 @@ export function openUpdateLog(paths: PultPaths, max = UPDATE_LOG_MAX): number {
   return openSync(paths.updateLog, 'a', 0o600)
 }
 
+/**
+ * 0.3.16: `pult update --stage` — фоновая подготовка. Демона не перезапускает, поэтому без scope-группы systemd и не
+ * отсоединённый; вывод — в тот же logs/update.log.
+ */
+export function stageArgv(i: { launcher: string | null; node: string; cliEntry: string }): string[] {
+  return i.launcher ? [i.launcher, 'update', '--stage'] : [i.node, i.cliEntry, 'update', '--stage']
+}
+
+export function spawnStageProcess(paths: PultPaths, env: NodeJS.ProcessEnv = process.env): ChildProcess {
+  const argv = stageArgv({
+    launcher: isExec(paths.cliLauncher) ? paths.cliLauncher : null,
+    node: process.execPath,
+    cliEntry: fileURLToPath(new URL('../cli/main.js', import.meta.url)),
+  })
+  const fd = openUpdateLog(paths)
+  try {
+    const child = spawn(argv[0] as string, argv.slice(1), { stdio: ['ignore', fd, fd], env: applyEnv(paths, env), cwd: paths.home })
+    child.unref()
+    return child
+  } finally {
+    closeSync(fd)
+  }
+}
+
 /** Настоящий запуск: отсоединённый, вывод — в logs/update.log. */
 export function spawnUpdateProcess(paths: PultPaths, to: string, env: NodeJS.ProcessEnv = process.env): ChildProcess {
   const argv = applyArgv({
@@ -251,6 +300,13 @@ export function createUpdateChecker(o: CheckerOptions): UpdateChecker {
   /** Ребёнок, чей выход что-то значит: выход прежнего (повтор после провала) состояние не трогает. */
   let child: ApplyChild | null = null
   let applyInflight: Promise<{ waiting: number } | { applying: true; to: string }> | null = null
+  /** «Перезапустить и обновить» (0.3.16): после пакета — окно; иначе (target 'package') — только пакет. */
+  let applyWindow = false
+  /** Фоновая подготовка: что готовится или готово (в памяти; после рестарта — с диска, см. `diskStaged`). */
+  let staged: UpdateStaged | null = null
+  let stagePromise: Promise<void> | null = null
+  let stageFailures = 0
+  let stageRetryAt = 0
   let nextAt = now() + firstDelay
   let stopped = false
   /** Когда последний раз ходили в сеть (удачно или нет) — предел частоты проверок по фокусу. */
@@ -258,6 +314,27 @@ export function createUpdateChecker(o: CheckerOptions): UpdateChecker {
   let lastAttemptAt: number | null = Number.isFinite(savedAt) ? savedAt : null
   const auto = (): boolean => enabled && scheduleAllowed && !stopped
   const regularDelay = (): number => interval + Math.round((random() * 2 - 1) * jitter)
+
+  /** Пакет из канала можно ставить: новее этого демона, не bad, не рабочая копия. */
+  const packageWanted = (latest: UpdateRelease | null): boolean => {
+    if (latest === null || compareVersions(latest.version, o.current) <= 0) return false
+    return !readState(o.paths).bad.includes(latest.version) && !installedVersion(o.paths).dev
+  }
+
+  /**
+   * Подготовленное на диске (после рестарта демона памяти нет): пакет — `versions/<v>` с меткой канала, окно —
+   * `apps/ready-<v>`. Готово, только когда готово всё, что надо ставить.
+   */
+  const diskStaged = (latest: UpdateRelease | null): UpdateStaged | null => {
+    if (latest === null) return null
+    const pkg = packageWanted(latest)
+    const appV = latest.app?.version ?? null
+    const app = appV !== null && (o.app?.wanted(appV) ?? false)
+    if (!pkg && !app) return null
+    if (pkg && !stagedReady(o.paths, latest.version)) return null
+    if (app && !(o.app?.ready(appV as string) ?? false)) return null
+    return { to: latest.version, state: 'ready', error: null, at: saved.checkedAt ?? new Date(now()).toISOString() }
+  }
 
   const status = (): UpdateStatus => {
     const latest = saved.latest
@@ -276,6 +353,7 @@ export function createUpdateChecker(o: CheckerOptions): UpdateChecker {
       bad,
       apply,
       failure: lastChannelFailure(o.paths),
+      staged: staged !== null && staged.to === latest?.version ? staged : diskStaged(latest),
     }
   }
 
@@ -290,14 +368,65 @@ export function createUpdateChecker(o: CheckerOptions): UpdateChecker {
     }
   }
 
-  const check = (): Promise<UpdateStatus> => {
-    if (checking) return checking
+  /** Ребёнок `pult update --stage` как промис: код 0 — подготовлено, иначе — исключение с путём к журналу. */
+  const runStageChild = (): Promise<void> => new Promise<void>((resolve, reject) => {
+    let k: ApplyChild
+    try { k = (o.spawnStage ?? (() => spawnStageProcess(o.paths, env)))() } catch (e) { reject(new Error(`pult update --stage не запустился: ${(e as Error).message}`)); return }
+    k.on('error', (e) => { reject(new Error(`pult update --stage не запустился: ${e.message}`)) })
+    k.on('exit', (code, signal) => {
+      if (code === 0) resolve()
+      else reject(new Error(`подготовка вышла ${code !== null ? `с кодом ${code}` : `по сигналу ${signal ?? '?'}`} — подробности: ${o.paths.updateLog}`))
+    })
+  })
+
+  /**
+   * Фоновая подготовка по итогу проверки: только при включённой автопроверке или по ручной «Проверить сейчас», не
+   * во время «Перезапустить», одна за раз. Неудача — тихо, повтор не раньше `retry` (ручная проверка — сразу).
+   */
+  const startStage = (m: Manifest, manual: boolean): void => {
+    if (stopped || stagePromise || apply.state !== 'idle' || o.stage === false) return
+    if (!manual && !(enabled && scheduleAllowed)) return
+    if (!manual && now() < stageRetryAt) return
+    const latest = releaseOf(m)
+    const pkg = packageWanted(latest)
+    const app = m.app?.['darwin-arm64'] !== undefined && (o.app?.wanted(m.app.version) ?? false)
+    if (!pkg && !app) { staged = null; return }
+    if (staged?.to === m.version && staged.state === 'ready') return
+    if (diskStaged(latest) !== null) { staged = diskStaged(latest); return }
+    const to = m.version
+    staged = { to, state: 'downloading', error: null, at: new Date(now()).toISOString() }
+    o.logger.info('готовлю обновление в фоне', { to, package: pkg, app })
+    stagePromise = (async () => {
+      if (pkg) await runStageChild()
+      if (app && o.app) await o.app.stage(m)
+    })().then(() => {
+      staged = { to, state: 'ready', error: null, at: new Date(now()).toISOString() }
+      stageFailures = 0
+      stageRetryAt = 0
+      o.logger.info('обновление подготовлено', { to })
+    }, (e: unknown) => {
+      const error = (e as Error).message.split('\n')[0] ?? 'ошибка'
+      staged = { to, state: 'failed', error, at: new Date(now()).toISOString() }
+      stageRetryAt = now() + (retry[Math.min(stageFailures, retry.length - 1)] ?? interval)
+      stageFailures++
+      // Повтор — следующей плановой проверкой, но не позже срока повтора.
+      if (Number.isFinite(nextAt)) nextAt = Math.min(nextAt, stageRetryAt)
+      o.logger.warn('подготовка обновления не удалась', { to, error })
+    }).finally(() => { stagePromise = null })
+  }
+
+  /** Ручная проверка, присоединившаяся к идущей плановой, тоже просит подготовку. */
+  let manualJoined = false
+  const runCheck = (manual: boolean): Promise<UpdateStatus> => {
+    if (checking) { if (manual) manualJoined = true; return checking }
+    manualJoined = manual
     lastAttemptAt = now()
     checking = (async () => {
       try {
         const url = updateUrl(o.config, env)
         const m = await fetchManifest({ env, url, keys, ...(o.http ? { http: o.http } : {}) })
         saved = { checkedAt: new Date(now()).toISOString(), error: null, latest: releaseOf(m) }
+        if (!stopped) startStage(m, manualJoined)
         o.logger.info('канал обновлений проверен', { latest: m.version, current: o.current })
         // Удача вне расписания (окно, человек) — плановая сдвигается на полный срок. Во время плановой
         // `nextAt` — бесконечность, срок ставит само расписание.
@@ -323,7 +452,7 @@ export function createUpdateChecker(o: CheckerOptions): UpdateChecker {
       timer = null
       if (now() >= nextAt) {
         nextAt = Number.POSITIVE_INFINITY // пока идёт проверка, второй не будет
-        void check().then((st) => {
+        void runCheck(false).then((st) => {
           // Удача — 6 ч ± 30 мин; провал — 15 мин, 1 ч, 6 ч, потом снова обычный срок.
           if (st.error === null) failures = 0
           const backoff = st.error !== null ? retry[failures++] : undefined
@@ -351,9 +480,22 @@ export function createUpdateChecker(o: CheckerOptions): UpdateChecker {
   const launch = (to: string): void => {
     stopWaitPoll()
     apply = { state: 'applying', since: new Date(now()).toISOString(), to }
+    // Посреди фоновой подготовки — дождаться её (тот же update.lock), потом `pult update` только переключит.
+    if (stagePromise) {
+      o.logger.info('«Перезапустить» ждёт конца подготовки', { to })
+      void stagePromise.finally(() => { if (!stopped && apply.state === 'applying' && child === null) spawnApplyChild(to) })
+      return
+    }
+    spawnApplyChild(to)
+  }
+
+  const spawnApplyChild = (to: string): void => {
     o.logger.info('запускаю pult update', { to, from: o.current })
-    const ended = (): void => { try { o.onApplyEnd?.() } catch (e) { o.logger.warn('очереди после обновления не разбудились', { error: (e as Error).message }) } }
-    const fail = (error: string): void => { apply = { state: 'failed', at: new Date(now()).toISOString(), error }; ended() }
+    const ended = (ok: boolean): void => { try { o.onApplyEnd?.({ ok }) } catch (e) { o.logger.warn('очереди после обновления не разбудились', { error: (e as Error).message }) } }
+    const fail = (error: string): void => { apply = { state: 'failed', at: new Date(now()).toISOString(), error }; ended(false) }
+    if (applyWindow) {
+      try { o.onLaunch?.(to) } catch (e) { o.logger.warn('журнал обновления не записался — окно придётся обновить отдельно', { error: (e as Error).message }) }
+    }
     let k: ApplyChild
     try {
       k = (o.spawnApply ?? ((v: string) => spawnUpdateProcess(o.paths, v, env)))(to)
@@ -368,7 +510,7 @@ export function createUpdateChecker(o: CheckerOptions): UpdateChecker {
       child = null
       // Удачный `pult update` останавливает этот демон раньше, чем выходит сам, — сюда доходят его
       // провалы: подпись, загрузка, проба с откатом (демон тогда уже новый, но откатный — тот же этот).
-      if (code === 0) { apply = { state: 'idle' }; ended(); return }
+      if (code === 0) { apply = { state: 'idle' }; ended(true); return }
       fail(`pult update вышел ${code !== null ? `с кодом ${code}` : `по сигналу ${signal ?? '?'}`} — подробности: ${o.paths.updateLog}`)
       o.logger.warn('pult update не удался', { code, signal })
     })
@@ -381,7 +523,7 @@ export function createUpdateChecker(o: CheckerOptions): UpdateChecker {
     if (blocked) throw new ApplyError(blocked)
     let st = status()
     // Окно жмёт «Обновить» по тому, что видело; итог мог устареть или его ещё не было — проверить заново.
-    if (!st.available) st = await check()
+    if (!st.available) st = await runCheck(true)
     // Демон остановили, пока шла проверка: ребёнка `pult update` от остановленного демона не запускать.
     if (stopped) throw new ApplyError('демон останавливается — обновление не запущено')
     // Пока ждали проверку, состояние могло смениться (запуск из poke) — второй ребёнок не нужен.
@@ -411,13 +553,13 @@ export function createUpdateChecker(o: CheckerOptions): UpdateChecker {
 
   return {
     status,
-    check,
+    check: () => runCheck(true),
     checkIfStale(olderThanMs) {
       if (checking) return checking
       if (!auto()) return Promise.resolve(status())
       const gap = Math.max(MIN_AUTO_GAP_MS, Number.isFinite(olderThanMs) ? olderThanMs : 0)
       if (lastAttemptAt !== null && now() - lastAttemptAt < gap) return Promise.resolve(status())
-      return check()
+      return runCheck(false)
     },
     setEnabled(on) {
       if (on === enabled) return
@@ -426,11 +568,15 @@ export function createUpdateChecker(o: CheckerOptions): UpdateChecker {
       if (on) nextAt = now() + firstDelay
       arm()
     },
-    apply(force) {
+    apply(force, withWindow = false) {
       if (applyInflight) return applyInflight
+      // «Сейчас» поверх ожидания с окном не снимает окно: человек жмёт ту же кнопку быстрее.
+      if (apply.state === 'idle' || apply.state === 'failed') applyWindow = withWindow
+      else applyWindow = applyWindow || withWindow
       applyInflight = applyOnce(force).finally(() => { applyInflight = null })
       return applyInflight
     },
+    staging: () => stagePromise ?? Promise.resolve(),
     poke() {
       // Демон зовёт poke ИЗ рассылки события, а менеджер сессий обновляет статус хода ПОСЛЕ неё: пересчёт
       // сразу видел бы конец хода ещё «working». Отложить на следующий оборот цикла — и раз на пачку событий.

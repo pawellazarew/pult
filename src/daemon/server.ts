@@ -80,6 +80,7 @@ import type { SessionBrowser, SessionRecord, SessionStatus } from '../sessions/r
 import { ApplyError, createUpdateChecker } from '../update/checker.js'
 import type { CheckerOptions, UpdateChecker } from '../update/checker.js'
 import { AppUpdateError, createAppUpdater, shellHelloOf } from '../update/appUpdate.js'
+import { dropApplyJournal, journalApplies, readApplyJournal, waitPackageProbe, writeApplyJournal } from '../update/applyJournal.js'
 import type { AppTools, AppUpdater, ShellHello } from '../update/appUpdate.js'
 import { bundleOf, insideApp } from '../update/appUpdate.js'
 import type { UpdateStatus } from '../core/rpc.js'
@@ -134,7 +135,7 @@ export interface DaemonOptions {
    * M8c: швы канала обновлений — запрос, ключи, запуск `pult update`, расписание. Без них тестовый демон
    * расписания не заводит (сеть в тестах закрыта), кроме сквозных прогонов с PULT_TEST_UPDATE_DIR.
    */
-  updates?: Pick<CheckerOptions, 'http' | 'keys' | 'spawnApply' | 'schedule' | 'firstDelayMs' | 'intervalMs' | 'jitterMs' | 'tickMs' | 'now' | 'random'>
+  updates?: Pick<CheckerOptions, 'http' | 'keys' | 'spawnApply' | 'spawnStage' | 'stage' | 'schedule' | 'firstDelayMs' | 'intervalMs' | 'jitterMs' | 'tickMs' | 'now' | 'random'>
   /** 0.3.4: швы обновления окна — утилиты macOS, сроки ожидания. Тест не трогает настоящий Pult.app никогда. */
   appUpdate?: { tools?: Partial<AppTools>; quitWaitMs?: number; helloWaitMs?: number; killWaitMs?: number; pollMs?: number; stopWaitMs?: number }
   /** M8f: подмена живого списка моделей Codex для `agent.configure` (`null` — списка нет). */
@@ -452,11 +453,28 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     paths, config, logger,
     current: VERSION,
     runningTurns,
-    onApplyEnd: () => { manager.resumeQueues() },
+    onApplyEnd: ({ ok }) => {
+      manager.resumeQueues()
+      // 0.3.16: `pult update` вышел, а демон жив — рестарта не было (провал или ставить оказалось нечего). Журнал
+      // больше не нужен; удача без рестарта — окно доводится здесь же.
+      if (readApplyJournal(paths)) {
+        dropApplyJournal(paths)
+        if (ok) void appUpdaterRef?.applyAll({}).catch((e: unknown) => { logger.warn('окно после обновления не обновилось', { error: (e as Error).message }) })
+      }
+    },
+    onLaunch: (to) => { writeApplyJournal(paths, { from: VERSION, to, at: new Date().toISOString() }) },
     blocked: () => (appUpdaterRef?.busy() ? 'идёт обновление окна — пакет обновится после него' : null),
+    // 0.3.16: окно готовится заранее вместе с пакетом (ссылка заполняется ниже, до первой проверки).
+    app: {
+      wanted: (v) => appUpdaterRef?.wanted(v) ?? false,
+      ready: (v) => appUpdaterRef?.readyFor(v) ?? false,
+      stage: async (m) => { await appUpdaterRef?.stage(m) },
+    },
     ...(opts.testMode && !opts.updates
       ? { schedule: !!process.env['PULT_TEST_UPDATE_DIR'], ...(Number.isFinite(testFirst) && testFirst >= 0 ? { firstDelayMs: testFirst } : {}) }
       : {}),
+    // Тестовый демон готовит в фоне только со швом подготовки или в сквозном прогоне с «релизом» из папки.
+    ...(opts.testMode && !opts.updates?.spawnStage && !process.env['PULT_TEST_UPDATE_DIR'] ? { stage: false } : {}),
     ...(opts.updates ?? {}),
   })
   updaterRef = updater
@@ -481,14 +499,46 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     ...(opts.appUpdate?.pollMs !== undefined ? { pollMs: opts.appUpdate.pollMs } : {}),
     ...(opts.appUpdate?.stopWaitMs !== undefined ? { stopWaitMs: opts.appUpdate.stopWaitMs } : {}),
     shells: () => [...connections.values()].filter((c) => c.authed && c.client === 'shell' && c.app).map((c) => c.app as ShellHello),
+    packageVersion: VERSION,
+    packageStaging: () => updater.staging(),
   })
   appUpdaterRef = appUpdater
+  /** 0.3.16: новый демон доводит «Перезапустить и обновить» по журналу — окно показывает «Перезапускаю…». */
+  let continuing: { to: string } | null = null
   /** Статус канала вместе с окном: одним объектом в `update.*` и `daemon.status.update`. */
   const updateStatus = (u: UpdateStatus = updater.status(), conn?: Connection): UpdateStatus => {
     const app = appUpdater.status()
     const here = hereOf(conn, app.path)
-    return { ...u, app: { ...app, here, hereFrom: here === false && conn?.app?.execPath ? bundleOf(conn.app.execPath) : null } }
+    const stale = conn?.client === 'shell' && conn.app ? appUpdater.isStale(conn.app) : null
+    return { ...u, continuing, app: { ...app, here, hereFrom: here === false && conn?.app?.execPath ? bundleOf(conn.app.execPath) : null, stale } }
   }
+  /**
+   * 0.3.16: старт после «Перезапустить и обновить». Журнал есть и версия сменилась — дождаться итога пробы
+   * `pult update` (провал — нас откатят, окно не трогаем) и довести окно: замена бандла или перезапуск окна со старым
+   * интерфейсом. Журнал удаляется до работы с окном: у замены свой журнал (apps/swap.json), повтор по кругу не нужен.
+   */
+  const continueApply = async (): Promise<void> => {
+    const j = readApplyJournal(paths)
+    if (!j) return
+    if (!journalApplies(j, VERSION)) {
+      dropApplyJournal(paths)
+      logger.info('журнал обновления не к этому демону — убран', { from: j.from, to: j.to, version: VERSION })
+      return
+    }
+    continuing = { to: VERSION }
+    try {
+      const ok = await waitPackageProbe(paths, VERSION, { stopped: () => stopping })
+      dropApplyJournal(paths)
+      if (!ok || stopping) { logger.warn('проба нового пакета не подтвердилась — окно не трогаю', { version: VERSION }); return }
+      const r = await appUpdater.applyAll({ expect: VERSION, waitLockMs: 60_000, record: true })
+      logger.info('обновление окна после пакета', { started: r !== null, from: j.from, version: VERSION })
+    } catch (e) {
+      logger.warn('окно после обновления пакета не обновилось', { error: (e as Error).message })
+    } finally {
+      continuing = null
+    }
+  }
+  void continueApply()
   /** Спрашивающее окно — из поставленного бандла? Только для оболочки с путём. */
   const hereOf = (conn: Connection | undefined, app: string | null): boolean | null =>
     conn?.client === 'shell' && conn.app?.execPath && app ? insideApp(conn.app.execPath, app) : null
@@ -1163,7 +1213,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
       case 'update.apply': {
         if (params['force'] !== undefined && typeof params['force'] !== 'boolean') { fail(ERROR_CODES.invalidParams, 'update.apply: force — true или false'); return }
         const target = params['target']
-        if (target !== undefined && target !== 'package' && target !== 'app') { fail(ERROR_CODES.invalidParams, "update.apply: target — 'package' или 'app'"); return }
+        if (target !== undefined && target !== 'package' && target !== 'app' && target !== 'all') { fail(ERROR_CODES.invalidParams, "update.apply: target — 'all', 'package' или 'app'"); return }
         if (target === 'app') {
           // 0.3.4: окно. Тот же метод моста, что «Обновить» пакета, — окну 0.1.15 новая оболочка не нужна.
           const expect = params['expect']
@@ -1178,13 +1228,32 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
           }
           return
         }
+        if (target === 'package') {
+          try {
+            send({ id: req.id, result: await updater.apply(params['force'] === true) })
+          } catch (e) {
+            if (e instanceof ApplyError) { fail(ERROR_CODES.invalidParams, e.message); return }
+            throw e
+          }
+          return
+        }
+        // 0.3.16: без target (так зовёт и окно 0.3.15) или 'all' — одна кнопка «Перезапустить и обновить»: есть новый
+        // пакет — он (ожидание ходов, `pult update`, рестарт), а окно доведёт новый демон по журналу; пакет последний —
+        // сразу окно (замена бандла или перезапуск окна с интерфейсом другой версии).
         try {
-          send({ id: req.id, result: await updater.apply(params['force'] === true) })
+          const st0 = updater.status()
+          const pkg = st0.apply.state === 'waiting' || st0.apply.state === 'applying' || st0.available ? st0 : await updater.check()
+          if (pkg.apply.state === 'waiting' || pkg.apply.state === 'applying' || pkg.available) {
+            send({ id: req.id, result: await updater.apply(params['force'] === true, true) })
+            return
+          }
+          const r = await appUpdater.applyAll({})
+          if (r) { send({ id: req.id, result: r }); return }
+          throw new ApplyError(pkg.error ? `проверить канал не вышло: ${pkg.error}` : `ставить нечего: ${VERSION} — последняя`)
         } catch (e) {
-          if (e instanceof ApplyError) { fail(ERROR_CODES.invalidParams, e.message); return }
+          if (e instanceof ApplyError || e instanceof AppUpdateError) { fail(ERROR_CODES.invalidParams, e.message); return }
           throw e
         }
-        return
       }
 
       case 'events.tail': {

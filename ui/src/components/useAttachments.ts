@@ -124,7 +124,7 @@ export function useAttachments({ source, box, text, setText, session, persist = 
         }
         return
       }
-      if (!source.image) throw new Error('Для вставки картинки обнови окно: Настройки → Обновления → Обновить окно.')
+      if (!source.image) throw new Error('Для вставки картинки обнови окно: Настройки → Обновления → «Перезапустить и обновить».')
       const r = await source.image(session)
       if ('error' in r) throw new Error(r.error)
       await save({ path: r.path, name: 'Скриншот.png' })
