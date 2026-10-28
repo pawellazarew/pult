@@ -367,6 +367,14 @@ interface Live {
   pendingMcpKey: string
   /** Субагенты и команды, пережившие ход (`background.changed`, «фон · N»), — src/adapters/codex/background.ts. */
   bg: CodexBackground
+  /**
+   * Ход, который начал САМ сервер (28.10.2026): `turn/started` своего треда без нашего `turn/start` — сообщение
+   * субагента будит родителя (`inter_agent_communication_metadata.trigger_turn` в записях Codex), сервер работает
+   * после неподтверждённого стопа. Статус — `working {reason: server_turn}`, конец — `server_turn_done`.
+   */
+  serverTurn: { providerTurnId: string; stopRequested: boolean } | null
+  /** Реплики человека, ждущие конца серверного хода (их `turn/start` столкнулся бы с ним). */
+  serverWaiters: Array<() => void>
 }
 
 interface PendingApproval {
@@ -530,6 +538,25 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
   const clearBackground = (l: Live, reason: string): void => {
     if (l.bg.clear()) emitBackground(l, reason)
   }
+
+  /** Серверный ход кончился (или его больше некому вести): статус, фон и ждущие реплики. */
+  const endServerTurn = (l: Live, st: string | null, extra: Record<string, unknown> = {}): void => {
+    if (!l.serverTurn) return
+    l.serverTurn = null
+    if (!l.closing && live.get(l.spec.name) === l) {
+      if (st) status(l.spec.name, st, { reason: 'server_turn_done', ...extra })
+      if (l.bg.turnEnded()) { emitBackground(l); watchBackground() }
+    }
+    for (const w of l.serverWaiters.splice(0)) w()
+  }
+  /** Ждать конца серверного хода (не дольше `backgroundMaxMs`). false — не дождались. */
+  const waitServerTurn = (l: Live): Promise<boolean> => new Promise<boolean>((resolve) => {
+    if (!l.serverTurn) { resolve(true); return }
+    const done = (): void => { clearTimeout(t); resolve(true) }
+    const t = setTimeout(() => { l.serverWaiters = l.serverWaiters.filter((f) => f !== done); resolve(false) }, config.backgroundMaxMs)
+    t.unref?.()
+    l.serverWaiters.push(done)
+  })
 
   const netProbe = opts.netCheck
     ?? ((provider: 'codex'): Promise<NetCheck> =>
@@ -726,6 +753,7 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
       // Субагенты и команды жили в умершем процессе — фон кончился вместе с ним. ДО конца хода: иначе его
       // открытые элементы на миг ушли бы в фон.
       if (!l.closing) clearBackground(l, 'provider_exit')
+      endServerTurn(l, 'failed', { message: why })
       const ctx = l.turn
       if (ctx) ctx.finish({ turnId: ctx.turnId, ok: false, errorCode: 'provider_unavailable', message: why })
     }
@@ -1272,6 +1300,13 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
       case 'turn_started': {
         if (!own) return
         if (ctx && ctx.providerTurnId === null) ctx.providerTurnId = sig.providerTurnId
+        // Ход начал сервер (нашего `turn/start` не было): сессия работает — явно, иначе статус и сторож его не видят.
+        if (!ctx && sig.providerTurnId && l.serverTurn?.providerTurnId !== sig.providerTurnId) {
+          l.serverTurn = { providerTurnId: sig.providerTurnId, stopRequested: false }
+          l.bg.turnStarted()
+          status(l.spec.name, 'working', { reason: 'server_turn' })
+          logger.info('codex начал ход сам (не реплика человека)', { session: l.spec.name, providerTurnId: sig.providerTurnId })
+        }
         if (!l.confirmed && l.threadId) {
           l.confirmed = true
           // Только ТЕПЕРЬ тред возобновляем, и только теперь его id имеет смысл в реестре.
@@ -1289,7 +1324,16 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
         return
       }
       case 'turn_completed': {
-        if (!own || !ctx) return
+        if (!own) return
+        if (!ctx) {
+          const srv = l.serverTurn
+          if (!srv || (sig.providerTurnId && sig.providerTurnId !== srv.providerTurnId)) return
+          // Стоп серверного хода попросил Пульт: `interrupted` уже написал менеджер.
+          if (sig.status === 'completed') endServerTurn(l, 'idle')
+          else if (sig.status === 'interrupted') endServerTurn(l, srv.stopRequested ? null : 'interrupted', sig.errorMessage ? { message: sig.errorMessage } : {})
+          else endServerTurn(l, 'failed', { message: sig.errorMessage || `ход завершился со статусом ${sig.status}` })
+          return
+        }
         if (ctx.providerTurnId !== null && sig.providerTurnId && sig.providerTurnId !== ctx.providerTurnId) return
         if (sig.status === 'completed') {
           ctx.finish({ turnId: ctx.turnId, ok: true, ...(ctx.textParts.length ? { text: ctx.textParts.join('\n') } : {}) })
@@ -1419,6 +1463,8 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
     // Признак жизни фоновой записи: уведомление её команды (`itemId`, в том числе `outputDelta`, который
     // переводчик глушит) или треда её субагента.
     if (own) { const itemId = str(params['itemId']); if (itemId) l.bg.touch(itemId) } else l.bg.touch(owner.parentNodeId as string)
+    // Команда хода печатает — ход жив (сторож тишины); переводчик этот поток глушит, в журнал он не идёт.
+    if (own && method === 'item/commandExecution/outputDelta' && !l.closing && live.get(owner.name) === l) opts.live?.(owner.name, { kind: 'output' })
     const mapped = l.mapper.push(method, params, own ? {} : { parentId: owner.parentNodeId as string })
     let bgMoved = false
     for (const draft of mapped.drafts) {
@@ -1427,7 +1473,7 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
         if (l.bg.onDraft(draft)) bgMoved = true
       }
     }
-    if (bgMoved && !l.closing && live.get(owner.name) === l) emitBackground(l)
+    if (bgMoved && !l.closing && live.get(owner.name) === l) { emitBackground(l); watchBackground() }
     if (mapped.live && !l.closing && live.get(owner.name) === l) for (const sig of mapped.live) opts.live?.(owner.name, sig)
     for (const sig of mapped.signals) applySignal(l, sig, own)
   }
@@ -1676,6 +1722,17 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
     if (l.threadPolicy && l.threadPolicy.approvalPolicy !== target.approvalPolicy) override['approvalPolicy'] = target.approvalPolicy
     if (l.threadPolicy && l.threadPolicy.sandbox !== target.sandbox) override['sandboxPolicy'] = await sandboxObject(l, c, target.sandbox)
     if (abandoned()) return giveUp('агент остановлен или снят до отправки реплики')
+    // Сервер ведёт свой ход (сообщение субагента разбудило тред): наш `turn/start` столкнулся бы с ним. Реплика
+    // ждёт его конца, как у занятой сессии.
+    if (l.serverTurn) {
+      logger.info('реплика ждёт конца хода, начатого сервером', { session: name, turnId })
+      if (!await waitServerTurn(l)) {
+        l.usingProcess = false
+        statusL('failed', { turnId, reason: 'server_turn_wait' })
+        return fail('timeout', `ход, начатый сервером, не кончился за ${Math.round(config.backgroundMaxMs / 60_000)} мин — реплика не отправлена`)
+      }
+      if (abandoned()) return giveUp('агент остановлен или снят, пока шёл ход сервера')
+    }
 
     // --- ход -------------------------------------------------------------------
     let finishOuter: (o: TurnOutcome) => void = () => {}
@@ -1728,6 +1785,7 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
       finish: (o) => { finishOuter(o) },
     }
     l.turn = ctx
+    l.bg.turnStarted()
     statusL('working', { turnId })
     // Модель снимка — переводчику (`context.updated`), в момент хода, а не смены (ревью, LOW 7).
     if (flags.model) l.mapper.setModel(flags.model)
@@ -1821,6 +1879,8 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
         sandboxObjects: {},
         pendingMcpKey: '',
         bg: newBackground(),
+        serverTurn: null,
+        serverWaiters: [],
       })
       // Ни процесса, ни треда: тред без хода не возобновляется (измерено), поэтому заводить
       // его заранее незачем, а выдумывать `providerSessionId` — тем более. Пустая строка
@@ -1864,6 +1924,18 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
       // а не «подумаю». Ответить на него всё равно будет нечему — ход снимается.
       dropApprovals(name, 'агент остановлен')
       const ctx = l.turn
+      const srv = l.serverTurn
+      if (!ctx && srv) {
+        // Ход, начатый сервером: снимаем тем же методом. Статус (`interrupted`) пишет менеджер; ждущие реплики
+        // отпускаются сразу — поздний `turn/completed` такого хода уже ничего не двигает.
+        srv.stopRequested = true
+        if (client && client.alive() && l.threadId) {
+          await client.request('turn/interrupt', { threadId: l.threadId, turnId: srv.providerTurnId }, 10_000)
+            .catch((e: unknown) => { logger.info('turn/interrupt хода сервера не понадобился', { session: name, error: (e as Error).message }) })
+        }
+        if (l.serverTurn === srv) endServerTurn(l, null)
+        return
+      }
       if (!ctx) return
       await interruptTurn(l, ctx)
       // `status.changed interrupted` здесь НЕ пишется: хозяин этого события — менеджер.
@@ -1909,6 +1981,8 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
         sandboxObjects: {},
         pendingMcpKey: '',
         bg: newBackground(),
+        serverTurn: null,
+        serverWaiters: [],
       })
       if (threadId) threadOwner.set(threadId, { name })
     },
@@ -1965,6 +2039,8 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
       }
       // Фон сессии снимается вместе с ней: её субагенты и команды больше никому не отчитываются.
       clearBackground(l, 'session_closed')
+      l.serverTurn = null
+      for (const w of l.serverWaiters.splice(0)) w()
       live.delete(name)
       status(name, 'done', {})
     },

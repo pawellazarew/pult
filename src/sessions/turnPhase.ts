@@ -59,9 +59,13 @@ export const PHASE_FRAME_KIND = 'turn.phase'
  */
 export type PhaseFrameData = { reset: true } | { phase: TurnPhase | null }
 
-/** `/bin/zsh -lc "npm test"` → `npm test`; всё остальное — как есть. */
+/**
+ * `/bin/zsh -lc "npm test"` → `npm test`: обёртка оболочки (любой путь к `sh`/`bash`/`zsh`/`dash`/`ksh`, флаги
+ * с `c`: `-c`, `-lc`, `-cl`, `-ilc`) и одна пара внешних кавычек. Кавычки внутри не раскрываются, ничего не
+ * прячется — команда видна целиком. Без обёртки — как есть.
+ */
 export function unwrapShell(cmd: string): string {
-  const m = /^(?:\/(?:usr\/)?bin\/)?(?:ba|z)?sh\s+-l?c\s+(['"])([\s\S]*)\1\s*$/.exec(cmd.trim())
+  const m = /^(?:\S*\/)?(?:ba|z|da|k)?sh\s+-[a-z]*c[a-z]*\s+(['"])([\s\S]*)\1\s*$/.exec(cmd.trim())
   return m ? (m[2] as string) : cmd
 }
 

@@ -8,7 +8,8 @@
 //
 // ЧТО СЧИТАЕТСЯ. Открытые на конец хода элементы СВОЕГО треда: субагент (`agent.spawned` без `agent.finished`) и
 // команда (`tool.called commandExecution` без `tool.finished`). Внутри хода они — инструменты хода (строка фазы), в
-// фон переходят только на конце хода. Счёт падает на их событии конца; всё снимается закрытием сессии и смертью
+// фон переходят на конце хода. Начатые ВНЕ хода (`item/started` обогнал `turn/completed`, сервер работает после
+// неподтверждённого стопа) — сразу фон. Счёт падает на их событии конца; всё снимается закрытием сессии и смертью
 // app-server; рестарт демона забывает их вместе с памятью адаптера.
 //
 // СТРАХОВКА. Конец может потеряться (сервер его не прислал) — запись не должна держать «фон · 1» вечно. Признак
@@ -40,6 +41,8 @@ export interface CodexBackground {
   onDraft(draft: EventDraft): boolean
   /** Признак жизни элемента: уведомление по его `itemId` или по треду его субагента. */
   touch(id: string): void
+  /** Ход начался (свой или серверный): новые элементы — инструменты хода, а не фон. */
+  turnStarted(): void
   /** Ход кончился: всё, что ещё открыто, — в фон. `true` — фон изменился. */
   turnEnded(): boolean
   /** Снять записи, молчащие дольше `silenceMs`. Возвращает снятые (пусто — фон не изменился). */
@@ -60,28 +63,46 @@ export function createCodexBackground(opts: { now: () => number; silenceMs: numb
   const items = new Map<string, Item>()
   const bgCount = (): number => { let n = 0; for (const it of items.values()) if (it.bg) n += 1; return n }
   const task = (id: string, it: Item): BackgroundTask => ({ id, type: it.type, description: it.description })
+  /**
+   * Узел дерева → его родитель (`parentId` черновика). По нему признак жизни внука (субагент субагента, его команда)
+   * доходит до записи верхнего уровня: иначе живой субагент, у которого работают только дети, снимался бы через час.
+   */
+  const parentOf = new Map<string, string>()
+  let inTurn = false
   const touch = (id: string): void => {
-    const it = items.get(id)
-    if (it) it.last = opts.now()
+    let cur: string | undefined = id
+    for (let depth = 0; cur !== undefined && depth < 32; depth++) {
+      const it = items.get(cur)
+      if (it) { it.last = opts.now(); return }
+      cur = parentOf.get(cur)
+    }
+  }
+  /** Элемент, начатый вне хода (сервер ещё работает после конца хода или неподтверждённого стопа), — сразу фон. */
+  const open = (id: string, type: Item['type'], description: string): boolean => {
+    items.set(id, { type, description, last: opts.now(), bg: !inTurn })
+    return !inTurn
   }
 
   return {
     onDraft(draft) {
-      if (draft.parentId) { touch(draft.parentId); return false }
       const d = obj(draft.data)
       const id = str(d['toolUseId'])
+      if (draft.parentId) {
+        if (id !== null && (draft.kind === 'agent.spawned' || draft.kind === 'tool.called')) parentOf.set(id, draft.parentId)
+        if (id !== null && (draft.kind === 'agent.finished' || draft.kind === 'tool.finished')) parentOf.delete(id)
+        touch(draft.parentId)
+        return false
+      }
       if (id === null) return false
       switch (draft.kind) {
         case 'agent.spawned': {
           const what = str(d['subagentType']) ?? str(d['description'])
-          items.set(id, { type: 'subagent', description: what ? `субагент ${what}` : 'субагент', last: opts.now(), bg: false })
-          return false
+          return open(id, 'subagent', what ? `субагент ${what}` : 'субагент')
         }
         case 'tool.called': {
           if (d['name'] !== 'commandExecution') return false
           const summary = toolSummary('commandExecution', obj(d['input']))
-          items.set(id, { type: 'command', description: summary || 'команда', last: opts.now(), bg: false })
-          return false
+          return open(id, 'command', summary || 'команда')
         }
         case 'agent.finished':
         case 'tool.finished': {
@@ -97,7 +118,10 @@ export function createCodexBackground(opts: { now: () => number; silenceMs: numb
 
     touch,
 
+    turnStarted() { inTurn = true },
+
     turnEnded() {
+      inTurn = false
       let moved = false
       const t = opts.now()
       for (const it of items.values()) {
@@ -122,6 +146,8 @@ export function createCodexBackground(opts: { now: () => number; silenceMs: numb
     clear() {
       const had = bgCount() > 0
       items.clear()
+      parentOf.clear()
+      inTurn = false
       return had
     },
 

@@ -506,16 +506,53 @@ describe('сторож тишины: только настоящий ход (28.
     } finally { await w.done() }
   })
 
-  it('открытый инструмент хода (долгий тест, sleep) — не «завис»; после его конца тишина считается заново', async () => {
+  it('открытый вызов инструмента — порог втрое больше, но висящий без конца вызов всё равно «завис»', async () => {
     const w = world()
     try {
       say(w.manager, 'status.changed', { status: 'working', turnId: 't1' })
-      say(w.manager, 'tool.called', { toolUseId: 'exec-1', name: 'commandExecution', input: { command: 'sleep 600' } })
-      await sleep(900)
-      assert.equal(w.stalls().length, 0, 'инструмент работает — сторож молчит')
+      say(w.manager, 'tool.called', { toolUseId: 'exec-1', name: 'commandExecution', input: { command: 'cat' } })
+      const t0 = Date.now()
+      await sleep(550)
+      assert.equal(w.stalls().length, 0, 'инструмент работает — обычного порога мало')
       assert.equal(w.manager.phase('w')?.phase, 'tool', 'строка фазы показывает инструмент')
+      assert.ok(await waitFor(() => w.stalls().length > 0, 3000), 'вызов ждёт stdin и молчит — втрое дольше порога, и «завис»')
+      assert.ok(Date.now() - t0 >= 850, 'не раньше тройного порога')
+      await sleep(400)
+      assert.equal(w.stalls().length, 1, 'одно «завис» на ход')
+    } finally { await w.done() }
+  })
+
+  it('инструмент давно открыт, а свежее событие корня — модель: обычный порог (поток модели повис)', async () => {
+    const w = world()
+    try {
+      say(w.manager, 'status.changed', { status: 'working', turnId: 't1' })
+      say(w.manager, 'agent.spawned', { toolUseId: 'call_a', name: 'Agent', agentThreadId: 'thr-a' })
+      say(w.manager, 'tool.called', { toolUseId: 'exec-1', name: 'commandExecution', input: { command: 'npm run dev' } })
+      say(w.manager, 'message.delta', { text: 'пишу ответ', itemId: 'm1' })
+      const t0 = Date.now()
+      assert.ok(await waitFor(() => w.stalls().length > 0, 3000))
+      assert.ok(Date.now() - t0 < 850, 'открытые субагент и команда не дают модели молчать втрое дольше')
+    } finally { await w.done() }
+  })
+
+  it('вывод команды Codex (output) и снимки лимитов: первое — жизнь, второе — нет', async () => {
+    const w = world()
+    try {
+      say(w.manager, 'status.changed', { status: 'working', turnId: 't1' })
+      say(w.manager, 'tool.called', { toolUseId: 'exec-1', name: 'commandExecution', input: { command: 'npm test' } })
+      const until = Date.now() + 1300
+      while (Date.now() < until) {
+        w.manager.live('w', { kind: 'output' })
+        await sleep(80)
+      }
+      assert.equal(w.stalls().length, 0, 'тест печатает — ход жив')
       say(w.manager, 'tool.finished', { toolUseId: 'exec-1', name: 'commandExecution', status: 'completed' })
-      assert.ok(await waitFor(() => w.stalls().length > 0, 3000), 'после инструмента настоящая тишина — «завис»')
+      const t0 = Date.now()
+      const ping = setInterval(() => say(w.manager, 'usage.updated', { source: 'rate_limit_event', status: 'allowed' }), 50)
+      try {
+        assert.ok(await waitFor(() => w.stalls().length > 0, 3000), 'снимки лимитов аккаунта не прячут зависание')
+      } finally { clearInterval(ping) }
+      assert.ok(Date.now() - t0 < 850)
     } finally { await w.done() }
   })
 
@@ -549,6 +586,14 @@ describe('сторож тишины: только настоящий ход (28.
       assert.equal(manager.list()[0]?.lastStatus, 'idle')
       const last = store.readFrom(0, { sessionId: 'w' }).at(-1)
       assert.deepEqual(last?.data, { status: 'idle', reason: 'permission_outside_turn' }, 'окно видит то же событием')
+      // Ход упал, а субагент ещё спросил: после ответа — снова «ошибка», без новой карточки ошибки.
+      say(manager, 'status.changed', { status: 'working', turnId: 't0' })
+      say(manager, 'status.changed', { status: 'failed', turnId: 't0', message: 'упал' })
+      say(manager, 'permission.requested', { id: 'p3', toolName: 'commandExecution' })
+      say(manager, 'permission.resolved', { id: 'p3', decision: 'allow' })
+      assert.equal(manager.list()[0]?.lastStatus, 'failed')
+      assert.equal(store.readFrom(0, { sessionId: 'w' }).at(-1)?.data['reason'], 'permission_outside_turn')
+      assert.equal(store.attention('w')?.kind, 'ask', 'новой карточки ошибки нет — последнее внимание сам вопрос')
       // Внутри хода — по-прежнему «ход продолжается».
       say(manager, 'status.changed', { status: 'working', turnId: 't1' })
       say(manager, 'permission.requested', { id: 'p2', toolName: 'commandExecution' })

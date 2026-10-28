@@ -19,6 +19,7 @@ import { ensureLayout, layout } from '../dist/core/paths.js'
 import type { NetCheck } from '../dist/env/net.js'
 import { createBroker } from '../dist/perm/broker.js'
 import type { PermBroker } from '../dist/perm/broker.js'
+import { createCodexBackground } from '../dist/adapters/codex/background.js'
 import { FAKE_CODEX, FAKE_CODEX_SCRIPTED, sleep, waitFor } from './helpers.js'
 
 const seenPids: number[] = []
@@ -632,5 +633,64 @@ describe('codex: фоновая работа после хода — «фон ·
       assert.equal(last?.reason, 'session_closed')
       assert.equal(statuses(r).at(-1), 'done')
     } finally { await r.adapter.shutdown(); r.remove() }
+  })
+})
+
+describe('codex: ход, начатый сервером (сообщение субагента будит родителя)', () => {
+  const st = (r: Rig): string[] => r.drafts.filter((d) => d.kind === 'status.changed').map((d) => `${String(d.data?.['status'])}:${String(d.data?.['reason'] ?? '')}`)
+
+  it('working {server_turn} → idle {server_turn_done}; реплика человека ждёт его конца, а не сталкивается', async () => {
+    const r = rig({ fake: { bgPauseMs: 400 } })
+    try {
+      await r.adapter.startSession(spec(r, 'w'))
+      await (await r.adapter.send('w', '[[server-turn]] начни')).done
+      assert.ok(await waitFor(() => st(r).includes('working:server_turn'), 3000), `статусы: ${st(r).join(', ')}`)
+      assert.ok(r.drafts.some((d) => d.kind === 'message.done' && d.data?.['text'] === 'субагент отчитался'))
+      // Человек пишет посреди хода сервера.
+      const second = await r.adapter.send('w', 'ещё вопрос')
+      const outcome = await second.done
+      assert.equal(outcome.ok, true)
+      assert.deepEqual(r.raw().filter((x) => x.ev === 'collision'), [], 'turn/start ушёл посреди хода сервера')
+      const order = r.raw().map((x) => x.ev === 'server-turn-completed' ? 'srv-done' : x.msg?.method === 'turn/start' ? 'turn/start' : null).filter(Boolean)
+      assert.deepEqual(order, ['turn/start', 'srv-done', 'turn/start'])
+      const s = st(r)
+      assert.ok(s.indexOf('idle:server_turn_done') > s.indexOf('working:server_turn'))
+      assert.equal(s.at(-1), 'idle:')
+    } finally { await r.adapter.shutdown(); r.remove() }
+  })
+})
+
+describe('codex: фон — чистый счёт (background.ts)', () => {
+  let t = 0
+  const bg = (): ReturnType<typeof createCodexBackground> => createCodexBackground({ now: () => t, silenceMs: 1000 })
+  const d = (kind: string, data: Record<string, unknown>, parentId?: string): EventDraft =>
+    ({ sessionId: 'w', provider: 'codex', kind: kind as EventDraft['kind'], data, ...(parentId ? { parentId } : {}) })
+
+  it('элемент, начатый ВНЕ хода, — сразу фон; внутри хода — только на его конце', () => {
+    t = 0
+    const b = bg()
+    b.turnStarted()
+    assert.equal(b.onDraft(d('tool.called', { toolUseId: 'e1', name: 'commandExecution', input: { command: 'make' } })), false)
+    assert.equal(b.data().count, 0, 'в ходе — инструмент хода')
+    assert.equal(b.turnEnded(), true)
+    assert.equal(b.data().count, 1)
+    assert.equal(b.onDraft(d('agent.spawned', { toolUseId: 'a1', name: 'Agent', subagentType: '/root/late' })), true, 'после конца хода — сразу фон')
+    assert.equal(b.data().count, 2)
+    assert.deepEqual(b.data().tasks.map((x) => x.description), ['make', 'субагент /root/late'])
+  })
+
+  it('жизнь внука (субагент субагента) держит запись верхнего уровня', () => {
+    t = 0
+    const b = bg()
+    b.turnStarted()
+    b.onDraft(d('agent.spawned', { toolUseId: 'a1', name: 'Agent' }))
+    b.turnEnded()
+    b.onDraft(d('agent.spawned', { toolUseId: 'a2', name: 'Agent' }, 'a1'))
+    b.onDraft(d('tool.called', { toolUseId: 'e2', name: 'commandExecution', input: { command: 'sleep 1' } }, 'a2'))
+    for (t = 500; t <= 3000; t += 500) b.touch('a2')
+    assert.deepEqual(b.sweep(), [], 'внук жив — субагент не снят')
+    assert.equal(b.data().count, 1)
+    t += 1500
+    assert.equal(b.sweep().length, 1, 'замолчали все — снят')
   })
 })

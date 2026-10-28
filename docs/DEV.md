@@ -2036,34 +2036,57 @@ pult.collapsed. При возвращении фокуса окно обновл
   блокировок и `session.started` прежние. Окно сворачивает журнал той же функцией — разойтись не может.
 - **Вопрос вне хода.** `permission.resolved` по-прежнему возвращает `blocked_permission` в `working` («ход
   продолжается»). Если хода нет (`turnStartedAt` пуст — спросил субагент, переживший ход), менеджер следом пишет
-  `status.changed idle {reason: 'permission_outside_turn'}`: иначе поле ввода было бы заперто до следующего хода.
+  `status.changed {status: <статус до вопроса>, reason: 'permission_outside_turn'}` (`failed`/`interrupted`/`limited`/
+  `done` сохраняются, остальное — `idle`): иначе поле ввода было бы заперто до следующего хода. Внимания такой возврат
+  не даёт и очередь не ставит — о той ошибке уже сказали.
 - **Сторож тишины** (`checkSilence` в `src/sessions/manager.ts`). Кричит только при идущем ходе (`status` `working` И
-  `turnStartedAt` — был `status.changed working`, ещё не было конца). Признаки жизни — любое событие сессии (и поток
-  субагентов) и живые сигналы адаптера (`live`: размышления, `active`, `request`, `thinking`) — они в журнал не пишутся,
-  но сдвигают `lastEventAt`. Пока в ходе открыт инструмент или субагент корня (`phaseTracker.toolOpen`: `tool.called`
-  или `agent.spawned` без конца — долгий тест, `sleep`, ожидание), «завис» не пишется: строка фазы показывает
-  инструмент и секунды, а его конец — событие, от которого тишина считается заново. `turn.stalled` — по-прежнему один
-  раз на ход и только при настоящей тишине.
-- **Команды Codex в строке фазы.** `toolSummary` снимает обёртку оболочки (`/bin/zsh -lc "npm test"` → `npm test`, и
-  в ленте тоже), окно зовёт `commandExecution` «shell»: «выполняет: shell npm test… 8 с», в дереве — «shell».
+  `turnStartedAt` — был `status.changed working`, ещё не было конца). Признаки жизни (`isLife`) — события сессии (и
+  поток субагентов), кроме справочных: снимок лимитов аккаунта (`usage.updated rate_limit_event` — Codex приписывает его
+  каждой сессии с открытым ходом раз в несколько секунд), `background.changed`, `turn.stalled`, `session.configured`;
+  и живые сигналы адаптера (`live`: размышления, `active`, `request`, `thinking`, новый `output` — Codex
+  `item/commandExecution/outputDelta`, в журнал не пишется). Порог: если самое свежее событие корня разговора
+  (`ROOT_ACTIVITY`) — открытый `tool.called` (`toolTail`), то `3 × silenceMinutes` (тест, `sleep`, ожидание имеют
+  право молчать дольше модели), иначе обычный. Вызов, повисший без конца (ждёт stdin, повис MCP), всё равно даёт
+  «завис»; долгий субагент или команда, открытые раньше, не прикрывают повисший поток модели. Один `turn.stalled` на ход.
+- **Команды Codex в строке фазы.** `toolSummary` снимает обёртку оболочки (`unwrapShell`: любой путь к
+  `sh`/`bash`/`zsh`/`dash`/`ksh`, флаги с `c` — `-c`, `-lc`, `-cl`; одна пара внешних кавычек, внутренние не
+  раскрываются) — `/bin/zsh -lc "npm test"` → `npm test`, и в ленте тоже (у Claude `bash -c "…"` — так же); окно зовёт
+  `commandExecution` «shell»: «выполняет: shell npm test… 8 с», в дереве — «shell».
 - **Фон Codex** (`src/adapters/codex/background.ts`, по `Live` адаптера). Открытые элементы СВОЕГО треда — субагент
   (`agent.spawned` без `agent.finished`) и команда (`tool.called commandExecution` без `tool.finished`) — на конце хода
-  (`finishOuter`, любой исход) уходят в фон: `background.changed {count, tasks: [{id, type: subagent|command,
-  description}]}` — та же форма, что у Claude, поэтому окно, `phaseTracker` (фаза `background`) и «фон · N» работают без
+  (`finishOuter`, любой исход) уходят в фон; начатые ВНЕ хода (`item/started` обогнал `turn/completed`, сервер работает
+  после неподтверждённого стопа) — сразу. Событие — `background.changed {count, tasks: [{id, type: subagent|command,
+  description}]}`, та же форма, что у Claude, поэтому окно, `phaseTracker` (фаза `background`) и «фон · N» работают без
   изменений. Счёт падает на событии конца элемента; `close()` (`reason: session_closed`) и смерть app-server
   (`provider_exit`, ДО закрытия хода) обнуляют его; рестарт демона забывает его вместе с адаптером (окно гасит фон на
   `daemon.started`). Страховка от потерянного конца: признак жизни записи — уведомление по её `itemId` (в том числе
-  `outputDelta`, который переводчик глушит) или по треду её субагента; запись, молчащая дольше
-  `min(CODEX_BACKGROUND_SILENCE_MS = 1 ч, backgroundMaxMs)`, снимается (`reason: background_silence`, предупреждение в
-  журнале демона). Проверка — таймер адаптера (`unref`), он живёт, только пока фон не пуст. Статус сессии фоном не
-  двигается: `idle`, ввод открыт, сторож молчит.
+  `outputDelta`) или по треду её субагента, а через `parentId` черновиков — и по внукам (субагент субагента, его
+  команды); запись, молчащая дольше `min(CODEX_BACKGROUND_SILENCE_MS = 1 ч, backgroundMaxMs)`, снимается
+  (`reason: background_silence`, предупреждение в журнале демона). Команды при стопе НЕ снимаются: в живых журналах
+  unified exec Codex переживает `interrupted` и присылает конец позже (через 3 с, через 14 мин). Проверка — таймер
+  адаптера (`unref`), он живёт, только пока фон не пуст. Статус сессии фоном не двигается: `idle`, ввод открыт.
+- **Ход, начатый сервером Codex.** `turn/started` своего треда без нашего `turn/start` (сообщение субагента будит
+  родителя — `inter_agent_communication_metadata.trigger_turn` в записях Codex) — `status.changed working {reason:
+  server_turn}`, его `turn/completed` — `idle`/`failed`/`interrupted {reason: server_turn_done}` (как
+  `background_turn_done` у Claude: «готово» в Inbox, очередь реплик идёт дальше). Реплика человека, пришедшая в это
+  время, ждёт конца хода сервера в адаптере (не дольше `backgroundMaxMs`, иначе `failed {reason: server_turn_wait}`) —
+  её `turn/start` не сталкивается с ним; окно и так ставит её в очередь (сессия `working`). Стоп — `turn/interrupt`
+  этого хода, статус пишет менеджер. Смерть app-server закрывает его `failed`.
+- **Фон Claude при смерти процесса.** `dropBackground` (src/adapters/claude/adapter.ts): процесс сессии вышел, снят или
+  заменён, а счёт фоновых задач был не нулевой, — `background.changed {count: 0, reason}` (`background_process_exit`,
+  `process_exit`, `process_released`, `process_replaced`, `session_closed`). Раньше счёт обнулялся молча, и после стопа
+  простаивающей сессии с фоновыми задачами или падения CLI строка оставалась «в фоне» до рестарта демона.
 - **Окно.** `statusRank(status, pending, background)` и `agentRank(a)` (`ui/src/model/agents.ts`): беседа с фоном —
   ранг 1, то есть секция и фильтр «Работают», счётчик проекта; фон кончился — назад в свою группу. `chatStatus` —
   «В фоне» (`tone: run`, без «тихого» стиля), кроме `failed`/`limited`: их подпись важнее, фон виден значком «фон · N».
   Поле ввода не запирается (`statusView(idle).busy === false`).
 - Тестовые швы: программируемый codex — сценарии `[[background]]` (субагент и команда переживают ход; паузы
-  `bgPauseMs`) и `[[background-lost]]` (конец команды потерян).
+  `bgPauseMs`), `[[background-lost]]` (конец команды потерян), `[[server-turn]]` (сервер сам начинает ход; `turn/start`
+  поверх идущего хода пишется в журнал фальшивки как `collision`).
 - Тесты: `test/sessions.test.ts` (таблица свёртки; четыре разобранных случая синтетикой; сторож — тишина в ходе, нет
-  крика после конца хода, открытый инструмент, живые сигналы; вопрос вне хода), `test/codex-safety.test.ts` (фон
-  2 → 1 → 0 и статус после хода, потерянный конец, закрытие сессии), `ui/test/navigation.test.ts` (ранг, секция, фильтр,
-  подпись), `ui/test/phase.test.ts` («shell», обёртка оболочки, значок «фон · N»).
+  крика после конца хода, тройной порог открытого вызова и «завис» висящего, свежее событие модели — обычный порог,
+  `output` — жизнь, снимки лимитов — нет, живые сигналы; вопрос вне хода с возвратом `failed`),
+  `test/codex-safety.test.ts` (фон 2 → 1 → 0 и статус после хода, потерянный конец, закрытие сессии, ход сервера и
+  реплика без столкновения, чистый счёт: элемент вне хода, внуки), `test/claude-adapter.test.ts` (стоп и закрытие
+  обнуляют фон Claude), `ui/test/navigation.test.ts` (ранг, секция, фильтр, подпись), `ui/test/phase.test.ts`
+  («shell», обёртки оболочки, значок «фон · N»).

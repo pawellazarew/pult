@@ -17,13 +17,16 @@ import { REASONING_TAIL, toolSummary } from './turnPhase.js'
  *   * `active` — первый признак жизни провайдера в ходе (Claude `system/init`, Codex `turn/started`);
  *   * `request` — новое обращение к модели внутри хода (Claude `message_start`);
  *   * `thinking` — начался блок размышлений (Claude `thinking`/`redacted_thinking`, Codex элемент `reasoning`);
- *   * `reasoning` — кусок текста размышлений (Claude `thinking_delta`, Codex `item/reasoning/summaryTextDelta`), СЫРОЙ.
+ *   * `reasoning` — кусок текста размышлений (Claude `thinking_delta`, Codex `item/reasoning/summaryTextDelta`), СЫРОЙ;
+ *   * `output` — команда печатает (Codex `outputDelta`): фазу не двигает, только сторожу тишины.
  */
 export type LiveSignal =
   | { kind: 'active' }
   | { kind: 'request' }
   | { kind: 'thinking' }
   | { kind: 'reasoning'; text: string }
+  /** Вывод работающей команды (Codex `item/commandExecution/outputDelta`): признак жизни хода для сторожа тишины. */
+  | { kind: 'output' }
 
 export interface PhaseTracker {
   /** Ход принят: реплика записана, дальше страж сети, MCP, спавн — «запускается». */
@@ -37,11 +40,6 @@ export interface PhaseTracker {
   get(name: string, opts?: { reasoning?: boolean }): TurnPhase | null
   /** Сессии, у которых сейчас есть фаза. */
   names(): string[]
-  /**
-   * В идущем ходе открыт инструмент или субагент корня (`tool.called`/`agent.spawned` без конца): долгий тест,
-   * `sleep`, ожидание. Сторож тишины в это время молчит — строка фазы и так показывает инструмент и секунды.
-   */
-  toolOpen(name: string): boolean
   forget(name: string): void
 }
 
@@ -218,6 +216,8 @@ export function createPhaseTracker(opts: PhaseTrackerOptions = {}): PhaseTracker
           t.reasoning = (t.reasoning + sig.text).slice(-RAW_TAIL)
           moved = true
           break
+        case 'output':
+          break
       }
       if (moved) changed(name)
     },
@@ -245,10 +245,6 @@ export function createPhaseTracker(opts: PhaseTrackerOptions = {}): PhaseTracker
 
     names() {
       return [...new Set([...turns.keys(), ...bg.keys()])]
-    },
-
-    toolOpen(name) {
-      return (turns.get(name)?.tools.length ?? 0) > 0
     },
 
     forget(name) {

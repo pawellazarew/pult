@@ -37,6 +37,9 @@
 //                              Codex): после `turn/completed` — сообщение и `subAgentActivity completed` субагента,
 //                              `outputDelta` и `item/completed` команды (паузы `bgPauseMs`). `-lost` — команда так и
 //                              не кончается (конец потерян). Формы — как в журнале живого хода
+//   server-turn                28.10.2026: ход кончается, а через `bgPauseMs` сервер САМ начинает новый ход на том же
+//                              треде (сообщение субагента будит родителя): `turn/started`, ответ, через `bgPauseMs` —
+//                              `turn/completed`. Реплика человека в это время не должна столкнуться с ним
 //   simple                     обычный ход с ответом «OK»
 //
 // Запросы разрешений он ЖДЁТ: ответ клиента логируется, и ход продолжается только после него
@@ -272,6 +275,22 @@ async function runTurn(scenario, threadId, turnId) {
       out({ jsonrpc: '2.0', method: 'item/completed', params: { threadId, turnId, item: { type: 'commandExecution', id: cid, command: "/bin/zsh -lc 'npm test'", cwd: '/tmp', status: 'completed', exitCode: 0 } } })
       return
     }
+    case 'server-turn': {
+      const pause = Number(cfg.bgPauseMs ?? 300)
+      await finish()
+      await sleep(pause)
+      const t = threads.get(threadId)
+      const own = uid('sc-srv-turn')
+      if (t) t.turn = own
+      const turn = (status, completedAt) => ({ id: own, items: [], itemsView: 'notLoaded', status, error: null, startedAt: 3, completedAt, durationMs: completedAt ? 1 : null })
+      out({ jsonrpc: '2.0', method: 'turn/started', params: { threadId, turn: turn('inProgress', null) } })
+      out({ jsonrpc: '2.0', method: 'item/completed', params: { threadId, turnId: own, item: { type: 'agentMessage', id: `msg-${own}`, text: 'субагент отчитался', phase: 'final_answer' } } })
+      await sleep(pause)
+      if (t && t.turn === own) t.turn = null
+      log({ ev: 'server-turn-completed' })
+      out({ jsonrpc: '2.0', method: 'turn/completed', params: { threadId, turn: turn('completed', 4) } })
+      return
+    }
     default:
       await sleep(30)
       await finish()
@@ -305,6 +324,8 @@ async function onRequest(id, method, params) {
       const scenario = marked ? marked[1] : 'simple'
       const turnId = uid('sc-turn')
       const t = threads.get(params.threadId)
+      // Ход на треде ещё идёт (в том числе начатый сервером) — столкновение: тест его видит.
+      if (t && t.turn) log({ ev: 'collision', running: t.turn })
       if (t) t.turn = turnId
       replyOk(id, { turn: { id: turnId, items: [], itemsView: 'notLoaded', status: 'inProgress', error: null, startedAt: 1, completedAt: null, durationMs: null } })
       out({ jsonrpc: '2.0', method: 'turn/started', params: { threadId: params.threadId, turn: { id: turnId, items: [], itemsView: 'notLoaded', status: 'inProgress', error: null, startedAt: 1, completedAt: null, durationMs: null } } })
