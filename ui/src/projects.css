@@ -24,7 +24,7 @@
 .project-manager .project-group .proj-btn { opacity: 0; }
 .project-manager .project-group > .proj-h:hover .proj-btn, .project-manager .project-group:focus-within > .proj-h .proj-btn { opacity: 1; }
 .project-chats.chat-section { padding: 1px 0 0 12px; }
-.project-chats .ag { padding: 9px 9px; margin: 0 0 2px; border-radius: 7px; }
+.project-chats .ag { scroll-margin-top: 40px; scroll-margin-bottom: 6px; padding: 9px 9px; margin: 0 0 2px; border-radius: 7px; }
 .project-chats .ag-name { font-size: 12px; }
 .project-chats .ag-meta .chat-project { display: none; }
 .project-chats .ag-meta .chat-provider::before { display: none; }

@@ -70,6 +70,7 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
   const [menu, setMenu] = useState<OpenMenu | null>(null)
   const [archiveOpen, setArchiveOpen] = useState(false)
   const [query, setQuery] = useState('')
+  const [revealRequest, setRevealRequest] = useState(0)
   const sections = chatSections(p.groups, query)
   const [filter, setFilter] = useState<ProjectFilter>('all')
   const [longProjects, setLongProjects] = useState(new Set<string>())
@@ -93,7 +94,7 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
       if (item.top < bounds.top || item.bottom > bounds.bottom) row.scrollIntoView({ block: 'nearest' })
     }, 240)
     return () => window.clearTimeout(timer)
-  }, [p.selected, selectedProject])
+  }, [p.selected, selectedProject, revealRequest])
   const closeMenu = useCallback(() => setMenu(null), [])
 
   const projectMenu = (e: MouseEvent<HTMLElement>, g: ProjectGroup): void => {
@@ -129,7 +130,10 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
     ] })
   }
   const row = (a: AgentView, project: string, shortcut = false): ReactElement =>
-    <SessionRow key={a.name} a={a} project={project} shortcut={shortcut} selected={a.name === p.selected} now={p.now} onSelect={p.onSelect} onMenu={sessionMenu} />
+    <SessionRow key={a.name} a={a} project={project} shortcut={shortcut} selected={a.name === p.selected} now={p.now} onSelect={(name) => {
+      if (shortcut) { if (p.collapsed.has(project)) p.onToggle(project); setRevealRequest((n) => n + 1) }
+      p.onSelect(name)
+    }} onMenu={sessionMenu} />
   return (
     <nav className="agents" aria-label="Проекты и сессии">
       <div className="sidebar-top">

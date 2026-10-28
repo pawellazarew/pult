@@ -63,6 +63,9 @@ describe('проекты как основная навигация', () => {
       const row = await selected.boundingBox(), area = await h.win.getByTestId('sidebar-projects').boundingBox()
       return !!row && !!area && row.y >= area.y && row.y + row.height <= area.y + area.height + 1
     }))
+    await project.getByTestId('project-toggle').click()
+    await h.win.locator('[data-testid="recent-row"][data-agent="chat-00"]').click()
+    assert.ok(await waitFor(async () => await project.getAttribute('open') !== null), 'повторный выбор текущего чата тоже раскрывает проект')
     await h.win.locator('[data-testid="agent-row"][data-agent="chat-59"]').click()
   })
 
