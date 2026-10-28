@@ -1,0 +1,14 @@
+.attachment-area { padding: 10px 12px 4px; min-width: 0; }
+.attachment-list { display: flex; flex-wrap: wrap; gap: 8px; max-height: 160px; overflow: auto; }
+.attachment-card { display: flex; align-items: center; gap: 9px; min-width: 0; max-width: 260px; padding: 7px; border: 1px solid var(--line); border-radius: 9px; background: var(--ground); }
+.attachment-preview, .attachment-icon { display: flex; flex: 0 0 40px; width: 40px; height: 40px; align-items: center; justify-content: center; border-radius: 5px; overflow: hidden; color: var(--mut); background: var(--panel); }
+.attachment-preview img { width: 100%; height: 100%; object-fit: cover; }
+.attachment-info { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.attachment-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; }
+.attachment-meta, .attachment-retention, .attachment-saving { font-size: 11px; color: var(--mut); }
+.attachment-retention { display: block; padding: 7px 0 2px; }
+.attachment-remove { border: 0; border-radius: 5px; background: transparent; color: var(--mut); cursor: pointer; min-width: 28px; min-height: 32px; font-size: 18px; }
+.attachment-remove:hover, .attachment-remove:focus-visible { color: var(--ink); background: var(--panel); }
+.composer .box.attachment-over { outline: 2px solid var(--accent); outline-offset: -2px; }
+.attach-picker { min-width: 32px; padding: 5px 9px; }
+.attach-picker-input { display: none; }

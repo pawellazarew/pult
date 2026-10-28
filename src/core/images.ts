@@ -1,6 +1,6 @@
 // Изображения хранятся отдельно от журнала: в событии только пути, не base64.
 import { createHash } from 'node:crypto'
-import { constants, closeSync, fstatSync, mkdirSync, openSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { constants, closeSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
 
@@ -32,14 +32,32 @@ export function readScopedImage(scope: ImageScope, source: string): ImageFile {
   const cwd = canonical(scope.cwd)
   const media = canonical(path.join(home, 'media', scope.sessionId))
   const generated = canonical(path.join(scope.codexHome ?? path.join(userHome, '.codex'), 'generated_images'))
-  const file = realpathSync(path.resolve(scope.cwd, source))
+  const sourcePath = path.resolve(scope.cwd, source)
+  const file = realpathSync(sourcePath)
+  // Вложения — своя реальная папка внутри канонического PULT_HOME. Канонизировать произвольный
+  // attachments/owner-симлинк как разрешённый root нельзя: он может вести к картинкам вне хранилища.
+  const attachments = path.join(home, 'attachments')
+  const ownAttachments = path.join(attachments, scope.sessionId)
+  let attachmentsSafe = false
+  try {
+    attachmentsSafe = [attachments, ownAttachments].every((dir) => {
+      const stat = lstatSync(dir)
+      return stat.isDirectory() && !stat.isSymbolicLink() && realpathSync(dir) === dir
+    })
+  } catch { /* папки вложений ещё нет */ }
   const roots = [media, generated]
+  if (attachmentsSafe) roots.push(ownAttachments)
+  // Если cwd включает весь PULT_HOME, оно всё равно не открывает вложения остальных сессий.
+  // Проверяем и исходный путь: симлинк папки дня/owner/root наружу не превращается в обычный project image.
+  const fromAttachments = inside(attachments, sourcePath) || inside(path.join(path.resolve(scope.home), 'attachments'), sourcePath)
+  const badAttachments = (fromAttachments && (!attachmentsSafe || !inside(ownAttachments, file)))
+    || (inside(attachments, file) && (!attachmentsSafe || !inside(ownAttachments, file)))
   // Корень диска и домашний каталог не превращаются в разрешение читать любые картинки пользователя.
   if (!inside(cwd, userHome) && cwd !== path.parse(cwd).root) roots.push(cwd)
   const allowed = roots.some((root) => { try { return inside(realpathSync(root), file) } catch { return false } })
   const sensitive = ['.ssh', '.aws', '.gnupg', '.config', '.claude'].some((n) => inside(canonical(path.join(userHome, n)), file))
   const otherMedia = inside(canonical(path.join(home, 'media')), file) && !inside(media, file)
-  if (!allowed || sensitive || otherMedia || inside(canonical(path.join(home, 'run')), file)) throw new Error('Изображение вне папки проекта')
+  if (!allowed || sensitive || otherMedia || badAttachments || inside(canonical(path.join(home, 'run')), file)) throw new Error('Изображение вне папки проекта')
   const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW)
   try {
     const stat = fstatSync(fd)

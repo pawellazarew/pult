@@ -7,7 +7,7 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/hero-dark.png">
   <source media="(prefers-color-scheme: light)" srcset="docs/images/hero-light.png">
-  <img alt="The Pult window: conversations grouped by attention on the left, a Claude conversation in the middle and collapsed tool activity" src="docs/images/hero-light.png" width="100%">
+  <img alt="The Pult window: conversations grouped by project on the left, a Claude conversation in the middle and collapsed tool activity" src="docs/images/hero-light.png" width="100%">
 </picture>
 
 > [!NOTE]
@@ -166,8 +166,13 @@ projects and providers. Selecting an old conversation from Recent reveals it ins
 ⌘1…9 selects the first nine conversations in the visible list. Technical connection details are under the
 connection indicator. ⌘K focuses conversation search; ⌘B hides or shows the sidebar. Model, effort and
 approval mode sit in the composer. Context, subscription usage and session details open from its info button.
-When reading older messages, “К последним” returns to the latest reply. Errors show a short excerpt first;
-the full input and output remain available in a separate disclosure.
+When reading older messages, “К последним” returns to the latest reply. Drag the project sidebar, right panel,
+file-tree and composer boundaries to resize them. Diagnostics has adjustable width and height. Arrow keys resize,
+double-click resets, and sizes persist. Narrow windows retain room for the conversation.
+
+Errors explain the failure and suggest a next step; original output remains under Technical details. Exit code 1
+is a generic failure, not a specific diagnosis. Explicit login, network, quota and access errors get their own
+explanations. A `grep`/`rg` search returning code 1 is explained as no matches.
 
 Local PNG, JPEG, GIF and WebP references appear as previews. Click to zoom, save a copy or open the file.
 New MCP screenshots and Codex image-generation results are stored separately from the journal and survive
@@ -224,17 +229,20 @@ Every question from every session goes to the Inbox (⌘I in the window, `pult p
   <img alt="The New session dialog: provider (claude or codex), session name, project folder, optional worktree branch, browser for the agent, approval mode, model and effort" src="docs/images/new-session-light.png" width="720">
 </picture>
 
-In the dialog, drop a folder onto the form to use it as the session folder; files dropped into the first message, or
-copied in Finder and pasted with ⌘V, become their full paths (quoted when they contain spaces), as in the chat input.
+**Attachments in the composer** (window 0.1.21). Drop files, paste files copied in Finder, paste a screenshot,
+or use the **＋** button. Cards show names, sizes, remove buttons and PNG/JPEG thumbnails; your text stays in
+the input. You can send an attachment without text. A screenshot without a disk file needs no manual saving.
 
-**Images from the clipboard** (window 0.1.20). ⌘V on an image without a file — a screenshot copied to the clipboard,
-"Copy image" in a browser — saves it as a PNG under `~/.pult/attachments/<session>/<date>/` (folders 0700, file 0600, PNG or JPEG source, up to
-25 MB, one per second, 1 GB a day) and pastes its path, in the chat input and in the first message (there, type the
-session name first). When the clipboard also holds plain text, the text is
-pasted, as everywhere else (Office and editors put a picture of the copied text next to it). Each Claude session gets only
-its own folder via `--add-dir` and reads its images without a question (without it, Claude asks about any file outside
-the session folder); Codex reads it within its sandbox. Pult deletes
-attachments older than 30 days. An older window says where to update it (Settings → Updates → Update window).
+Pult immediately saves file copies under `~/.pult/attachments/<session>/<date>/`, so deleting the original temporary
+file does not break the attachment. Limits: 20 files per message, 25 MB per file and 1 GB per day. Copies expire
+after 30 days; originals remain unchanged. Removing a card only removes it from the draft, keeping copies used by
+messages. Draft attachments survive reopening; saved files are checked before sending. In New session you can
+attach files before choosing a name; creation copies them into the final session's folder. Directories remain
+explicitly labelled references rather than recursive copies. Dropping a folder outside the prompt selects the
+session folder. Pasting text from Office still pastes text.
+
+Older windows retain path insertion. Update the window under Settings → Updates for cards and memory-backed
+files. Each Claude session receives only its own attachment directory; Codex uses its normal sandbox access rules.
 
 | mode (window label) | Claude | Codex |
 |---|---|---|

@@ -7,6 +7,8 @@ import './projects.css'
 import './media.css'
 import './files.css'
 import './pdf.css'
+import './resize.css'
+import './attachments.css'
 
 const root = document.getElementById('root')
 if (root) createRoot(root).render(<App />)

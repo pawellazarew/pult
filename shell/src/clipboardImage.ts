@@ -109,7 +109,7 @@ export function attachmentName(now: Date, hex: string): { day: string; file: str
 }
 
 /** Папка 0700, и именно папка: симлинк или файл на её месте — ошибка (симлинк не следуем). */
-function ensurePrivateDir(dir: string): void {
+export function ensurePrivateDir(dir: string): void {
   try { mkdirSync(dir, { mode: 0o700 }) } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e }
   const st = lstatSync(dir)
   if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(`${dir} — не папка`)

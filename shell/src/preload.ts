@@ -114,6 +114,37 @@ const bridge: PultBridge = {
     },
   },
 
+  attachments: {
+    async import(session, item) {
+      return await ipcRenderer.invoke(IPC.attachmentImport, session, item) as import('./contract.js').AttachmentResult
+    },
+    async files(session, files) {
+      if (!Array.isArray(files) || files.length > 20) return [{ error: 'Можно добавить не больше 20 файлов за один раз.' }]
+      const results: import('./contract.js').AttachmentResult[] = []
+      for (const file of files) {
+        try {
+          // Не принимаем произвольные path-строки страницы: настоящий File проверяет Electron.
+          const source = webUtils.getPathForFile(file)
+          let item: import('./contract.js').AttachmentInput
+          if (source) item = { name: file.name, path: source }
+          else {
+            if (file.size > 25 * 1024 * 1024) { results.push({ error: `${file.name}: файл больше 25 МБ.` }); continue }
+            item = { name: file.name, bytes: new Uint8Array(await file.arrayBuffer()) }
+          }
+          const reply = await ipcRenderer.invoke(IPC.attachmentFiles, session, item) as import('./contract.js').AttachmentResult
+          results.push(reply)
+        } catch { results.push({ error: 'Не удалось прочитать перетащенный файл. Перетащи его ещё раз.' }) }
+      }
+      return results
+    },
+    async clipboard(session) {
+      return await ipcRenderer.invoke(IPC.attachmentClipboard, session) as import('./contract.js').AttachmentResult[]
+    },
+    async preview(session, source) {
+      return await ipcRenderer.invoke(IPC.attachmentPreview, session, source) as { dataUrl: string } | { error: string }
+    },
+  },
+
   async openExternal(url: string): Promise<void> {
     await ipcRenderer.invoke(IPC.openExternal, url)
   },

@@ -16,7 +16,9 @@ import { obj } from '../model/types.js'
 import type { QueueItem } from '../model/types.js'
 import type { ProviderUsage } from '../model/usage.js'
 import { formatClock, formatResetIn, limitHolds, limitWindowsView } from '../model/usage.js'
-import { useFilePaths } from './useFilePaths.js'
+import { useAttachments } from './useAttachments.js'
+import { AttachmentStrip } from './AttachmentStrip.js'
+import { attachmentPrompt } from '../model/attachmentDrafts.js'
 import type { FilePathSource } from '../model/paths.js'
 import { APPROVAL_FULL_WARNING, approvalFooter, approvalHint } from '../model/newAgent.js'
 import { Chip, CMD, hhmm, Icon, IS_MAC, Kbd, ProviderTag } from './common.js'
@@ -35,10 +37,12 @@ import type { DraftStore } from '../model/drafts.js'
 import { expireQueueEdit, queueEditKey, saveQueueEdit, startQueueEdit } from '../model/queueEdit.js'
 import type { QueueEditApi, QueueEditState, QueueEditStep } from '../model/queueEdit.js'
 import { errorText, isBridgeError } from '../bridge.js'
+import { explainFailure } from '../model/errors.js'
 import { PermCard } from './PermCard.js'
 import { phaseAnnouncement, phaseElapsed, phaseText } from '../model/phase.js'
 import type { TurnPhase } from '../model/phase.js'
 import { takeAutoFocus } from '../lib/linkGuard.js'
+import { ResizableComposer } from './WorkspaceLayout.js'
 
 export interface ConversationProps {
   agent: AgentView
@@ -625,6 +629,9 @@ function ToolRow({ it, loadEvents }: { it: ToolItem; loadEvents?: (ids: number[]
   const shown = { input: detail && typeof detail === 'object' ? detail.input : it.input, ...(result !== undefined ? { result } : {}) }
   const sum = toolSummary(it.name, it.input)
   const dur = it.endTs ? Math.max(0, Date.parse(it.endTs) - Date.parse(it.ts)) : null
+  const failure = it.state === 'error' || (it.exitCode !== undefined && it.exitCode !== 0)
+    ? explainFailure(shown.result, { scope: 'tool', ...(it.exitCode !== undefined ? { exitCode: it.exitCode } : {}), ...(typeof shown.input['command'] === 'string' ? { command: shown.input['command'] } : {}) })
+    : null
   return (
     <div className="it it-tool" data-testid="tool-row" data-event-id={it.id}>
       <Gutter who="" cls="" ts={it.ts} />
@@ -633,21 +640,24 @@ function ToolRow({ it, loadEvents }: { it: ToolItem; loadEvents?: (ids: number[]
           <Icon name="chev" className="chev" />
           <span className="nm" title={it.name}>{friendlyTool(it.name)}</span>
           <span className="sum">{sum}</span>
-          <span className={`st t-${stateTone(it.state)}`}>
-            <StateMark state={it.state} />
+          <span className={`st t-${failure?.expected ? 'mut' : stateTone(it.state)}`} title={failure ? `${failure.explanation} ${failure.action}` : undefined}>
+            {failure?.expected ? <Icon name="info" /> : <StateMark state={it.state} />}
             {it.state !== 'stopped' && dur !== null && dur >= 100 ? formatSeconds(dur) : ''}
-            {it.exitCode !== undefined ? ` код ${it.exitCode}` : ''}
+            {failure?.expected ? ' нет совпадений' : failure ? ' не выполнено' : ''}
           </span>
         </button>
         <ImageGallery sources={it.images ?? []} />
         {open && (
           <div className="tool-detail">
-            {it.state === 'error' && <div className="tool-error-preview" data-testid="tool-error-preview">
-              <strong>Действие завершилось с ошибкой{it.exitCode !== undefined ? ` · код ${it.exitCode}` : ''}</strong>
+            {failure && <div className={`tool-error-preview${failure.expected ? ' expected-result' : ''}`} data-testid="tool-error-preview">
+              <strong>{failure.title}</strong>
+              <span>{failure.explanation}</span>
+              <span>{failure.action}</span>
               {shown.result ? <pre>{shown.result.split('\n').filter((line) => line.trim()).slice(-6).join('\n').slice(-1600)}</pre> : <span>Подробности доступны в полном выводе.</span>}
             </div>}
-            <details className="tool-raw" open={it.state !== 'error'}>
+            <details className="tool-raw" open={!failure}>
               <summary>Полный ввод и вывод</summary>
+              {it.exitCode !== undefined && <div className="k">Код завершения: {it.exitCode}</div>}
               <div className="k">вход</div><pre>{JSON.stringify(shown.input, null, 2)}</pre>
               {shown.result !== undefined && <><div className="k">результат</div><pre>{shown.result}</pre></>}
             </details>
@@ -683,15 +693,19 @@ function SubAgent({ it, ...p }: { it: AgentItem } & ConversationProps): ReactEle
 
 function Notice({ it, now }: { it: NoticeItem; now: number }): ReactElement {
   const icon = it.tone === 'info' ? 'info' : it.tone === 'wait' ? 'clock' : 'alert'
+  const failure = it.tone === 'fail' && it.title === 'Ход не удался' ? explainFailure(it.text, { scope: 'agent' }) : null
   return (
     <div className={`it it-notice n-${it.tone}`} data-testid="notice" data-event-id={it.id}>
       <Gutter who="" cls="" ts={it.ts} />
       <div className="body">
         <Icon name={icon} />
         <div>
-          <b>{it.title}</b>
+          <b>{failure?.title ?? it.title}</b>
           {it.resetsAt && <div className="txt">сброс в {formatClock(it.resetsAt * 1000, now)} · {formatResetIn(it.resetsAt, now)}</div>}
-          {it.text && <div className="txt">{it.text}</div>}
+          {failure ? <div className="failure-message" data-testid="failure-explanation">
+            <p>{failure.explanation}</p><p>{failure.action}</p>
+            {it.text && <details className="error-details"><summary>Технические подробности</summary><pre>{it.text}</pre></details>}
+          </div> : it.text && <div className="txt">{it.text}</div>}
         </div>
       </div>
     </div>
@@ -861,13 +875,36 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
   useLayoutEffect(() => { if (takeAutoFocus(agentName, Date.now())) ta.current?.focus() }, [agentName])
 
   // Идёт ход: со старым демоном поле заперто, как раньше; с очередью — открыто.
-  const blocked = (busy && !queueable) || disabled || sending || link !== 'up'
+  const attached = useAttachments({ source: filePaths, box: ta, text, setText, session: agentName })
+  const picker = useRef<HTMLInputElement>(null)
+  const sendLock = useRef(false)
+  const blocked = (busy && !queueable) || disabled || sending || link !== 'up' || attached.pending > 0
   // С очередью — всегда `queue`: свободную сессию демон и так пустит сразу, а `busy` в окне мог устареть.
   // M8e: поле чистится СРАЗУ — ответ демона приходит, когда ход запущен (страж сети, resume — до секунд), и
   // окно казалось зависшим. Отказ (`updating`, страж, таймаут «прервать и сказать», очередь) — черновик обратно:
   // в пустое поле как был, к набранному за это время — первым, через пустую строку (model/pending.ts).
   const send = async (mode: SendMode = queueable ? 'queue' : 'now'): Promise<void> => {
-    if (blocked) return
+    if (blocked || attached.isBusy() || sendLock.current) return
+    if (attached.items.length) {
+      sendLock.current = true
+      const original = attached.items
+      const draft = textRef.current
+      attached.clear()
+      setText('')
+      let ok = false
+      try {
+        const snapshot = await attached.finalize(agentName, original)
+        ok = await onSend(attachmentPrompt(draft, snapshot), mode === 'now' ? undefined : mode)
+      } catch (e) { attached.report(e instanceof Error ? e.message : 'Сообщение не отправлено. Попробуй ещё раз.') }
+      finally { sendLock.current = false }
+      if (!ok) {
+        attached.restore(original)
+        const r = restoreDraft(ta.current?.value ?? peekDraft(draftStore, agentName, Date.now()) ?? '', draft)
+        setText(r.text)
+        saveDraft(draftStore, agentName, r.text, Date.now())
+      }
+      return
+    }
     await sendFromComposer(text, {
       clear: () => setText(''),
       send: (t) => onSend(t, mode === 'now' ? undefined : mode),
@@ -879,7 +916,7 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
     })
   }
   // ⌘V на файлах из Finder и перетаскивание кладут в поле пути (model/filePathsInput.ts).
-  const { onPaste, onDragOver, onDrop, notice: pasteNotice } = useFilePaths({ source: filePaths, box: ta, text, setText, session: agentName })
+  const { onPaste, onDragOver, onDrop, notice: pasteNotice } = attached
   const onKey = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
     if (e.nativeEvent.isComposing || e.key !== 'Enter' || e.shiftKey || e.altKey) return
     const cmd = IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey
@@ -893,24 +930,26 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
     // Сессия ждёт тебя (разрешение, вопрос, выделенный запрос) — ⌘Enter остаётся «разрешить запрос».
     // `permFocused` — выделен запрос ЭТОЙ сессии (Console: `composerApproves`): карточка другой сессии в открытом Inbox
     // ⌘Enter из этого поля не получает — ни здесь, ни в окне (там тот же фильтр по источнику клавиши).
-    if (cmd && composerCmdEnter({ busy, needsYou, permFocused, queueable, hasText: text.trim() !== '', blocked }) === 'interrupt') {
+    if (cmd && composerCmdEnter({ busy, needsYou, permFocused, queueable, hasText: text.trim() !== '' || attached.items.length > 0, blocked }) === 'interrupt') {
       e.preventDefault()
       e.stopPropagation()
       void send('interrupt')
     }
   }
   return (
-    <div className="composer">
-      <div className="box">
+    <ResizableComposer>
+      <div className={`box${attached.over ? ' attachment-over' : ''}`}>
+        <AttachmentStrip items={attached.items} previews={attached.previews} pending={attached.pending} onRemove={attached.remove} />
         <textarea ref={ta} rows={3} value={text} onChange={(e) => setText(e.target.value)} onKeyDown={onKey}
-          onPaste={onPaste} onDragOver={onDragOver} onDrop={onDrop}
+          onPaste={onPaste} onDragOver={onDragOver} onDragEnter={attached.onDragEnter} onDragLeave={attached.onDragLeave} onDrop={onDrop}
           placeholder={placeholderFor({ link, needsYou, busy, disabled, label, queueable })}
           data-testid="composer" aria-label="Реплика в сессию" />
         <div className="composer-toolbar">
           {footer}
           <div className="composer-actions">
+        {attached.enabled && <><input ref={picker} className="attach-picker-input" type="file" multiple data-testid="attachment-picker" onChange={(e) => { attached.addFiles(Array.from(e.target.files ?? [])); e.target.value = '' }} /><button type="button" className="btn attach-picker" title="Прикрепить файлы" aria-label="Прикрепить файлы" onClick={() => picker.current?.click()} disabled={blocked}>＋</button></>}
         {busy && <button type="button" className="btn btn-danger composer-stop" onClick={onStop} data-testid="stop-turn" title="Остановить ход (Esc)"><Icon name="stop" />Стоп</button>}
-        <button type="button" className="btn btn-primary" onClick={() => void send()} disabled={blocked || !text.trim()} data-testid="send"
+        <button type="button" className="btn btn-primary" onClick={() => void send()} disabled={blocked || (!text.trim() && !attached.items.length)} data-testid="send"
           title={busy && queueable ? `Идёт ход: реплика уйдёт, когда он кончится. ${CMD}Enter — прервать и сказать` : undefined}>
           <Icon name="send" />{busy && queueable ? 'В очередь' : 'Отправить'}
         </button>
@@ -921,7 +960,7 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
       {error && <div className="hint"><span className="err" role="alert" data-testid="send-error">{error}</span></div>}
       {/* Картинка из буфера не сохранилась или окно старое — словами под полем (model/filePathsInput.ts). */}
       {pasteNotice && <div className="hint"><span className="paste-notice" role="status" data-testid="paste-notice">{pasteNotice}</span></div>}
-    </div>
+    </ResizableComposer>
   )
 }
 

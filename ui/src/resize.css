@@ -1,0 +1,28 @@
+/* Drag targets are wider than the hairline, without visually dividing the workspace into boxes. */
+.resizable-workspace { position: relative; min-width: 0; }
+.panel-resize { flex: none; position: relative; z-index: 6; display: flex; align-items: center; justify-content: center; touch-action: none; outline-offset: -2px; }
+.panel-resize-x { cursor: col-resize; width: 8px; }
+.panel-resize-y { cursor: row-resize; height: 8px; }
+.panel-resize::before { content: ''; position: absolute; background: var(--accent); opacity: 0; transition: opacity 120ms ease; border-radius: 2px; }
+.panel-resize-x::before { inset: 0 3px; }
+.panel-resize-y::before { inset: 3px 0; }
+.panel-resize:hover::before, .panel-resize:focus-visible::before, .panel-resize[data-dragging]::before { opacity: .8; }
+.workspace-boundary { position: absolute; top: 0; bottom: 0; transform: translateX(-50%); }
+body:has(.panel-resize-x[data-dragging]) *, body:has(.panel-resize-x[data-dragging]) { cursor: col-resize !important; user-select: none !important; }
+body:has(.panel-resize-y[data-dragging]) *, body:has(.panel-resize-y[data-dragging]) { cursor: row-resize !important; user-select: none !important; }
+.files-layout.resizable-file-layout > .file-tree { width: var(--file-tree-size); min-width: 0; border-right: 0; }
+.file-tree-boundary { width: 6px; margin-left: -3px; margin-right: -3px; z-index: 8; }
+.file-tree-boundary::after { content: ''; position: absolute; inset: 0 3px; width: 1px; background: var(--hair); z-index: -1; }
+.resizable-composer { position: relative; }
+.resizable-composer textarea { max-height: var(--composer-input-max); }
+.resizable-composer[data-input-resized] textarea { min-height: var(--composer-input-size); max-height: var(--composer-input-size); }
+.composer-boundary { position: absolute; top: -4px; left: 0; right: 0; }
+.composer-boundary > span { width: 28px; height: 2px; background: var(--line); border-radius: 2px; }
+.composer-boundary::before { left: calc(50% - 28px); right: calc(50% - 28px); }
+.resizable-dialog { position: relative; max-width: calc(100vw - 32px); }
+.resizable-dialog .dlg-b { flex: 1; min-height: 0; }
+.resizable-dialog .dlg-h, .resizable-dialog .dlg-f { flex: none; }
+.dialog-width-boundary { position: absolute; right: -4px; top: 10px; bottom: 10px; }
+.dialog-height-boundary { position: absolute; left: 10px; right: 10px; bottom: -4px; }
+.dialog-height-boundary > span { width: 28px; height: 2px; background: var(--line); border-radius: 2px; }
+@media (prefers-reduced-motion: reduce) { .panel-resize::before { transition: none; } }

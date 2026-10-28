@@ -984,6 +984,12 @@ button { font: inherit; color: inherit; }
 .tool-error-preview > strong, .tool-error-preview > span { display: block; font-family: var(--body); }
 .tool-error-preview > span { margin-top: 6px; color: var(--mut); }
 .tool-error-preview pre { max-height: 160px; margin: 6px 0 0; font: 11.5px/1.6 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; overflow: auto; color: var(--mut); }
+.tool-error-preview.expected-result { border-color: var(--line); border-left-color: var(--mut); background: var(--panel); }
+.failure-message { font: 12.5px/1.6 var(--body); overflow-wrap: anywhere; }
+.failure-message p { margin: 4px 0; }
+.error-details { margin-top: 8px; color: var(--mut); font: 11.5px/1.6 var(--body); }
+.error-details summary { cursor: pointer; width: fit-content; }
+.error-details pre { max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 11.5px/1.6 var(--mono); }
 .tool-raw { margin-top: 8px; }
 .tool-raw > summary { cursor: pointer; color: var(--mut); font: 12px/1.5 var(--body); padding: 5px 0; }
 .it-notice .body { border-radius: 8px; padding: 10px 12px; font-size: 13px; }
