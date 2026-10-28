@@ -271,6 +271,19 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
     return { file, askKey }
   }
 
+  /**
+   * Процесс сессии ушёл (вышел, снят, заменён) — его фоновые задачи ушли вместе с ним. Счёт, о котором окно и фаза
+   * хода узнали из `background.changed`, обнуляется тем же событием (28.10.2026): иначе после стопа простаивающей
+   * сессии с фоновыми задачами или падения CLI строка навсегда оставалась «в фоне» — до рестарта демона.
+   * Снятой сессии (`agent rm`, новая с тем же именем) не пишется: её обнуляет `close`.
+   */
+  const dropBackground = (l: Live, reason: string): void => {
+    if (l.bgTasks > 0 && !l.closing && live.get(l.spec.name) === l) {
+      emit({ sessionId: l.spec.name, provider: 'claude', kind: 'background.changed', data: { count: 0, tasks: [], reason } })
+    }
+    l.bgTasks = 0
+  }
+
   const killChild = (l: Live, signal: NodeJS.Signals = 'SIGTERM'): void => {
     const child = l.child
     if (!child) return
@@ -326,7 +339,7 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
     if (!child) return
     l.child = null
     l.mapper = null
-    l.bgTasks = 0
+    dropBackground(l, 'process_released')
     clearBgExpected(l)
     try { child.stdin?.end() } catch { /* закрыт */ }
     pendingKills.add(child)
@@ -437,7 +450,7 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
     const onClose = (): void => {
       detach()
       if (l.child === child) { l.child = null; l.mapper = null }
-      l.bgTasks = 0
+      dropBackground(l, 'background_process_exit')
       clearBgExpected(l)
       if (l.autoTurn) {
         l.autoTurn = false
@@ -494,7 +507,7 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
     l.idle?.detach()
     l.child = null
     l.mapper = null
-    l.bgTasks = 0
+    dropBackground(l, 'process_exit')
     clearBgExpected(l)
     l.autoTurn = false
     releaseAuto(l)
@@ -719,7 +732,7 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
         l.mapper = mapper
         // Счёт фоновых задач — счёт ПРОЦЕССА. У нового процесса их нет, пока он сам не скажет
         // (`background_tasks_changed`); прежний счёт держал бы его живым ради чужих задач.
-        l.bgTasks = 0
+        dropBackground(l, 'process_replaced')
         clearBgExpected(l)
         child = spawn(opts.bin, argv, {
           cwd: l.spec.cwd,
@@ -844,7 +857,7 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
           if (l.child === child) {
             l.child = null
             l.mapper = null
-            l.bgTasks = 0
+            dropBackground(l, 'process_exit')
             clearBgExpected(l)
           }
           // Добивающий SIGTERM. Таймер `unref`-нут, поэтому ребёнка держит не он, а список
@@ -1210,6 +1223,8 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
       const l = live.get(name)
       // 0.3.7: имя переиспользуемо (`agent rm` и новая сессия с тем же именем) — ключи прежней не должны к ней подойти.
       if (!l) { askKeys.revokeSession(name); return }
+      // Фон сессии снимается вместе с ней — событием, пока сессия ещё своя (`dropBackground` молчит о закрытых).
+      dropBackground(l, 'session_closed')
       l.closing = true
       if (l.reaper) { clearTimeout(l.reaper); l.reaper = null }
       const child = l.child

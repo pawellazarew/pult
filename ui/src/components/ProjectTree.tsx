@@ -248,7 +248,7 @@ function SessionRow({ a, project, selected, now, onSelect, onMenu, shortcut = fa
       </span>
       <span className="ag-right" title={a.pending > 0 ? `${a.pending} ${plural(a.pending, 'запрос', 'запроса', 'запросов')} в Inbox` : undefined}>
         {/* Однозначное состояние рядом с названием, текущее действие — во второй строке. */}
-        <span className={`chat-row-status t-${sv.tone}${a.status === 'cold' || a.status === 'idle' || a.status === 'done' ? ' is-quiet' : ''}`} data-testid="row-status" title={sv.detail}>{sv.label}{a.pending > 0 ? ` · ${a.pending}` : ''}</span>
+        <span className={`chat-row-status t-${sv.tone}${(a.status === 'cold' || a.status === 'idle' || a.status === 'done') && !a.background ? ' is-quiet' : ''}`} data-testid="row-status" title={sv.detail}>{sv.label}{a.pending > 0 ? ` · ${a.pending}` : ''}</span>
         <button type="button" className="row-btn" data-testid="row-menu" title="Действия с сессией" aria-label={`Действия с сессией ${agentLabel(a)}`}
           onClick={(e) => onMenu(e, a)}><span className="dots" aria-hidden="true">⋯</span></button>
       </span>

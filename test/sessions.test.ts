@@ -45,8 +45,14 @@ describe('свёртка статуса (таблица)', () => {
     ['idle', 'session.started', 'idle'],
     // init приходит посреди хода: «готов» до первой дельты — ложь.
     ['working', 'session.started', 'working'],
-    ['idle', 'message.delta', 'working'],
-    ['idle', 'tool.called', 'working'],
+    // Активность вне хода статус не двигает: ход начинает только явный `status.changed working` (28.10.2026).
+    ['idle', 'message.delta', 'idle'],
+    ['idle', 'tool.called', 'idle'],
+    ['failed', 'agent.finished', 'failed'],
+    ['interrupted', 'tool.finished', 'interrupted'],
+    ['done', 'message.done', 'done'],
+    ['cold', 'tool.called', 'cold'],
+    ['working', 'tool.finished', 'working'],
     ['working', 'permission.requested', 'blocked_permission'],
     ['blocked_permission', 'permission.resolved', 'working'],
     ['idle', 'permission.resolved', 'idle'],
@@ -81,7 +87,42 @@ describe('свёртка статуса (таблица)', () => {
       assert.equal(reduceStatusEvent('idle', ev(kind, { parentId: 'toolu_1' })), 'idle', kind)
       assert.equal(reduceStatusEvent('working', ev(kind, { parentId: 'toolu_1' })), 'working', kind)
     }
-    assert.equal(reduceStatusEvent('idle', ev('message.done')), 'working', 'свой поток по-прежнему двигает')
+    assert.equal(reduceStatusEvent('idle', ev('message.done')), 'idle', 'и свой поток вне хода тоже не двигает')
+  })
+
+  // Четыре разобранных случая ложного «Похоже, завис» (28.10.2026): Codex отпускает ход, а субагенты и фоновые
+  // команды доделывают работу — их конец приходит верхним событием без `parentId` уже ПОСЛЕ хода. События
+  // синтетические, форма — как в журнале.
+  describe('ход кончился, а субагенты и команды Codex — нет: статус не воскресает', () => {
+    const codex = (kind: string, data: Record<string, unknown> = {}): PultEvent => ev(kind, { provider: 'codex', data })
+    const turn = (end: Record<string, unknown>): PultEvent[] => [
+      codex('status.changed', { status: 'working', turnId: 't1' }),
+      codex('status.changed', { status: 'working', turnId: 't1', reason: 'turn_started' }),
+      codex('agent.spawned', { toolUseId: 'call_a', name: 'Agent', agentThreadId: 'thr-a' }),
+      codex('tool.called', { toolUseId: 'exec-1', name: 'commandExecution', input: { command: 'npm test' } }),
+      codex('status.changed', end),
+    ]
+    it('конец хода idle → поздний agent.finished: idle', () => {
+      const evs = [...turn({ status: 'idle', turnId: 't1' }), codex('agent.finished', { toolUseId: 'call_a', agentThreadId: 'thr-a' })]
+      assert.equal(reduceStatus(evs), 'idle')
+    })
+    it('ход упал (internal) → agent.finished через 10 с: failed', () => {
+      const evs = [...turn({ status: 'failed', turnId: 't1', errorCode: 'internal' }), codex('agent.finished', { toolUseId: 'call_a', agentThreadId: 'thr-a' })]
+      assert.equal(reduceStatus(evs), 'failed')
+    })
+    it('ход оборван → субагенты и фоновая команда кончаются через минуты: статус конца хода', () => {
+      const evs = [
+        ...turn({ status: 'failed', turnId: 't1' }),
+        codex('message.done', { text: 'итог субагента', itemId: 'm1' }),
+        codex('agent.finished', { toolUseId: 'call_a', agentThreadId: 'thr-a' }),
+        codex('tool.finished', { toolUseId: 'exec-1', name: 'commandExecution', status: 'completed', exitCode: 0 }),
+      ]
+      assert.equal(reduceStatus(evs), 'failed')
+    })
+    it('стоп (interrupted) → команда хода кончается через 3 с: interrupted', () => {
+      const evs = [...turn({ status: 'interrupted' }), codex('tool.finished', { toolUseId: 'exec-1', name: 'commandExecution', status: 'completed', exitCode: 0 })]
+      assert.equal(reduceStatus(evs), 'interrupted')
+    })
   })
 
   it('status.changed с явным статусом бьёт любую догадку', () => {
@@ -316,9 +357,14 @@ describe('менеджер сессий: правки после ревью В2'
       for (let i = 0; i < N; i++) {
         manager.emit({ sessionId: 'w', provider: 'claude', kind: 'message.delta', data: { text: `кусок ${i}` } })
       }
-      // Статус меняется ровно один раз (idle → working); остальные 299 дельт — ничего.
-      assert.ok(writes <= 2, `${writes} записей реестра на ${N} дельт — это усиление записи`)
-      assert.equal(store.lastId, N, 'в журнал при этом уходит КАЖДОЕ событие')
+      // Статус меняется ровно один раз (начало хода → working); 300 дельт — ничего.
+      manager.emit({ sessionId: 'w', provider: 'claude', kind: 'status.changed', data: { status: 'working', turnId: 't1' } })
+      writes = 0
+      for (let i = 0; i < N; i++) {
+        manager.emit({ sessionId: 'w', provider: 'claude', kind: 'message.delta', data: { text: `кусок ${i}` } })
+      }
+      assert.equal(writes, 0, `${writes} записей реестра на ${N} дельт — это усиление записи`)
+      assert.equal(store.lastId, 2 * N + 1, 'в журнал при этом уходит КАЖДОЕ событие')
       assert.equal(real.get('w')?.lastStatus, 'working')
       store.close()
     } finally { home.remove() }
@@ -405,6 +451,166 @@ describe('менеджер сессий: правки после ревью В2'
       assert.deepEqual(manager.list(), [])
       store.close()
     } finally { home.remove() }
+  })
+})
+
+describe('сторож тишины: только настоящий ход (28.10.2026)', () => {
+  const rec = (name: string, provider: 'claude' | 'codex' = 'codex'): SessionRecord => ({
+    name, provider, cwd: '/tmp/x', mode: 'turn',
+    createdAt: '2026-09-21T10:00:00.000Z', lastStatus: 'idle', lastEventId: 0,
+  })
+  // Порог 300 мс, проход сторожа — каждые 75 мс.
+  const world = (): { manager: SessionManager; store: EventStore; stalls(): PultEvent[]; status(): SessionStatus | undefined; done(): Promise<void> } => {
+    const home = tempHome()
+    const config = defaultConfig()
+    config.watchdog.silenceMinutes = 0.005
+    const registry = createRegistry(home.paths)
+    registry.create(rec('w'))
+    const store = createStore(home.paths)
+    const manager = createManager({
+      paths: home.paths, config, logger: home.logger, store,
+      publish: (d) => store.append(d), adapters: {}, broker: createBroker({ emit: () => {} }), registry,
+    })
+    return {
+      manager, store,
+      stalls: () => store.readFrom(0, { sessionId: 'w' }).filter((e) => e.kind === 'turn.stalled'),
+      status: () => manager.list().find((r) => r.name === 'w')?.lastStatus,
+      done: async () => { await manager.shutdown(); store.close(); home.remove() },
+    }
+  }
+  const say = (m: SessionManager, kind: string, data: Record<string, unknown> = {}, parentId?: string): void => {
+    m.emit({ sessionId: 'w', provider: 'codex', kind: kind as PultEvent['kind'], data, ...(parentId ? { parentId } : {}) })
+  }
+
+  it('настоящая тишина в ходе — одно «завис» на ход', async () => {
+    const w = world()
+    try {
+      say(w.manager, 'status.changed', { status: 'working', turnId: 't1' })
+      assert.ok(await waitFor(() => w.stalls().length > 0, 3000), 'turn.stalled не пришёл')
+      await sleep(400)
+      assert.equal(w.stalls().length, 1)
+      assert.equal(w.status(), 'working', 'сторож ход не обрывает')
+    } finally { await w.done() }
+  })
+
+  it('ход кончился, поздний agent.finished / tool.finished без parentId — ни working, ни «завис»', async () => {
+    const w = world()
+    try {
+      say(w.manager, 'status.changed', { status: 'working', turnId: 't1' })
+      say(w.manager, 'agent.spawned', { toolUseId: 'call_a', name: 'Agent', agentThreadId: 'thr-a' })
+      say(w.manager, 'tool.called', { toolUseId: 'exec-1', name: 'commandExecution', input: { command: 'npm test' } })
+      say(w.manager, 'status.changed', { status: 'idle', turnId: 't1' })
+      say(w.manager, 'message.done', { text: 'итог', itemId: 'm1' }, 'call_a')
+      say(w.manager, 'agent.finished', { toolUseId: 'call_a', agentThreadId: 'thr-a' })
+      say(w.manager, 'tool.finished', { toolUseId: 'exec-1', name: 'commandExecution', status: 'completed' })
+      assert.equal(w.status(), 'idle')
+      await sleep(800)
+      assert.equal(w.stalls().length, 0, 'без хода «завис» — ложь')
+      for (const end of ['failed', 'interrupted']) {
+        say(w.manager, 'status.changed', { status: 'working', turnId: `t-${end}` })
+        say(w.manager, 'status.changed', { status: end, turnId: `t-${end}` })
+        say(w.manager, 'tool.finished', { toolUseId: 'exec-2', name: 'commandExecution', status: 'completed' })
+        assert.equal(w.status(), end)
+      }
+      await sleep(800)
+      assert.equal(w.stalls().length, 0)
+    } finally { await w.done() }
+  })
+
+  it('открытый вызов инструмента — порог втрое больше, но висящий без конца вызов всё равно «завис»', async () => {
+    const w = world()
+    try {
+      say(w.manager, 'status.changed', { status: 'working', turnId: 't1' })
+      say(w.manager, 'tool.called', { toolUseId: 'exec-1', name: 'commandExecution', input: { command: 'cat' } })
+      const t0 = Date.now()
+      await sleep(550)
+      assert.equal(w.stalls().length, 0, 'инструмент работает — обычного порога мало')
+      assert.equal(w.manager.phase('w')?.phase, 'tool', 'строка фазы показывает инструмент')
+      assert.ok(await waitFor(() => w.stalls().length > 0, 3000), 'вызов ждёт stdin и молчит — втрое дольше порога, и «завис»')
+      assert.ok(Date.now() - t0 >= 850, 'не раньше тройного порога')
+      await sleep(400)
+      assert.equal(w.stalls().length, 1, 'одно «завис» на ход')
+    } finally { await w.done() }
+  })
+
+  it('инструмент давно открыт, а свежее событие корня — модель: обычный порог (поток модели повис)', async () => {
+    const w = world()
+    try {
+      say(w.manager, 'status.changed', { status: 'working', turnId: 't1' })
+      say(w.manager, 'agent.spawned', { toolUseId: 'call_a', name: 'Agent', agentThreadId: 'thr-a' })
+      say(w.manager, 'tool.called', { toolUseId: 'exec-1', name: 'commandExecution', input: { command: 'npm run dev' } })
+      say(w.manager, 'message.delta', { text: 'пишу ответ', itemId: 'm1' })
+      const t0 = Date.now()
+      assert.ok(await waitFor(() => w.stalls().length > 0, 3000))
+      assert.ok(Date.now() - t0 < 850, 'открытые субагент и команда не дают модели молчать втрое дольше')
+    } finally { await w.done() }
+  })
+
+  it('вывод команды Codex (output) и снимки лимитов: первое — жизнь, второе — нет', async () => {
+    const w = world()
+    try {
+      say(w.manager, 'status.changed', { status: 'working', turnId: 't1' })
+      say(w.manager, 'tool.called', { toolUseId: 'exec-1', name: 'commandExecution', input: { command: 'npm test' } })
+      const until = Date.now() + 1300
+      while (Date.now() < until) {
+        w.manager.live('w', { kind: 'output' })
+        await sleep(80)
+      }
+      assert.equal(w.stalls().length, 0, 'тест печатает — ход жив')
+      say(w.manager, 'tool.finished', { toolUseId: 'exec-1', name: 'commandExecution', status: 'completed' })
+      const t0 = Date.now()
+      const ping = setInterval(() => say(w.manager, 'usage.updated', { source: 'rate_limit_event', status: 'allowed' }), 50)
+      try {
+        assert.ok(await waitFor(() => w.stalls().length > 0, 3000), 'снимки лимитов аккаунта не прячут зависание')
+      } finally { clearInterval(ping) }
+      assert.ok(Date.now() - t0 < 850)
+    } finally { await w.done() }
+  })
+
+  it('живые сигналы (размышления) — признак жизни хода', async () => {
+    const w = world()
+    try {
+      say(w.manager, 'status.changed', { status: 'working', turnId: 't1' })
+      const until = Date.now() + 900
+      while (Date.now() < until) {
+        w.manager.live('w', { kind: 'reasoning', text: 'думаю ' })
+        await sleep(60)
+      }
+      assert.equal(w.stalls().length, 0, 'модель думает — не «завис»')
+      assert.ok(await waitFor(() => w.stalls().length > 0, 3000), 'сигналы кончились — «завис»')
+    } finally { await w.done() }
+  })
+
+  it('вопрос вне хода (субагент пережил ход): ответ возвращает сессию в idle, а не в working', () => {
+    const home = tempHome()
+    const registry = createRegistry(home.paths)
+    registry.create(rec('w'))
+    const store = createStore(home.paths)
+    const manager = createManager({
+      paths: home.paths, config: defaultConfig(), logger: home.logger, store,
+      publish: (d) => store.append(d), adapters: {}, broker: createBroker({ emit: () => {} }), registry,
+    })
+    try {
+      say(manager, 'permission.requested', { id: 'p1', toolName: 'commandExecution' })
+      assert.equal(manager.list()[0]?.lastStatus, 'blocked_permission')
+      say(manager, 'permission.resolved', { id: 'p1', decision: 'allow' })
+      assert.equal(manager.list()[0]?.lastStatus, 'idle')
+      const last = store.readFrom(0, { sessionId: 'w' }).at(-1)
+      assert.deepEqual(last?.data, { status: 'idle', reason: 'permission_outside_turn' }, 'окно видит то же событием')
+      // Ход упал, а субагент ещё спросил: после ответа — снова «ошибка», без новой карточки ошибки.
+      say(manager, 'status.changed', { status: 'working', turnId: 't0' })
+      say(manager, 'status.changed', { status: 'failed', turnId: 't0', message: 'упал' })
+      say(manager, 'permission.requested', { id: 'p3', toolName: 'commandExecution' })
+      say(manager, 'permission.resolved', { id: 'p3', decision: 'allow' })
+      assert.equal(manager.list()[0]?.lastStatus, 'failed')
+      assert.equal(store.readFrom(0, { sessionId: 'w' }).at(-1)?.data['reason'], 'permission_outside_turn')
+      assert.equal(store.attention('w')?.kind, 'ask', 'новой карточки ошибки нет — последнее внимание сам вопрос')
+      // Внутри хода — по-прежнему «ход продолжается».
+      say(manager, 'status.changed', { status: 'working', turnId: 't1' })
+      say(manager, 'permission.requested', { id: 'p2', toolName: 'commandExecution' })
+      say(manager, 'permission.resolved', { id: 'p2', decision: 'allow' })
+      assert.equal(manager.list()[0]?.lastStatus, 'working')
+    } finally { void manager.shutdown(); store.close(); home.remove() }
   })
 })
 

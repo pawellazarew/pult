@@ -140,6 +140,22 @@ describe('список: устойчивый статус и фаза в под�
     assert.equal(chip(agent({ status: 'idle', phase: ph({ phase: 'background', background: 2 }) })), 'Готово')
   })
 
+  it('Codex: команда — «shell» с самой командой (без обёртки оболочки) и секундами; фон — значком «фон · N»', () => {
+    const cmd = ph({ phase: 'tool', tool: { name: 'commandExecution', detail: toolSummary('commandExecution', { command: "/bin/zsh -lc 'npm test'" }) } })
+    assert.equal(phaseText(cmd), 'выполняет: shell npm test…')
+    assert.equal(treePhaseLabel(cmd), 'shell')
+    assert.equal(shortToolName('commandExecution'), 'shell')
+    assert.equal(toolSummary('commandExecution', { command: '/bin/bash -c "make check"' }), 'make check')
+    assert.equal(toolSummary('commandExecution', { command: 'ls -la' }), 'ls -la', 'без обёртки — как есть')
+    assert.equal(toolSummary('commandExecution', { command: "/opt/homebrew/bin/zsh -cl 'npm run e2e'" }), 'npm run e2e')
+    assert.equal(toolSummary('Bash', { command: `bash -c "echo 'a b' && rm -rf build"` }), "echo 'a b' && rm -rf build", 'внутренние кавычки не раскрываются, ничего не прячется')
+    assert.equal(toolSummary('Bash', { command: "shellcheck -c 'x'" }), "shellcheck -c 'x'", 'не оболочка — как есть')
+    const bgRow = html(ProjectTree, tree([agent({ provider: 'codex', status: 'idle', background: { count: 2, tasks: ['npm test', 'субагент'] } })]))
+    assert.match(bgRow, /data-testid="row-background"[^>]*>фон · 2</)
+    assert.equal(chip(agent({ provider: 'codex', status: 'idle', background: { count: 2, tasks: [] } })), 'В фоне')
+    assert.doesNotMatch(bgRow, /chat-row-status[^"]*is-quiet/, 'идущая работа — не «тихая» строка')
+  })
+
   it('фаза из живого канала доезжает до строки (buildAgents)', () => {
     const rec = { name: 'w', provider: 'claude', cwd: '/w', createdAt: '2026-10-23T09:00:00Z', lastStatus: 'working', pendingPermissions: 0 }
     const [v] = buildAgents([rec as never], { w: { phase: ph({ phase: 'writing' }) } })
