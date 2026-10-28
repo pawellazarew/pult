@@ -145,6 +145,23 @@ export async function launch(opts: {
   })
   // Playwright может освободить канал после внешнего SIGTERM раньше close().
   const appProcess = app.process()
+  // Вывод главного процесса Electron (pult-shell, Chromium) и его выход — улики, если Electron умрёт
+  // посреди теста: без них Playwright говорит только «Target page, context or browser has been closed».
+  const electronOut: string[] = []
+  const keep = (stream: string) => (chunk: Buffer): void => {
+    for (const line of chunk.toString('utf8').split('\n')) {
+      if (line.trim()) electronOut.push(`${new Date().toISOString()} [${stream}] ${line}`)
+    }
+    if (electronOut.length > 400) electronOut.splice(0, electronOut.length - 400)
+  }
+  appProcess.stdout?.on('data', keep('out'))
+  appProcess.stderr?.on('data', keep('err'))
+  let closing = false
+  let electronExit: string | null = null
+  appProcess.once('exit', (code, signal) => {
+    electronExit = `code=${code} signal=${signal}`
+    if (!closing) process.stderr.write(`e2e ${opts.name}: Electron вышел до close() (${electronExit}); хвост вывода:\n${electronOut.slice(-15).join('\n')}\n`)
+  })
   const win = await app.firstWindow()
   await win.waitForLoadState('domcontentloaded')
   // Размер окна и экрана — в вывод: у раннера CI экран меньше рабочего мака, и окно 1280×820 туда не
@@ -231,9 +248,16 @@ export async function launch(opts: {
       if (between) await between()
       assert.equal(app.windows().length, 0, 'окно не закрылось')
       const next = app.waitForEvent('window', { timeout: 15_000 })
-      // Как клик по иконке в доке: macOS шлёт `activate`, оболочка открывает окно заново.
-      await app.evaluate(({ app: a }) => { (a as unknown as { emit(e: string): boolean }).emit('activate') })
-      current = await next
+      // Ждём его ниже; без этого отказ, пришедший, пока идёт evaluate, — unhandledRejection без причины.
+      next.catch(() => {})
+      try {
+        // Как клик по иконке в доке: macOS шлёт `activate`, оболочка открывает окно заново.
+        await app.evaluate(({ app: a }) => { (a as unknown as { emit(e: string): boolean }).emit('activate') })
+        current = await next
+      } catch (e) {
+        const why = electronExit ? `; Electron вышел до close() (${electronExit}), хвост вывода:\n${electronOut.slice(-15).join('\n')}` : ''
+        throw new Error(`окно не открылось заново: ${(e as Error).message.split('\n')[0]}${why}`)
+      }
       listen(current)
       await current.waitForLoadState('domcontentloaded')
       return current
@@ -242,6 +266,8 @@ export async function launch(opts: {
       mkdirSync(RESULTS, { recursive: true })
       if (!current.isClosed()) await current.screenshot({ path: path.join(RESULTS, `${opts.name}-at-close.png`), timeout: 5000 }).catch(() => {})
       writeFileSync(path.join(RESULTS, `${opts.name}-console.log`), consoleLines.join('\n') + '\n')
+      closing = true
+      writeFileSync(path.join(RESULTS, `${opts.name}-electron.log`), electronOut.join('\n') + `\nвыход до close(): ${electronExit ?? 'нет'}\n`)
       try { cpSync(paths.logs, path.join(RESULTS, `${opts.name}-logs`), { recursive: true }) } catch { /* логов нет — и ладно */ }
       for (const c of clients) c.close()
       const last = daemonPid()

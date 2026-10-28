@@ -7,7 +7,12 @@ import type { Harness } from './harness.js'
 
 describe('изображения: живой ответ, просмотр и история', () => {
   let h: Harness
-  before(async () => { h = await launch({ name: 'images' }) })
+  before(async () => {
+    h = await launch({ name: 'images' })
+    // Демона поднимает окно уже после загрузки страницы: под нагрузкой клиент теста раньше него
+    // ловил «нет файла токена — демон не запущен». Ждём подключения окна, как остальные наборы.
+    assert.ok(await waitFor(async () => (await h.win.getAttribute('.app', 'data-conn')) === 'up', 20_000), 'окно не подключилось')
+  })
   after(async () => { await h?.close() })
   it('три локальных изображения видны, увеличиваются и остаются после перезапуска окна', async () => {
     const c = await h.client()
@@ -27,7 +32,10 @@ describe('изображения: живой ответ, просмотр и и�
     for (let i = 0; i < 6; i++) {
       const card = cards.nth(i)
       await card.scrollIntoViewIfNeeded()
-      assert.ok(await waitFor(async () => (await card.locator('img').count()) > 0 || (await card.textContent())?.includes('недоступно') === true, 5000))
+      // Первая картинка после холодного старта Electron на раннере CI шла дольше 5 с (diag 28.10:
+      // 1 из 21, первый прогон); предел — как у проверки загрузки ниже.
+      assert.ok(await waitFor(async () => (await card.locator('img').count()) > 0 || (await card.textContent())?.includes('недоступно') === true, 15_000),
+        `карточка ${i}: ни картинки, ни «недоступно»: ${await card.textContent()}`)
     }
     const loaded = () => h.win.locator('.image-thumb img').evaluateAll((imgs) => imgs.length === 4 && imgs.every((i) => (i as HTMLImageElement).naturalWidth > 0))
     assert.ok(await waitFor(loaded, 15_000), 'изображения не загружены в ленте')
