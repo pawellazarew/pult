@@ -1043,10 +1043,12 @@ export function createManager(opts: ManagerOptions): SessionManager {
       // «что сказал человек → почему не получилось». Отдельный вид, а не `message.done`:
       // статус сессии и текст ответа (`agent read`) реплика человека менять не должна.
       // Текст — через ту же редакцию, что и ответы модели (инвариант 7).
-      emit({ sessionId: name, provider: rec.provider, kind: 'message.user', data: { text: redactString(text) } })
+      const user = emit({ sessionId: name, provider: rec.provider, kind: 'message.user', data: { text: redactString(text) } })
       phases.accepted(name)
+      // Начало хода — время для порядка бесед в окне (`lastTurnAt`): одна запись реестра на ход, тем же `ts`, что у
+      // `message.user`, — окно поднимает строку по событию, и `agent.list` её уже не сдвинет.
       // Реплика в архивную сессию — она снова в работе: из архива её возвращает сама реплика.
-      if (rec.archived) registry.update(name, { archived: undefined })
+      registry.update(name, { lastTurnAt: user.ts, ...(rec.archived ? { archived: undefined } : {}) })
       maybeAutoTitle(name, text)
       prompting.set(name, (prompting.get(name) ?? 0) + 1)
       // ПОДЦЕПЛЕНИЕ ПОСЛЕ РЕСТАРТА. Реестр сессию пережил, а адаптер — нет: он живёт ровно

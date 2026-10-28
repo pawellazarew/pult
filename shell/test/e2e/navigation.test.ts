@@ -69,7 +69,7 @@ describe('проекты как основная навигация', () => {
     await h.win.locator('[data-testid="agent-row"][data-agent="chat-59"]').click()
   })
 
-  it('фильтр работающих сохраняет порядок по созданию; события не двигают строки; свёрнутый проект показывает состояние', async () => {
+  it('фильтр работающих: чат с ходом сверху, остальные по созданию; события не двигают строки; свёрнутый проект показывает состояние', async () => {
     const c = await h.client()
     for (let i = 0; i < 35; i++) await c.request('events.emit', { kind: 'status.changed', sessionId: `chat-${String(i).padStart(2, '0')}`, provider: i % 2 ? 'codex' : 'claude', data: { status: 'working' } })
     await h.win.getByTestId('filter-working').click()
@@ -86,6 +86,43 @@ describe('проекты как основная навигация', () => {
     assert.equal(await summary.getByLabel('36 в работе').count(), 1)
     await summary.click()
     await h.win.getByTestId('filter-all').click()
+  })
+
+  it('новая реплика поднимает чат из середины наверх один раз; события хода и фон его не двигают', async () => {
+    const c = await h.client()
+    await h.win.getByTestId('project-more').click()
+    assert.ok(await waitFor(async () => await h.win.getByTestId('agent-row').count() === 60))
+    const order = () => h.win.getByTestId('agent-row').evaluateAll((rows) => rows.map((el) => (el as HTMLElement).dataset.agent))
+    const before = await order()
+    assert.ok(before.indexOf('chat-45') > 5, before.join(' '))
+    const expected = ['chat-45', ...before.filter((n) => n !== 'chat-45')]
+    // Пока идёт ход, строки снимаются непрерывно: видны только два порядка — до реплики и после.
+    const seen = new Set<string>()
+    let sampling = true
+    const sampler = (async () => { while (sampling) { seen.add((await order()).join(' ')); await new Promise((r) => setTimeout(r, 15)) } })()
+    await c.request('agent.prompt', { name: 'chat-45', text: 'Проверь порядок' })
+    await c.request('agent.wait', { name: 'chat-45', until: ['idle'], timeoutMs: 20_000 })
+    assert.ok(await waitFor(async () => (await order()).join(' ') === expected.join(' ')), 'чат с новой репликой — наверху проекта')
+    // Ход кончился, а дальше — поток, инструменты, субагент, фон и сторож у него и у соседа.
+    let last = 0
+    for (const name of ['chat-45', 'chat-10']) {
+      for (const [kind, data] of [['message.delta', { text: 'ещё' }], ['tool.called', { toolUseId: `t-${name}`, name: 'Bash', input: {} }],
+        ['agent.spawned', { toolUseId: `a-${name}`, description: 'фон' }], ['background.changed', { count: 1, tasks: [{ id: 'b', description: 'фон' }] }],
+        ['turn.stalled', { silentForMs: 1 }], ['status.changed', { status: 'idle' }], ['background.changed', { count: 0, tasks: [] }]] as const) {
+        const r = await c.request('events.emit', { kind, sessionId: name, provider: name === 'chat-45' ? 'codex' : 'claude', data }) as { ids: number[] }
+        last = r.ids.at(-1) ?? last
+      }
+    }
+    await h.win.getByTestId('event-count').filter({ hasText: `#${last}` }).waitFor({ state: 'attached' })
+    await h.win.evaluate(() => window.dispatchEvent(new Event('focus')))
+    await new Promise((r) => setTimeout(r, 300))
+    sampling = false
+    await sampler
+    assert.deepEqual(await order(), expected, 'события после хода строку не двигают')
+    assert.deepEqual([...seen].filter((o) => o !== before.join(' ') && o !== expected.join(' ')), [], 'промежуточных порядков нет')
+    assert.equal(await h.win.locator('[data-testid="recent-row"]').first().getAttribute('data-agent'), 'chat-45', 'и в «Недавних» он первый')
+    assert.equal(await h.win.getByTestId('conversation').getAttribute('data-agent'), 'chat-59', 'выбор не украден')
+    await h.win.getByRole('button', { name: 'Свернуть список', exact: true }).click()
   })
 
   it('много проектов прокручиваются в основной области; недавние видны на трёх размерах окна', async () => {

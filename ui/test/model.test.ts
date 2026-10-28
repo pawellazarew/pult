@@ -25,11 +25,11 @@ const ev = (kind: string, data: Record<string, unknown> = {}, over: Partial<Pult
   kind: kind as PultEvent['kind'], data, ...over,
 })
 
-const view = (name: string, status: AgentView['status'], lastActivity: string, pending = 0): AgentView =>
-  ({ name, provider: 'claude', status, cwd: '/x', pending, lastActivity })
+const view = (name: string, status: AgentView['status'], lastTurnAt: string, pending = 0): AgentView =>
+  ({ name, provider: 'claude', status, cwd: '/x', pending, lastActivity: '2026-09-28T10:00:00Z', lastTurnAt })
 
 describe('агенты: статусы и порядок', () => {
-  it('ждущие тебя первыми, потом работающие, потом остальные по активности', () => {
+  it('ждущие тебя первыми, потом работающие, потом остальные по началу последнего хода', () => {
     const sorted = sortAgents([
       view('old-idle', 'idle', '2026-09-28T08:00:00Z'),
       view('work', 'working', '2026-09-28T09:00:00Z'),
@@ -40,6 +40,36 @@ describe('агенты: статусы и порядок', () => {
     ])
     assert.deepEqual(sorted.map((a) => a.name), ['asks', 'pending-but-working', 'work', 'fresh-idle', 'failed', 'old-idle'])
     assert.equal(waitingCount(sorted), 2)
+  })
+
+  it('порядок по началу хода: реплика поднимает беседу один раз; поток, инструменты и фон — нет; без хода — createdAt', () => {
+    const rec = (name: string, createdAt: string, lastTurnAt?: string): AgentRecord =>
+      ({ name, provider: 'claude', cwd: '/x', mode: 'turn', createdAt, ...(lastTurnAt ? { lastTurnAt } : {}), lastStatus: 'idle', lastEventId: 0, pendingPermissions: 0 })
+    const records = [
+      rec('old', '2026-09-28T08:00:00.000Z'),
+      rec('mid', '2026-09-28T09:00:00.000Z', '2026-09-28T09:30:00.000Z'),
+      rec('new', '2026-09-28T09:10:00.000Z'),
+    ]
+    const order = (live: Parameters<typeof buildAgents>[1]): string[] => buildAgents(records, live).map((a) => a.name)
+    // Старые записи без lastTurnAt — по createdAt; ход (mid) выше созданной позже без хода.
+    assert.deepEqual(order({}), ['mid', 'new', 'old'])
+    // Живой поток: реплика человека в «old» — наверх сразу, до agent.list.
+    let st = applyEvents(EMPTY_STATE, [ev('message.user', { text: 'привет' }, { sessionId: 'old', ts: '2026-09-28T10:00:00.000Z' })])
+    const live = (): Parameters<typeof buildAgents>[1] => Object.fromEntries(Object.entries(st.sessions).map(([n, l]) => [n, { status: 'idle' as const, lastTs: l.lastTs, ...(l.lastTurnTs ? { lastTurnTs: l.lastTurnTs } : {}) }]))
+    assert.deepEqual(order(live()), ['old', 'mid', 'new'])
+    // Дальше ход «mid»: поток, инструменты, субагент, фон, конец хода и сторож — порядок тот же.
+    st = applyEvents(st, ['message.delta', 'tool.called', 'tool.finished', 'agent.spawned', 'background.changed', 'turn.stalled'].map((k, i) =>
+      ev(k, k === 'background.changed' ? { count: 1, tasks: [] } : {}, { sessionId: 'mid', ts: `2026-09-28T11:0${i}:00.000Z` })))
+    st = applyEvents(st, [ev('status.changed', { status: 'idle' }, { sessionId: 'old', ts: '2026-09-28T12:00:00.000Z' })])
+    assert.deepEqual(order(live()), ['old', 'mid', 'new'])
+    assert.equal(st.sessions['mid']?.lastTurnTs, undefined, 'события без реплики время хода не заводят')
+    // agent.list догнал: то же время из реестра — второго прыжка нет.
+    records[0] = { ...records[0]!, lastTurnAt: '2026-09-28T10:00:00.000Z' }
+    assert.deepEqual(order(live()), ['old', 'mid', 'new'])
+    assert.equal(buildAgents(records, live()).find((a) => a.name === 'old')?.lastTurnAt, '2026-09-28T10:00:00.000Z')
+    // Реестр новее живого (ход из CLI, пока окно спало) — побеждает реестр.
+    records[2] = { ...records[2]!, lastTurnAt: '2026-09-28T13:00:00.000Z' }
+    assert.deepEqual(order(live()), ['new', 'old', 'mid'])
   })
 
   it('подписи и тона статусов по палитре docs/12 §3', () => {

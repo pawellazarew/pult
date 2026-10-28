@@ -76,6 +76,8 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
   const [longProjects, setLongProjects] = useState(new Set<string>())
   const list = projectChats(p.groups, query, filter)
   const selectedProject = p.groups.find((g) => g.sessions.some((a) => a.name === p.selected))?.path
+  // Выбранная беседа начала ход и встала наверх проекта — строку держим в виду (прокрутка только если она ушла из виду).
+  const selectedTurn = p.groups.flatMap((g) => g.sessions).find((a) => a.name === p.selected)?.lastTurnAt
   const lastReveal = useRef<string | null>(null)
   const projectArea = useRef<HTMLDivElement>(null)
   useEffect(() => {
@@ -94,7 +96,7 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
       if (item.top < bounds.top || item.bottom > bounds.bottom) row.scrollIntoView({ block: 'nearest' })
     }, 240)
     return () => window.clearTimeout(timer)
-  }, [p.selected, selectedProject, revealRequest])
+  }, [p.selected, selectedProject, revealRequest, selectedTurn])
   const closeMenu = useCallback(() => setMenu(null), [])
 
   const projectMenu = (e: MouseEvent<HTMLElement>, g: ProjectGroup): void => {

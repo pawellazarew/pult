@@ -462,11 +462,11 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   // --- вид ---------------------------------------------------------------------------
   const pending = useMemo(() => pendingBySession(ui.inbox), [ui.inbox])
   const agents = useMemo(() => {
-    const live: Record<string, { status?: AgentRecord['lastStatus']; lastTs?: string; pending: number; context?: SessionContext; phase?: PhaseMap[string] }> = {}
+    const live: Record<string, { status?: AgentRecord['lastStatus']; lastTs?: string; lastTurnTs?: string; pending: number; context?: SessionContext; phase?: PhaseMap[string] }> = {}
     for (const r of records) {
       const s = ui.sessions[r.name]
       const ph = phases[r.name]
-      live[r.name] = { ...(s ? { status: s.status, lastTs: s.lastTs, ...(s.background ? { background: s.background } : {}) } : {}), ...(s?.context ? { context: s.context } : {}), pending: pending[r.name] ?? 0, ...(ph ? { phase: ph } : {}) }
+      live[r.name] = { ...(s ? { status: s.status, lastTs: s.lastTs, ...(s.lastTurnTs ? { lastTurnTs: s.lastTurnTs } : {}), ...(s.background ? { background: s.background } : {}) } : {}), ...(s?.context ? { context: s.context } : {}), pending: pending[r.name] ?? 0, ...(ph ? { phase: ph } : {}) }
     }
     return buildAgents(records, live)
   }, [records, ui.sessions, pending, phases])

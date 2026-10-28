@@ -208,6 +208,17 @@ describe('реестр сессий', () => {
     assert.deepEqual(got.map((s) => s.title), [undefined, undefined, 'я'.repeat(SESSION_TITLE_MAX), 'в две строки'])
   })
 
+  it('lastTurnAt в sessions.json: целое время читается, мусор выбрасывается (порядок тогда по createdAt)', () => {
+    const base = { provider: 'claude', cwd: '/x' }
+    const got = parseSessions({ sessions: [
+      { ...base, name: 'a', lastTurnAt: '2026-10-28T10:00:00.000Z' },
+      { ...base, name: 'b', lastTurnAt: 'вчера' },
+      { ...base, name: 'c', lastTurnAt: 42 },
+      { ...base, name: 'd' },
+    ] })
+    assert.deepEqual(got.map((s) => s.lastTurnAt), ['2026-10-28T10:00:00.000Z', undefined, undefined, undefined])
+  })
+
   it('после рестарта всё незавершённое становится cold, завершённое не трогается', () => {
     const home = tempHome()
     try {
@@ -753,6 +764,43 @@ describe('менеджер сессий: рестарт демона', () => {
       assert.equal(argv[argv.indexOf('--effort') + 1], 'low')
       // Граница доступа переживает рестарт вместе с сессией.
       assert.equal(argv[argv.indexOf('--setting-sources') + 1], 'user')
+    } finally {
+      await second.close()
+      rmSync(cwd, { recursive: true, force: true })
+      home.remove()
+    }
+  })
+
+  it('lastTurnAt: начало хода — время реплики человека; события хода его не двигают; переживает рестарт', async () => {
+    const home = tempHome()
+    const cwd = workDir({})
+    const first = boot(home)
+    let turnAt = ''
+    try {
+      const rec = await first.manager.start({ name: 'w', kind: 'claude', cwd, mode: 'turn' })
+      assert.equal(rec.lastTurnAt, undefined, 'до первого хода поля нет — окно берёт createdAt')
+      await first.manager.prompt('w', 'привет')
+      assert.ok(await waitFor(() => first.manager.list()[0]?.lastStatus === 'idle', 20_000))
+      const user = first.store.readFrom(0, { sessionId: 'w' }).find((e) => e.kind === 'message.user')
+      turnAt = String(first.manager.list()[0]?.lastTurnAt)
+      assert.equal(turnAt, user?.ts, 'то же время, что у message.user: окно и agent.list ставят строку в одно место')
+      // Поток, инструменты, субагент, фон и смена статуса после хода время хода не трогают.
+      for (const kind of ['message.delta', 'tool.called', 'agent.spawned', 'background.changed', 'turn.stalled'] as const) {
+        first.manager.emit({ sessionId: 'w', provider: 'claude', kind, data: {} })
+      }
+      first.manager.emit({ sessionId: 'w', provider: 'claude', kind: 'status.changed', data: { status: 'idle' } })
+      assert.equal(first.manager.list()[0]?.lastTurnAt, turnAt)
+    } finally { await first.close() }
+
+    const second = boot(home)
+    try {
+      assert.equal(second.manager.list()[0]?.lastTurnAt, turnAt, 'реестр помнит начало хода после рестарта')
+      await sleep(5)
+      await second.manager.prompt('w', 'ещё раз')
+      const next = String(second.manager.list()[0]?.lastTurnAt)
+      assert.ok(Date.parse(next) > Date.parse(turnAt), `новый ход двигает время: ${turnAt} → ${next}`)
+      assert.ok(await waitFor(() => second.manager.list()[0]?.lastStatus === 'idle', 20_000))
+      assert.equal(second.manager.list()[0]?.lastTurnAt, next, 'конец хода время не двигает')
     } finally {
       await second.close()
       rmSync(cwd, { recursive: true, force: true })
