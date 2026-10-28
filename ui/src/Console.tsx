@@ -40,7 +40,7 @@ import type { SearchHit, SearchReply } from './model/search.js'
 import type { HotAction } from './model/hotkeys.js'
 import { composerApproves, focusedRequest, inboxCounts, inboxList, inboxView, isInboxFilter, pendingBySession, reconcileInbox } from './model/inbox.js'
 import type { InboxFilter } from './model/inbox.js'
-import { isSnoozed, nextWaiting, pruneSnoozed, snooze, unsnooze } from './model/queue.js'
+import { isSnoozed, nextWaiting, pruneSnoozed, snooze, unsnooze, waitingQueue } from './model/queue.js'
 import type { Snoozed } from './model/queue.js'
 import { startParams } from './model/newAgent.js'
 import type { NewAgentForm } from './model/newAgent.js'
@@ -586,6 +586,18 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     setJump({ name: hit.sessionId, eventId: hit.eventId, nonce: ++jumpNonce.current, kind: hit.kind, ...(hit.parentId !== undefined ? { parentId: hit.parentId } : {}) })
   }
   const onScrolled = useCallback((nonce: number): void => { setJump((j) => (j?.nonce === nonce ? null : j)) }, [])
+  /** Следующая сессия, которая ждёт тебя: кнопка в Inbox и ⌘⌥L делают одно и то же. */
+  const goNextWaiting = (): void => {
+    if (modal) return
+    const next = nextWaiting(agents, current?.name ?? null, snoozed)
+    if (next) select(next)
+  }
+  /** «в ленту» из карточки Inbox: открыть разговор и прыгнуть к карточке запроса (нет события — просто открыть). */
+  const jumpToPerm = (sessionId: string, eventId?: number): void => {
+    if (!agents.some((a) => a.name === sessionId)) { setBannerError(`сессии ${sessionId} больше нет`); return }
+    select(sessionId)
+    if (eventId !== undefined) setJump({ name: sessionId, eventId, nonce: ++jumpNonce.current, kind: 'permission.requested' })
+  }
   const runSearch = useCallback((query: string): Promise<SearchReply> =>
     bridge.call('events.search', { query, limit: 100 }).then((r) => r as SearchReply), [bridge])
   const labels = useRef<Map<string, string>>(new Map())
@@ -614,6 +626,8 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   // Поле реплики знает только запрос СВОЕЙ сессии: ⌘↵ в нём не разрешает карточку другой сессии из Inbox.
   const ownFocused = composerApproves(focused, current?.name ?? null)
   const inboxNums = useMemo(() => inboxCounts(inbox, agents), [inbox, agents])
+  /** Очередь внимания (⌘⌥L): сколько сессий ждут — кнопка и подсказка в Inbox. */
+  const waitingTotal = useMemo(() => waitingQueue(agents, snoozed).length, [agents, snoozed])
   const guard = useMemo(() => guardView([...guardFromDoctor(doctor.report), ...ui.guard]), [doctor.report, ui.guard])
   const doctorGroupsList = useMemo(() => doctorGroups(doctor.report), [doctor.report])
   const blocked = blockedProviders(status?.providers)
@@ -985,10 +999,8 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         setInboxOpen((v) => !v)
         return
       case 'nextWaiting': {
-        if (modal) return
         e.preventDefault()
-        const next = nextWaiting(agents, current?.name ?? null, snoozed)
-        if (next) select(next)
+        goNextWaiting()
         return
       }
       case 'snooze': {
@@ -1107,7 +1119,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
             onReveal={(p) => void bridge.revealPath(p)} onBrowser={setBrowser} />
           <button type="button" className="btn external-open" disabled={conn.state !== 'up'} onClick={() => setModal({ type: 'external' })} data-testid="open-external-sessions"><Icon name="folder" />Существующие чаты</button>
           <button type="button" className="btn sidebar-settings" onClick={() => setModal({ type: 'settings' })} data-testid="open-settings"><Icon name="tool" />Настройки<Kbd>{`${CMD},`}</Kbd></button>
-          <div className="ag-foot mono" data-testid="event-count">журнал #{ui.lastId}</div>
+          <div className="ag-foot mono journal" data-testid="event-count" title="Курсор журнала демона (служебный, скрыт с экрана)">журнал #{ui.lastId}</div>
         </div>
         <div className="conv-col">
         {current ? (
@@ -1128,6 +1140,14 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
             onStop={() => setModal({ type: 'stop', name: current.name })}
             onRemove={() => setModal({ type: 'rm', name: current.name })}
             onReveal={(p) => void bridge.revealPath(p)}
+            menu={{
+              onRename: (name) => setModal({ type: 'rename', name }),
+              onReveal: (path) => void bridge.revealPath(path),
+              onExport: exportAgent,
+              onBrowser: setBrowser,
+              onArchive: archiveSession,
+              onRemove: (name) => setModal({ type: 'rm', name }),
+            }}
             onApprove={approve} onDeny={deny} onAnswer={answer} onFocusPerm={setFocusChosen}
             onOpenInbox={(permId) => { setInboxOpen(true); setFocusChosen(permId) }}
             {...(settingsOk && conn.state === 'up' ? { onConfigure: (pick: SettingsPick) => configureAgent(current.name, pick) } : {})}
@@ -1150,6 +1170,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         {inboxOpen && (
           <Inbox items={inboxShown.perms} cards={inboxShown.sessions} filter={inboxFilter} counts={inboxNums} onFilter={setInboxFilter}
             agents={agents} focused={focused?.id ?? null} busy={permBusy} retrying={retrying} now={now}
+            waitingCount={waitingTotal} onNextWaiting={goNextWaiting} onJumpPerm={jumpToPerm}
             onFocus={setFocusChosen} onApprove={approve} onDeny={deny} onAnswer={answer} onClose={() => setInboxOpen(false)}
             onOpen={select} onRetry={retryAgent}
             onStop={(name, upTo, turnId) => {

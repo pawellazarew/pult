@@ -1095,3 +1095,27 @@ button { font: inherit; color: inherit; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
 }
+
+/* --- ревью UX 29.10.2026: Inbox и меню беседы ----------------------------------------- */
+
+/* «⋯» в шапке разговора — та же кнопка, что у строки сайдбара; меню открывается вниз от неё. */
+.conv-menu { flex: none; cursor: pointer; border: 0; background: none; padding: 6px 10px; border-radius: 6px; color: inherit; }
+.conv-menu:hover { background: var(--sunk); }
+
+/* «в ленту» из карточки Inbox: тихая кнопка в шапке карточки, стрелка — вверх-вправо. */
+.perm-h .perm-jump { flex-shrink: 0; gap: 3px; padding: 2px 7px; }
+.perm-h .perm-jump .ic { width: 11px; height: 11px; transform: rotate(-45deg); }
+
+/* Решённая карточка хранит diff свёрнутым: утром проверяется, что именно разрешили ночью. */
+.perm-diff-resolved { border: 1px solid var(--hair); border-radius: 8px; margin: 8px 10px 0; overflow: hidden; }
+.perm-diff-resolved > summary { cursor: pointer; padding: 5px 10px; background: var(--sunk); font-size: 10.5px; color: var(--mut); list-style: none; display: flex; gap: 8px; align-items: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.perm-diff-resolved > summary::-webkit-details-marker { display: none; }
+.perm-diff-resolved .a { color: var(--add); }
+.perm-diff-resolved .d { color: var(--del); }
+
+/* Очередь внимания в шапке Inbox: разбор «кто ждёт» без знания ⌘⌥L. */
+.inbox-next { flex-shrink: 0; gap: 5px; }
+.inbox-waiting-hint { margin: 8px 0 0; font-size: 11px; color: var(--mut); }
+
+/* Служебный курсор журнала демона: точка синхронизации e2e, человеку на экране не нужен. */
+.ag-foot.journal { display: none; }
