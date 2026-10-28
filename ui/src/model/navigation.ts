@@ -1,4 +1,4 @@
-// Единственный список бесед: внимание важнее папки; проект остаётся подписью и фильтром поиска.
+// Поиск, фильтры состояния и стабильное дерево проектов; недавние служат ярлыками к тем же чатам.
 import type { AgentView } from './agents.js'
 import { agentLabel, sortAgents, statusRank, statusView } from './agents.js'
 import type { ProjectGroup } from './projects.js'
@@ -32,4 +32,27 @@ export function chatStatus(a: AgentView): { label: string; tone: string; detail:
   if (a.status === 'cold') return { label: 'История', tone: 'queued', detail: 'Можно продолжить' }
   if (a.status === 'idle' || a.status === 'done') return { label: 'Готово', tone: 'ok', detail: 'Можно продолжить' }
   return { label: sv.label, tone: sv.tone, detail: sv.label }
+}
+
+export type ProjectFilter = 'all' | 'working' | 'waiting'
+export interface ProjectChats { group: ProjectGroup; rows: AgentView[]; working: number; waiting: number }
+
+/** Projects keep their position; chats keep creation order even when their status changes. */
+export function projectChats(groups: readonly ProjectGroup[], query = '', filter: ProjectFilter = 'all'): ProjectChats[] {
+  const matched = new Set(chatSections(groups, query).flatMap((s) => s.rows.map((r) => r.agent.name)))
+  const terms = query.toLocaleLowerCase().trim().split(/\s+/).filter(Boolean)
+  return groups.flatMap((group) => {
+    const all = group.sessions.filter((a) => !a.archived && matched.has(a.name))
+    const working = all.filter((a) => statusRank(a.status, a.pending) === 1).length
+    const waiting = all.filter((a) => statusRank(a.status, a.pending) === 0).length
+    const rows = all.filter((a) => filter === 'all' || statusRank(a.status, a.pending) === (filter === 'waiting' ? 0 : 1))
+      .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? '') || a.name.localeCompare(b.name))
+    const emptyMatches = filter === 'all' && !group.sessions.length && terms.every((term) => `${group.name} ${group.path}`.toLocaleLowerCase().includes(term))
+    return rows.length || emptyMatches ? [{ group, rows, working, waiting }] : []
+  })
+}
+
+/** A long project stays manageable; the selected and busy chats never disappear behind “more”. */
+export function projectPreview(rows: readonly AgentView[], selected: string | null, expanded: boolean, limit = 4): AgentView[] {
+  return rows.filter((a, i) => expanded || i < limit || a.name === selected || statusRank(a.status, a.pending) < 2)
 }

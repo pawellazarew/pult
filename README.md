@@ -156,10 +156,13 @@ it is doing right now, with a seconds counter — starting, thinking, writing, r
 you (with a link to the Inbox card); reasoning text, when the provider streams it, sits under a collapsed
 "Размышления". The line is never written to the event journal.
 
-The sidebar keeps waiting and working conversations above Projects, with Recent in a separate lower area.
-Each area scrolls independently, so active chats and expanded projects cannot push Recent out of view.
-Working chats are ordered by creation date (newest first), keeping their positions stable as events arrive.
-Recent stays ordered by activity. Search matches the title, project or provider.
+The sidebar groups chats inside expandable projects. Click a project to open its conversations; project order
+and chat creation order stay stable as agents work. Long lists have a “Show more” button, keeping the selected
+and busy chats visible. “Working” and “Waiting” filters narrow the project tree. Collapsed projects show activity
+and attention counts; each project has its own new-chat button and menu.
+Recent conversations remain below the projects. Drag their separator, use its arrow keys, or double-click to
+reset the size; the split and collapsed projects survive reopening the window. Search matches chat titles,
+projects and providers. Selecting an old conversation from Recent reveals it inside its project.
 ⌘1…9 selects the first nine conversations in the visible list. Technical connection details are under the
 connection indicator. ⌘K focuses conversation search; ⌘B hides or shows the sidebar. Model, effort and
 approval mode sit in the composer. Context, subscription usage and session details open from its info button.

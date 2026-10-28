@@ -1,0 +1,44 @@
+/* Projects are the primary navigation; Recent is a bounded, adjustable shortcut area. */
+.sidebar-filters { display: flex; gap: 4px; padding: 0 10px 10px; flex: none; }
+.sidebar-filter { border: 1px solid transparent; background: none; color: var(--mut); padding: 5px 4px; border-radius: 6px; font: 11px var(--body); display: flex; align-items: center; gap: 5px; cursor: pointer; white-space: nowrap; }
+.sidebar-filter span { color: var(--faint); font-size: 10px; }
+.sidebar-filter:hover { background: var(--ground); }
+.sidebar-filter.active { background: var(--panel); border-color: var(--line); color: var(--ink); }
+.tree.project-sidebar { display: grid; grid-template-rows: minmax(0, 1fr) 8px clamp(104px, var(--recent-share, 30%), 55%); padding: 0; overflow: hidden; }
+.project-sidebar .sidebar-projects { min-height: 0; max-height: none; overflow: auto; scrollbar-gutter: stable; overflow-anchor: none; }
+.project-sidebar .project-manager { margin: 0 8px; border: 0; }
+.projects-heading { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; height: 34px; padding: 0 9px; background: var(--sidebar); }
+.projects-heading h3 { margin: 0; color: var(--mut); font: 500 11.5px var(--body); display: flex; align-items: center; gap: 8px; }
+.projects-heading .count { color: var(--faint); font-size: 10px; }
+.projects-heading .proj-btn { opacity: 1; }
+.project-sidebar .project-group { border: 0; margin-bottom: 6px; interpolate-size: allow-keywords; }
+.project-group::details-content { overflow: clip; block-size: 0; transition: block-size 200ms ease, content-visibility 200ms allow-discrete; }
+.project-group[open]::details-content { block-size: auto; }
+.project-manager .project-group > .proj-h { display: flex; height: 34px; padding: 0 7px; list-style: none; border-radius: 7px; gap: 6px; font-family: var(--body); }
+.project-group > summary::-webkit-details-marker { display: none; }
+.project-group[open] > .proj-h .proj-chev { transform: rotate(90deg); }
+.project-manager .project-group > .proj-h > .proj-chev { width: 11px; }
+.current-project > .proj-h .proj-name { color: var(--ink); }
+.project-chat-count { color: var(--faint); font: 10px var(--mono); }
+.project-state { font: 10px var(--mono); white-space: nowrap; }
+.project-manager .project-group .proj-btn { opacity: 0; }
+.project-manager .project-group > .proj-h:hover .proj-btn, .project-manager .project-group:focus-within > .proj-h .proj-btn { opacity: 1; }
+.project-chats.chat-section { padding: 1px 0 0 12px; }
+.project-chats .ag { padding: 9px 9px; margin: 0 0 2px; border-radius: 7px; }
+.project-chats .ag-name { font-size: 12px; }
+.project-chats .ag-meta .chat-project { display: none; }
+.project-chats .ag-meta .chat-provider::before { display: none; }
+.project-chats .ag-meta { font-size: 10.5px; }
+.project-chats .chat-row-status { font-size: 10px; }
+.project-more, .project-empty { border: 0; background: none; color: var(--mut); font: 11px var(--body); text-align: left; padding: 8px 10px; width: 100%; cursor: pointer; border-radius: 6px; }
+.project-empty { display: flex; justify-content: space-between; align-items: center; }
+.project-more:hover, .project-empty:hover { background: var(--ground); color: var(--ink); }
+.project-sidebar .proj-archive { border: 0; margin: 8px 9px; }
+.archive-toggle { width: 100%; border: 0; background: none; text-align: left; color: var(--mut); }
+.sidebar-splitter { display: flex; justify-content: center; align-items: center; cursor: row-resize; touch-action: none; border-top: 1px solid var(--hair); outline-offset: -2px; }
+.sidebar-splitter span { width: 28px; height: 2px; background: var(--line); border-radius: 2px; }
+.sidebar-splitter:hover span, .sidebar-splitter:focus-visible span { background: var(--accent); }
+.project-sidebar .chat-recent { min-height: 0; border: 0; padding-top: 0; overflow: hidden; }
+.project-sidebar .chat-recent .chat-section-title { padding-top: 5px; }
+.project-sidebar .chat-recent .ag { padding-top: 8px; padding-bottom: 8px; }
+@media (prefers-reduced-motion: reduce) { .project-group::details-content { transition: none; } }
