@@ -1,9 +1,11 @@
 // e2e M8f: подвал «модель · усилие · режим» — меню (со следующего хода, строка в ленте, «Полный доступ» — с вопросом),
 // «Настройки» (⌘,) → умолчания «+ Сессия» записаны в config.json, последний выбор подставляется в форму.
 // 0.3.6: «Страж сети» — режим allow и страна из поиска → config.json, doctor, отказ хода с причиной в ленте.
+// План 16, № 11: «Правила „Всегда“» — правило с меткой Пульта видно с датой и сессией, «Отозвать» убирает его строку.
 
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { after, before, describe, it } from 'node:test'
 import { launch, waitFor } from './harness.js'
 import type { Harness } from './harness.js'
@@ -141,6 +143,36 @@ describe('окно: настройки сессии M8f', () => {
     await h.win.getByTestId('settings-save').click()
     assert.ok(await waitFor(async () => /изменилось снаружи/.test((await h.win.getByTestId('settings-error').textContent().catch(() => '')) ?? ''), 5000), 'отказа нет')
     assert.equal(readFileSync(h.paths.config, 'utf8'), before, 'правило из терминала не затёрто')
+    await h.win.keyboard.press('Escape')
+    assert.ok(await waitFor(async () => (await dlg.count()) === 0, 5000))
+  })
+
+  it('«Правила „Всегда“»: правило Пульта с датой и сессией; «Отозвать» убирает метку и строку, чужое — как было', async () => {
+    // Тестовый демон держит файл правил Codex в PULT_HOME/codex-rules (настоящий ~/.codex не трогается).
+    const dir = join(h.paths.home, 'codex-rules')
+    mkdirSync(dir, { recursive: true })
+    const file = join(dir, 'default.rules')
+    const mine = '# моё\nprefix_rule(pattern=["ls"], decision="allow")\n'
+    writeFileSync(file, `${mine}# pult: rule=r-e2e00001 at=2026-10-29T10:05:00.000Z session=sm cwd=%2Fsrv%2Fp\nprefix_rule(pattern=["git", "push"], decision="allow")\n`)
+    await h.win.keyboard.press('Meta+,')
+    const dlg = h.win.getByTestId('settings-dialog')
+    await dlg.waitFor({ timeout: 5000 })
+    const sec = h.win.getByTestId('settings-rules')
+    const row = h.win.locator('[data-testid="rule-row"][data-id="r-e2e00001"]')
+    await row.waitFor({ timeout: 5000 })
+    const rowText = (await row.textContent()) ?? ''
+    assert.match(rowText, /Команды, начинающиеся с «git push»/)
+    assert.match(rowText, /сессия sm/)
+    assert.match(rowText, /\/srv\/p/)
+    assert.match((await h.win.getByTestId('rules-unmarked').textContent()) ?? '', /Ещё 1 строка/)
+    await sec.scrollIntoViewIfNeeded()
+    await h.screen('rules-always')
+    await h.win.getByTestId('rule-revoke-r-e2e00001').click()
+    assert.ok(await waitFor(async () => (await row.count()) === 0, 5000), 'строка правила не ушла из окна')
+    assert.equal(readFileSync(file, 'utf8'), mine, 'ушли ровно метка и правило')
+    await h.win.getByTestId('rules-empty').waitFor({ timeout: 5000 })
+    const events = ((await c.request('events.tail', { since: 0, sessionId: 'daemon' })) as { events: Array<{ kind: string; data: Record<string, unknown> }> }).events
+    assert.equal(events.find((e) => e.kind === 'rule.revoked')?.data['id'], 'r-e2e00001', 'отзыва нет в журнале')
     await h.win.keyboard.press('Escape')
     assert.ok(await waitFor(async () => (await dlg.count()) === 0, 5000))
   })

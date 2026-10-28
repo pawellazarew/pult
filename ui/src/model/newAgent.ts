@@ -2,6 +2,7 @@
 // `agent.start`. Чистые функции.
 
 import type { GuardRule } from '../../../src/core/guard.js'
+import type { CodexRulesList } from './rules.js'
 import type { NewSessionPrefill } from '../../../shell/src/contract.js'
 import type { ApprovalMode } from '../../../src/adapters/types.js'
 import { CLAUDE_DEFAULT_EFFORT, CLAUDE_DEFAULT_MODEL, CLAUDE_EFFORTS, CLAUDE_MODELS, CODEX_EFFORTS_FALLBACK, HOME_CWD_WARNING, modeBlocksBrowser } from '../../../src/sessions/settings.js'
@@ -136,6 +137,8 @@ export interface SettingsReply {
     guard: GuardRule
     exits?: Record<string, { loc?: string | null; path?: string; reason?: string; checkedAt?: string } | undefined>
   }
+  /** Правила «Всегда» Codex с меткой Пульта (план 16, № 11); нет — старый демон, раздела нет. */
+  codexRules?: CodexRulesList
 }
 
 /** Поля провайдера поверх формы: модель, усилие, режим, процесс, браузер, предложенная ветка. */

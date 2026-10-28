@@ -136,7 +136,21 @@ async function runTurn(scenario, threadId, turnId) {
     }
     case 'approval-custom': {
       const a = cfg.approval ?? {}
-      await ask(9020 + customAsks++, a.method ?? 'item/commandExecution/requestApproval', { threadId, turnId, itemId: 'ac-1', ...(a.params ?? {}) })
+      const reply = await ask(9020 + customAsks++, a.method ?? 'item/commandExecution/requestApproval', { threadId, turnId, itemId: 'ac-1', ...(a.params ?? {}) })
+      // План 16, № 11: поправку «всегда» codex дописывает в rules/default.rules сам — как живой 0.163 (строка JSON-литералами,
+      // точно такая же строка не дублируется). Файл — `cfg.rulesFile` (временный дом теста), а не настоящий ~/.codex.
+      const d = reply?.result?.decision
+      const argv = d?.acceptWithExecpolicyAmendment?.execpolicy_amendment
+      const net = d?.applyNetworkPolicyAmendment?.network_policy_amendment
+      const line = Array.isArray(argv) ? `prefix_rule(pattern=[${argv.map((x) => JSON.stringify(x)).join(', ')}], decision="allow")`
+        : net?.host ? `network_rule(host=${JSON.stringify(net.host)}, protocol="https", decision="allow")` : null
+      if (cfg.rulesFile && line) {
+        let text = ''
+        try { text = readFileSync(cfg.rulesFile, 'utf8') } catch { text = '' }
+        if (!text.split('\n').includes(line)) appendFileSync(cfg.rulesFile, `${text && !text.endsWith('\n') ? '\n' : ''}${line}\n`)
+      }
+      // Ход ещё идёт после ответа (`holdMs`): тест успевает отозвать правило посреди хода.
+      if (a.holdMs) await sleep(a.holdMs)
       await finish()
       return
     }

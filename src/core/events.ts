@@ -72,6 +72,12 @@ export const EVENT_KINDS = [
    * очереди попадает в журнал, как и прямая, отредактированным `message.user` в момент отправки. Статус не двигает.
    */
   'queue.updated',
+  /**
+   * План 16, № 11: правило «Всегда» Codex отозвано (`perm.rules.revoke`, «Настройки» → «Правила „Всегда“») —
+   * `{id, kind: execpolicy|network, label, session, at, by}`. Пишется в сессию демона: правило общее на все сессии
+   * Codex, `session` — откуда его когда-то разрешили. Строка уже убрана из `default.rules`; ходы не трогаются.
+   */
+  'rule.revoked',
   'daemon.started',
   'daemon.stopping',
 ] as const

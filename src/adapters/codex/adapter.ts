@@ -51,6 +51,7 @@ import type { NetCheck } from '../../env/net.js'
 import { readSavedNode, resolveChildNode } from '../../env/nodeBin.js'
 import { BROWSER_SERVER_NAME, DENIED_BROWSER_TOOLS } from '../../mcp/browser.js'
 import type { SessionRecord } from '../../sessions/registry.js'
+import type { RuleTarget } from '../../perm/codexRules.js'
 import type {
   AdapterDeps, ApprovalMode, PermissionDecision, PermissionOffers, PermissionScope, ProviderAdapter, SessionSpec, StartedSession, TurnOutcome, TurnSettings, TurnStarted,
 } from '../types.js'
@@ -151,10 +152,22 @@ export function codexThreadPolicy(approval: ApprovalMode | undefined, broker: bo
 /**
  * Что на самом деле делает «всегда» у Codex — карточка Inbox говорит это словами (ревью M8d, живой codex 0.163):
  * поправка execpolicy — это правило-ПРЕФИКС (команда с любыми аргументами дальше идёт без песочницы и без вопроса),
- * и оно, как и правило сети, пишется в `$CODEX_HOME/rules/default.rules` — во все сессии Codex, Пульт его не снимет.
+ * и оно, как и правило сети, пишется в `$CODEX_HOME/rules/default.rules` — во все сессии Codex. Пульт метит такую строку
+ * и отзывает её из «Настроек» или `pult perm rules revoke` (план 16, № 11; src/perm/codexRules.ts).
  */
-export const CODEX_EXEC_RULE_NOTE = '(с любыми аргументами дальше) — без песочницы и без вопроса во всех сессиях Codex; правило в ~/.codex/rules/default.rules'
-export const CODEX_NET_RULE_NOTE = '— без вопроса во всех сессиях Codex; правило в ~/.codex/rules/default.rules'
+export const CODEX_EXEC_RULE_NOTE = '(с любыми аргументами дальше) — без песочницы и без вопроса во всех сессиях Codex; правило в ~/.codex/rules/default.rules, отозвать — «Настройки» → «Правила „Всегда“»'
+export const CODEX_NET_RULE_NOTE = '— без вопроса во всех сессиях Codex; правило в ~/.codex/rules/default.rules, отозвать — «Настройки» → «Правила „Всегда“»'
+
+/**
+ * Что разрешает готовый ответ «всегда» (объект из `availableDecisions`, `codexScopedOffers`): префикс команды или
+ * хост. Демону — чтобы найти строку, которую codex допишет в rules/default.rules, и поставить над ней метку.
+ */
+export function codexRuleTarget(rule: Record<string, unknown> | null): RuleTarget | null {
+  const argv = obj(rule?.['acceptWithExecpolicyAmendment'])?.['execpolicy_amendment']
+  if (Array.isArray(argv) && argv.length && argv.every((v) => typeof v === 'string')) return { kind: 'execpolicy', argv: argv as string[] }
+  const host = obj(obj(rule?.['applyNetworkPolicyAmendment'])?.['network_policy_amendment'])?.['host']
+  return typeof host === 'string' && host ? { kind: 'network', host } : null
+}
 
 /** Префикс команды строкой для карточки: слова с пробелами и спецзнаками — в одинарных кавычках, как в sh. */
 export function shellJoin(argv: readonly string[]): string {
@@ -1296,7 +1309,17 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
       })
       return
     }
+    if (chosen.decision === pending.rule) noteRule(l.spec.name, l.spec.cwd, pending.rule)
     client.respond(id, { decision: chosen.decision })
+  }
+
+  /** «Всегда» уходит на провод: демону — ДО ответа, чтобы слепок файла правил был снят раньше записи codex. */
+  const noteRule = (sessionId: string, cwd: string | undefined, rule: Record<string, unknown> | null): void => {
+    const target = codexRuleTarget(rule)
+    if (!target || !opts.ruleGranted) return
+    try { opts.ruleGranted({ ...target, sessionId, ...(cwd ? { cwd } : {}) }) } catch (e) {
+      logger.warn('правила codex: метка «Всегда» не заведена', { session: sessionId, error: (e as Error).message })
+    }
   }
 
   // --- демультиплексор -------------------------------------------------------
@@ -1914,11 +1937,13 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
       approvals.delete(key)
       pending.answered = true
       if (!client || !client.alive()) return
+      const chosen = chooseDecision(pending.method, decision.behavior, pending.offered, decision.scope, pending.rule).decision
+      if (pending.rule && chosen === pending.rule) noteRule(pending.session, live.get(pending.session)?.spec.cwd, pending.rule)
       client.respond(raw, pending.method === 'item/tool/requestUserInput'
         ? { answers: decision.behavior === 'allow' ? decision.answers ?? {} : {} }
         : pending.method === 'mcpServer/elicitation/request'
           ? elicitationAnswer(decision.behavior)
-          : { decision: chooseDecision(pending.method, decision.behavior, pending.offered, decision.scope, pending.rule).decision })
+          : { decision: chosen })
     },
 
     async interrupt(name) {

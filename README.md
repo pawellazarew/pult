@@ -209,8 +209,11 @@ Every question from every session goes to the Inbox (⌘I in the window, `pult p
   action until the session ends.
 - **Always** (`--rule`) — only when Codex offers it. "Always: commands starting with `<prefix>`" adds a Codex rule:
   that command, with any arguments, then runs **outside the sandbox and without a question in all Codex sessions**, not
-  only Pult's. The same works for network access to a host. These rules are written to `~/.codex/rules/default.rules`;
-  Pult never removes them for you.
+  only Pult's. The same works for network access to a host. These rules are written to `~/.codex/rules/default.rules`.
+  Pult marks the line it caused with a `# pult: rule=…` comment; marked rules are listed (date, source session) in
+  Settings → «Правила „Всегда“» (Always rules) and by `pult perm rules`, and can be revoked there or with `pult perm rules revoke <id>` —
+  only the marker and that line are removed, a running turn is not interrupted. Unmarked lines are never touched. Codex
+  sessions that are already open may keep a revoked rule in memory until the daemon restarts.
 - **Claude** doesn't offer reusable rules to Pult today, so Claude cards only offer "once".
 - **A card says when it shows less than will run.** The secret filter masks e-mails, tokens and URL credentials on
   the card (`<email>`, `<token>`, `<redacted>`), and Codex fields are clipped; the ORIGINAL command still runs, so
@@ -476,7 +479,8 @@ rm -rf ~/.pult                 # all sessions, journals, settings and installed 
 rm -rf /Applications/Pult.app
 ```
 
-Codex "always" rules you allowed stay in `~/.codex/rules/default.rules`; remove those lines by hand if you want them gone.
+Codex "always" rules you allowed stay in `~/.codex/rules/default.rules`. Revoke the ones Pult marked first
+(`pult perm rules`, then `pult perm rules revoke <id>`); remove unmarked lines by hand.
 
 ## FAQ
 

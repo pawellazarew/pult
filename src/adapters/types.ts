@@ -19,13 +19,15 @@
 import type { EventDraft } from '../core/events.js'
 import type { SessionMode, SessionProvider, SessionRecord } from '../sessions/registry.js'
 import type { LiveSignal } from '../sessions/phaseTracker.js'
+import type { RuleGrant } from '../perm/codexRules.js'
 
 /**
  * M8d (решение владельца 19.10.2026, пересмотр инварианта 5 Ф1): насколько широко «да».
  *   * `once` — ровно это действие (по умолчанию; ⌘Enter и голое `pult perm approve` — всегда оно);
  *   * `session` — это и такие же до конца сессии провайдера (`acceptForSession` у Codex);
  *   * `rule` — постоянное правило в настройках САМОГО провайдера (`acceptWithExecpolicyAmendment`,
- *     `applyNetworkPolicyAmendment` у Codex): Пульт его потом не снимет.
+ *     `applyNetworkPolicyAmendment` у Codex). С плана 16 (№ 11) Пульт метит такую строку и умеет её отозвать
+ *     (src/perm/codexRules.ts, «Настройки» → «Правила „Всегда“», `pult perm rules`).
  * Шире `once` — только если провайдер ЭТОТ запрос так предложил (`PermissionOffers`); иначе отказ на входе.
  */
 export type PermissionScope = 'once' | 'session' | 'rule'
@@ -161,6 +163,11 @@ export interface AdapterDeps {
    * `at` (M8f) — снимок хода: режим и браузер берутся из него, а не из записи, которую мог сменить `configure`.
    */
   mcpExtras?(name: string, nodeBin: string, at?: TurnSettings): Promise<SessionMcpExtras>
+  /**
+   * План 16, № 11: человек нажал «Всегда …», и ответ-поправка сейчас уйдёт провайдеру. Зовётся ДО ответа — демон
+   * снимает слепок файла правил и метит строку, которую codex допишет (src/perm/codexRules.ts). Не бросает.
+   */
+  ruleGranted?(grant: RuleGrant): void
 }
 
 /** Что добавить сессии: серверы и правила разрешений. */
