@@ -151,6 +151,8 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   const [send, setSend] = useState<{ sending: boolean; error: string | null }>({ sending: false, error: null })
   // M8e: реплика «отправляется…» — поле уже пустое, демон ещё не подтвердил (model/pending.ts).
   const [outgoing, setOutgoing] = useState<PendingSend | null>(null)
+  /** Отправка из поля, чей ход вернёт строку чата в виду в списке (не очередь): см. `ProjectTree.revealSend`. */
+  const [revealSend, setRevealSend] = useState<{ name: string; id: number } | null>(null)
   const pendingSeq = useRef(0)
   const [bannerError, setBannerError] = useState<string | null>(null)
   const [starting, setStarting] = useState(false)
@@ -643,6 +645,8 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         { busy: sv.busy, needsYou: sv.needsYou, queueLen: current.queue?.length ?? 0, queuePaused: current.queuePaused === true }),
     })
     const mine = (f: (p: PendingSend) => PendingSend | null) => (p: PendingSend | null): PendingSend | null => (p && p.nonce === nonce ? f(p) : p)
+    const unmark = (r: { name: string; id: number } | null): { name: string; id: number } | null => (r?.id === nonce ? null : r)
+    setRevealSend({ name, id: nonce })
     setSend({ sending: true, error: null })
     try {
       // О2: идёт ход — в очередь демона; ⌘Enter — прервать и сказать (демон ждёт, пока ход осядет).
@@ -651,6 +655,8 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
       })) as { queued?: boolean } | null
       setSend({ sending: false, error: null })
       if (r?.queued) {
+        // В очереди ход начнёт демон сам, позже: строку тогда не дёргаем.
+        setRevealSend(unmark)
         // В очереди: реплика видна под полем, когда придёт свежий `agent.list`, — пузырь до тех пор.
         await refreshAgents()
         setOutgoing(mine(() => null))
@@ -659,6 +665,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     } catch (e) {
       // Отказ: пузырь уходит, черновик возвращает поле (только в пустое), ошибка — под полем, как раньше.
       setOutgoing(mine(() => null))
+      setRevealSend(unmark)
       setSend({ sending: false, error: errorText(e) })
       return false
     }
@@ -1087,7 +1094,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
 
       <WorkspaceLayout sidebarHidden={sidebarHidden} inboxOpen={inboxOpen} filesOpen={filesOpen} filesExpanded={filesExpanded}>
         <div className="agents-col">
-          <ProjectTree groups={groups} selected={current?.name ?? null} now={now} collapsed={collapsed}
+          <ProjectTree groups={groups} selected={current?.name ?? null} revealSend={revealSend} now={now} collapsed={collapsed}
             onSelect={select} onNew={(cwd) => setModal({ type: 'new', cwd })} onToggle={toggleProject}
             onAddProject={() => void addProject()} onPin={pinProject}
             onHide={(path, sessions, busy) => setModal({ type: 'hide', path, sessions, busy })}

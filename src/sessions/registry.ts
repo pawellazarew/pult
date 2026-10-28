@@ -237,6 +237,13 @@ export interface SessionRegistry {
    * исправленных записей.
    */
   seedSeen(lastId: number): number
+  /**
+   * Разовая миграция порядка бесед при старте демона: записи без `lastTurnAt` получают время от `lookup` (последняя
+   * реплика человека в журнале сессии), а без него — `createdAt`. Иначе после обновления «Недавние» встали бы по
+   * дате создания, и беседа, заведённая месяц назад, но живая вчера, утонула бы. Пишется сразу, один раз на запись:
+   * следующий старт журнал уже не читает. Отдаёт число исправленных записей.
+   */
+  seedLastTurn(lookup: (rec: SessionRecord) => string | undefined): number
 }
 
 function isStatus(x: unknown): x is SessionStatus {
@@ -370,6 +377,17 @@ export function createRegistry(paths: PultPaths): SessionRegistry {
       for (const s of list) {
         if (ENDED_STATUSES.has(s.lastStatus) || s.lastStatus === 'cold') continue
         s.lastStatus = 'cold'
+        n++
+      }
+      if (n) save()
+      return n
+    },
+    seedLastTurn(lookup) {
+      let n = 0
+      for (const s of list) {
+        if (s.lastTurnAt !== undefined) continue
+        const found = lookup({ ...s })
+        s.lastTurnAt = found && Number.isFinite(Date.parse(found)) ? found : s.createdAt
         n++
       }
       if (n) save()

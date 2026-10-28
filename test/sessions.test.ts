@@ -569,7 +569,7 @@ interface Stand {
  * а менеджер и адаптер новые и пустые, ровно как после `daemon stop` + `daemon start`.
  * Ковыряться в `live` адаптера не нужно и нечестно — его незнание сессии здесь настоящее.
  */
-function boot(home: TempHome): Stand {
+function boot(home: TempHome, registry?: SessionRegistry): Stand {
   const store = createStore(home.paths)
   const claude = createClaudeAdapter({
     paths: home.paths, config: defaultConfig(), logger: home.logger,
@@ -583,6 +583,7 @@ function boot(home: TempHome): Stand {
     publish: (d) => store.append(d),
     adapters: { claude },
     broker: createBroker({ emit: (d) => { manager.emit(d) } }),
+    ...(registry ? { registry } : {}),
   })
   return {
     manager,
@@ -717,6 +718,18 @@ describe('менеджер сессий: рестарт демона', () => {
     } finally { await stand.close(); home.remove() }
   })
 
+  it('импорт: lastTurnAt — время последней импортированной реплики человека (то же, что окно возьмёт из потока)', async () => {
+    const home = tempHome()
+    const stand = boot(home)
+    try {
+      await stand.manager.importSession({ name: 'imported', kind: 'claude', cwd: workIn(home) }, '94357d2d-8c5c-46b3-9a4c-2176726d3521',
+        [{ role: 'user', text: 'первый' }, { role: 'assistant', text: 'ответ' }, { role: 'user', text: 'второй' }, { role: 'assistant', text: 'ещё ответ' }])
+      const users = stand.store.readFrom(0, { sessionId: 'imported' }).filter((e) => e.kind === 'message.user')
+      assert.equal(users.length, 2)
+      assert.equal(stand.manager.list()[0]?.lastTurnAt, users.at(-1)?.ts)
+    } finally { await stand.close(); home.remove() }
+  })
+
   it('init нового fork меняет provider id и очищает флаг в реестре', async () => {
     const home = tempHome()
     const stand = boot(home)
@@ -806,6 +819,56 @@ describe('менеджер сессий: рестарт демона', () => {
       rmSync(cwd, { recursive: true, force: true })
       home.remove()
     }
+  })
+
+  it('lastTurnAt не записался (диск, права) — ход всё равно идёт, ошибка только в логе', async () => {
+    const home = tempHome()
+    const cwd = workDir({})
+    const real = createRegistry(home.paths)
+    const failing: SessionRegistry = { ...real, update: (n, p) => { if ('lastTurnAt' in p) throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' }); return real.update(n, p) } }
+    const stand = boot(home, failing)
+    try {
+      await stand.manager.start({ name: 'w', kind: 'claude', cwd, mode: 'turn' })
+      const turn = await stand.manager.prompt('w', 'привет')
+      assert.ok(turn.turnId)
+      assert.ok(await waitFor(() => stand.manager.list()[0]?.lastStatus === 'idle', 20_000))
+      assert.equal(stand.manager.list()[0]?.lastTurnAt, undefined)
+      assert.equal(stand.store.readFrom(0, { sessionId: 'w' }).filter((e) => e.kind === 'message.user').length, 1, 'реплика не задвоилась')
+    } finally {
+      await stand.close()
+      rmSync(cwd, { recursive: true, force: true })
+      home.remove()
+    }
+  })
+
+  it('обновление: записи без lastTurnAt получают его из журнала сессии один раз — последняя реплика, иначе последнее событие, иначе createdAt', () => {
+    const home = tempHome()
+    try {
+      const reg = createRegistry(home.paths)
+      const base = { provider: 'claude' as const, cwd: '/tmp/x', mode: 'turn' as const, createdAt: '2026-09-01T10:00:00.000Z', lastStatus: 'idle' as const, lastEventId: 0 }
+      for (const name of ['talked', 'quiet', 'empty', 'fresh']) reg.create({ ...base, name, ...(name === 'fresh' ? { lastTurnAt: '2026-10-01T00:00:00.000Z' } : {}) })
+      const store = createStore(home.paths)
+      const user = store.append({ sessionId: 'talked', provider: 'claude', kind: 'message.user', data: { text: 'вчера' } })
+      store.append({ sessionId: 'talked', provider: 'claude', kind: 'message.done', data: { text: 'ответ' } })
+      const quiet = store.append({ sessionId: 'quiet', provider: 'claude', kind: 'session.started', data: {} })
+      store.close()
+      const mk = (): { manager: SessionManager; store: EventStore; reads: number } => {
+        const st = createStore(home.paths)
+        const before = st.stats().reads
+        const manager = createManager({ paths: home.paths, config: defaultConfig(), logger: home.logger, store: st, publish: (d) => st.append(d), adapters: {}, broker: createBroker({ emit: () => {} }) })
+        return { manager, store: st, reads: st.stats().reads - before }
+      }
+      const first = mk()
+      assert.equal(first.reads, 2, 'читаются только файлы записей без поля (у «empty» файла нет)')
+      const at = Object.fromEntries(first.manager.list().map((r) => [r.name, r.lastTurnAt]))
+      assert.deepEqual(at, { talked: user.ts, quiet: quiet.ts, empty: base.createdAt, fresh: '2026-10-01T00:00:00.000Z' })
+      first.store.close()
+      assert.equal(createRegistry(home.paths).get('talked')?.lastTurnAt, user.ts, 'записано на диск')
+      // Второй старт журнал сессий уже не читает.
+      const second = mk()
+      assert.equal(second.reads, 0)
+      second.store.close()
+    } finally { home.remove() }
   })
 
   it('контекстное окно: в agent.list после хода и после рестарта; окно подставляется в первую реплику хода', async () => {

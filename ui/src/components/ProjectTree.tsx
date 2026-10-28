@@ -19,6 +19,11 @@ import { CMD, Icon, Kbd } from './common.js'
 export interface ProjectTreeProps {
   groups: readonly ProjectGroup[]
   selected: string | null
+  /**
+   * Реплика, отправленная из поля ввода этого окна (не из очереди и не из CLI): когда её ход начнётся и чат встанет
+   * наверх, строку возвращаем в виду. `id` — номер отправки, одна отправка — одна прокрутка.
+   */
+  revealSend?: { name: string; id: number } | null
   now: number
   /** Свёрнутые проекты (пути). */
   collapsed: ReadonlySet<string>
@@ -76,8 +81,18 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
   const [longProjects, setLongProjects] = useState(new Set<string>())
   const list = projectChats(p.groups, query, filter)
   const selectedProject = p.groups.find((g) => g.sessions.some((a) => a.name === p.selected))?.path
-  // Выбранная беседа начала ход и встала наверх проекта — строку держим в виду (прокрутка только если она ушла из виду).
+  // Выбранная беседа начала ход по реплике из этого окна и встала наверх проекта — строку возвращаем в виду (прокрутка,
+  // только если она ушла из виду). Ход из очереди или из CLI список не дёргает: человек мог прокрутить его в другое место.
   const selectedTurn = p.groups.flatMap((g) => g.sessions).find((a) => a.name === p.selected)?.lastTurnAt
+  const sendMark = useRef<{ id: number; turn: string | undefined; done: boolean } | null>(null)
+  useEffect(() => {
+    const r = p.revealSend
+    if (!r || r.name !== p.selected) return
+    if (sendMark.current?.id !== r.id) { sendMark.current = { id: r.id, turn: selectedTurn, done: false }; return }
+    if (sendMark.current.done || sendMark.current.turn === selectedTurn) return
+    sendMark.current.done = true
+    setRevealRequest((n) => n + 1)
+  }, [p.revealSend, p.selected, selectedTurn])
   const lastReveal = useRef<string | null>(null)
   const projectArea = useRef<HTMLDivElement>(null)
   useEffect(() => {
@@ -96,7 +111,7 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
       if (item.top < bounds.top || item.bottom > bounds.bottom) row.scrollIntoView({ block: 'nearest' })
     }, 240)
     return () => window.clearTimeout(timer)
-  }, [p.selected, selectedProject, revealRequest, selectedTurn])
+  }, [p.selected, selectedProject, revealRequest])
   const closeMenu = useCallback(() => setMenu(null), [])
 
   const projectMenu = (e: MouseEvent<HTMLElement>, g: ProjectGroup): void => {
