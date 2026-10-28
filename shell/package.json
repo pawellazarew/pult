@@ -1,6 +1,6 @@
 {
   "name": "pult-shell",
-  "version": "0.1.21",
+  "version": "0.3.16",
   "private": true,
   "license": "MIT",
   "description": "Pult desktop window: a thin Electron shell over the pultd daemon",
