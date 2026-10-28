@@ -3,6 +3,7 @@
 import { createRoot } from 'react-dom/client'
 import { App } from './App.js'
 import './styles.css'
+import './projects.css'
 import './media.css'
 import './files.css'
 import './pdf.css'

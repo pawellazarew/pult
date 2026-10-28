@@ -335,7 +335,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     const refresh = (): void => {
       if (document.visibilityState === 'hidden') return
       setNow(Date.now())
-      void refreshStatus(); void refreshAgents(); void refreshPerms()
+      void refreshStatus(); void refreshAgents(); void refreshPerms(); void refreshProjects()
       // Окно вернулось, а канал давно не проверяли — попросить демона. Решает он: автопроверка включена,
       // не чаще раза в 10 минут на всех. Старая оболочка (без update.check) молча откажет.
       if (focusCheckWanted(statusRef.current?.update, Date.now())) {
@@ -345,7 +345,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     window.addEventListener('focus', refresh)
     document.addEventListener('visibilitychange', refresh)
     return () => { window.removeEventListener('focus', refresh); document.removeEventListener('visibilitychange', refresh) }
-  }, [bridge, putUpdate, refreshStatus, refreshAgents, refreshPerms])
+  }, [bridge, putUpdate, refreshStatus, refreshAgents, refreshPerms, refreshProjects])
 
   // Старт без доигрывания журнала (0.2.19, model/state.ts): снимок, когда связь поднялась, —
   // и поток с его курсора. Снимок ложится ПОВЕРХ того, что уже пришло из `perm.list`/`agent.list`.
@@ -940,7 +940,9 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
       case 'selectAgent': {
         // ⌘1…9 — первые видимые беседы единственного списка, с учётом поиска.
         if (modal) return
-        const name = document.querySelectorAll<HTMLElement>('.chat-section [data-testid="agent-row"]')[a.index]?.dataset.agent
+        const visible = [...document.querySelectorAll<HTMLElement>('.chat-section [data-sidebar-chat]')].filter((el) => !el.closest('details:not([open])'))
+        const names = [...new Set(visible.map((el) => el.dataset.agent).filter((name): name is string => !!name))]
+        const name = names[a.index]
         if (name) { e.preventDefault(); select(name) }
         return
       }

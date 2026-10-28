@@ -3,13 +3,12 @@ import { after, before, describe, it } from 'node:test'
 import { launch, waitFor } from './harness.js'
 import type { Harness } from './harness.js'
 
-describe('раскрытие проектов', () => {
+describe('раскрытие проектов и размер недавних', () => {
   let h: Harness
   before(async () => {
     h = await launch({ name: 'projects-layout' })
     assert.ok(await waitFor(async () => await h.win.getAttribute('.app', 'data-conn') === 'up'))
-    const c = await h.client()
-    const dirs = ['alpha', 'beta', 'gamma'].map((n) => h.workDir(n))
+    const c = await h.client(), dirs = ['alpha', 'beta', 'gamma'].map((n) => h.workDir(n))
     for (const dir of dirs) await c.request('project.add', { path: dir })
     for (let i = 0; i < 10; i++) await c.request('agent.start', { name: `chat-${i}`, kind: 'claude', cwd: dirs[i % 3] })
     for (let i = 0; i < 2; i++) await c.request('events.emit', { kind: 'status.changed', sessionId: `chat-${i}`, provider: 'claude', data: { status: 'working' } })
@@ -17,49 +16,66 @@ describe('раскрытие проектов', () => {
   })
   after(async () => { await h?.close() })
 
-  it('счётчик 3 соответствует трём полностью видимым строкам после раскрытия', async () => {
-    const manager = h.win.getByTestId('project-manager')
+  it('все три свёрнутых проекта и первая недавняя беседа видны на трёх размерах окна', async () => {
+    for (const project of await h.win.getByTestId('project').all()) if (await project.getAttribute('open') !== null) await project.getByTestId('project-toggle').click()
     for (const [width, height] of [[1280, 800], [1024, 642], [900, 560]]) {
       await h.app.evaluate(({ BrowserWindow }, [w, hh]) => BrowserWindow.getAllWindows()[0]?.setContentSize(w!, hh!), [width, height])
-      await manager.locator('summary').click()
-      await h.win.waitForTimeout(300)
-      const geometry = await h.win.getByTestId('sidebar-projects').evaluate((el) => {
-        const bounds = el.getBoundingClientRect()
-        return { top: bounds.top, bottom: bounds.bottom, count: el.querySelector('.count')?.textContent,
-          rows: Array.from(el.querySelectorAll('.proj-h')).map((row) => { const r = row.getBoundingClientRect(); return { top: r.top, bottom: r.bottom } }) }
-      })
-      assert.equal(geometry.count, '3')
-      assert.equal(geometry.rows.length, 3)
-      for (const row of geometry.rows) assert.ok(row.top >= geometry.top && row.bottom <= geometry.bottom + 1, `${width}: строка проекта обрезана: ${JSON.stringify(geometry)}`)
-      const active = await h.win.getByTestId('active-chats').boundingBox()
-      assert.ok(active && active.height >= 70, `${width}: работающие чаты сжаты до ${active?.height}px`)
-      const recent = await h.win.getByTestId('chats-recent').boundingBox()
-      const firstRecent = await h.win.getByTestId('chats-recent').getByTestId('agent-row').first().boundingBox()
-      assert.ok(recent && firstRecent && firstRecent.y + firstRecent.height <= recent.y + recent.height + 1, 'первая недавняя беседа должна оставаться видимой')
+      assert.ok(await waitFor(async () => h.win.getByTestId('sidebar-projects').evaluate((el) => {
+        const box = el.getBoundingClientRect()
+        return Array.from(el.querySelectorAll('.project-group > summary')).every((row) => { const r = row.getBoundingClientRect(); return r.top >= box.top && r.bottom <= box.bottom + 1 })
+      })))
+      assert.equal(await h.win.locator('.projects-heading .count').textContent(), '3')
       await h.shot(`projects-three-${width}`)
-      await manager.locator('summary').click()
-      await h.win.waitForTimeout(300)
     }
   })
 
-  it('раскрытие и закрытие проходят через промежуточную высоту; reduced motion отключает движение', async () => {
-    await h.win.emulateMedia({ reducedMotion: 'no-preference' })
-    const measure = () => h.win.getByTestId('sidebar-projects').evaluate((el) => el.getBoundingClientRect().height)
-    const closed = await measure()
-    await h.win.getByTestId('project-manager').locator('summary').click()
-    await h.win.waitForTimeout(60)
-    const middle = await measure()
-    await h.win.waitForTimeout(260)
-    const opened = await measure()
-    assert.ok(middle > closed + 1 && middle < opened - 1, `раскрытие скачком: ${closed} → ${middle} → ${opened}`)
-    await h.win.getByTestId('project-manager').locator('summary').click()
-    await h.win.waitForTimeout(60)
-    const closing = await measure()
-    assert.ok(closing > closed + 1 && closing < opened - 1, `закрытие скачком: ${opened} → ${closing} → ${closed}`)
-    await h.win.waitForTimeout(260)
+  it('проекты открываются плавно, сохраняют свёрнутость; reduced motion отключает движение', async () => {
+    const project = h.win.getByTestId('project').first(), toggle = project.getByTestId('project-toggle')
+    const heights = await project.evaluate(async (el) => {
+      const samples: number[] = []
+      ;(el.querySelector('summary') as HTMLElement).click()
+      const end = performance.now() + 260
+      while (performance.now() < end) { samples.push(el.getBoundingClientRect().height); await new Promise<void>((done) => requestAnimationFrame(() => done())) }
+      return samples
+    })
+    assert.ok(heights.some((height) => height > heights[0]! + 2 && height < heights.at(-1)! - 2), 'нет промежуточных размеров при раскрытии')
+    await toggle.click()
+    assert.ok(await waitFor(async () => await project.getAttribute('open') === null))
+    await h.win.reload()
+    assert.ok(await waitFor(async () => await h.win.getByTestId('project').count() === 3))
+    assert.equal(await h.win.getByTestId('project').first().getAttribute('open'), null)
     await h.win.emulateMedia({ reducedMotion: 'reduce' })
-    await h.win.getByTestId('project-manager').locator('summary').click()
-    await h.win.waitForTimeout(40)
-    assert.ok(Math.abs(await measure() - opened) <= 1, 'reduced motion должен раскрывать без анимации')
+    await h.win.getByTestId('project-toggle').first().click()
+    const duration = await h.win.getByTestId('project').first().evaluate((el) => getComputedStyle(el, '::details-content').transitionDuration)
+    assert.equal(duration, '0s')
+  })
+
+  it('граница недавних работает мышью и клавиатурой; размер сохраняется после reload', async () => {
+    const splitter = h.win.getByTestId('recent-resize')
+    const height = () => h.win.getByTestId('chats-recent').evaluate((el) => el.getBoundingClientRect().height)
+    const before = await height(), box = await splitter.boundingBox()
+    assert.ok(box)
+    await h.win.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+    await h.win.mouse.down(); await h.win.mouse.move(box.x + box.width / 2, box.y - 70, { steps: 8 }); await h.win.mouse.up()
+    assert.ok(await height() > before + 30)
+    const dragged = await height()
+    await splitter.focus(); await splitter.press('ArrowDown')
+    assert.ok(await height() < dragged - 5)
+    await splitter.press('End')
+    const saved = await splitter.getAttribute('aria-valuenow')
+    await h.win.reload()
+    assert.ok(await waitFor(async () => await h.win.getByTestId('recent-resize').getAttribute('aria-valuenow') === saved))
+    assert.ok(await h.win.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1))
+    await h.win.getByTestId('recent-resize').dblclick()
+    assert.ok(Number(await h.win.getByTestId('recent-resize').getAttribute('aria-valuenow')) < 55)
+  })
+
+  it('«+» в проекте открывает создание в его папке и не сворачивает проект', async () => {
+    const project = h.win.getByTestId('project').first(), open = await project.getAttribute('open')
+    await project.getByTestId('project-new-session').click()
+    await h.win.getByTestId('new-agent-dialog').waitFor()
+    assert.equal(await h.win.getByTestId('new-agent-cwd').getAttribute('data-path'), await project.getAttribute('data-project'))
+    await h.win.keyboard.press('Escape')
+    assert.equal(await project.getAttribute('open'), open)
   })
 })

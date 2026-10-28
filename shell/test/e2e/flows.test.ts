@@ -293,7 +293,6 @@ describe('окно: рабочие сценарии', () => {
   it('M8d: «Убрать из списка…» у папки с сессиями — вопрос, сессии в архив, папка пропадает; новая сессия её возвращает', async () => {
     const dir = h.workDir('hideme', { scenario: 'simple' })
     await c.request('agent.start', { name: 'hideme', kind: 'claude', cwd: dir })
-    await h.win.getByTestId('project-manager').locator('summary').evaluate((el) => { (el.parentElement as HTMLDetailsElement).open = true })
     const proj = h.win.locator(`[data-testid="project"][data-project="${dir}"]`)
     await proj.waitFor({ timeout: 10_000 })
     await proj.hover()
@@ -530,9 +529,7 @@ describe('окно: рабочие сценарии', () => {
   it('проекты: добавление и новая беседа в папке; единый список без вкладок, открепление не удаляет беседу', async () => {
     const dir = h.workDir('proj', { scenario: 'simple' })
     await h.stubPickFolder(dir)
-    await h.win.getByTestId('project-manager').locator('summary').evaluate((el) => { (el.parentElement as HTMLDetailsElement).open = true })
     await h.win.getByTestId('add-project').click()
-    await h.win.getByTestId('project-manager').locator('summary').evaluate((el) => { (el.parentElement as HTMLDetailsElement).open = true })
     const proj = h.win.locator(`[data-testid="project"][data-project="${dir}"]`)
     await proj.waitFor({ timeout: 5000 })
     assert.equal(await proj.getAttribute('data-pinned'), '1')
