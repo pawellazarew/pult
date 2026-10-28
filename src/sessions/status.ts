@@ -53,8 +53,8 @@ export function reduceStatusEvent(prev: SessionStatus, ev: PultEvent): SessionSt
     case 'permission.requested':
       return 'blocked_permission'
     case 'permission.resolved':
-      // Решение принято — значит ход продолжается. Если решение пришло уже после конца хода,
-      // следующий `status.changed` от адаптера всё поправит.
+      // Решение принято — значит ход продолжается. Вопрос, заданный ВНЕ хода (субагент Codex, переживший
+      // ход), после ответа возвращает менеджер: он видит, что хода нет, и пишет `status.changed idle`.
       return prev === 'blocked_permission' ? 'working' : prev
     case 'question.asked':
       return 'blocked_question'
@@ -66,15 +66,15 @@ export function reduceStatusEvent(prev: SessionStatus, ev: PultEvent): SessionSt
     case 'tool.finished':
     case 'agent.spawned':
     case 'agent.finished':
-      // Поток субагента (`parentId`) статус сессии не двигает (07.10.2026): после ответа фоновый
-      // субагент доделывает работу, а сессия уже принимает реплики — пересланный текст субагента
-      // делал её снова «идёт», и окно запирало поле ввода. Внутри хода статус и так `working`.
-      if (ev.parentId) return prev
-      // Из `limited` и блокировок живой поток сам не вытаскивает: их снимает адаптер явным
-      // `status.changed`, иначе один запоздавший `message.delta` стирал бы красную плашку.
-      return prev === 'limited' || prev === 'blocked_permission' || prev === 'blocked_question'
-        ? prev
-        : 'working'
+      // АКТИВНОСТЬ СТАТУС НЕ ДВИГАЕТ (28.10.2026). Ход начинает только явный `status.changed working`
+      // адаптера (Claude — до спавна и на фоновый ход, Codex — на `turn/start`), а внутри хода статус и так
+      // `working`. Раньше дельта, вызов или конец инструмента без `parentId` поднимали сессию в `working` из
+      // `idle`/`failed`/`interrupted`/`done`: Codex даёт субагентам и фоновым командам пережить ход, их конец
+      // приходил верхним `agent.finished`/`tool.finished` уже ПОСЛЕ хода — сессия «воскресала» без хода, поле
+      // ввода запиралось, а через 10 мин сторож тишины кричал «Похоже, завис» (4 из 4 разобранных случаев).
+      // Правка 07.10 закрыла только события с `parentId`. Фоновую работу показывает `background.changed`
+      // («фон · N»), а не статус.
+      return prev
     case 'usage.updated':
     // Контекстное окно — справка о разговоре, а не признак работы: статус не трогает.
     case 'context.updated':

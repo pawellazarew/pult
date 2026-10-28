@@ -355,6 +355,22 @@ export interface ManagerOptions {
 /** Отказ хода, пока ставится обновление: окно оставляет текст в поле ввода. */
 export const UPDATING_MESSAGE = 'Пульт обновляется — отправь после перезапуска'
 
+/** События корня разговора, по которым сторож тишины понимает, что сейчас самое свежее в ходе (см. `toolTail`). */
+const ROOT_ACTIVITY: ReadonlySet<string> = new Set([
+  'message.delta', 'message.done', 'tool.called', 'tool.finished', 'agent.spawned', 'agent.finished',
+  'permission.requested', 'permission.resolved', 'question.asked', 'status.changed',
+])
+
+/**
+ * Признак жизни хода для сторожа тишины — любое событие сессии, кроме справочных: снимок лимитов аккаунта (Codex
+ * приписывает его каждой сессии с открытым ходом раз в несколько секунд — за ним не видно зависания), смена фона,
+ * сам `turn.stalled` и смена настроек человеком.
+ */
+function isLife(ev: PultEvent): boolean {
+  if (ev.kind === 'usage.updated') return (ev.data as { source?: unknown }).source === 'result'
+  return ev.kind !== 'background.changed' && ev.kind !== 'turn.stalled' && ev.kind !== 'session.configured'
+}
+
 /** Статусы, которыми ход кончается: на них считается его длительность (`turnMs`). */
 const TURN_END: ReadonlySet<string> = new Set(['idle', 'failed', 'interrupted', 'done', 'cold'])
 
@@ -445,6 +461,11 @@ export function createManager(opts: ManagerOptions): SessionManager {
   const lastEventAt = new Map<string, number>()
   // Ход, о молчании которого уже сказали (ключ — его начало): «завис» — один раз на ход.
   const stalledFor = new Map<string, number>()
+  // Самое свежее событие хода в корне разговора — открытый `tool.called` (id): инструмент работает (тест, `sleep`,
+  // ожидание), и сторож даёт ему втрое больше тишины. Любое более свежее событие корня снимает отметку.
+  const toolTail = new Map<string, string>()
+  // Статус до вопроса, заданного вне хода: после ответа сессия возвращается в него (см. `settleOutsideTurn`).
+  const beforeBlock = new Map<string, SessionStatus>()
   const withTurnTiming = (draft: EventDraft): EventDraft => {
     if (draft.kind !== 'status.changed' || !statuses.has(draft.sessionId)) return draft
     const d = draft.data ?? {}
@@ -460,6 +481,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
     const t0 = turnStartedAt.get(name)
     turnStartedAt.delete(name)
     stalledFor.delete(name)
+    toolTail.delete(name)
     return t0 === undefined ? draft : { ...draft, data: { ...d, turnMs: Date.now() - t0 } }
   }
 
@@ -498,25 +520,43 @@ export function createManager(opts: ManagerOptions): SessionManager {
     const ev = opts.publish(withTurnTiming(draft.kind === 'context.updated' ? withKnownContext(draft) : draft))
     if (ev.kind === 'context.updated') trackContext(ev)
     const prev = statuses.get(ev.sessionId)
+    let settleOutsideTurn = false
     if (prev !== undefined) {
-      lastEventAt.set(ev.sessionId, Date.now())
+      if (isLife(ev)) lastEventAt.set(ev.sessionId, Date.now())
+      if (!ev.parentId && ROOT_ACTIVITY.has(ev.kind)) {
+        const id = (ev.data as { toolUseId?: unknown }).toolUseId
+        if (ev.kind === 'tool.called' && typeof id === 'string') toolTail.set(ev.sessionId, id)
+        else toolTail.delete(ev.sessionId)
+      }
       const next = reduceStatusEvent(prev, ev)
       if (next !== prev) {
         statuses.set(ev.sessionId, next)
         registry.update(ev.sessionId, { lastStatus: next, lastEventId: ev.id, ...unsavedContext(ev.sessionId) })
       }
+      // Вопрос задали ВНЕ хода (субагент или фоновая команда Codex, пережившие ход), человек ответил — свёртка
+      // по правилу «решение принято — ход продолжается» сделала бы сессию `working` без хода: поле ввода
+      // заперто до следующего хода. Хода нет — сессия снова свободна, и это пишется явным событием, чтобы окно
+      // (та же свёртка по журналу) не разошлось с демоном.
+      if (next === 'blocked_permission' && prev !== 'blocked_permission' && !turnStartedAt.has(ev.sessionId)) {
+        beforeBlock.set(ev.sessionId, prev)
+      }
+      if (ev.kind === 'permission.resolved' && next === 'working' && prev !== 'working' && !turnStartedAt.has(ev.sessionId)) {
+        settleOutsideTurn = true
+      }
       if (ev.kind === 'status.changed') {
         const st = ev.data['status']
-        // Ход кончился `idle` — очередь реплик идёт дальше. Только настоящий конец хода: свой (`turnId`) или
-        // фоновый (`background_turn_done`); служебные `idle` (конец фонового процесса, потолок фона, остывание)
-        // очередь не будят. Не здесь же, а следующим тиком: мы внутри записи события, адаптер ещё не закрыл ход.
-        if (st === 'idle' && (typeof ev.data['turnId'] === 'string' || ev.data['reason'] === 'background_turn_done')) {
+        // Ход кончился `idle` — очередь реплик идёт дальше. Только настоящий конец хода: свой (`turnId`), фоновый
+        // Claude (`background_turn_done`) или начатый сервером Codex (`server_turn_done`); служебные `idle` (конец
+        // фонового процесса, потолок фона, остывание) очередь не будят. Не здесь же, а следующим тиком: мы внутри
+        // записи события, адаптер ещё не закрыл ход.
+        if (st === 'idle' && (typeof ev.data['turnId'] === 'string' || ev.data['reason'] === 'background_turn_done' || ev.data['reason'] === 'server_turn_done')) {
           const rec = registry.get(ev.sessionId)
           if (rec?.queue?.length && !rec.queuePaused) scheduleDrain(ev.sessionId)
         }
         // Ход упал, прерван или упёрся в лимит — откуда бы ни пришло (фоновый ход, отказ на `send`, сервер
         // Codex сам прервал ход): очередь встаёт до «Продолжить».
-        if (st === 'failed' || st === 'interrupted' || (st === 'limited' && typeof ev.data['turnId'] === 'string')) {
+        if ((st === 'failed' || st === 'interrupted' || (st === 'limited' && typeof ev.data['turnId'] === 'string'))
+          && ev.data['reason'] !== 'permission_outside_turn') {
           pauseQueue(ev.sessionId, String(st))
         }
       }
@@ -545,6 +585,13 @@ export function createManager(opts: ManagerOptions): SessionManager {
     }
     if (ev.kind === 'usage.updated') trackUsage(ev)
     if (statuses.has(ev.sessionId) || ev.kind === 'session.ended') phases.event(ev)
+    if (settleOutsideTurn) {
+      // Статус возвращается тот, что был до вопроса: ошибка, стоп или лимит прошлого хода не превращаются в «готов».
+      const was = beforeBlock.get(ev.sessionId)
+      beforeBlock.delete(ev.sessionId)
+      const back = was === 'failed' || was === 'interrupted' || was === 'limited' || was === 'done' ? was : 'idle'
+      emit({ sessionId: ev.sessionId, provider: ev.provider, kind: 'status.changed', data: { status: back, reason: 'permission_outside_turn' } })
+    }
     return ev
   }
 
@@ -742,16 +789,27 @@ export function createManager(opts: ManagerOptions): SessionManager {
   }
 
   // Сторож тишины: один таймер на демон, проход по статусам — дёшево и без таймера на событие.
+  //
+  // КРИЧИТ ТОЛЬКО О НАСТОЯЩЕМ ХОДЕ (28.10.2026). Ход идёт — значит был `status.changed working` и ещё не было
+  // конца (`turnStartedAt`). Без хода «завис» — ложь: так кричало после конца хода Codex, когда запоздалый
+  // `agent.finished` его субагента поднимал сессию в `working`. Признаки жизни — события сессии (`isLife`: и
+  // дельты, и поток субагентов) и живые сигналы адаптера (`live`: размышления, «провайдер отозвался», новое
+  // обращение к модели, вывод команды Codex). Самое свежее событие корня — открытый вызов инструмента (долгий
+  // тест, `sleep`, ожидание): порог втрое больше — инструмент имеет право молчать дольше модели, но висящий без
+  // конца вызов (ждёт stdin, повис MCP) всё равно даст «завис». Строка фазы при этом показывает инструмент и секунды.
   const silenceMs = Math.round(opts.config.watchdog.silenceMinutes * 60_000)
+  /** Во сколько раз дольше может молчать работающий инструмент хода. */
+  const TOOL_SILENCE_FACTOR = 3
   const checkSilence = (): void => {
     const now = Date.now()
     for (const name of statuses.keys()) {
       if (currentStatus(name) !== 'working') continue
       const t0 = turnStartedAt.get(name)
-      const last = lastEventAt.get(name) ?? t0
-      if (last === undefined) continue
-      const key = t0 ?? -1
-      if (stalledFor.get(name) === key || now - last < silenceMs) continue
+      if (t0 === undefined) continue
+      const last = Math.max(lastEventAt.get(name) ?? t0, t0)
+      const key = t0
+      const limit = toolTail.has(name) ? silenceMs * TOOL_SILENCE_FACTOR : silenceMs
+      if (stalledFor.get(name) === key || now - last < limit) continue
       const rec = registry.get(name)
       if (!rec) continue
       stalledFor.set(name, key)
@@ -1398,7 +1456,12 @@ export function createManager(opts: ManagerOptions): SessionManager {
 
     phaseNames() { return phases.names().filter((n) => registry.get(n)) },
 
-    live(name, sig) { if (statuses.has(name)) phases.live(name, sig) },
+    live(name, sig) {
+      if (!statuses.has(name)) return
+      phases.live(name, sig)
+      // Живой сигнал в журнал не пишется, но это признак жизни хода: сторож тишины его видит.
+      if (turnStartedAt.has(name)) lastEventAt.set(name, Date.now())
+    },
 
     async stop(name, turnId) {
       const rec = needRec(name)
@@ -1463,6 +1526,8 @@ export function createManager(opts: ManagerOptions): SessionManager {
         turnStartedAt.delete(name)
         lastEventAt.delete(name)
         stalledFor.delete(name)
+        toolTail.delete(name)
+        beforeBlock.delete(name)
         stopRequested.delete(name)
         phases.forget(name)
         // О3: профиль браузера сессии (куки входа) уходит вместе с ней — даже если браузер уже выключили:

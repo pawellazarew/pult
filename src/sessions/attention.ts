@@ -58,12 +58,14 @@ export function attentionOf(ev: PultEvent): Attention | null {
   const base = { id: ev.id, at: ev.ts }
   const turn = s(d['turnId'])
   const withTurn = turn ? { turnId: turn } : {}
-  // Итог фонового хода (фоновые субагенты доделали работу после ответа): «готово» или «упал», но без
-  // номера хода — реплики, которую можно повторить, у него нет.
-  const background = d['reason'] === 'background_turn_done'
+  // Итог фонового хода (фоновые субагенты Claude доделали работу после ответа) или хода, начатого сервером Codex
+  // (его разбудил субагент): «готово» или «упал», но без номера хода — реплики, которую можно повторить, у него нет.
+  const background = d['reason'] === 'background_turn_done' || d['reason'] === 'server_turn_done'
   switch (ev.kind) {
     case 'status.changed': {
       if (d['rateLimitStatus'] === 'allowed_warning') return null
+      // Возврат к статусу до вопроса, заданного вне хода (менеджер): о той ошибке или стопе уже сказали.
+      if (d['reason'] === 'permission_outside_turn') return null
       // «Готово» — конец хода (`turnId` есть у idle после хода) или фонового хода. Без них idle пишут
       // остывание, конец фонового процесса и прочая служба — они человека не зовут.
       if (d['status'] === 'idle' && (turn || background)) return { ...base, kind: 'done' }

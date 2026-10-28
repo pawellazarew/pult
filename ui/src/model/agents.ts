@@ -92,12 +92,20 @@ export function agentLabel(a: { name: string; title?: string | undefined }): str
   return a.title || a.name
 }
 
-/** 0 — ждут тебя, 1 — работают, 2 — остальные. */
-export function statusRank(s: SessionStatus, pending = 0): number {
+/**
+ * 0 — ждут тебя, 1 — работают, 2 — остальные. `background` — фоновые задачи после ответа (субагенты, команды):
+ * сессия свободна (поле ввода открыто), но работа идёт — она среди «Работают», пока фон не кончится.
+ */
+export function statusRank(s: SessionStatus, pending = 0, background = 0): number {
   const v = statusView(s)
   if (v.needsYou || pending > 0) return 0
-  if (s === 'working') return 1
+  if (s === 'working' || background > 0) return 1
   return 2
+}
+
+/** Ранг строки агента: статус, запросы в Inbox и фон. */
+export function agentRank(a: Pick<AgentView, 'status' | 'pending' | 'background'>): number {
+  return statusRank(a.status, a.pending, a.background?.count ?? 0)
 }
 
 /** Порядок бесед в любом списке: свежий ход выше, затем новее заведённая, затем имя (оно не меняется). */
@@ -110,7 +118,7 @@ export function byLastTurn(a: AgentView, b: AgentView): number {
 
 export function sortAgents(list: readonly AgentView[]): AgentView[] {
   return [...list].sort((a, b) => {
-    const r = statusRank(a.status, a.pending) - statusRank(b.status, b.pending)
+    const r = agentRank(a) - agentRank(b)
     if (r !== 0) return r
     return byLastTurn(a, b)
   })

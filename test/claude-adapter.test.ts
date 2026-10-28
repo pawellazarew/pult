@@ -426,6 +426,22 @@ describe('адаптер claude: защиты', () => {
     } finally { await r.adapter.shutdown(); r.remove() }
   })
 
+  it('стоп и закрытие простаивающей сессии с фоновыми задачами обнуляют «фон» событием (28.10.2026)', async () => {
+    for (const how of ['interrupt', 'close'] as const) {
+      const r = rig({ scenario: 'background-live', config: { subagentGraceMs: 400 } })
+      try {
+        await r.adapter.startSession(spec(r))
+        await (await r.adapter.send('w', 'запусти фоновую задачу')).done
+        const bg = (): Array<{ count: number; reason?: string }> => r.drafts.filter((d) => d.kind === 'background.changed').map((d) => d.data as never)
+        assert.ok(await waitFor(() => (bg().at(-1)?.count ?? 0) > 0, 5000), `фон не появился: ${JSON.stringify(bg())}`)
+        if (how === 'interrupt') await r.adapter.interrupt('w')
+        else await r.adapter.close('w')
+        assert.ok(await waitFor(() => bg().at(-1)?.count === 0, 5000), `${how}: фон не обнулён: ${JSON.stringify(bg())}`)
+        assert.equal(bg().at(-1)?.reason, how === 'interrupt' ? 'background_process_exit' : 'session_closed')
+      } finally { await r.adapter.shutdown(); r.remove() }
+    }
+  })
+
   it('фоновый субагент: ход закрывается по СВОЕМУ ответу, итог приходит ходом-итогом, процесс уходит после тишины', async () => {
     // 07.10.2026: раньше ход держала отсрочка, а по её концу процесс снимали — вместе с ещё живыми
     // фоновыми субагентами и их работой. Теперь ход человека закрывается по своему result, а

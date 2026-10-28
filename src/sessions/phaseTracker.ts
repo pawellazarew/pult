@@ -17,13 +17,16 @@ import { REASONING_TAIL, toolSummary } from './turnPhase.js'
  *   * `active` — первый признак жизни провайдера в ходе (Claude `system/init`, Codex `turn/started`);
  *   * `request` — новое обращение к модели внутри хода (Claude `message_start`);
  *   * `thinking` — начался блок размышлений (Claude `thinking`/`redacted_thinking`, Codex элемент `reasoning`);
- *   * `reasoning` — кусок текста размышлений (Claude `thinking_delta`, Codex `item/reasoning/summaryTextDelta`), СЫРОЙ.
+ *   * `reasoning` — кусок текста размышлений (Claude `thinking_delta`, Codex `item/reasoning/summaryTextDelta`), СЫРОЙ;
+ *   * `output` — команда печатает (Codex `outputDelta`): фазу не двигает, только сторожу тишины.
  */
 export type LiveSignal =
   | { kind: 'active' }
   | { kind: 'request' }
   | { kind: 'thinking' }
   | { kind: 'reasoning'; text: string }
+  /** Вывод работающей команды (Codex `item/commandExecution/outputDelta`): признак жизни хода для сторожа тишины. */
+  | { kind: 'output' }
 
 export interface PhaseTracker {
   /** Ход принят: реплика записана, дальше страж сети, MCP, спавн — «запускается». */
@@ -212,6 +215,8 @@ export function createPhaseTracker(opts: PhaseTrackerOptions = {}): PhaseTracker
           if (t.phase === 'starting' || t.phase === 'writing') set(name, t, 'thinking')
           t.reasoning = (t.reasoning + sig.text).slice(-RAW_TAIL)
           moved = true
+          break
+        case 'output':
           break
       }
       if (moved) changed(name)

@@ -19,6 +19,7 @@ import { ensureLayout, layout } from '../dist/core/paths.js'
 import type { NetCheck } from '../dist/env/net.js'
 import { createBroker } from '../dist/perm/broker.js'
 import type { PermBroker } from '../dist/perm/broker.js'
+import { createCodexBackground } from '../dist/adapters/codex/background.js'
 import { FAKE_CODEX, FAKE_CODEX_SCRIPTED, sleep, waitFor } from './helpers.js'
 
 const seenPids: number[] = []
@@ -66,6 +67,8 @@ function rig(opts: {
   net?: () => Promise<NetCheck>
   /** Не давать адаптеру снимать вопросы из Inbox: так проверяется защита ПО ПОКОЛЕНИЮ. */
   noCancel?: boolean
+  /** Потолок фоновой работы (и молчания записи фона Codex) — тест ставит короче. */
+  backgroundMaxMs?: number
 } = {}): Rig {
   const dir = mkdtempSync(join(tmpdir(), 'pt-safe-'))
   const paths = layout(join(dir, 'h'))
@@ -80,8 +83,10 @@ function rig(opts: {
     emit: (d) => { drafts.push(d) },
     ...(opts.permTimeoutMs !== undefined ? { timeoutMs: opts.permTimeoutMs } : {}),
   })
+  const config = defaultConfig()
+  if (opts.backgroundMaxMs !== undefined) config.backgroundMaxMs = opts.backgroundMaxMs
   const adapter = createCodexAdapter({
-    paths, config: defaultConfig(), logger: createLogger(paths.logFile),
+    paths, config, logger: createLogger(paths.logFile),
     bin: opts.bin ?? FAKE_CODEX_SCRIPTED,
     emit: (d) => { drafts.push(d) },
     askPermission: (req) => broker.request(req),
@@ -575,5 +580,117 @@ describe('codex: гонки вокруг общего процесса и сня
       assert.equal(outcome.ok, false)
       assert.equal(outcome.errorCode, 'interrupted', 'исход по контракту interrupt, а не internal')
     } finally { await r.adapter.shutdown(); r.remove() }
+  })
+})
+
+describe('codex: фоновая работа после хода — «фон · N», как у Claude (28.10.2026)', () => {
+  const bgEvents = (r: Rig): Array<{ count: number; tasks: Array<{ type: string; description: string }>; reason?: string }> =>
+    r.drafts.filter((d) => d.kind === 'background.changed').map((d) => d.data as never)
+  const statuses = (r: Rig): string[] => r.drafts.filter((d) => d.kind === 'status.changed').map((d) => String(d.data?.['status']))
+
+  it('субагент и команда пережили ход: фон 2 → 1 → 0 на их концах; статус после хода не трогается', async () => {
+    const r = rig()
+    try {
+      await r.adapter.startSession(spec(r, 'w'))
+      const turn = await r.adapter.send('w', '[[background]] проверь')
+      const outcome = await turn.done
+      assert.equal(outcome.ok, true)
+      assert.ok(await waitFor(() => bgEvents(r).some((b) => b.count === 0), 5000), 'фон не обнулился')
+      const counts = bgEvents(r).map((b) => b.count)
+      assert.deepEqual(counts, [2, 1, 0])
+      const first = bgEvents(r)[0]!
+      assert.deepEqual(first.tasks.map((t) => t.type).sort(), ['command', 'subagent'])
+      assert.ok(first.tasks.some((t) => t.description === 'npm test'), 'команда — без обёртки оболочки')
+      // После `idle` хода ни одного `working`: поздние концы статус не двигают.
+      const st = statuses(r)
+      assert.equal(st.at(-1), 'idle')
+      assert.equal(st.lastIndexOf('working') < st.indexOf('idle'), true)
+      // Концы пришли верхними событиями, как в живых журналах.
+      assert.ok(r.drafts.some((d) => d.kind === 'agent.finished' && !d.parentId))
+      assert.ok(r.drafts.some((d) => d.kind === 'tool.finished' && !d.parentId && d.data?.['name'] === 'commandExecution'))
+    } finally { await r.adapter.shutdown(); r.remove() }
+  })
+
+  it('конец потерян: запись, молчащая дольше потолка, снимается сама', async () => {
+    const r = rig({ backgroundMaxMs: 400, fake: { bgPauseMs: 50 } })
+    try {
+      await r.adapter.startSession(spec(r, 'w'))
+      await (await r.adapter.send('w', '[[background-lost]] проверь')).done
+      assert.ok(await waitFor(() => bgEvents(r).some((b) => b.count === 0 && b.reason === 'background_silence'), 5000), 'зависшая запись не снята')
+      assert.deepEqual(bgEvents(r).map((b) => b.count), [2, 1, 0])
+    } finally { await r.adapter.shutdown(); r.remove() }
+  })
+
+  it('сессию закрыли — фон обнуляется до `done`', async () => {
+    const r = rig({ fake: { bgPauseMs: 5_000 } })
+    try {
+      await r.adapter.startSession(spec(r, 'w'))
+      await (await r.adapter.send('w', '[[background]] проверь')).done
+      assert.ok(await waitFor(() => bgEvents(r).length > 0, 3000))
+      await r.adapter.close('w')
+      const last = bgEvents(r).at(-1)
+      assert.equal(last?.count, 0)
+      assert.equal(last?.reason, 'session_closed')
+      assert.equal(statuses(r).at(-1), 'done')
+    } finally { await r.adapter.shutdown(); r.remove() }
+  })
+})
+
+describe('codex: ход, начатый сервером (сообщение субагента будит родителя)', () => {
+  const st = (r: Rig): string[] => r.drafts.filter((d) => d.kind === 'status.changed').map((d) => `${String(d.data?.['status'])}:${String(d.data?.['reason'] ?? '')}`)
+
+  it('working {server_turn} → idle {server_turn_done}; реплика человека ждёт его конца, а не сталкивается', async () => {
+    const r = rig({ fake: { bgPauseMs: 400 } })
+    try {
+      await r.adapter.startSession(spec(r, 'w'))
+      await (await r.adapter.send('w', '[[server-turn]] начни')).done
+      assert.ok(await waitFor(() => st(r).includes('working:server_turn'), 3000), `статусы: ${st(r).join(', ')}`)
+      assert.ok(r.drafts.some((d) => d.kind === 'message.done' && d.data?.['text'] === 'субагент отчитался'))
+      // Человек пишет посреди хода сервера.
+      const second = await r.adapter.send('w', 'ещё вопрос')
+      const outcome = await second.done
+      assert.equal(outcome.ok, true)
+      assert.deepEqual(r.raw().filter((x) => x.ev === 'collision'), [], 'turn/start ушёл посреди хода сервера')
+      const order = r.raw().map((x) => x.ev === 'server-turn-completed' ? 'srv-done' : x.msg?.method === 'turn/start' ? 'turn/start' : null).filter(Boolean)
+      assert.deepEqual(order, ['turn/start', 'srv-done', 'turn/start'])
+      const s = st(r)
+      assert.ok(s.indexOf('idle:server_turn_done') > s.indexOf('working:server_turn'))
+      assert.equal(s.at(-1), 'idle:')
+    } finally { await r.adapter.shutdown(); r.remove() }
+  })
+})
+
+describe('codex: фон — чистый счёт (background.ts)', () => {
+  let t = 0
+  const bg = (): ReturnType<typeof createCodexBackground> => createCodexBackground({ now: () => t, silenceMs: 1000 })
+  const d = (kind: string, data: Record<string, unknown>, parentId?: string): EventDraft =>
+    ({ sessionId: 'w', provider: 'codex', kind: kind as EventDraft['kind'], data, ...(parentId ? { parentId } : {}) })
+
+  it('элемент, начатый ВНЕ хода, — сразу фон; внутри хода — только на его конце', () => {
+    t = 0
+    const b = bg()
+    b.turnStarted()
+    assert.equal(b.onDraft(d('tool.called', { toolUseId: 'e1', name: 'commandExecution', input: { command: 'make' } })), false)
+    assert.equal(b.data().count, 0, 'в ходе — инструмент хода')
+    assert.equal(b.turnEnded(), true)
+    assert.equal(b.data().count, 1)
+    assert.equal(b.onDraft(d('agent.spawned', { toolUseId: 'a1', name: 'Agent', subagentType: '/root/late' })), true, 'после конца хода — сразу фон')
+    assert.equal(b.data().count, 2)
+    assert.deepEqual(b.data().tasks.map((x) => x.description), ['make', 'субагент /root/late'])
+  })
+
+  it('жизнь внука (субагент субагента) держит запись верхнего уровня', () => {
+    t = 0
+    const b = bg()
+    b.turnStarted()
+    b.onDraft(d('agent.spawned', { toolUseId: 'a1', name: 'Agent' }))
+    b.turnEnded()
+    b.onDraft(d('agent.spawned', { toolUseId: 'a2', name: 'Agent' }, 'a1'))
+    b.onDraft(d('tool.called', { toolUseId: 'e2', name: 'commandExecution', input: { command: 'sleep 1' } }, 'a2'))
+    for (t = 500; t <= 3000; t += 500) b.touch('a2')
+    assert.deepEqual(b.sweep(), [], 'внук жив — субагент не снят')
+    assert.equal(b.data().count, 1)
+    t += 1500
+    assert.equal(b.sweep().length, 1, 'замолчали все — снят')
   })
 })
