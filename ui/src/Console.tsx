@@ -20,6 +20,7 @@ import { Confirm, DoctorPanel, HotkeysHelp, Inbox, McpServersDialog, NewAgentDia
 import { SearchDialog } from './components/Search.js'
 import { SettingsDialog } from './components/Settings.js'
 import { guardFromExits } from './model/netGuard.js'
+import { revokeParams } from './model/rules.js'
 import type { GuardRule } from './model/netGuard.js'
 import { configureParams, confirmNeeded, isNoop, modelWindows, settingsErrorText, settingsParams, shellHasSettings } from './model/sessionSettings.js'
 import type { SettingsPick } from './model/sessionSettings.js'
@@ -878,6 +879,18 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     return null
   }
 
+  // План 16, № 11: «Отозвать» правило «Всегда» Codex — сразу, мимо «Сохранить»; ответ — свежие настройки со списком.
+  const revokeRule = async (id: string): Promise<{ ok: string } | { error: string }> => {
+    try {
+      const r = await bridge.call('settings.set', revokeParams(id)) as SettingsReply & { codexRulesRevoked?: { text?: string } }
+      setSettings(r)
+      return { ok: r.codexRulesRevoked?.text ?? 'Отозвано.' }
+    } catch (e) {
+      void refreshSettings()
+      return { error: errorText(e) }
+    }
+  }
+
   const resetProvider = (provider: string): void => {
     bridge.call('provider.reset', { provider }).then(() => refreshStatus(), (e: unknown) => setBannerError(errorText(e)))
   }
@@ -1211,6 +1224,16 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
               checks: [...guardFromExits(settings.network.exits), ...guardFromDoctor(doctor.report), ...ui.guard],
               checking: doctor.loading,
               onCheck: () => { void runDoctor().then(() => refreshSettings()) },
+            },
+          } : {})}
+          {...(settings?.codexRules ? {
+            rules: {
+              list: settings.codexRules,
+              sessionLabel: (name: string) => {
+                const a = agents.find((x) => x.name === name)
+                return a ? (a.title ? `«${a.title}» (${name})` : name) : null
+              },
+              onRevoke: revokeRule,
             },
           } : {})}
           updates={{

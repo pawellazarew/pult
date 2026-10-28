@@ -125,6 +125,8 @@ const HELP = `pult ${VERSION} — диспетчерская над claude, code
   pult perm list [--json] · pult perm approve <id> [--session | --rule] · pult perm deny <id> --reason "…"
                                     approve — один раз; --session — и такие же до конца сессии; --rule —
                                     постоянное правило провайдера (оба — только если провайдер их предложил)
+  pult perm rules [--json]          правила «Всегда» Codex, записанные Пультом (дата, сессия);
+  pult perm rules revoke <id>       отозвать: метка и строка уходят из ~/.codex/rules/default.rules
   pult usage [--json]
   pult provider reset [claude|codex]   снять остановку провайдера
   pult mcp-ask                         служебный режим: stdio-MCP-заглушка разрешений
@@ -768,6 +770,11 @@ function printWait(result: Record<string, unknown>, asJson: boolean): number {
   return EXIT.ok
 }
 
+/** Правило «Всегда» строкой — как кнопка карточки. */
+function ruleText(x: Record<string, unknown>): string {
+  return x['kind'] === 'network' ? `пускать в сеть к ${String(x['label'])}` : `команды, начинающиеся с «${String(x['label'])}»`
+}
+
 async function cmdPerm(paths: PultPaths, args: ParsedArgs): Promise<number> {
   const { client } = await ensureDaemon(paths)
   const done = (code: number): number => { client.close(); return code }
@@ -813,8 +820,36 @@ async function cmdPerm(paths: PultPaths, args: ParsedArgs): Promise<number> {
         out(asJson ? JSON.stringify(r) : `${permId}: ${args.sub === 'approve' ? how : 'отказано'}`)
         return done(EXIT.ok)
       }
+      case 'rules': {
+        // План 16, № 11: правила «Всегда» Codex с меткой Пульта; без метки — только счётчиком, их Пульт не трогает.
+        if (id === 'revoke') {
+          const ruleId = args.positional[3]
+          if (!ruleId) { err('pult perm rules revoke: нужен id из pult perm rules'); return done(EXIT.error) }
+          const r = (await client.request('perm.rules.revoke', { id: ruleId })) as { revoked: Record<string, unknown>; text?: string }
+          out(asJson ? JSON.stringify(r) : `${ruleId}: ${r.text ?? `отозвано (${ruleText(r.revoked)})`}`)
+          return done(EXIT.ok)
+        }
+        if (id !== undefined) { err(`pult perm rules: неизвестное «${id}» — revoke <id> или ничего`); return done(EXIT.error) }
+        const r = (await client.request('perm.rules')) as { path: string; exists: boolean; rules: Array<Record<string, unknown>>; unmarked: number; backup?: string; error?: string }
+        if (asJson) { out(JSON.stringify(r)); return done(EXIT.ok) }
+        out(`файл правил Codex: ${r.path}${r.exists ? '' : ' (ещё нет)'}`)
+        if (r.error) err(`не прочитан: ${r.error}`)
+        if (r.backup) {
+          const file = r.backup.replace(/\.pult\.bak$/, '')
+          err(`ВНИМАНИЕ: осталась копия прерванной записи ${r.backup}; до её удаления Пульт файл не правит.`)
+          err(`  если ${file} пуст или обрезан — mv ${r.backup} ${file}, затем проверь последние строки; иначе удали копию`)
+        }
+        if (!r.rules.length) out('правил «Всегда», записанных Пультом, нет')
+        for (const x of r.rules) {
+          out(`${String(x['id'])}  ${String(x['at'])}  сессия ${String(x['session'])}${x['cwd'] ? ` · ${String(x['cwd'])}` : ''}`)
+          out(`    ${ruleText(x)}`)
+        }
+        if (r.unmarked > 0) out(`ещё строк правил без метки Пульта: ${r.unmarked} — их Пульт не показывает и не отзывает`)
+        if (r.rules.length) out('отозвать: pult perm rules revoke <id>')
+        return done(EXIT.ok)
+      }
       default:
-        err('pult perm: нужен один из list|approve|deny')
+        err('pult perm: нужен один из list|approve|deny|rules')
         return done(EXIT.error)
     }
   } catch (e) {
