@@ -6,6 +6,7 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
+import zlib from 'node:zlib'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, describe, it } from 'node:test'
@@ -17,6 +18,38 @@ const KEYGEN = join(ROOT, 'scripts', 'release-keygen.mjs')
 const RELEASE = join(ROOT, 'scripts', 'release.mjs')
 const VERSION = (JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')) as { version: string }).version
 const SHELL_VERSION = (JSON.parse(readFileSync(join(ROOT, 'shell', 'package.json'), 'utf8')) as { version: string }).version
+
+// 0.3.16: один номер на пакет и окно. Дешёвая сверка в гейте: разъехались — релиз откажет, а окно и пакет в плашке
+// показывали бы два номера.
+describe('один номер: пакет и окно', () => {
+  it('shell/package.json и package.json — одна версия (и в lock-файлах)', () => {
+    assert.equal(SHELL_VERSION, VERSION, `окно ${SHELL_VERSION}, пакет ${VERSION} — подними обе версии вместе`)
+    const lock = (f: string): string => (JSON.parse(readFileSync(join(ROOT, f), 'utf8')) as { version: string }).version
+    assert.equal(lock('package-lock.json'), VERSION)
+    assert.equal(lock(join('shell', 'package-lock.json')), VERSION)
+  })
+})
+
+/** Info.plist окна с номером версии. */
+const plistOf = (v: string): string => `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>CFBundleShortVersionString</key><string>${v}</string></dict></plist>\n`
+
+/** Минимальный zip (без сжатия) с одним файлом — `unzip -p` его читает на macOS и Linux. */
+function storedZip(name: string, text: string): Buffer {
+  const data = Buffer.from(text, 'utf8')
+  const n = Buffer.from(name, 'utf8')
+  const crc = zlib.crc32(data)
+  const local = Buffer.alloc(30)
+  local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt32LE(crc, 14)
+  local.writeUInt32LE(data.length, 18); local.writeUInt32LE(data.length, 22); local.writeUInt16LE(n.length, 26)
+  const central = Buffer.alloc(46)
+  central.writeUInt32LE(0x02014b50, 0); central.writeUInt16LE(20, 4); central.writeUInt16LE(20, 6); central.writeUInt32LE(crc, 16)
+  central.writeUInt32LE(data.length, 20); central.writeUInt32LE(data.length, 24); central.writeUInt16LE(n.length, 28)
+  const cdOff = local.length + n.length + data.length
+  const end = Buffer.alloc(22)
+  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(1, 8); end.writeUInt16LE(1, 10)
+  end.writeUInt32LE(central.length + n.length, 12); end.writeUInt32LE(cdOff, 16)
+  return Buffer.concat([local, n, data, central, n, end])
+}
 
 let dir = ''
 let env: Record<string, string> = {}
@@ -99,20 +132,22 @@ describe('release.mjs: сухой прогон', () => {
     assert.equal(m.package.size, tgz.length)
     assert.equal(m.package.url, `https://github.com/pawellazarew/pult/releases/download/v${VERSION}/pult-${VERSION}.tgz`)
     assert.equal(m.notes, `https://github.com/pawellazarew/pult/releases/tag/v${VERSION}`)
-    assert.deepEqual(m.app, { version: SHELL_VERSION, minVersion: WINDOW_MIN_VERSION })
+    // Окно — тем же номером, что пакет; minVersion заморожен для Пультов старше 0.3.16.
+    assert.deepEqual(m.app, { version: VERSION, minVersion: WINDOW_MIN_VERSION })
 
     assert.match(r.stdout, new RegExp(`gh release create v${VERSION.replace(/\./g, '\\.')} --repo pawellazarew/pult --target [0-9a-f]{40} .*--draft`))
     assert.match(r.stdout, /gh release edit v[\d.]+ --repo pawellazarew\/pult --draft=false --latest/)
     assert.equal(existsSync(join(dir, 'gh-called')), false, 'сухой прогон позвал gh')
   })
 
-  it('окно: Pult-<appv>-arm64.zip и те же байты под постоянным именем Pult-arm64.zip; в манифесте — имя с версией', () => {
+  it('окно: Pult-<v>-arm64.zip и те же байты под постоянным именем Pult-arm64.zip; в манифесте — имя с версией', () => {
     const out = join(dir, 'out-app')
     const zip = join(dir, 'fake-app.zip')
-    writeFileSync(zip, 'PK\u0003\u0004 не настоящий zip — release.mjs его только копирует и хэширует')
+    // Настоящий zip с одним Info.plist: release.mjs сверяет CFBundleShortVersionString окна с версией релиза.
+    writeFileSync(zip, storedZip('Pult.app/Contents/Info.plist', plistOf(VERSION)))
     const r = node(RELEASE, [VERSION, '--skip-checks', '--app-zip', zip, '--out', out, '--key', key, '--trust', pub])
     assert.equal(r.code, 0, r.stderr + r.stdout)
-    const versioned = `Pult-${SHELL_VERSION}-arm64.zip`
+    const versioned = `Pult-${VERSION}-arm64.zip`
     assert.deepEqual(readdirSync(out).sort(), ['Pult-arm64.zip', versioned, 'install.sh', 'latest.json', `pult-${VERSION}.tgz`, 'pult.tgz'].sort())
     assert.deepEqual(readFileSync(join(out, 'Pult-arm64.zip')), readFileSync(zip))
     assert.deepEqual(readFileSync(join(out, versioned)), readFileSync(zip))
@@ -126,6 +161,15 @@ describe('release.mjs: сухой прогон', () => {
     // Готовый zip — только для репетиции: публикуется окно, собранное этим прогоном.
     assert.match(node(RELEASE, [VERSION, '--publish', '--app-zip', zip]).stderr, /--app-zip с --publish нельзя/)
     assert.match(node(RELEASE, [VERSION, '--skip-checks', '--no-app', '--app-zip', zip, '--key', key]).stderr, /--no-app и --app-zip вместе не бывают/)
+    // Ревью: окно другой версии в zip — отказ (каждый Пульт отверг бы такую замену).
+    const old = join(dir, 'old-app.zip')
+    writeFileSync(old, storedZip('Pult.app/Contents/Info.plist', plistOf('0.1.21')))
+    const bad = node(RELEASE, [VERSION, '--skip-checks', '--app-zip', old, '--out', join(dir, 'out-old'), '--key', key, '--trust', pub])
+    assert.equal(bad.code, 1)
+    assert.match(bad.stderr, new RegExp(`окно 0\\.1\\.21, а релиз ${VERSION.replace(/\./g, '\\.')} — у окна тот же номер, что у пакета`))
+    // Релиз без окна не публикуется: окно обновляется той же кнопкой, что пакет.
+    assert.match(node(RELEASE, [VERSION, '--publish', '--no-app']).stderr, /--no-app с --publish нельзя/)
+    assert.equal(m.app?.version, m.version)
     assert.equal(existsSync(join(dir, 'gh-called')), false)
   })
 
@@ -179,7 +223,9 @@ describe('release.mjs: проверки git до гейта (временный 
   let repo = ''
   let key = ''
   let keyId = ''
-  const rel = (...extra: string[]): { code: number | null; stdout: string; stderr: string } => node(join(repo, 'scripts', 'release.mjs'), ['0.0.5', '--key', key, '--no-app', ...extra])
+  // `--publish` — с окном (без него отказ раньше проверок git); дальше гейта, где окно собиралось бы, прогон не доходит.
+  const rel = (...extra: string[]): { code: number | null; stdout: string; stderr: string } =>
+    node(join(repo, 'scripts', 'release.mjs'), ['0.0.5', '--key', key, ...(extra.includes('--publish') ? [] : ['--no-app']), ...extra])
   /** Переписать keys.ts и передвинуть на этот коммит тег прошлого релиза v0.0.4. */
   const retagPrev = (text: string): void => {
     writeFileSync(join(repo, 'src', 'update', 'keys.ts'), text)
@@ -204,6 +250,8 @@ describe('release.mjs: проверки git до гейта (временный 
     mkdirSync(join(repo, 'src', 'update'), { recursive: true })
     writeFileSync(join(repo, 'scripts', 'release.mjs'), readFileSync(RELEASE))
     writeFileSync(join(repo, 'package.json'), JSON.stringify({ name: 'pult', version: '0.0.5' }))
+    mkdirSync(join(repo, 'shell'))
+    writeFileSync(join(repo, 'shell', 'package.json'), JSON.stringify({ name: 'pult-shell', version: '0.0.5' }))
     writeFileSync(join(repo, 'src', 'update', 'keys.ts'), keysTs(['00000000']))
     git(repo, 'add', '-A')
     git(repo, 'commit', '-q', '-m', 'v0.0.4')
@@ -223,6 +271,19 @@ describe('release.mjs: проверки git до гейта (временный 
     assert.equal(r.code, 1)
     assert.match(r.stderr, /HEAD [0-9a-f]{12} не совпадает с origin\/main/)
     git(repo, 'push', '-q', 'origin', 'main')
+  })
+
+  it('у окна другой номер (shell/package.json) — отказ до проверок git', () => {
+    const file = join(repo, 'shell', 'package.json')
+    const was = readFileSync(file)
+    writeFileSync(file, JSON.stringify({ name: 'pult-shell', version: '0.1.21' }))
+    try {
+      const r = rel()
+      assert.equal(r.code, 1)
+      assert.match(r.stderr, /в shell\/package\.json 0\.1\.21, а релиз 0\.0\.5 — у окна тот же номер, что у пакета/)
+    } finally {
+      writeFileSync(file, was)
+    }
   })
 
   it('ключ подписи не из keys.ts прошлого релиза (v0.0.4) — отказ ротации', () => {

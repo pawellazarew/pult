@@ -229,11 +229,15 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   // Снимок статуса застал проверку канала («Проверяю…») — переспросить через секунду, а не ждать опроса раз в 15 с.
   const refreshStatusRef = useRef<(() => Promise<void>) | null>(null)
   const updChecking = status?.update?.checking === true
+  // 0.3.16: пока новая версия качается в фоне или идёт перезапуск — переспрашивать раз в 2 с: «Пульт X готов» и
+  // «Перезапускаю…» должны появляться и уходить сразу, а не через 15 с опроса.
+  const upd = status?.update
+  const updMoving = upd?.staged?.state === 'downloading' || (upd?.continuing ?? null) !== null || (upd?.app?.applying ?? null) !== null
   useEffect(() => {
-    if (!updChecking) return
-    const t = window.setTimeout(() => { void refreshStatusRef.current?.() }, 1_000)
+    if (!updChecking && !updMoving) return
+    const t = window.setTimeout(() => { void refreshStatusRef.current?.() }, updChecking ? 1_000 : 2_000)
     return () => clearTimeout(t)
-  }, [updChecking, status])
+  }, [updChecking, updMoving, status])
   const refreshStatus = useCallback(async (): Promise<void> => {
     try {
       const st = (await bridge.call('daemon.status')) as DaemonStatus
@@ -864,14 +868,14 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     bridge.call('provider.reset', { provider }).then(() => refreshStatus(), (e: unknown) => setBannerError(errorText(e)))
   }
 
-  // «Обновить» / «Сейчас» / «Повторить»: дальше демон сам — ждёт ходы или запускает `pult update` и перезапускается.
-  // «Обновить окно» (0.3.4) — тот же `update.apply` с `target: 'app'`: демон закроет это окно, заменит Pult.app и
-  // откроет новое (черновики полей ввода переживут это — model/drafts.ts).
+  // «Перезапустить» / «Сейчас» / «Повторить» (0.3.16): `update.apply` без target — дальше демон сам: ждёт ходы, ставит
+  // пакет и перезапускается, а новый демон закрывает это окно, меняет Pult.app и открывает новое (черновики полей ввода
+  // переживут это — model/drafts.ts). «Вернуть <from>» — `target: 'app', rollback`.
   const applyUpdate = (a: UpdateAction): void => {
     setUpdBusy(true)
     setUpdCheck((c) => ({ ...c, applyError: null }))
     const params = a.target === 'app'
-      ? { target: 'app', ...(a.rollback ? { rollback: true } : a.expect ? { expect: a.expect } : {}) }
+      ? { target: 'app', ...(a.rollback ? { rollback: true } : {}) }
       : a.force ? { force: true } : {}
     bridge.call('update.apply', params)
       .then(() => refreshStatus(), (e: unknown) => {

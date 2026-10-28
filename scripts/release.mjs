@@ -16,7 +16,10 @@
 //   3. `npm run clean && npm run build` — в тарбол не попадёт устаревший dist/*.js от удалённого исходника;
 //      `npm pack` → pult-<v>.tgz и его копия pult.tgz (постоянное имя для install.sh);
 //   4. Pult.app (`cd shell && npm ci && electron install && npm run dist:mac`) → `ditto -c -k --keepParent` →
-//      Pult-<appv>-arm64.zip и его копия Pult-arm64.zip (постоянное имя для README: releases/latest/download/…);
+//      Pult-<v>-arm64.zip и его копия Pult-arm64.zip (постоянное имя для README: releases/latest/download/…).
+//      С 0.3.16 у окна тот же номер, что у пакета: shell/package.json другой версии — отказ, `app.version` = `version`,
+//      и `--publish` без окна (`--no-app`) — отказ: окно обновляется той же кнопкой, что пакет, и релиз без него
+//      оставил бы стоящие окна без пары;
 //   5. манифест → подпись Ed25519 → latest.json. Подписывает и проверяет код ИЗ СОБРАННОГО ТАРБОЛА
 //      (dist/update/manifest.js и keys.js): релиз проверяется ровно тем, чем его проверят люди. Ключ
 //      подписи не из keys.ts этой сборки — отказ: такой latest.json отвергнет каждый стоящий Пульт;
@@ -70,6 +73,7 @@ try {
   if (opt.publish && opt.trust.length) die('--trust с --publish нельзя: релиз проверяется только ключами из сборки')
   if (opt.publish && opt.appZip) die('--app-zip с --publish нельзя: публикуется только окно, собранное этим прогоном')
   if (opt.noApp && opt.appZip) die('--no-app и --app-zip вместе не бывают')
+  if (opt.publish && opt.noApp) die('--no-app с --publish нельзя: у окна тот же номер, что у пакета, и релиз выходит только с ним')
   if (opt.appZip && !existsSync(opt.appZip)) die(`--app-zip: нет файла ${opt.appZip}`)
   if (!/^[\w.-]+\/[\w.-]+$/.test(opt.repo)) die(`--repo «${opt.repo}» — не owner/name`)
 
@@ -118,6 +122,9 @@ try {
   // --- 1. дерево, версия, теги ----------------------------------------------------------------
   const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
   if (pkg.version !== version) die(`в package.json ${pkg.version}, а релиз ${version} — подними версию (npm version ${version} --no-git-tag-version) и закоммить`)
+  // 0.3.16: один номер на пакет и окно.
+  const shellVersion = JSON.parse(readFileSync(join(ROOT, 'shell', 'package.json'), 'utf8')).version
+  if (shellVersion !== version) die(`в shell/package.json ${shellVersion}, а релиз ${version} — у окна тот же номер, что у пакета: подними обе версии`)
   const tag = `v${version}`
   if (!opt.skipChecks) {
     if (run('git', ['status', '--porcelain'])) die('дерево грязное — релиз собирается только из закоммиченного')
@@ -195,14 +202,21 @@ try {
     const { WINDOW_MIN_VERSION } = await import(pathToFileURL(join(built, 'dist', 'core', 'version.js')).href)
 
     // --- 4. окно ----------------------------------------------------------------------------
-    const shellPkg = JSON.parse(readFileSync(join(ROOT, 'shell', 'package.json'), 'utf8'))
-    const appVersion = shellPkg.version
+    const appVersion = version
     let appAsset = null
     const appZipName = `Pult-${appVersion}-arm64.zip`
-    // Постоянное имя для README и ссылки releases/latest/download/Pult-arm64.zip: версию окна (0.1.x, своя, не
-    // версия пакета) новичок угадать не может. Те же байты; в манифесте — имя с версией.
+    // Постоянное имя для README и ссылки releases/latest/download/Pult-arm64.zip: ссылка на «последнее окно» без
+    // номера. Те же байты; в манифесте — имя с версией.
     const appAliasName = 'Pult-arm64.zip'
+    // Номер окна — из Info.plist самого бандла (CFBundleShortVersionString), а не из shell/package.json: собранное или
+    // поданное окно другой версии каждый Пульт отверг бы при замене («версия в архиве …»).
+    const bundleVersion = (plistText, where) => {
+      const m = /<key>CFBundleShortVersionString<\/key>\s*<string>([^<]*)<\/string>/.exec(plistText ?? '')
+      if (!m) die(`${where}: в Info.plist нет CFBundleShortVersionString (или plist не XML)`)
+      if (m[1] !== version) die(`${where}: окно ${m[1]}, а релиз ${version} — у окна тот же номер, что у пакета`)
+    }
     if (opt.appZip) {
+      bundleVersion(run('unzip', ['-p', resolve(opt.appZip), 'Pult.app/Contents/Info.plist']), `--app-zip ${opt.appZip}`)
       const zip = join(out, appZipName)
       copyFileSync(resolve(opt.appZip), zip)
       copyFileSync(zip, join(out, appAliasName))
@@ -216,6 +230,7 @@ try {
       run('npm', ['run', 'dist:mac'], { cwd: shellDir })
       const app = join(shellDir, 'out', 'mac-arm64', 'Pult.app')
       if (!existsSync(app)) die(`после dist:mac нет ${app}`)
+      bundleVersion(readFileSync(join(app, 'Contents', 'Info.plist'), 'utf8'), app)
       const zip = join(out, appZipName)
       run('ditto', ['-c', '-k', '--keepParent', app, zip])
       copyFileSync(zip, join(out, appAliasName))
@@ -233,6 +248,7 @@ try {
       package: asset(tgz, tgzName),
       app: {
         version: appVersion,
+        // Заморожено (src/core/version.ts): нужно только разбору манифеста у Пультов старше 0.3.16.
         minVersion: WINDOW_MIN_VERSION,
         ...(appAsset ? { 'darwin-arm64': asset(appAsset, appZipName) } : {}),
       },
@@ -250,6 +266,7 @@ try {
     }
     let checked
     try { checked = manifestMod.verifyEnvelope(readFileSync(latestFile), keys) } catch (e) { die(`самопроверка latest.json: ${e.message}`) }
+    if (checked.app?.version !== checked.version) die(`самопроверка: окно ${checked.app?.version} и пакет ${checked.version} — номера должны совпадать`)
     for (const [file, a] of [[tgz, checked.package], [join(out, 'pult.tgz'), checked.package], ...(appAsset ? [[appAsset, checked.app['darwin-arm64']], [join(out, appAliasName), checked.app['darwin-arm64']]] : [])]) {
       if (sha256(file) !== a.sha256 || statSync(file).size !== a.size) die(`самопроверка: ${file} не сходится с манифестом`)
     }

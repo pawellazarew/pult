@@ -25,6 +25,7 @@ import { atomicSymlink, atomicWrite } from '../service/fsutil.js'
 import type { ServiceContext } from '../service/context.js'
 import { bypassNotice, ownServiceContext, readServiceFile, REINSTALL_CMD } from '../service/status.js'
 import { npmInstall, readTarballManifest, UpdateError, verifyInstalled } from './install.js'
+import { compareVersions } from '../core/semver.js'
 import type { RestartContext } from './probe.js'
 import { daemonStatusOnce, fileSize, outputFile, restartAndProbe, tailSince } from './probe.js'
 import type { ProbeOptions } from './probe.js'
@@ -76,20 +77,43 @@ function prepareDirs(paths: PultPaths): void {
   }
 }
 
+/** Сколько `pult update` ждёт фоновую подготовку (`pult update --stage`), прежде чем отказать. */
+export const STAGE_WAIT_MS = 10 * 60_000
+
+/** Метка «lock держит фоновая подготовка»: pid держателя. Рядом с lock, живёт ровно столько, сколько он. */
+const stageMark = (paths: PultPaths): string => `${paths.updateLock}.stage`
+const stageHolder = (paths: PultPaths): number | null => {
+  try { const n = Number(readFileSync(stageMark(paths), 'utf8').trim()); return Number.isInteger(n) && n > 0 ? n : null } catch { return null }
+}
+
 /**
  * Один `pult update` за раз: `open(O_CREAT|O_EXCL)` + живость pid со временем старта — тот же
  * lock, что у демона (core/lock.ts), со всеми его уроками про переиспользованный pid.
+ * 0.3.16: lock держит фоновая подготовка (`pult update --stage`, её запускает демон) — не отказ, а ожидание её конца
+ * (не дольше STAGE_WAIT_MS): человек, набравший `pult update`, не должен гадать, что за «другое обновление».
  */
-export async function withUpdateLock(paths: PultPaths, io: Io, fn: () => Promise<number>): Promise<number> {
+export async function withUpdateLock(paths: PultPaths, io: Io, fn: () => Promise<number>, opts: { stage?: boolean; stageWaitMs?: number } = {}): Promise<number> {
   prepareDirs(paths)
-  const got = acquireLock(paths.updateLock)
+  const deadline = Date.now() + (opts.stageWaitMs ?? STAGE_WAIT_MS)
+  let said = false
+  let got = acquireLock(paths.updateLock)
+  while (!got.ok && !opts.stage && got.holderPid !== null && stageHolder(paths) === got.holderPid && Date.now() < deadline) {
+    if (!said) { io.err(`pult update: демон готовит обновление в фоне (pid ${got.holderPid}) — жду конца подготовки, потом продолжу`); said = true }
+    await new Promise((r) => { setTimeout(r, 500) })
+    got = acquireLock(paths.updateLock)
+  }
   if (!got.ok) {
-    io.err(`pult update: уже идёт другое обновление (pid ${got.holderPid ?? '?'}${got.holderCmd ? `, ${got.holderCmd}` : ''}) — дождись его конца`)
+    const bg = got.holderPid !== null && stageHolder(paths) === got.holderPid
+    io.err(bg
+      ? `pult update: фоновая подготовка обновления (pid ${got.holderPid}) идёт дольше ${Math.round((opts.stageWaitMs ?? STAGE_WAIT_MS) / 60_000)} мин — повтори позже; журнал: ${paths.updateLog}`
+      : `pult update: уже идёт другое обновление (pid ${got.holderPid ?? '?'}${got.holderCmd ? `, ${got.holderCmd}` : ''}) — дождись его конца`)
     return 1
   }
+  if (opts.stage) { try { atomicWrite(stageMark(paths), `${process.pid}\n`, 0o600) } catch { /* без метки — просто отказ другим */ } }
   try {
     return await fn()
   } finally {
+    if (opts.stage) { try { unlinkSync(stageMark(paths)) } catch { /* уже нет */ } }
     got.lock.release()
   }
 }
@@ -346,7 +370,19 @@ export async function installTarball(paths: PultPaths, io: Io, tgzArg: string, o
   }
   if (valid && !trusted) io.out(`${v} уже лежит в ${dir}, но не из этого подписанного тарбола — переставляю`)
 
-  // --- установка в .partial -----------------------------------------------------------
+  if (!installDir(paths, io, tgz, v, st, opts, true)) return 1
+  return switchAndProbe(paths, io, v, action, opts)
+}
+
+/**
+ * npm в `versions/<v>.partial` → проверка → rename в `versions/<v>` (+ метка канала). Общее у установки и фоновой
+ * подготовки (0.3.16). false — не вышло, причина уже в stderr; `record` — записать провал в update.json (подготовка
+ * молчит: её неудача — не «обновление не встало», а повод скачать ещё раз).
+ */
+function installDir(paths: PultPaths, io: Io, tgz: string, v: string, st: UpdateState, opts: UpdateOptions, record: boolean): boolean {
+  const env = opts.env ?? process.env
+  const action = opts.action ?? 'from'
+  const dir = join(paths.versions, v)
   const partial = dir + PARTIAL_SUFFIX
   removeVersionDir(partial)
   try {
@@ -355,10 +391,10 @@ export async function installTarball(paths: PultPaths, io: Io, tgzArg: string, o
   } catch (e) {
     removeVersionDir(partial)
     const msg = (e as Error).message
-    recordLast(paths, st, { at: now(), action, version: v, was: currentName(paths), result: 'failed', message: msg }, opts)
+    if (record) recordLast(paths, st, { at: now(), action, version: v, was: currentName(paths), result: 'failed', message: msg }, opts)
     io.err(`pult update: ${msg}`)
     io.err('ничего не переключено: current и работающий демон прежние')
-    return 1
+    return false
   }
   if (existsSync(dir) || scanVersions(paths).versions.some((x) => x.name === v)) {
     // --reinstall или мусор без пакета на месте версии: rename не заменяет непустой каталог,
@@ -374,7 +410,70 @@ export async function installTarball(paths: PultPaths, io: Io, tgzArg: string, o
   st.installed[v] = now()
   writeState(paths, st)
   io.out(`${v} поставлена в ${dir}`)
-  return switchAndProbe(paths, io, v, action, opts)
+  return true
+}
+
+/**
+ * 0.3.16: версия `v` уже подготовлена каналом — лежит в `versions/<v>`, пакет той же версии и с меткой канала
+ * (`sha256` — той же, что в подписанном манифесте; не задан — любой меткой канала).
+ */
+export function stagedReady(paths: PultPaths, v: string, sha256?: string): boolean {
+  const dir = join(paths.versions, v)
+  const pkg = packageIn(dir)
+  if (!pkg || pkg.layout !== 'installed' || pkg.version !== v) return false
+  const mark = channelMark(dir)
+  return mark !== null && (sha256 === undefined || mark === sha256)
+}
+
+/**
+ * Не больше одной подготовленной версии: убрать прочие версии канала новее активной (не current, не previous, не
+ * `keep`). Остальное на диске — дело `pruneVersions` после переключения.
+ */
+export function pruneStaged(paths: PultPaths, keep: string | null): string[] {
+  const cur = currentName(paths)
+  const st = readState(paths)
+  const curPkg = cur !== null ? packageIn(join(paths.versions, cur)) : null
+  const removed: string[] = []
+  for (const e of scanVersions(paths).versions) {
+    if (e.dev || e.name === cur || e.name === st.previous || e.name === keep || e.version === null) continue
+    if (channelMark(e.dir) === null) continue
+    if (curPkg && compareVersions(e.name, curPkg.version) <= 0) continue
+    removeVersionDir(e.dir)
+    delete st.installed[e.name]
+    removed.push(e.name)
+  }
+  if (removed.length) writeState(paths, st)
+  return removed
+}
+
+/**
+ * 0.3.16, фоновая подготовка: поставить тарбол в `versions/<v>` и НЕ переключать. Вызывается под update.lock.
+ * Активная версия или уже подготовленная тем же тарболом — ничего не делать. Провал в update.json не пишется.
+ */
+export function stageTarball(paths: PultPaths, io: Io, tgzArg: string, opts: UpdateOptions = {}): number {
+  const env = opts.env ?? process.env
+  const tgz = resolve(tgzArg)
+  cleanLeftovers(paths)
+  let v: string
+  try {
+    v = readTarballManifest(tgz, env).version
+  } catch (e) {
+    if (e instanceof UpdateError) { io.err(`pult update: ${e.message}`); return 1 }
+    throw e
+  }
+  if (opts.expectVersion !== undefined && v !== opts.expectVersion) {
+    io.err(`pult update: в тарболе версия ${v}, а подписанный манифест обещал ${opts.expectVersion} — релиз собран криво, не ставлю`)
+    return 1
+  }
+  if (currentName(paths) === v) { io.out(`${v} активна — готовить нечего`); return 0 }
+  if (stagedReady(paths, v, opts.channelSha)) { io.out(`${v} уже подготовлена: ${join(paths.versions, v)}`); return 0 }
+  return installDir(paths, io, tgz, v, readState(paths), opts, false) ? 0 : 1
+}
+
+/** 0.3.16: переключиться на подготовленную заранее версию — тот же путь, что у установки (проба, автооткат). */
+export async function switchStaged(paths: PultPaths, io: Io, v: string, opts: UpdateOptions = {}): Promise<number> {
+  io.out(`${v} подготовлена заранее — переключаюсь`)
+  return switchAndProbe(paths, io, v, opts.action ?? 'channel', opts)
 }
 
 export async function updateTo(paths: PultPaths, io: Io, v: string, opts: UpdateOptions = {}): Promise<number> {

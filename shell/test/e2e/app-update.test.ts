@@ -1,9 +1,10 @@
 // e2e 0.3.4, окно обновляется само. Демон с тестовым «релизом» (PULT_TEST_UPDATE_DIR, свой ключ): в канале окно
 // 0.1.16, «поставлено» фальшивое Pult.app 0.1.15 во временной папке (PULT_TEST_APP_DIRS — настоящий /Applications
-// тестовый демон не видит). Окно теста — рабочая копия Electron, НЕ из поставленного бандла: «Доступно новое окно»
-// видно, но кнопки «Обновить окно» в нём нет (here: false). Обновление, запущенное из терминала (клиент теста),
-// доходит до настоящего ditto и сверки бандла, кладёт новое окно рядом со старым и отказывает «закрой окно из …»:
-// это окно пережило бы замену. Ничего не тронуто. Плюс черновик поля реплики переживает SIGTERM окна (так его
+// тестовый демон не видит). С 0.3.16 демон сразу готовит окно в фоне (настоящий ditto → apps/ready-0.1.16). Окно
+// теста — рабочая копия Electron, НЕ из поставленного бандла: плашка про окно молчит (кнопка его не обновит), а
+// «Настройки» говорят, где обновить (here: false). Обновление, запущенное из терминала (клиент теста), берёт
+// подготовленное окно, сверяет бандл, кладёт новое окно рядом со старым и отказывает «закрой окно из …»: это окно
+// пережило бы замену. Ничего не тронуто. Плюс черновик поля реплики переживает SIGTERM окна (так его
 // закрывает обновление) и запуск НОВОГО процесса окна с тем же userData.
 
 import assert from 'node:assert/strict'
@@ -103,19 +104,24 @@ describe('окно обновляется само: окно не из банд�
     rmSync(root, { recursive: true, force: true })
   })
 
-  it('плашка «Доступно новое окно 0.1.16» и строка «Окно» — без кнопки: это окно не из поставленного бандла', async () => {
-    const banner = h.win.getByTestId('update-app')
-    await banner.waitFor({ timeout: 25_000 })
-    assert.match(await banner.innerText(), /Доступно новое окно 0\.1\.16 \(стоит 0\.1\.15\) · закрой окно из .*Electron\.app и обнови из .*Pult\.app/)
-    assert.equal(await h.win.getByTestId('update-apply-app').count(), 0)
+  it('окно готовится в фоне (настоящий ditto); плашка молчит, «Настройки» говорят «закрой окно из …» — без кнопки', async () => {
+    const c = await h.client()
+    // Проверка через 0 мс после старта — и сразу подготовка окна: zip, разбор, ditto, проверки бандла.
+    assert.ok(await waitFor(async () => ((await c.request('update.status')) as { app?: { ready?: string | null } }).app?.ready === '0.1.16', 25_000), 'окно не подготовилось')
+    assert.equal(readdirSync(path.join(h.home, 'apps')).filter((n) => n.startsWith('stage-')).length, 0)
+    assert.equal(versionAt(installed), '0.1.15', 'подготовка не трогает поставленное окно')
+    assert.deepEqual(readdirSync(path.dirname(installed)), ['Pult.app'])
+    await new Promise((r) => setTimeout(r, 2500))
+    assert.equal(await h.win.getByTestId('update-available').count(), 0, 'кнопка не обновит это окно — плашки нет')
     await h.win.keyboard.press('Meta+,')
     await h.win.getByTestId('settings-dialog').waitFor({ timeout: 5000 })
     const row = h.win.getByTestId('settings-app-update')
     await row.waitFor({ timeout: 5000 })
-    assert.equal(await row.getAttribute('data-state'), 'available')
-    assert.match((await row.innerText()).replace(/\s+/g, ' '), /Окно: 0\.1\.15 → доступно 0\.1\.16 · закрой окно из .*Electron\.app/)
+    assert.equal(await row.getAttribute('data-state'), 'elsewhere')
+    assert.match((await row.innerText()).replace(/\s+/g, ' '), /Окно 0\.1\.15 → 0\.1\.16 · закрой окно из .*Electron\.app и обнови из .*Pult\.app/)
     assert.equal(await h.win.getByTestId('settings-app-apply').count(), 0)
-    assert.match((await h.win.getByTestId('settings-update-versions').innerText()).replace(/\s+/g, ' '), /окно 0\.1\.15/)
+    // Окно другой версии, чем пакет, — номер окна мелко рядом с «Пульт X».
+    assert.match((await h.win.getByTestId('settings-window-version').innerText()).replace(/\s+/g, ' '), /окно 0\.1\.15/)
     await h.shot('settings-app-elsewhere')
   })
 
@@ -135,7 +141,8 @@ describe('окно обновляется само: окно не из банд�
     assert.equal(versionAt(installed), '0.1.15', 'прежний бандл на месте')
     assert.deepEqual(readdirSync(path.dirname(installed)), ['Pult.app'], 'новое окно рядом убрано')
     const tools = readFileSync(path.join(h.home, 'test-app-tools.log'), 'utf8')
-    assert.match(tools, /^codesign .*staging-0\.1\.16\/Pult\.app$/m, 'бандл из настоящего ditto дошёл до проверки подписи')
+    assert.match(tools, /^codesign .*stage-0\.1\.16\/out\/Pult\.app$/m, 'бандл из настоящего ditto дошёл до проверки подписи при подготовке')
+    assert.match(tools, /^codesign .*(ready|staging)-0\.1\.16\/Pult\.app$/m, 'перед заменой бандл проверен заново')
     assert.doesNotMatch(tools, /^open /m, 'окно никто не открывал')
     assert.equal(h.daemonPid(), pid, 'демон не перезапускался')
     await h.win.getByTestId('settings-update-check').click()

@@ -31,9 +31,9 @@ import { RELEASE_KEYS } from './keys.js'
 import type { TrustedKey } from './keys.js'
 import { keyIdOf, MANIFEST_MAX_BYTES, ManifestError, rawPublicKey, verifyEnvelope } from './manifest.js'
 import type { Manifest } from './manifest.js'
-import { installTarball, withUpdateLock } from './update.js'
+import { installTarball, pruneStaged, stageTarball, stagedReady, switchStaged, withUpdateLock } from './update.js'
 import type { UpdateOptions } from './update.js'
-import { currentName, packageIn, readState } from './versions.js'
+import { currentName, isVersionName, packageIn, readState } from './versions.js'
 import { readAppState } from './appState.js'
 import { plistString } from './plist.js'
 
@@ -217,14 +217,12 @@ export async function updateCheck(paths: PultPaths, io: Io, opts: ChannelOptions
     io.out(`pult ${r.current ?? v} — последняя версия`)
   }
   io.out(`что нового: ${r.latest.notes}`)
+  // 0.3.16: у окна тот же номер, что у пакета, — строка про окно только когда оно отстало (обновится той же кнопкой).
   const w = r.window
   if (w.installed !== null && w.latest !== null && compareVersions(w.latest, w.installed) > 0) {
     io.out(w.bad
       ? `окно: ${w.installed} → в канале ${w.latest}, но оно уже не встало на этой машине — повторить: pult update --app --force`
-      : `окно: ${w.installed} → доступно ${w.latest}${w.outdated ? ` (релизу нужно не ниже ${w.minVersion})` : ''} — обновить: pult update --app или «Настройки» → «Обновления»`)
-  } else if (w.minVersion !== null) {
-    if (w.outdated) io.out(`окно: стоит ${w.installed}, релизу нужно не ниже ${w.minVersion} — новое окно на странице релиза`)
-    else if (w.installed !== null) io.out(`окно: ${w.installed} — годится (нужно не ниже ${w.minVersion})`)
+      : `окно: ${w.installed} → доступно ${w.latest} — обновится вместе с Пультом («Перезапустить» в окне) или: pult update --app`)
   }
   return r.available ? EXIT_UPDATE_AVAILABLE : 0
 }
@@ -236,17 +234,36 @@ function cleanDownloads(paths: PultPaths): void {
   for (const n of names) rmSync(join(paths.downloads, n), { recursive: true, force: true })
 }
 
-/** Что сказать, когда новому пакету нужно окно новее стоящего. */
-function windowWarning(r: CheckReport): string | null {
-  if (!r.window.outdated) return null
-  return r.window.available
-    ? `внимание: окно ${r.window.installed} старше нужного релизу (${r.window.minVersion}) — после обновления: pult update --app (или «Настройки» → «Обновления» → «Обновить окно»)`
-    : `внимание: окно ${r.window.installed} старше нужного релизу (${r.window.minVersion}) — после обновления скачай новое со страницы релиза (${r.latest.notes}), Pult-<версия>-arm64.zip, и замени Pult.app`
+/** Скачать тарбол релиза в downloads/ (размер и sha256 — из подписанного манифеста). null — не вышло, причина в stderr. */
+async function downloadPackage(paths: PultPaths, io: Io, m: Manifest, env: NodeJS.ProcessEnv, http: HttpGet | undefined): Promise<string | null> {
+  const v = m.version
+  mkdirSync(paths.downloads, { recursive: true, mode: 0o700 })
+  chmodSync(paths.downloads, 0o700)
+  const partial = join(paths.downloads, `pult-${v}.tgz.partial-${process.pid}`)
+  const tgz = join(paths.downloads, `pult-${v}.tgz`)
+  try {
+    await downloadTo(m.package.url, partial, {
+      http: http ?? httpFor(env),
+      size: m.package.size,
+      sha256: m.package.sha256,
+      what: `pult-${v}.tgz`,
+    })
+  } catch (e) {
+    if (!(e instanceof FetchError)) throw e
+    io.err(`pult update: ${e.message}`)
+    return null
+  }
+  renameSync(partial, tgz)
+  io.out(`скачано: ${m.package.size} байт, sha256 сходится с подписанным манифестом`)
+  return tgz
 }
 
 /**
  * Голый `pult update`: проверка канала и установка новой версии тем же путём, что `--from`.
- * `expect` — версия, которую видел человек («Обновить» в окне передаёт её `--expect`): в канале уже другая — отказ.
+ * `expect` — версия, которую видел человек («Перезапустить» в окне передаёт её `--expect`). С 0.3.16 канал, ушедший
+ * ВПЕРЁД (вышла версия ещё новее), — не отказ: ставится самая новая, и об этом сказано; ушедший назад — отказ.
+ * Версия, подготовленная заранее (`pult update --stage`, та же метка sha256), не качается второй раз; нет сети, а
+ * `expect` подготовлена — переключение на неё (её тарбол уже сверен с подписанным манифестом при подготовке).
  */
 export async function updateLatest(paths: PultPaths, io: Io, opts: ChannelOptions & UpdateOptions & { expect?: string } = {}): Promise<number> {
   const { env, config } = settle(opts, paths)
@@ -256,6 +273,9 @@ export async function updateLatest(paths: PultPaths, io: Io, opts: ChannelOption
     io.err(`pult update: ${e.message}`)
     return 1
   }
+  // PULT_UPDATE_LOG ставит демон, запуская нас из окна: окно потом укажет на этот файл, а не на терминал.
+  const log = (env['PULT_UPDATE_LOG'] ?? '').trim()
+  const tail: UpdateOptions = { ...opts, env, action: 'channel', ...(log ? { log } : {}) }
   return withUpdateLock(paths, io, async () => {
     cleanDownloads(paths)
     let m: Manifest
@@ -263,6 +283,15 @@ export async function updateLatest(paths: PultPaths, io: Io, opts: ChannelOption
       m = await fetchManifest({ ...opts, env, url })
     } catch (e) {
       if (!(e instanceof ChannelError)) throw e
+      // Те же правила, что у пути с сетью: только вперёд, не bad, не рабочая копия — иначе `--expect <previous>` без
+      // сети тихо откатил бы на прежнюю версию (у неё тоже метка канала).
+      const exp = opts.expect
+      const inst = installedVersion(paths)
+      const forward = exp !== undefined && isVersionName(exp) && (inst.version === null || compareVersions(exp, inst.version) > 0)
+      if (exp !== undefined && forward && !inst.dev && !readState(paths).bad.includes(exp) && stagedReady(paths, exp)) {
+        io.err(`pult update: ${e.message} — ${exp} уже подготовлена заранее, ставлю её`)
+        return switchStaged(paths, io, exp, tail)
+      }
       io.err(`pult update: ${e.message}`)
       io.err('ничего не поставлено; поставить тарбол руками: pult update --from <pult-x.y.z.tgz>')
       return 1
@@ -284,40 +313,71 @@ export async function updateLatest(paths: PultPaths, io: Io, opts: ChannelOption
       return 1
     }
     if (opts.expect !== undefined && opts.expect !== v) {
-      io.err(`pult update: в канале уже ${v}, а ставить просили ${opts.expect} — проверь заново (pult update --check) и повтори`)
-      return 1
+      if (compareVersions(v, opts.expect) < 0) {
+        io.err(`pult update: в канале ${v}, а ставить просили ${opts.expect} — канал старше просимого; проверь заново (pult update --check) и повтори`)
+        return 1
+      }
+      // Пока окно ждало конца ходов (или висело с прошлой проверки), вышла ещё одна версия — ставим её, а не старую.
+      io.out(`в канале уже ${v} (просили ${opts.expect}) — ставлю ${v}`)
     }
-    const warn = windowWarning(r)
-    if (warn) io.err(warn)
+    if (stagedReady(paths, v, m.package.sha256)) return switchStaged(paths, io, v, { ...tail, expectVersion: v })
     io.out(`доступна ${v} (сейчас ${r.current ?? 'ничего не стоит'}) — скачиваю ${m.package.url}`)
     // Тестовый шов: «долгая загрузка», чтобы сквозной тест окна застал состояние «ставится». Только под PULT_TEST.
     const hold = Number(env['PULT_TEST'] === '1' ? env['PULT_TEST_UPDATE_HOLD_MS'] : NaN)
     if (Number.isFinite(hold) && hold > 0) await new Promise((res) => setTimeout(res, hold))
-    mkdirSync(paths.downloads, { recursive: true, mode: 0o700 })
-    chmodSync(paths.downloads, 0o700)
-    const partial = join(paths.downloads, `pult-${v}.tgz.partial-${process.pid}`)
-    const tgz = join(paths.downloads, `pult-${v}.tgz`)
+    const tgz = await downloadPackage(paths, io, m, env, opts.http)
+    if (tgz === null) { io.err('ничего не поставлено: current и работающий демон прежние'); return 1 }
     try {
-      await downloadTo(m.package.url, partial, {
-        http: opts.http ?? httpFor(env),
-        size: m.package.size,
-        sha256: m.package.sha256,
-        what: `pult-${v}.tgz`,
-      })
-    } catch (e) {
-      if (!(e instanceof FetchError)) throw e
-      io.err(`pult update: ${e.message}`)
-      io.err('ничего не поставлено: current и работающий демон прежние')
-      return 1
-    }
-    renameSync(partial, tgz)
-    io.out(`скачано: ${m.package.size} байт, sha256 сходится с подписанным манифестом`)
-    try {
-      // PULT_UPDATE_LOG ставит демон, запуская нас из окна: окно потом укажет на этот файл, а не на терминал.
-      const log = (env['PULT_UPDATE_LOG'] ?? '').trim()
-      return await installTarball(paths, io, tgz, { ...opts, env, expectVersion: v, action: 'channel', channelSha: m.package.sha256, ...(log ? { log } : {}) })
+      return await installTarball(paths, io, tgz, { ...tail, expectVersion: v, channelSha: m.package.sha256 })
     } finally {
       try { unlinkSync(tgz) } catch { /* уже нет */ }
     }
   })
+}
+
+/**
+ * `pult update --stage` (0.3.16, так зовёт демон после проверки): скачать и поставить новую версию в
+ * `versions/<v>`, НЕ переключая `current` и не трогая демона. Под тем же update.lock. Код 0 — подготовлено (или
+ * готовить нечего), 1 — не вышло (демон молчит и повторит при следующей проверке). Старые подготовленные версии
+ * убираются: подготовленная — одна.
+ */
+export async function updateStage(paths: PultPaths, io: Io, opts: ChannelOptions & UpdateOptions = {}): Promise<number> {
+  const { env, config } = settle(opts, paths)
+  let url: string
+  try { url = updateUrl(config, env) } catch (e) {
+    if (!(e instanceof ChannelError)) throw e
+    io.err(`pult update --stage: ${e.message}`)
+    return 1
+  }
+  return withUpdateLock(paths, io, async () => {
+    cleanDownloads(paths)
+    let m: Manifest
+    try { m = await fetchManifest({ ...opts, env, url }) } catch (e) {
+      if (!(e instanceof ChannelError)) throw e
+      io.err(`pult update --stage: ${e.message}`)
+      return 1
+    }
+    const r = report(paths, m, url, env)
+    const v = m.version
+    if (r.dev || !r.newer || r.bad) {
+      io.out(`pult update --stage: готовить нечего (${r.dev ? 'рабочая копия' : r.bad ? `${v} — bad` : `${r.current ?? v} — последняя`})`)
+      return 0
+    }
+    // Прежние подготовленные убираются только ПОСЛЕ удачи: битый релиз не должен стереть годную подготовленную версию.
+    const prune = (): void => {
+      const removed = pruneStaged(paths, v)
+      if (removed.length) io.out(`убраны прежние подготовленные версии: ${removed.join(', ')}`)
+    }
+    if (stagedReady(paths, v, m.package.sha256)) { io.out(`${v} уже подготовлена`); prune(); return 0 }
+    io.out(`готовлю ${v}: скачиваю ${m.package.url}`)
+    const tgz = await downloadPackage(paths, io, m, env, opts.http)
+    if (tgz === null) return 1
+    try {
+      const code = stageTarball(paths, io, tgz, { ...opts, env, expectVersion: v, action: 'channel', channelSha: m.package.sha256 })
+      if (code === 0) prune()
+      return code
+    } finally {
+      try { unlinkSync(tgz) } catch { /* уже нет */ }
+    }
+  }, { stage: true })
 }

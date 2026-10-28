@@ -214,7 +214,7 @@ describe('pult update из канала: --expect, окно, неподписа�
   let apps = ''
   before(async () => {
     h = makeHome()
-    // Окно 0.1.12 при minVersion релиза 0.1.13: установка идёт, но CLI говорит, что делать с окном.
+    // Окно 0.1.12: с 0.3.16 «минимальной версии окна» нет — установка про него не предупреждает.
     apps = join(h.dir, 'apps')
     mkdirSync(join(apps, 'Pult.app', 'Contents'), { recursive: true })
     writeFileSync(join(apps, 'Pult.app', 'Contents', 'Info.plist'),
@@ -225,28 +225,95 @@ describe('pult update из канала: --expect, окно, неподписа�
   })
   after(async () => { await teardown(h) })
 
-  it('--expect другой версии — отказ, ничего не тронуто', async () => {
+  it('--expect новее канала (канал ушёл назад) — отказ, ничего не тронуто', async () => {
     const r = await cli(h, ['update', '--expect', '0.0.9'])
     assert.equal(r.code, 1)
-    assert.match(r.stderr, /в канале уже 0\.0\.3, а ставить просили 0\.0\.9/)
+    assert.match(r.stderr, /в канале 0\.0\.3, а ставить просили 0\.0\.9 — канал старше просимого/)
     assert.equal(current(h), join('versions', '0.0.1'))
   })
 
-  it('0.0.3 уже лежит из неподписанного --from — канал её переставляет из своего тарбола, метит sha; окно старое — предупреждение', async () => {
-    const r = await cli(h, ['update', '--expect', '0.0.3'], { PULT_TEST_APP_DIRS: apps })
+  it('0.3.16: канал ушёл вперёд от --expect — ставится самая новая и говорится, какая; 0.0.3 из неподписанного --from переставляется', async () => {
+    const r = await cli(h, ['update', '--expect', '0.0.2'], { PULT_TEST_APP_DIRS: apps })
     assert.equal(r.code, 0, r.stderr + r.stdout)
+    assert.match(r.stdout, /в канале уже 0\.0\.3 \(просили 0\.0\.2\) — ставлю 0\.0\.3/)
     assert.match(r.stdout, /0\.0\.3 уже лежит в .*, но не из этого подписанного тарбола — переставляю/)
     assert.match(r.stdout, /0\.0\.3 поставлена в/)
-    assert.match(r.stderr, /внимание: окно 0\.1\.12 старше нужного релизу \(0\.1\.13\) — после обновления скачай новое со страницы релиза/)
+    assert.doesNotMatch(r.stderr, /старше нужного релизу/)
     assert.equal(readFileSync(join(h.paths.versions, '0.0.3', '.channel-sha256'), 'utf8').trim(), sha(tgz.C))
     assert.equal(current(h), join('versions', '0.0.3'))
   })
 
-  it('тот же подписанный тарбол — каталог переиспользуется без переустановки', async () => {
+  it('тот же подписанный тарбол — каталог переиспользуется без переустановки и без загрузки', async () => {
     assert.equal((await cli(h, ['update', '--to', '0.0.1'])).code, 0)
     const r = await cli(h, ['update'])
     assert.equal(r.code, 0, r.stderr + r.stdout)
-    assert.match(r.stdout, /0\.0\.3 уже лежит в .* — переключаюсь без переустановки/)
+    assert.match(r.stdout, /0\.0\.3 подготовлена заранее — переключаюсь/)
+    assert.doesNotMatch(r.stdout, /скачиваю/)
+    assert.equal(current(h), join('versions', '0.0.3'))
+  })
+})
+
+// 0.3.16: фоновая подготовка. `pult update --stage` ставит новую версию в versions/<v> и НЕ переключает; потом голый
+// `pult update` только переключает (без загрузки), а без сети — переключает на подготовленную `--expect`.
+describe('pult update --stage: подготовить заранее, не переключая', () => {
+  let h: Home
+  before(async () => {
+    h = makeHome()
+    assert.equal((await cli(h, ['update', '--from', tgz.A])).code, 0)
+  })
+  after(async () => { await teardown(h) })
+
+  it('ставит 0.0.2 в versions/ с меткой канала; current, демон и update.json (last) не тронуты; тарбол удалён', async () => {
+    publish(h, '0.0.2', tgz.B)
+    const last = (JSON.parse(readFileSync(h.paths.updateState, 'utf8')) as { last: unknown }).last
+    const r = await cli(h, ['update', '--stage'])
+    assert.equal(r.code, 0, r.stderr + r.stdout)
+    assert.match(r.stdout, /готовлю 0\.0\.2/)
+    assert.equal(current(h), join('versions', '0.0.1'))
+    assert.equal(readFileSync(join(h.paths.versions, '0.0.2', '.channel-sha256'), 'utf8').trim(), sha(tgz.B))
+    assert.deepEqual((JSON.parse(readFileSync(h.paths.updateState, 'utf8')) as { last: unknown }).last, last)
+    assert.deepEqual(downloads(h), [])
+    // Повтор — «уже подготовлена», без загрузки.
+    const again = await cli(h, ['update', '--stage'])
+    assert.equal(again.code, 0)
+    assert.match(again.stdout, /0\.0\.2 уже подготовлена/)
+  })
+
+  it('вышла 0.0.3 — подготовленная одна: 0.0.2 убрана, 0.0.3 на её месте', async () => {
+    publish(h, '0.0.3', tgz.C)
+    const r = await cli(h, ['update', '--stage'])
+    assert.equal(r.code, 0, r.stderr + r.stdout)
+    assert.match(r.stdout, /убраны прежние подготовленные версии: 0\.0\.2/)
+    assert.deepEqual(versions(h), ['0.0.1', '0.0.3'])
+    assert.equal(current(h), join('versions', '0.0.1'))
+  })
+
+  it('битый тарбол в канале — код 1, ничего не подготовлено, update.json без «не встало»', async () => {
+    publish(h, '0.0.2', tgz.B, { sha256: 'f'.repeat(64) })
+    const r = await cli(h, ['update', '--stage'])
+    // В канале 0.0.2 старше подготовленной 0.0.3, но новее активной — готовится она, и её sha не сходится.
+    assert.equal(r.code, 1)
+    assert.doesNotMatch(readFileSync(h.paths.updateState, 'utf8'), /"action": "channel"/)
+    assert.deepEqual(downloads(h), [])
+  })
+
+  it('нет сети, а --expect подготовлена — переключение на неё (проба), без загрузки', async () => {
+    publish(h, '0.0.3', tgz.C)
+    rmSync(join(h.rel, 'latest.json'))
+    const r = await cli(h, ['update', '--expect', '0.0.3'])
+    assert.equal(r.code, 0, r.stderr + r.stdout)
+    assert.match(r.stderr, /0\.0\.3 уже подготовлена заранее, ставлю её/)
+    assert.equal(current(h), join('versions', '0.0.3'))
+    const st = JSON.parse(readFileSync(h.paths.updateState, 'utf8')) as { last: { action: string; result: string; version: string } }
+    assert.deepEqual([st.last.action, st.last.result, st.last.version], ['channel', 'ok', '0.0.3'])
+  })
+
+  it('ревью: без сети --expect на прежнюю версию (у неё тоже метка канала) — не откатывает, отказ', async () => {
+    // 0.0.1 — previous; помечаем её как поставленную каналом, будто когда-то её ставили из latest.json.
+    writeFileSync(join(h.paths.versions, '0.0.1', '.channel-sha256'), `${sha(tgz.A)}\n`)
+    const r = await cli(h, ['update', '--expect', '0.0.1'])
+    assert.equal(r.code, 1, r.stdout)
+    assert.doesNotMatch(r.stderr, /подготовлена заранее/)
     assert.equal(current(h), join('versions', '0.0.3'))
   })
 })

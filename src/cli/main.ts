@@ -21,7 +21,7 @@ import { installService, serviceStatus, uninstallService } from '../service/inst
 import { stopDaemon } from '../service/stop.js'
 import { versionDoctorItems } from '../update/doctor.js'
 import { refuseRunningTurns, updateFrom, updateList, updateTo } from '../update/update.js'
-import { EXIT_UPDATE_AVAILABLE, updateCheck, updateLatest } from '../update/channel.js'
+import { EXIT_UPDATE_AVAILABLE, updateCheck, updateLatest, updateStage } from '../update/channel.js'
 import { runtimeInstall, runtimeShow } from '../update/runtimeCli.js'
 import { updateAppCli } from '../update/appUpdateCli.js'
 import { daemonNode } from '../env/nodeBin.js'
@@ -71,7 +71,8 @@ const HELP = `pult ${VERSION} — диспетчерская над claude, code
   pult update                       новая версия из релизов GitHub: подписанный latest.json, тарбол
                                     с проверкой sha256, дальше как --from (проба, откат)
   pult update --check [--json]      только проверить: код 0 — последняя, 10 — есть обновление
-  pult update --expect <версия>     то же, что pult update, но только эту версию (так зовёт окно)
+  pult update --expect <версия>     то же, что pult update, но эту версию или новее (так зовёт окно)
+  pult update --stage               скачать и подготовить новую версию, не переключая (так зовёт демон)
   pult update --from <pult-x.y.z.tgz> [--reinstall]   поставить версию из тарбола и переключиться
                                     (проба нового демона; не прошла — откат на прежнюю)
   pult update --to <версия>         переключиться на уже стоящую версию (ручной откат)
@@ -184,7 +185,7 @@ function approvalLabel(raw: unknown): string {
 
 /** Флаги без значения — чтобы `--worktree --json` читался как «значения нет», а не как ветка «--json». */
 const BOOL_FLAGS = new Set([
-  'json', 'warm', 'wait', 'dev', 'print', 'reinstall', 'list', 'check', 'no-follow', 'no-net', 'help', 'version', 'h', 'v', 'unread',
+  'json', 'warm', 'wait', 'dev', 'print', 'reinstall', 'list', 'check', 'stage', 'no-follow', 'no-net', 'help', 'version', 'h', 'v', 'unread',
   'queue', 'interrupt', 'stdout', 'browser', 'headed', 'none', 'rule', 'yes', 'app', 'force', 'rollback',
 ])
 
@@ -935,8 +936,9 @@ async function cmdUpdate(paths: PultPaths, args: ParsedArgs): Promise<number> {
   const from = args.flags.get('from')
   const to = args.flags.get('to')
   const app = args.flags.has('app')
-  const modes = [from !== undefined, to !== undefined, args.flags.has('list'), args.flags.has('check') && !app, app].filter(Boolean).length
-  if (modes > 1) { err('pult update: --from, --to, --list, --check и --app — по одному за раз'); return EXIT.error }
+  const stage = args.flags.has('stage')
+  const modes = [from !== undefined, to !== undefined, args.flags.has('list'), args.flags.has('check') && !app, app, stage].filter(Boolean).length
+  if (modes > 1) { err('pult update: --from, --to, --list, --check, --stage и --app — по одному за раз'); return EXIT.error }
   // `--force`: у окна — ставить и «плохую» версию; у пакета (канал, --from, --to) — не ждать конца идущих ходов.
   if (args.flags.has('force') && (args.flags.has('list') || args.flags.has('check'))) { err('pult update: --force — не с --list и --check'); return EXIT.error }
   if (args.flags.has('rollback') && !app) { err('pult update: --rollback — только вместе с --app'); return EXIT.error }
@@ -945,6 +947,8 @@ async function cmdUpdate(paths: PultPaths, args: ParsedArgs): Promise<number> {
   if (app) return updateAppCli(cliIo, { force: args.flags.has('force'), rollback: args.flags.has('rollback'), connect: async () => (await ensureDaemon(paths)).client })
   if (args.flags.has('list')) return updateList(paths, cliIo, opts)
   if (args.flags.has('check')) return updateCheck(paths, cliIo, { json: opts.json })
+  // 0.3.16: фоновая подготовка — демона и ходы не трогает, ждать их незачем.
+  if (stage) return updateStage(paths, cliIo)
   // Как «Обновить» в окне: идущий ход не обрывается молча. `--expect` зовёт сам демон — он уже дождался ходов.
   if (args.flags.get('expect') === undefined && await refuseRunningTurns(paths, cliIo, { force: args.flags.has('force') })) return EXIT.error
   if (from !== undefined) {

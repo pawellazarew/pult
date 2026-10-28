@@ -10,6 +10,7 @@ import type { ClientKind, RpcError } from '../core/rpc.js'
 import { PROTOCOL_VERSION } from '../core/rpc.js'
 import { readToken } from '../core/token.js'
 import { isBinaryPlist, plistString } from '../update/plist.js'
+import { VERSION } from '../core/version.js'
 
 export class ClientError extends Error {
   readonly code: string
@@ -74,11 +75,13 @@ export function shellAppInfo(
 /**
  * Окно запоминается при загрузке модуля (в main оболочки — при её старте): переподключения после рестарта демона
  * шлют то же самое, а Info.plist, который обновление окна уже заменило под работающим процессом, не перечитывается.
- * `pid` — свой: по нему демон сверяет, что поднялся процесс из нового бандла.
+ * `pid` — свой: по нему демон сверяет, что поднялся процесс из нового бандла. `pkg` (0.3.16) — версия пакета, из
+ * которого этот модуль загружен: оболочка грузит его и интерфейс из одного пакета при старте, так что это версия
+ * интерфейса в окне. Демон сменил версию, а `pkg` прежний — окно надо перезапустить.
  */
-const SHELL_APP: ({ execPath: string; version?: string; pid: number }) | null = (() => {
+const SHELL_APP: ({ execPath: string; version?: string; pid: number; pkg: string }) | null = (() => {
   const info = shellAppInfo()
-  return info ? { ...info, pid: process.pid } : null
+  return info ? { ...info, pid: process.pid, pkg: VERSION } : null
 })()
 const shellApp = (): typeof SHELL_APP => SHELL_APP
 

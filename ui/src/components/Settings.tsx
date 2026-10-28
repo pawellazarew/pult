@@ -1,5 +1,5 @@
 // M8f: «Настройки» (⌘,). Раздел «Новая сессия» — умолчания по провайдерам и «Подставлять последний выбор»;
-// «Обновления» — версии, состояние канала, «Проверить сейчас», «Обновить до X» и флаг автопроверки (что писать —
+// «Обновления» — версия, состояние канала, «Проверить сейчас», «Перезапустить и обновить» и флаг автопроверки (что писать —
 // model/update.ts); «Страж сети» (0.3.6) — режим deny/allow, страны, выходы провайдеров под черновиком
 // (model/netGuard.ts); «Внешний вид» пока пустой (темы и цвета — после редизайна, docs/15). Логика черновика —
 // model/sessionSettings.ts.
@@ -85,7 +85,7 @@ function ProviderDefaultsBox({ provider, draft, catalog, onChange }: {
 export interface UpdatesPanel {
   /** `daemon.status.update`; нет — старый демон. */
   status: UpdateStatus | null | undefined
-  /** Версия пакета (демона) и окна (из user agent; null — неизвестна). */
+  /** Версия пакета (демона) и окна (из user agent; null — неизвестна). Окно показывается, только если отличается. */
   packageVersion: string | null
   windowVersion: string | null
   /** Идёт «Проверить сейчас» из окна и чем кончился сам вызов (не ответ канала). */
@@ -107,19 +107,24 @@ export function UpdatesSection({ panel, auto, onAuto }: {
   onAuto(on: boolean): void
 }): ReactElement {
   const v = updateSection(panel.status, panel.windowVersion, { checking: panel.checking, error: panel.error }, panel.now)
-  const tone = v.state === 'error' || v.state === 'failed' || v.state === 'window' || v.state === 'bad' ? ' upd-warn' : v.state === 'available' ? ' upd-new' : ''
-  // 0.3.4: окно обновляется само — своя строка с «Обновить окно».
+  const tone = v.state === 'error' || v.state === 'failed' || v.state === 'bad' ? ' upd-warn' : v.state === 'available' ? ' upd-new' : ''
+  // 0.3.16: окно обновляется той же кнопкой; строка про окно — только когда с ним что-то не так.
   const w = appUpdateView(panel.status, panel.windowVersion)
-  const wTone = w.state === 'failed' || w.state === 'rolledback' || w.state === 'bad' || w.state === 'firstrun-failed' ? ' upd-warn' : w.state === 'available' ? ' upd-new' : ''
+  const wTone = w.state === 'firstrun' || w.state === 'none' ? '' : ' upd-warn'
+  // Одна версия для человека; версия окна — только если оно отстало или ушло вперёд.
+  const pkgV = panel.packageVersion
+  const winV = panel.status?.app?.installed ?? panel.windowVersion
   return (
     <section className="settings-sec" aria-labelledby="settings-upd-h" data-testid="settings-updates">
       <h3 id="settings-upd-h">Обновления</h3>
       <div className="upd-versions" data-testid="settings-update-versions">
-        <span>Пульт <span className="mono">{panel.packageVersion ?? '—'}</span></span>
-        <span>окно <span className="mono">{panel.status?.app?.installed ?? panel.windowVersion ?? 'неизвестно'}</span></span>
+        <span>Пульт <span className="mono">{pkgV ?? '—'}</span></span>
+        {winV !== null && pkgV !== null && winV !== pkgV && (
+          <span className="note" data-testid="settings-window-version">окно <span className="mono">{winV}</span></span>
+        )}
       </div>
       <div className={`upd-state${tone}`} role="status" data-testid="settings-update-state" data-state={v.state}>
-        {v.state === 'checking' && <span className="spin" aria-hidden="true" />}
+        {(v.state === 'checking' || v.state === 'applying' || v.state === 'downloading') && <span className="spin" aria-hidden="true" />}
         <span className="grow">{v.text}</span>
         {v.notes && (
           <button type="button" className="btn btn-ghost btn-sm" onClick={() => panel.onNotes(v.notes as string)} data-testid="settings-update-notes">Что нового</button>
@@ -140,10 +145,9 @@ export function UpdatesSection({ panel, auto, onAuto }: {
       </div>
       {w.state !== 'none' && (
         <div className={`upd-state${wTone}`} role="status" data-testid="settings-app-update" data-state={w.state}>
-          {w.state === 'applying' && <span className="spin" aria-hidden="true" />}
           <span className="grow">{w.text}</span>
           {w.action && (
-            <button type="button" className="btn btn-sm btn-primary" disabled={panel.busy}
+            <button type="button" className="btn btn-sm" disabled={panel.busy}
               onClick={() => {
                 if (!w.action) return
                 // «Вернуть», пока новое окно не запускалось, — с вопросом: это откат по просьбе, а не по сбою.
@@ -157,7 +161,7 @@ export function UpdatesSection({ panel, auto, onAuto }: {
         <label className="check">
           <input type="checkbox" checked={auto} data-testid="settings-update-auto" onChange={(e) => onAuto(e.target.checked)} />
           <span>Проверять обновления автоматически</span>
-          <span className="note">Раз в 6 ч и когда окно возвращается на экран (не чаще раза в 10 мин): один запрос latest.json к GitHub. Ставится только по кнопке.</span>
+          <span className="note">Раз в 6 ч и когда окно возвращается на экран (не чаще раза в 10 мин): один запрос latest.json к GitHub. Новая версия скачивается заранее, ставится только по кнопке.</span>
         </label>
       )}
     </section>

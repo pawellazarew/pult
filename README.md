@@ -98,8 +98,8 @@ pult ui
 Or download [`Pult-arm64.zip`](https://github.com/pawellazarew/pult/releases/latest/download/Pult-arm64.zip) in a
 browser, unzip it, move `Pult.app` to `/Applications` and run `pult ui` (or open the app from Launchpad).
 
-The window has its own version number (0.1.x), separate from Pult's (0.3.x); `Pult-arm64.zip` from the latest release
-always matches the latest Pult, and the window tells you if it is too old for the installed Pult. If `pult ui` finds no `Pult.app` in `/Applications` or `~/Applications`, it exits with code 1 and
+Since 0.3.16 the window has the same version number as Pult, and `Pult-arm64.zip` from the latest release always
+matches the latest Pult; after that, the window updates together with Pult (see [Updates](#updates)). If `pult ui` finds no `Pult.app` in `/Applications` or `~/Applications`, it exits with code 1 and
 prints how to build the window from source.
 
 **If macOS refuses to open it.** `Pult.app` is ad-hoc signed and **not notarized** (there is no Apple Developer
@@ -242,8 +242,8 @@ attach files before choosing a name; creation copies them into the final session
 explicitly labelled references rather than recursive copies. Dropping a folder outside the prompt selects the
 session folder. Pasting text from Office still pastes text.
 
-Older windows retain path insertion. Update the window under Settings → Updates for cards and memory-backed
-files. Each Claude session receives only its own attachment directory; Codex uses its normal sandbox access rules.
+Older windows retain path insertion. Update the window (Settings → Updates → «Перезапустить и обновить», Restart and
+update) for cards and memory-backed files. Each Claude session receives only its own attachment directory; Codex uses its normal sandbox access rules.
 
 | mode (window label) | Claude | Codex |
 |---|---|---|
@@ -273,44 +273,72 @@ composer, or run `pult agent set <name> [--model M] [--effort E] [--approval A] 
 
 ## Updates
 
-**In the window: Settings (⌘,) → Обновления (Updates) → «Проверить сейчас» (Check now) / «Обновить до X» (Update to X).**
-The section shows the installed package and window versions, the channel status (up to date, a new version with a
-«Что нового» (What's new) link, or the error) and when the channel was last checked. «Обновить» works like the banner at the top
-of the window: running turns finish first (or press «Сейчас» to not wait), then the daemon updates and restarts, and the
-window reconnects by itself. The toggle «Проверять обновления автоматически» (check automatically) is
-`updates.check` in `config.json`.
+**In the window: Settings (⌘,) → Обновления (Updates).** Pult and its window share one version number, and one button
+updates both: «Перезапустить и обновить» (Restart and update) in Settings, «Перезапустить» (Restart) in the banner. The
+section shows the installed version («Пульт 0.3.16»; the window's own number only when it differs), the channel status
+and when the channel was last checked; «Проверить сейчас» (Check now) checks right away. The toggle «Проверять
+обновления автоматически» (check automatically) is `updates.check` in `config.json`.
+
+How an update goes:
+
+1. A check (every 6 hours, when the window comes back after an hour, or «Проверить сейчас») finds a newer signed
+   release, and Pult downloads and verifies it in the background right away: the package into `PULT_HOME/versions/<v>`
+   without switching to it, the window (macOS, Apple Silicon) into `PULT_HOME/apps/ready-<v>`. This happens only with
+   automatic checks on or after you pressed «Проверить сейчас». The banner stays empty meanwhile; Settings says
+   «скачиваю в фоне…» (downloading in the background). A failed download stays quiet and is retried later; the button
+   downloads it anyway.
+2. When everything is ready, the banner says «Пульт X готов · Что нового · Перезапустить» (Pult X is ready · What's new ·
+   Restart).
+3. «Перезапустить» lets running turns finish first: «Обновлю до X после окончания ходов (N идут) · Сейчас» — «Сейчас»
+   (Now) means don't wait. New messages wait until the restart («Пульт обновляется — отправь после перезапуска»), the
+   text stays in the box. Then the daemon switches to the new version and restarts, and the new daemon closes the
+   window, swaps `Pult.app` and opens the new window. The banner says «Перезапускаю…» (Restarting…). Agents keep their
+   sessions; unsent text in the message box survives.
+4. A failure is shown with «Повторить» (Retry). A daemon that fails its start-up check is rolled back, a window that
+   does not come up within 60 seconds is put back, and a window replaced while it was closed can be put back with
+   «Вернуть <version>» (Put back) if its first start fails.
+
+If the channel already has an even newer version when you press the button, that one is installed, and Pult says so.
+
+**Updating from 0.3.15 (window 0.1.21): one extra click, once.** 0.3.15 updates itself to 0.3.16 the old way, and the
+window keeps showing the 0.3.15 interface. After the restart that window offers «Доступно новое окно 0.3.16 · Обновить
+окно» (New window available · Update window) in the banner and in Settings — press it once. From then on the single
+button does both.
 
 In the terminal:
 
 ```sh
 pult update              # check, download, verify, install, restart the daemon
 pult update --check      # only check: exit 0 — up to date, 10 — an update is available
+pult update --stage      # download and prepare the new version without switching (the daemon does this itself)
 pult update --list       # versions on disk
 pult update --to <ver>   # switch back to a version from `pult update --list`
-pult update --app        # update the window (Pult.app, macOS) from the same channel
+pult update --app        # update only the window (Pult.app, macOS) from the same channel
 pult update --app --rollback   # put the previous window back if the new one failed on its first start
 ```
 
+- `pult update` from the terminal updates the package only. The window then offers «Пульт X готов · Перезапустить»,
+  which replaces or restarts the window; `pult update --app` does the same from the terminal.
 - `pult update` (also `--from`, `--to`) restarts the daemon, so it refuses while turns are running
-  («идут ходы: N … дождись или --force»); `--force` updates anyway and cuts them off.
+  («идут ходы: N … дождись или --force»); `--force` updates anyway and cuts them off. If the daemon is preparing an
+  update in the background at that moment, `pult update` waits for it (up to 10 minutes) instead of refusing.
 - `latest.json` of the latest GitHub release is signed with Ed25519 (the public key is built into Pult); the package
-  must match the size and sha256 in the signed manifest. Anything else is refused and nothing is installed.
+  and the window zip must match the size and sha256 in the signed manifest. Anything else is refused and nothing is
+  installed. A version prepared in the background is not downloaded again; without network, `pult update` can still
+  switch to the version the window asked for if it was prepared earlier.
 - The daemon checks a minute after start, then every 6 hours, and when the window comes back to the screen if the last
-  check is older than an hour (at most once per 10 minutes). In the window a new version shows up as a quiet line at the
-  top. Running turns are not cut off, and a version that fails its start-up check is rolled back automatically.
-- **The window updates itself (macOS, Apple Silicon).** When the release has a newer window, Settings → Обновления shows
-  «Окно: 0.1.15 → доступно 0.1.16 · Обновить окно» (Update window), and the banner says so too. The daemon downloads
-  the window zip, checks its size and sha256 against the same signed manifest, the bundle id, version, architecture and
-  code signature, puts the new bundle next to the old one, then closes the window, swaps `Pult.app` in place with two
-  renames and opens the new one. If the new window is not up and working within 60 seconds, the old one is put back
-  and reopened, and that version is not offered again (`pult update --app --force` retries it). If the daemon is
-  stopped mid-swap, the next start finishes or rolls back. If the window was closed during the update, the previous
-  window is kept until the new one has started once; if that first start fails, Settings offers «Вернуть» (put it
-  back). Another open window (a second copy of `Pult.app`, a
-  development window) has to be closed first; the button is shown only in the installed window. Agents keep working the whole time; unsent text in the message box survives
-  the restart. If the window folder is not writable (for example, a non-admin user and `/Applications`), nothing is
-  touched and Pult tells you how to replace the window by hand (download `Pult-arm64.zip` as in
-  [Install](#2-the-window-macos-apple-silicon)). If a new Pult needs a newer window, the window says so.
+  check is older than an hour (at most once per 10 minutes). Running turns are not cut off, and a version that fails
+  its start-up check is rolled back automatically.
+- **The window (macOS, Apple Silicon).** The daemon checks the window zip's size and sha256 against the signed manifest,
+  then the bundle id, version, architecture and code signature, puts the new bundle next to the old one, closes the
+  window, swaps `Pult.app` in place with two renames and opens the new one. If the new window is not up and working
+  within 60 seconds, the old one is put back and reopened, and that version is not offered again
+  (`pult update --app --force` retries it). If the daemon is stopped mid-swap, the next start finishes or rolls back.
+  If the window was closed during the update, the previous window is kept until the new one has started once. Another
+  open window (a second copy of `Pult.app`, a development window) has to be closed first; Settings says which. If the
+  window folder is not writable (for example, a non-admin user and `/Applications`), the bundle is not touched and
+  Settings tells you how to replace the window by hand (download `Pult-arm64.zip` as in
+  [Install](#2-the-window-macos-apple-silicon)); the button still restarts the window so it shows the new interface.
 
 ## Network & privacy
 
@@ -326,8 +354,9 @@ Pult has no telemetry. Besides your agents' own traffic, it makes these requests
   Claude subscription. Turn it off with `"autoTitle": false` in `config.json`.
 - **Update check.** One `GET` of `latest.json` from github.com every 6 hours (and when the window returns after an hour
   or more, at most once per 10 minutes), with the header `user-agent: pult/<version>` and no identifiers. Turn it off in
-  Settings (⌘,) → Обновления or with `{ "updates": { "check": false } }`; «Проверить сейчас» still works. The package and
-  the window are downloaded only when you update them.
+  Settings (⌘,) → Обновления or with `{ "updates": { "check": false } }`; «Проверить сейчас» still works. A newer
+  package and window are downloaded right after a check finds them (only with automatic checks on, or after «Проверить
+  сейчас») and installed only when you press the button.
 
 After editing `~/.pult/config.json`, run `pult daemon stop`; the next command starts the daemon with the new settings.
 
