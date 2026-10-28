@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { describe, it } from 'node:test'
@@ -49,6 +49,42 @@ describe('изображения отдельно от журнала', () => {
     for (const source of [outside, '../secret.png', 'linked.png', 'https://example.com/x.png', 'file:///etc/passwd', 'a\0b']) assert.throws(() => readScopedImage(scope, source))
     assert.throws(() => readScopedImage({ ...scope, sessionId: '../other' }, local))
   }))
+  it('вложения читаются из своей сессии и остаются закрыты для чужой даже при широком cwd и alias home', () => fixture((scope, root) => {
+    const dir = path.join(scope.home, 'attachments', 'w', '2026-10-28')
+    mkdirSync(dir, { recursive: true })
+    const file = path.join(dir, 'screenshot.png'); writeFileSync(file, png)
+    assert.deepEqual(readScopedImage(scope, file).bytes, png)
+    assert.equal(readScopedImage(scope, file).path, realpathSync(file))
+    const broad = { ...scope, cwd: root }
+    assert.ok(readScopedImage(broad, file))
+    assert.throws(() => readScopedImage({ ...broad, sessionId: 'foreign' }, file))
+    const alias = path.join(root, 'pult-alias'); symlinkSync(scope.home, alias)
+    const aliasFile = path.join(alias, 'attachments', 'w', '2026-10-28', 'screenshot.png')
+    assert.deepEqual(readScopedImage({ ...scope, home: alias }, aliasFile).bytes, png)
+    assert.throws(() => readScopedImage({ ...broad, home: alias, sessionId: 'foreign' }, aliasFile))
+  }))
+  it('симлинки attachments/root, owner и папки дня не дают читать внешнюю картинку как вложение', () => {
+    for (const level of ['root', 'owner', 'day']) fixture((scope, root) => {
+      // Внешний target лежит внутри cwd: даже разрешение читать project не должно легализовать
+      // attachment-путь, который через симлинк покинул выделенную папку сессии.
+      const target = path.join(scope.cwd, 'outside'); mkdirSync(target)
+      const file = path.join(target, 'screenshot.png'); writeFileSync(file, png)
+      const attachments = path.join(scope.home, 'attachments')
+      let source: string
+      if (level === 'root') {
+        mkdirSync(scope.home, { recursive: true }); symlinkSync(scope.cwd, attachments)
+        source = path.join(attachments, 'outside', 'screenshot.png')
+      } else if (level === 'owner') {
+        mkdirSync(attachments, { recursive: true }); symlinkSync(target, path.join(attachments, 'w'))
+        source = path.join(attachments, 'w', 'screenshot.png')
+      } else {
+        mkdirSync(path.join(attachments, 'w'), { recursive: true }); symlinkSync(target, path.join(attachments, 'w', '2026-10-28'))
+        source = path.join(attachments, 'w', '2026-10-28', 'screenshot.png')
+      }
+      assert.ok(readScopedImage(scope, file), 'сам project image остаётся доступен')
+      assert.throws(() => readScopedImage(scope, source), `${level} symlink`)
+    })
+  })
   it('SVG, текст под расширением PNG, пустые и слишком большие файлы не попадают в renderer или storage', () => fixture((scope) => {
     for (const [name, bytes] of [['fake.png', Buffer.from('<svg onload="evil()"/>')], ['empty.png', Buffer.alloc(0)], ['large.png', Buffer.concat([png, Buffer.alloc(MAX_IMAGE_BYTES)])]] as const) {
       writeFileSync(path.join(scope.cwd, name), bytes)

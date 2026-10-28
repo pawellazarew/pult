@@ -220,6 +220,8 @@ export interface PultBridge {
    * путь файла, или `{error}` словами. Необязательный: старая оболочка его не знает, интерфейс подсказывает обновить окно.
    */
   clipboardImage?: ClipboardImageBridge
+  /** Сохранить snapshot файла/байтов в хранилище сессии; папка остаётся ссылкой. */
+  attachments?: AttachmentBridge
   /** Open a local document after a click; executable/unknown types are only revealed in Finder. */
   openFile?(path: string): Promise<'opened' | 'revealed'>
   listFiles?(sessionId: string, source?: string, showHidden?: boolean): Promise<FileListing>
@@ -229,6 +231,17 @@ export interface PultBridge {
   saveImage?(sessionId: string, source: string): Promise<boolean>
   openImage?(sessionId: string, source: string): Promise<void>
 
+}
+
+export interface AttachmentInput { name?: string; path?: string; bytes?: Uint8Array }
+export interface SavedAttachment { path: string; name: string; bytes: number; mime: string; kind: 'file' | 'directory' }
+export type AttachmentResult = SavedAttachment | { error: string }
+export interface AttachmentBridge {
+  /** Bytes or an existing attachment path only. Native source paths are obtained by preload/files or main/clipboard. */
+  import(session: string, item: AttachmentInput): Promise<AttachmentResult>
+  files(session: string, files: File[]): Promise<AttachmentResult[]>
+  clipboard(session: string): Promise<AttachmentResult[]>
+  preview(session: string, path: string): Promise<{ dataUrl: string } | { error: string }>
 }
 
 /** Ответ `clipboardImage.save()`. */
@@ -257,6 +270,10 @@ export const IPC = {
   notify: 'pult:notify',
   clipboardPaths: 'pult:clipboard-paths',
   clipboardImage: 'pult:clipboard-image',
+  attachmentImport: 'pult:attachment-import',
+  attachmentPreview: 'pult:attachment-preview',
+  attachmentFiles: 'pult:attachment-files',
+  attachmentClipboard: 'pult:attachment-clipboard',
   openExternal: 'pult:open-external',
   readImage: 'pult:read-image',
   saveImage: 'pult:save-image',

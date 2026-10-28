@@ -2004,3 +2004,20 @@ pult.collapsed. При возвращении фокуса окно обновл
 [список проектов и workspaces](https://github.com/getpaseo/paseo/blob/main/packages/app/src/components/sidebar-workspace-list.tsx),
 [сохранение свёрнутых разделов](https://github.com/getpaseo/paseo/blob/main/packages/app/src/stores/sidebar-collapsed-sections-store/state.ts).
 Использованы паттерны раскрытия, ограниченного списка и индикатора состояния у свёрнутого проекта; реализация Пульта самостоятельная.
+
+## 0.3.15 / окно 0.1.21: размеры, объяснения ошибок, вложения
+
+`ResizeHandle` задаёт общий pointer/keyboard/double-click механизм. `WorkspaceLayout`, `ResizableDialog`
+и `panelSizes` ограничивают размеры фактическим viewport и сохраняют их в отдельных localStorage-ключах.
+Поле ввода оставляет место ленте с учётом карточек вложений. Граница «Недавних» остаётся в `SidebarSplit`.
+
+`model/errors.ts` поясняет exit codes в контексте команды/агента/проверки; код 1 не используется для угадывания
+причины. Явные диагностические сообщения распознаются отдельно; оригинал всегда остаётся в disclosure.
+
+Вложения: [ADR-17](17-ADR-attachments.md), `shell/src/attachmentStore.ts`, optional bridge `attachments`,
+`useAttachments`, `AttachmentStrip`, `attachmentDrafts`. Нужен новый shell для native/virtual File и cards;
+старое окно продолжает вставлять пути. Новых daemon RPC нет. Обычный файл копируется сразу; диалог до имени
+использует draft-owner и копирует в final-owner перед созданием. Карточки persist без bytes/thumbnail;
+отправка сериализует сохранённые пути в prompt. TTL30дней сохраняется; удаления карточки недостаточно для
+удаления дисковой копии, которая могла быть отправлена ранее. Старое описание «до имени вставка запрещена»
+в разделе0.1.16 относится только к старому поведению, новый диалог позволяет прикреплять сразу.

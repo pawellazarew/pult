@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { ReactElement } from 'react'
+import type { CSSProperties, ReactElement } from 'react'
 import type { FileEntry, FileListing, FilePreview, PultBridge } from '../../../shell/src/contract.js'
 import { Icon } from './common.js'
 import { Markdown } from './Markdown.js'
 import { ImageContext } from './Images.js'
 import { FilePreviewContext } from '../model/filePreviewContext.js'
 import { PdfPreview } from './PdfPreview.js'
+import { clampSize } from '../model/panelSizes.js'
+import { ResizeHandle } from './ResizeHandle.js'
+import { usePanelBox, usePanelSize } from './WorkspaceLayout.js'
 
 export interface FileRequest { path: string; sessionId: string; nonce: number }
 const nameOf = (p: string): string => p.split('/').filter(Boolean).at(-1) ?? p
@@ -15,6 +18,13 @@ export function FileWorkspace({ bridge, sessionId, cwd, open, expanded, request,
   bridge: PultBridge; sessionId: string; cwd: string; open: boolean; expanded: boolean; request: FileRequest | null
   onClose(): void; onExpand(): void
 }): ReactElement {
+  const layout = useRef<HTMLDivElement>(null)
+  const { width: layoutWidth } = usePanelBox(layout, { width: 520, height: 650 })
+  const [treeSize, setTreeSize] = usePanelSize('pult.panel.fileTree.v1')
+  const treeMin = Math.min(132, layoutWidth * .3)
+  const treeMax = Math.max(treeMin, Math.min(420, layoutWidth - 180))
+  const treeDefault = expanded ? clampSize(layoutWidth * .22, 174, 260) : layoutWidth < 420 ? 160 : 174
+  const treeWidth = clampSize(treeSize ?? treeDefault, treeMin, treeMax)
   const [folders, setFolders] = useState<Record<string, FileListing>>({})
   const [expandedDirs, setExpandedDirs] = useState(new Set(['.']))
   const [dirBusy, setDirBusy] = useState(new Set<string>())
@@ -161,12 +171,14 @@ export function FileWorkspace({ bridge, sessionId, cwd, open, expanded, request,
       <button type="button" className="btn btn-ghost btn-sm" onClick={onExpand} title={expanded ? 'Показать рядом с чатом' : 'Развернуть просмотр'} aria-label={expanded ? 'Показать рядом с чатом' : 'Развернуть просмотр'} data-testid="files-expand"><Icon name={expanded ? 'collapse' : 'expand'} /></button>
       <button type="button" className="btn btn-ghost btn-sm" onClick={onClose} title="Вернуться к чату (Esc)" aria-label="Закрыть просмотр файлов" data-testid="files-close"><Icon name="x" /></button>
     </header>
-    <div className="files-layout">
+    <div className="files-layout resizable-file-layout" ref={layout} style={{ '--file-tree-size': `${treeWidth}px` } as CSSProperties}>
       {treeShown && <aside className="file-tree" aria-label="Файлы проекта на диске" data-testid="file-tree">
         <label className="file-filter"><Icon name="search" /><input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Фильтр папки" aria-label="Фильтр имён в открытых папках" data-testid="file-filter" /></label>
         <label className="file-hidden"><input type="checkbox" checked={hidden} onChange={(e) => { setHidden(e.target.checked); setFolders({}); setExpandedDirs(new Set(['.'])); loadedSession.current = null }} />Скрытые файлы</label>
         <div className="file-tree-scroll">{renderFolder('.')}</div>
       </aside>}
+      {treeShown && <ResizeHandle label="Ширина дерева файлов" value={treeWidth} min={treeMin} max={treeMax} onChange={setTreeSize}
+        onReset={() => setTreeSize(null)} testId="file-tree-resize" className="file-tree-boundary" />}
       <div className="file-document">
         {tabs.length > 0 && <div className="file-tabs" role="tablist" aria-label="Открытые файлы" onKeyDown={(e) => {
           if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return

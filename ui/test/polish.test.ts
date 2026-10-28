@@ -38,7 +38,7 @@ it('ошибка видна кратко, а большой JSON остаётс�
   const out = render([{ type: 'tool', id: 1, key: 't', ts: '', toolUseId: 't', name: 'Bash', input: { command: input }, state: 'error', exitCode: 2,
     result: Array.from({ length: 20 }, (_, i) => `строка ${i}`).join('\n') + '\nНужен пакет' }])
   const preview = /data-testid="tool-error-preview">(.*?)<\/div>/s.exec(out)?.[1] ?? ''
-  assert.match(preview, /код 2/)
+  assert.match(preview, /Код 2.*зависит от конкретной команды/)
   assert.match(preview, /Нужен пакет/)
   assert.doesNotMatch(preview, /LONG_INPUT_|строка 0/)
   assert.match(out, /<details class="tool-raw"><summary>Полный ввод и вывод<\/summary>/)

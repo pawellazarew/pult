@@ -1,3 +1,4 @@
+import { ResizableDialog } from './ResizableDialog.js'
 // Inbox (справа), диалог «+ Агент», панель doctor и подтверждение. Логика форм и сортировок —
 // в model/*.ts; здесь только отрисовка и фокус.
 
@@ -18,9 +19,12 @@ import type { McpListing } from '../model/mcp.js'
 import { plural } from '../lib/ru.js'
 import { FOLDER_DROP_HINT, folderFromDrop, hasFiles } from '../model/filePathsInput.js'
 import type { FilePathSource } from '../model/paths.js'
-import { useFilePaths } from './useFilePaths.js'
+import { useAttachments } from './useAttachments.js'
+import { AttachmentStrip } from './AttachmentStrip.js'
+import { attachmentPrompt } from '../model/attachmentDrafts.js'
 import { CMD, hhmm, Icon, IS_MAC, Kbd, ProviderTag } from './common.js'
 import { PermCard } from './PermCard.js'
+import { explainFailure, exitCodeIn } from '../model/errors.js'
 
 // --- Inbox -------------------------------------------------------------------------
 // О2 (docs/14): почтовый ящик всего, что требует человека. Фильтр «Все» — запросы и непрочитанные
@@ -113,6 +117,7 @@ export function SessionCardView({ c, agent, now, retrying, onOpen, onRetry, onSt
   onStop?(name: string, upTo: number, turnId?: string): void
   onWait?(name: string, upTo: number): void
 }): ReactElement {
+  const failure = c.kind === 'failed' ? explainFailure(c.text, { scope: 'agent' }) : null
   return (
     <div className="perm inbox-session" data-testid={c.error ? 'inbox-error' : 'inbox-unread'} data-agent={c.name} data-kind={c.kind}
       data-error={c.error ? '1' : '0'}>
@@ -122,7 +127,10 @@ export function SessionCardView({ c, agent, now, retrying, onOpen, onRetry, onSt
         <ProviderTag provider={agent.provider} />
         <span className="waited">{ago(c.at, now)}</span>
       </div>
-      {c.text && <div className="perm-reason" data-testid="inbox-error-text">{c.text}</div>}
+      {failure ? <div className="perm-reason failure-message" data-testid="inbox-error-text">
+        <strong>{failure.title}</strong><p>{failure.explanation}</p><p>{failure.action}</p>
+        {c.text && <details className="error-details"><summary>Технические подробности</summary><pre>{c.text}</pre></details>}
+      </div> : c.text && <div className="perm-reason" data-testid="inbox-error-text">{c.text}</div>}
       <div className="perm-actions">
         {c.retryable && onRetry && (
           <button type="button" className="btn btn-sm" disabled={retrying} data-testid="inbox-retry"
@@ -148,13 +156,14 @@ export function SessionCardView({ c, agent, now, retrying, onOpen, onRetry, onSt
 export function Dialog({ title, children, footer, onClose, size, testId, extra }: {
   title: string; children: ReactNode; footer: ReactNode; onClose(): void; size?: 'wide' | 'narrow'; testId: string; extra?: ReactNode
 }): ReactElement {
+  const Frame = testId === 'doctor-panel' ? ResizableDialog : 'div'
   return (
     <div className="scrim" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}>
-      <div className={`dlg${size ? ` ${size}` : ''}`} role="dialog" aria-modal="true" aria-label={title} data-testid={testId}>
+      <Frame className={`dlg${size ? ` ${size}` : ''}`} role="dialog" aria-modal="true" aria-label={title} data-testid={testId}>
         <div className="dlg-h"><h2>{title}</h2><span className="grow" />{extra}<button type="button" className="btn btn-ghost btn-sm" onClick={onClose} aria-label="Закрыть"><Icon name="x" /></button></div>
         <div className="dlg-b">{children}</div>
         <div className="dlg-f">{footer}</div>
-      </div>
+      </Frame>
     </div>
   )
 }
@@ -346,7 +355,9 @@ export function NewAgentDialog({ taken, pickFolder, onCreate, onClose, catalog, 
     applyFolder(dir)
   }
   // Файлы в «первую реплику» — пути, как в поле ввода разговора; папка на остальную форму — папка сессии.
-  const prompt = useFilePaths({ source: filePaths, box: promptBox, text: form.prompt, setText: (v) => setForm((f) => ({ ...f, prompt: v })), session: form.name })
+  const [attachmentSession] = useState(() => `draft-${Math.random().toString(36).slice(2, 14)}`)
+  const prompt = useAttachments({ source: filePaths, box: promptBox, text: form.prompt, setText: (v) => setForm((f) => ({ ...f, prompt: v })), session: attachmentSession, persist: false })
+  const attachmentPicker = useRef<HTMLInputElement>(null)
   const [folderOver, setFolderOver] = useState(false)
   const [dropHint, setDropHint] = useState<string | null>(null)
   const inPrompt = (e: DragEvent<HTMLElement>): boolean => !!promptBox.current?.contains(e.target as Node)
@@ -376,12 +387,15 @@ export function NewAgentDialog({ taken, pickFolder, onCreate, onClose, catalog, 
   }
   const submit = async (): Promise<void> => {
     setTried(true)
-    if (Object.keys(errors).length || busy || !armed) return
+    if (Object.keys(errors).length || busy || !armed || prompt.isBusy()) return
     setBusy(true)
     setErr(null)
-    const e = await onCreate(form)
-    setBusy(false)
-    if (e) setErr(e)
+    try {
+      const files = await prompt.finalize(form.name)
+      const e = await onCreate({ ...form, prompt: attachmentPrompt(form.prompt, files) })
+      if (e) setErr(e)
+    } catch (e) { setErr(e instanceof Error ? e.message : 'Не удалось подготовить вложения. Попробуй ещё раз.') }
+    finally { setBusy(false) }
   }
   const onKey = (e: React.KeyboardEvent): void => {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); e.stopPropagation(); void submit() }
@@ -393,11 +407,11 @@ export function NewAgentDialog({ taken, pickFolder, onCreate, onClose, catalog, 
         {err && <span className="err" role="alert" data-testid="new-agent-error">{err}</span>}
         <span className="grow" />
         <button type="button" className="btn" onClick={onClose}>Отмена <Kbd>Esc</Kbd></button>
-        <button type="button" className="btn btn-primary" onClick={() => void submit()} disabled={busy || !armed} data-testid="new-agent-submit">
-          {busy ? 'Завожу…' : form.prompt.trim() ? 'Завести и отправить' : 'Завести'} <Kbd>{`${CMD}↵`}</Kbd>
+        <button type="button" className="btn btn-primary" onClick={() => void submit()} disabled={busy || !armed || prompt.pending > 0} data-testid="new-agent-submit">
+          {busy ? 'Завожу…' : form.prompt.trim() || prompt.items.length ? 'Завести и отправить' : 'Завести'} <Kbd>{`${CMD}↵`}</Kbd>
         </button>
       </>}>
-      <div onKeyDown={onKey} className="form-stack" {...folderDrag}>
+      <div onKeyDown={onKey} className="form-stack" inert={busy} {...folderDrag}>
         {prefill && (
           <div className="field" data-testid="new-agent-from-link">
             <span className="t-wait">Поля заполнены по ссылке pult:// — проверь папку и реплику. Без «Завести» ничего не запустится.</span>
@@ -493,6 +507,8 @@ export function NewAgentDialog({ taken, pickFolder, onCreate, onClose, catalog, 
 
         <div className="field">
           <span className="lbl">первая реплика</span>
+          <AttachmentStrip items={prompt.items} previews={prompt.previews} pending={prompt.pending} onRemove={prompt.remove} />
+          {prompt.enabled && <><input ref={attachmentPicker} className="attach-picker-input" type="file" multiple data-testid="new-attachment-picker" onChange={(e) => { prompt.addFiles(Array.from(e.target.files ?? [])); e.target.value = '' }} /><button type="button" className="btn" onClick={() => attachmentPicker.current?.click()} disabled={busy || prompt.pending > 0}>＋ Прикрепить файлы</button></>}
           <textarea ref={promptBox} value={form.prompt} placeholder="что сделать — можно оставить пустой и написать потом" data-testid="new-agent-prompt"
             className={prompt.over ? 'drop' : undefined} data-drop={prompt.over ? '1' : undefined}
             onChange={(e) => setForm({ ...form, prompt: e.target.value })}
@@ -509,6 +525,16 @@ export function NewAgentDialog({ taken, pickFolder, onCreate, onClose, catalog, 
 }
 
 // --- doctor -------------------------------------------------------------------------
+
+/** Диагностика уже содержит отдельную команду исправления; поясняем код, не заменяя её догадкой. */
+function DoctorDetail({ text, failed }: { text: string; failed: boolean }): ReactElement {
+  if (!failed || exitCodeIn(text) === undefined) return <>{text}</>
+  const failure = explainFailure(text, { scope: 'check' })
+  return <span className="failure-message">
+    <span>{failure.explanation}</span>
+    <details className="error-details"><summary>Технические подробности</summary><pre>{text}</pre></details>
+  </span>
+}
 
 export function DoctorPanel({ report, groups, loading, error, copied, onRerun, onCopy, onClose, onMcp }: {
   report: DoctorReport | null
@@ -549,7 +575,7 @@ export function DoctorPanel({ report, groups, loading, error, copied, onRerun, o
                 <Icon name={it.status === 'ok' ? 'check' : it.status === 'warn' ? 'alert' : 'x'} />
               </span>
               <span className="title">{it.title}</span>
-              <span className="detail">{it.detail}</span>
+              <span className="detail"><DoctorDetail text={it.detail} failed={it.status !== 'ok'} /></span>
               {/* Совет словами — обычным текстом; рамка и «копировать» — только у команды, которую
                   можно вставить в терминал (вставленный совет давал `command not found`). */}
               {it.fix && it.fix !== it.fixCmd && <p className="doc-fix-text">{it.fix}</p>}

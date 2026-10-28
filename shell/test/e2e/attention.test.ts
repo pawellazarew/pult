@@ -38,12 +38,17 @@ describe('внимание: значок на доке и ошибки в Inbox'
     // Ошибка именно этого хода (номер — из журнала): «Повторить» отправит его реплику.
     const turnId = ((await c.request('agent.read', { name: 'omega', format: 'json' })) as { events: Array<{ kind: string; data: Record<string, unknown> }> }).events
       .filter((e) => e.kind === 'status.changed' && e.data['status'] === 'working').at(-1)?.data['turnId']
-    await c.request('events.emit', { kind: 'status.changed', sessionId: 'omega', provider: 'claude', data: { status: 'failed', turnId, message: 'процесс упал' } })
+    await c.request('events.emit', { kind: 'status.changed', sessionId: 'omega', provider: 'claude', data: { status: 'failed', turnId, message: 'процесс упал: код 1' } })
     assert.ok(await waitFor(async () => (await badge()) === '1', 10_000), `значок: ${JSON.stringify(await badge())}`)
     if (!(await h.win.getByTestId('inbox').count())) await h.win.getByTestId('toggle-inbox').click()
     const card = h.win.getByTestId('inbox').locator('[data-testid="inbox-error"][data-agent="omega"]')
     await card.waitFor({ timeout: 10_000 })
     assert.match((await card.getByTestId('inbox-error-text').textContent()) ?? '', /процесс упал/)
+    assert.match((await card.getByTestId('inbox-error-text').textContent()) ?? '', /Код 1 — общий сигнал/)
+    assert.equal(await card.locator('.error-details pre').isVisible(), false)
+    await card.locator('.error-details summary').click()
+    assert.equal(await card.locator('.error-details pre').innerText(), 'процесс упал: код 1')
+    await card.locator('.error-details summary').click()
     assert.equal((await h.win.getByTestId('inbox-count').textContent()) ?? '', '1', 'в шапке — ошибка')
 
     // Фильтр «Непрочитанные» показывает ту же сессию; «Ошибки» — только её.

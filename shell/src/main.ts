@@ -24,6 +24,7 @@ import { parseBackoff } from './backoff.js'
 import { readClipboardImageBytes, saveClipboardImage, SaveRate } from './clipboardImage.js'
 import type { ClipboardItemsLike, SaveImageResult } from './clipboardImage.js'
 import { readClipboardPaths } from './clipboardPaths.js'
+import { importAttachment, importStoredAttachment, previewAttachment } from './attachmentStore.js'
 import { BRIDGE_VERSION, IPC, isAllowedMethod, sanitizeParams, SUBSCRIBE_VIA_BRIDGE } from './contract.js'
 import type { CallReply, ConnState, DaemonStatus, NavTarget, NotifyTarget } from './contract.js'
 import { externalUrl } from './externalUrl.js'
@@ -557,8 +558,7 @@ function registerIpc(): void {
     await shell.openExternal(url)
   })
 
-  ipcMain.handle(IPC.clipboardPaths, async (e): Promise<string[]> => {
-    if (!trusted(e)) return []
+  const clipboardPathsForAttachments = async (): Promise<string[]> => {
     // Тестовый прогон системный буфер не читает: e2e кладёт «скопированные файлы» в main.
     if (TEST_MODE) return [...((globalThis as { __pultTestClipboardPaths?: string[] }).__pultTestClipboardPaths ?? [])]
     return readClipboardPaths({
@@ -571,7 +571,8 @@ function registerIpc(): void {
         return ''
       },
     }, process.platform)
-  })
+  }
+  ipcMain.handle(IPC.clipboardPaths, async (e): Promise<string[]> => trusted(e) ? await clipboardPathsForAttachments() : [])
 
   // Окно 0.1.16: картинка из буфера → PNG в PULT_HOME/attachments/<сессия> (clipboardImage.ts). От окна — только имя
   // сессии (проверяется по правилу имён демона); путь решает main, байты — из системного буфера.
@@ -595,6 +596,29 @@ function registerIpc(): void {
     })
     if ('error' in r) log('картинка из буфера не сохранена', { error: r.error })
     return r
+  })
+
+  ipcMain.handle(IPC.attachmentImport, (e, session: unknown, item: unknown) => {
+    if (!trusted(e)) return { error: 'Вызов не из окна Пульта.' }
+    return importStoredAttachment({ home: pultHome, session, item })
+  })
+
+  // Не exposed строковым методом рендерера: preload получает path у настоящего File через webUtils.
+  ipcMain.handle(IPC.attachmentFiles, (e, session: unknown, item: unknown) => {
+    if (!trusted(e)) return { error: 'Вызов не из окна Пульта.' }
+    return importAttachment({ home: pultHome, session, item })
+  })
+  // Источник выбирается системой, а не строкой из страницы.
+  ipcMain.handle(IPC.attachmentClipboard, async (e, session: unknown) => {
+    if (!trusted(e)) return [{ error: 'Вызов не из окна Пульта.' }]
+    const sources = await clipboardPathsForAttachments()
+    if (sources.length > 20) return [{ error: 'Можно добавить не больше 20 файлов за один раз.' }]
+    return sources.map((source) => importAttachment({ home: pultHome, session, item: { path: source } }))
+  })
+
+  ipcMain.handle(IPC.attachmentPreview, (e, session: unknown, source: unknown) => {
+    if (!trusted(e)) return { error: 'Вызов не из окна Пульта.' }
+    return previewAttachment({ home: pultHome, session, source, decode: (bytes) => nativeImage.createFromBuffer(bytes) })
   })
 
   ipcMain.handle(IPC.notify, (e, title: unknown, body: unknown, target: unknown, kind: unknown, sound: unknown): boolean => {

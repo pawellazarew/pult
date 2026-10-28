@@ -27,6 +27,7 @@ export type SavedClipboardImage = { path: string; width: number; height: number;
 
 /** Как окно узнаёт пути: из буфера (все скопированные файлы) и из перетащенных `File`. */
 export interface FilePathSource {
+  attachments?: import('../../../shell/src/contract.js').AttachmentBridge
   clipboard(): Promise<string[]>
   files(files: File[]): string[]
   /**

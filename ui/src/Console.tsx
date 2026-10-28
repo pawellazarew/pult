@@ -11,6 +11,7 @@ import { Conversation } from './components/Conversation.js'
 import type { SendMode } from './components/Conversation.js'
 import { Header } from './components/Header.js'
 import { FileWorkspace } from './components/FileWorkspace.js'
+import { WorkspaceLayout } from './components/WorkspaceLayout.js'
 import type { FileRequest } from './components/FileWorkspace.js'
 import { FilePreviewContext } from './model/filePreviewContext.js'
 import { ExternalSessions } from './components/ExternalSessions.js'
@@ -253,10 +254,11 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   // Окно 0.1.16 ещё и сохраняет картинку из буфера (`clipboardImage.save`); у старого метода нет — ⌘V на картинке
   // подсказывает обновить окно.
   const filePaths = useMemo<FilePathSource | null>(() => {
-    const { clipboardFilePaths, pathsForFiles, clipboardImage } = bridge
+    const { clipboardFilePaths, pathsForFiles, clipboardImage, attachments } = bridge
     if (!clipboardFilePaths || !pathsForFiles) return null
     return {
       clipboard: () => clipboardFilePaths(),
+      ...(attachments ? { attachments } : {}),
       files: (f) => pathsForFiles(f),
       ...(clipboardImage && typeof clipboardImage.save === 'function' ? { image: (session: string) => clipboardImage.save(session) } : {}),
     }
@@ -1083,7 +1085,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         </div>
       )}
 
-      <main className={`grid${sidebarHidden ? ' sidebar-hidden' : ''}${inboxOpen ? ' with-inbox' : ''}${filesOpen ? ` with-files${filesExpanded ? ' files-focused' : ''}` : ''}`}>
+      <WorkspaceLayout sidebarHidden={sidebarHidden} inboxOpen={inboxOpen} filesOpen={filesOpen} filesExpanded={filesExpanded}>
         <div className="agents-col">
           <ProjectTree groups={groups} selected={current?.name ?? null} now={now} collapsed={collapsed}
             onSelect={select} onNew={(cwd) => setModal({ type: 'new', cwd })} onToggle={toggleProject}
@@ -1146,7 +1148,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
             }}
             onWait={markSeen} />
         )}
-      </main>
+      </WorkspaceLayout>
 
       {modal?.type === 'new' && (
         <NewAgentDialog key={modal.seq ?? 0} taken={records.map((r) => r.name)} defaultCwd={modal.cwd ?? null} prefill={modal.prefill ?? null} catalog={providers} checking={providersChecking} onCheck={() => void checkProviders()}

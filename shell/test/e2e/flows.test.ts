@@ -7,7 +7,7 @@ import { existsSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { after, before, describe, it } from 'node:test'
 import type { Page } from 'playwright-core'
-import { launch, ONE_PX_PNG, sleep, waitFor } from './harness.js'
+import { launch, ONE_PX_PNG, waitFor } from './harness.js'
 import type { Harness } from './harness.js'
 
 type Client = Awaited<ReturnType<Harness['client']>>
@@ -83,80 +83,97 @@ describe('окно: рабочие сценарии', () => {
     assert.deepEqual(users, ['Скажи одно слово', 'первая строка\nвторая'])
   })
 
-  it('⌘V на файлах из Finder кладёт в поле полные пути всех файлов, а не имя первого', async () => {
-    // Chromium отдаёт в paste тип `Files` и только первый файл; все пути main читает из буфера.
-    await h.app.evaluate((_e, paths) => { (globalThis as { __pultTestClipboardPaths?: string[] }).__pultTestClipboardPaths = paths },
-      ['/srv/p/Отчёт 1.txt', '/tmp/b.txt'])
+  it('⌘V на файлах из Finder прикрепляет все файлы карточками и оставляет текст реплики', async () => {
+    // Chromium отдаёт в paste только первый файл; все пути main читает из буфера.
+    const dir = h.workDir('finder-files')
+    const paths = [path.join(dir, 'Отчёт 1.txt'), path.join(dir, 'b.txt')]
+    for (const [i, file] of paths.entries()) writeFileSync(file, `файл ${i + 1}`)
+    await h.app.evaluate((_e, files) => { (globalThis as { __pultTestClipboardPaths?: string[] }).__pultTestClipboardPaths = files }, paths)
     const box = h.win.getByTestId('composer')
-    await box.fill('глянь ')
-    await box.evaluate((el) => {
-      const dt = new DataTransfer()
-      dt.items.add(new File(['x'], 'Отчёт 1.txt', { type: 'text/plain' }))
-      el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }))
-    })
-    assert.ok(await waitFor(async () => (await box.inputValue()) === "глянь '/srv/p/Отчёт 1.txt' /tmp/b.txt", 3000), `в поле: ${await box.inputValue()}`)
-    await h.app.evaluate(() => { delete (globalThis as { __pultTestClipboardPaths?: string[] }).__pultTestClipboardPaths })
-    await box.fill('')
-  })
-
-  it('⌘V картинки без файла (скриншот): PNG в PULT_HOME/attachments, путь — в поле реплики и в «первую реплику»', async () => {
-    // Системный буфер тест не трогает: картинку (байты PNG) кладёт в main, а paste несёт то, что Chromium отдаёт для
-    // битмапа, — `Files` с image.png без пути на диске.
-    await h.app.evaluate((_e, b64) => { (globalThis as { __pultTestClipboardImage?: Uint8Array }).__pultTestClipboardImage = Buffer.from(b64, 'base64') }, ONE_PX_PNG)
-    const pasteImage = async (testId: string): Promise<void> => {
-      await h.win.getByTestId(testId).evaluate((el) => {
+    try {
+      await box.fill('глянь ')
+      await box.evaluate((el) => {
         const dt = new DataTransfer()
-        dt.items.add(new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], 'image.png', { type: 'image/png' }))
+        dt.items.add(new File(['x'], 'Отчёт 1.txt', { type: 'text/plain' }))
         el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }))
       })
+      const cards = h.win.locator('.composer').getByTestId('attachment-card')
+      assert.ok(await waitFor(async () => await cards.count() === 2, 5000), 'оба файла не прикрепились')
+      assert.equal(await box.inputValue(), 'глянь ', 'вложения не превращаются в пути в тексте')
+      for (const [i, card] of (await cards.all()).entries()) {
+        const saved = await card.getAttribute('data-path')
+        assert.ok(saved && saved.startsWith(path.join(h.home, 'attachments', 'alpha') + path.sep), `копия вне папки сессии: ${saved}`)
+        assert.ok(existsSync(saved), `нет копии файла: ${saved}`)
+        assert.notEqual(saved, paths[i], 'вложение ссылается на исходник вместо собственной копии')
+      }
+      assert.match((await cards.allTextContents()).join(' '), /Отчёт 1\.txt.*b\.txt/s)
+    } finally {
+      await h.app.evaluate(() => { delete (globalThis as { __pultTestClipboardPaths?: string[] }).__pultTestClipboardPaths })
+      const remove = h.win.locator('.composer').getByTestId('attachment-remove')
+      while (await remove.count()) await remove.first().click()
+      await box.fill('')
     }
-    const attachments = path.join(h.home, 'attachments')
-    const escRe = (x: string): string => x.replace(/[.*+?^$|()[\]{}\\]/g, '\\$&')
-    const re = (session: string): RegExp => new RegExp(`^глянь ${escRe(path.join(attachments, session))}/\\d{4}-\\d{2}-\\d{2}/paste-\\d{6}-[0-9a-f]{6}\\.png$`)
+  })
+
+  it('⌘V скриншота без файла сохраняет PNG в Пульте и показывает превью, в том числе до выбора имени новой сессии', async () => {
+    // File из памяти содержит настоящий PNG: не требует ручного сохранения скриншота или пути на диске.
+    const pasteImage = async (testId: string): Promise<void> => {
+      await h.win.getByTestId(testId).evaluate((el, b64) => {
+        const dt = new DataTransfer()
+        dt.items.add(new File([Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))], 'image.png', { type: 'image/png' }))
+        el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }))
+      }, ONE_PX_PNG)
+    }
+    const box = h.win.getByTestId('composer')
+    const cards = h.win.locator('.composer').getByTestId('attachment-card')
+    const dlg = h.win.getByTestId('new-agent-dialog')
     try {
-      const box = h.win.getByTestId('composer')
       await box.fill('глянь ')
       await pasteImage('composer')
-      // Поле разговора сессии alpha — папка attachments/alpha (своя у сессии: --add-dir claude только на неё).
-      assert.ok(await waitFor(async () => re('alpha').test(await box.inputValue()), 5000), `в поле: ${await box.inputValue()}`)
-      const p1 = (await box.inputValue()).slice('глянь '.length)
+      assert.ok(await waitFor(async () => await cards.count() === 1, 5000), 'скриншот не прикрепился')
+      assert.equal(await box.inputValue(), 'глянь ')
+      const p1 = await cards.first().getAttribute('data-path')
+      assert.ok(p1 && p1.startsWith(path.join(h.home, 'attachments', 'alpha') + path.sep), `путь скриншота: ${p1}`)
       assert.ok(existsSync(p1), `файла нет: ${p1}`)
       assert.equal(statSync(p1).mode & 0o777, 0o600)
+      assert.ok(await waitFor(async () => await cards.locator('img').count() === 1, 5000), 'нет превью скриншота')
+      await cards.getByTestId('attachment-remove').click()
+      assert.equal(await cards.count(), 0)
       await box.fill('')
 
       await h.win.keyboard.press('Meta+N')
-      const dlg = h.win.getByTestId('new-agent-dialog')
       await dlg.waitFor({ timeout: 5000 })
       const prompt = dlg.getByTestId('new-agent-prompt')
-      // Без имени — отказ словами: папку картинке даёт имя будущей сессии.
+      // До выбора имени используется собственная папка черновика. Переименование не теряет карточку.
       await dlg.getByTestId('new-agent-name').fill('')
-      await sleep(1100)
       await prompt.fill('глянь ')
       await pasteImage('new-agent-prompt')
-      assert.ok(await waitFor(async () => /сессия/.test((await dlg.getByTestId('new-agent-paste-notice').textContent({ timeout: 500 }).catch(() => null)) ?? ''), 5000), 'нет заметки «нужно имя»')
+      const draftCards = dlg.getByTestId('attachment-card')
+      assert.ok(await waitFor(async () => await draftCards.count() === 1, 5000), 'вложение без имени не сохранилось')
       assert.equal(await prompt.inputValue(), 'глянь ')
-      await dlg.getByTestId('new-agent-name').fill('pic')
-      await sleep(1100)
-      await pasteImage('new-agent-prompt')
-      assert.ok(await waitFor(async () => re('pic').test(await prompt.inputValue()), 5000), `в «первой реплике»: ${await prompt.inputValue()}`)
-      const p2 = (await prompt.inputValue()).slice('глянь '.length)
+      const p2 = await draftCards.first().getAttribute('data-path')
+      assert.ok(p2 && p2.startsWith(path.join(h.home, 'attachments', 'draft-')), `папка черновика: ${p2}`)
       assert.ok(existsSync(p2) && p2 !== p1, `второй файл: ${p2}`)
+      await dlg.getByTestId('new-agent-name').fill('pic')
+      assert.equal(await draftCards.count(), 1, 'выбор имени убрал вложение')
+      await draftCards.getByTestId('attachment-remove').click()
+      assert.equal(await draftCards.count(), 0)
       await h.win.keyboard.press('Escape')
       await dlg.waitFor({ state: 'detached', timeout: 5000 })
     } finally {
-      await h.app.evaluate(() => { delete (globalThis as { __pultTestClipboardImage?: Uint8Array }).__pultTestClipboardImage })
+      if (await dlg.count()) {
+        const removeDraft = dlg.getByTestId('attachment-remove')
+        while (await removeDraft.count()) await removeDraft.first().click()
+        await h.win.keyboard.press('Escape')
+        await dlg.waitFor({ state: 'detached', timeout: 5000 })
+      }
+      const remove = h.win.locator('.composer').getByTestId('attachment-remove')
+      while (await remove.count()) await remove.first().click()
+      await box.fill('')
     }
-    // Буфер без картинки: отказ словами под полем, поле не тронуто.
-    await sleep(1100)
-    const box = h.win.getByTestId('composer')
-    await box.fill('abc')
-    await pasteImage('composer')
-    assert.ok(await waitFor(async () => ((await h.win.getByTestId('paste-notice').textContent({ timeout: 500 }).catch(() => null)) ?? '').includes('нет картинки'), 5000), 'нет заметки об отказе')
-    assert.equal(await box.inputValue(), 'abc')
-    await box.fill('')
   })
 
-  it('«+ Сессия»: файлы, брошенные в первую реплику, — их пути; папка на форму — папка сессии; файл на папку — подсказка', async () => {
+  it('«+ Сессия»: файлы становятся вложениями; папка на форму — папка сессии; файл на папку — подсказка', async () => {
     // Настоящий бросок из Finder: CDP `Input.dispatchDragEvent` с путями на диске — Chromium строит из них
     // DataTransfer как от системы (File с путём, webkitGetAsEntry), чего синтетический DragEvent не умеет.
     const dir = h.workDir('drop proj')
@@ -204,9 +221,10 @@ describe('окно: рабочие сценарии', () => {
       await drag('dragCancel', { x: 4, y: 4 }, [fileA])
 
       await dropAt('new-agent-prompt', [fileA, fileB])
-      // Путь с пробелом — в одинарных кавычках, как в поле реплики разговора.
-      const want = `глянь '${fileA}' '${fileB}'`
-      assert.ok(await waitFor(async () => (await prompt.inputValue()) === want, 3000), `в поле: ${await prompt.inputValue()}`)
+      const want = 'глянь '
+      const cards = dlg.getByTestId('attachment-card')
+      assert.ok(await waitFor(async () => await cards.count() === 2, 5000), 'оба брошенных файла не прикрепились')
+      assert.equal(await prompt.inputValue(), want, 'текст не заменяется путями файлов')
       assert.ok(await waitFor(async () => (await lit('new-agent-prompt')) === null, 3000), 'подсветка поля не погасла после броска')
       const cwd = dlg.getByTestId('new-agent-cwd')
       const before = await cwd.getAttribute('data-path')
@@ -221,11 +239,16 @@ describe('окно: рабочие сценарии', () => {
       assert.equal(await dlg.getByTestId('new-agent-name').inputValue(), 'drop-proj', 'имя из брошенной папки')
       assert.equal(await dlg.getByTestId('new-agent-drop-hint').count(), 0, 'подсказка ушла')
       assert.equal(await prompt.inputValue(), want, 'реплика не тронута')
+      assert.equal(await cards.count(), 2, 'бросок папки не меняет вложения')
+      while (await dlg.getByTestId('attachment-remove').count()) await dlg.getByTestId('attachment-remove').first().click()
     } finally {
       // Упал посреди — не оставлять следующим тестам ни перетаскивания, ни открытого диалога.
       await drag('dragCancel', { x: 4, y: 4 }, []).catch(() => {})
       await cdp.detach().catch(() => {})
-      if (await dlg.count()) await h.win.keyboard.press('Escape')
+      if (await dlg.count()) {
+        while (await dlg.getByTestId('attachment-remove').count()) await dlg.getByTestId('attachment-remove').first().click()
+        await h.win.keyboard.press('Escape')
+      }
       await dlg.waitFor({ state: 'detached', timeout: 5000 })
     }
   })
