@@ -66,6 +66,8 @@ function rig(opts: {
   net?: () => Promise<NetCheck>
   /** Не давать адаптеру снимать вопросы из Inbox: так проверяется защита ПО ПОКОЛЕНИЮ. */
   noCancel?: boolean
+  /** Потолок фоновой работы (и молчания записи фона Codex) — тест ставит короче. */
+  backgroundMaxMs?: number
 } = {}): Rig {
   const dir = mkdtempSync(join(tmpdir(), 'pt-safe-'))
   const paths = layout(join(dir, 'h'))
@@ -80,8 +82,10 @@ function rig(opts: {
     emit: (d) => { drafts.push(d) },
     ...(opts.permTimeoutMs !== undefined ? { timeoutMs: opts.permTimeoutMs } : {}),
   })
+  const config = defaultConfig()
+  if (opts.backgroundMaxMs !== undefined) config.backgroundMaxMs = opts.backgroundMaxMs
   const adapter = createCodexAdapter({
-    paths, config: defaultConfig(), logger: createLogger(paths.logFile),
+    paths, config, logger: createLogger(paths.logFile),
     bin: opts.bin ?? FAKE_CODEX_SCRIPTED,
     emit: (d) => { drafts.push(d) },
     askPermission: (req) => broker.request(req),
@@ -574,6 +578,59 @@ describe('codex: гонки вокруг общего процесса и сня
       const outcome = await started.done
       assert.equal(outcome.ok, false)
       assert.equal(outcome.errorCode, 'interrupted', 'исход по контракту interrupt, а не internal')
+    } finally { await r.adapter.shutdown(); r.remove() }
+  })
+})
+
+describe('codex: фоновая работа после хода — «фон · N», как у Claude (28.10.2026)', () => {
+  const bgEvents = (r: Rig): Array<{ count: number; tasks: Array<{ type: string; description: string }>; reason?: string }> =>
+    r.drafts.filter((d) => d.kind === 'background.changed').map((d) => d.data as never)
+  const statuses = (r: Rig): string[] => r.drafts.filter((d) => d.kind === 'status.changed').map((d) => String(d.data?.['status']))
+
+  it('субагент и команда пережили ход: фон 2 → 1 → 0 на их концах; статус после хода не трогается', async () => {
+    const r = rig()
+    try {
+      await r.adapter.startSession(spec(r, 'w'))
+      const turn = await r.adapter.send('w', '[[background]] проверь')
+      const outcome = await turn.done
+      assert.equal(outcome.ok, true)
+      assert.ok(await waitFor(() => bgEvents(r).some((b) => b.count === 0), 5000), 'фон не обнулился')
+      const counts = bgEvents(r).map((b) => b.count)
+      assert.deepEqual(counts, [2, 1, 0])
+      const first = bgEvents(r)[0]!
+      assert.deepEqual(first.tasks.map((t) => t.type).sort(), ['command', 'subagent'])
+      assert.ok(first.tasks.some((t) => t.description === 'npm test'), 'команда — без обёртки оболочки')
+      // После `idle` хода ни одного `working`: поздние концы статус не двигают.
+      const st = statuses(r)
+      assert.equal(st.at(-1), 'idle')
+      assert.equal(st.lastIndexOf('working') < st.indexOf('idle'), true)
+      // Концы пришли верхними событиями, как в живых журналах.
+      assert.ok(r.drafts.some((d) => d.kind === 'agent.finished' && !d.parentId))
+      assert.ok(r.drafts.some((d) => d.kind === 'tool.finished' && !d.parentId && d.data?.['name'] === 'commandExecution'))
+    } finally { await r.adapter.shutdown(); r.remove() }
+  })
+
+  it('конец потерян: запись, молчащая дольше потолка, снимается сама', async () => {
+    const r = rig({ backgroundMaxMs: 400, fake: { bgPauseMs: 50 } })
+    try {
+      await r.adapter.startSession(spec(r, 'w'))
+      await (await r.adapter.send('w', '[[background-lost]] проверь')).done
+      assert.ok(await waitFor(() => bgEvents(r).some((b) => b.count === 0 && b.reason === 'background_silence'), 5000), 'зависшая запись не снята')
+      assert.deepEqual(bgEvents(r).map((b) => b.count), [2, 1, 0])
+    } finally { await r.adapter.shutdown(); r.remove() }
+  })
+
+  it('сессию закрыли — фон обнуляется до `done`', async () => {
+    const r = rig({ fake: { bgPauseMs: 5_000 } })
+    try {
+      await r.adapter.startSession(spec(r, 'w'))
+      await (await r.adapter.send('w', '[[background]] проверь')).done
+      assert.ok(await waitFor(() => bgEvents(r).length > 0, 3000))
+      await r.adapter.close('w')
+      const last = bgEvents(r).at(-1)
+      assert.equal(last?.count, 0)
+      assert.equal(last?.reason, 'session_closed')
+      assert.equal(statuses(r).at(-1), 'done')
     } finally { await r.adapter.shutdown(); r.remove() }
   })
 })

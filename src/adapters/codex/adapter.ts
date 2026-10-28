@@ -56,6 +56,8 @@ import type {
 } from '../types.js'
 import { createAppServerClient } from './client.js'
 import type { AppServerClient, JsonRpcId } from './client.js'
+import { CODEX_BACKGROUND_SILENCE_MS, createCodexBackground } from './background.js'
+import type { CodexBackground } from './background.js'
 import { createCodexMapper, NO_ROLLOUT_RE } from './mapper.js'
 import type { CodexMapper, CodexSignal } from './mapper.js'
 import { checkCodexSchema } from './schema.js'
@@ -363,6 +365,8 @@ interface Live {
   sandboxObjects: Record<string, Record<string, unknown>>
   /** Набор MCP треда, который заводится прямо сейчас (между сборкой и ответом `thread/start|resume`). */
   pendingMcpKey: string
+  /** Субагенты и команды, пережившие ход (`background.changed`, «фон · N»), — src/adapters/codex/background.ts. */
+  bg: CodexBackground
 }
 
 interface PendingApproval {
@@ -495,6 +499,37 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
   const emit = (draft: EventDraft): void => { opts.emit(draft) }
   const status = (sessionId: string, s: string, extra: Record<string, unknown> = {}): void =>
     emit({ sessionId, provider: 'codex', kind: 'status.changed', data: { status: s, ...extra } })
+
+  // --- фоновая работа (субагенты и команды, пережившие ход) -------------------
+  const bgSilenceMs = Math.max(1, Math.min(CODEX_BACKGROUND_SILENCE_MS, config.backgroundMaxMs))
+  const newBackground = (): CodexBackground => createCodexBackground({ now, silenceMs: bgSilenceMs })
+  let bgTimer: NodeJS.Timeout | null = null
+  const emitBackground = (l: Live, reason?: string): void => {
+    emit({ sessionId: l.spec.name, provider: 'codex', kind: 'background.changed', data: { ...l.bg.data(), ...(reason ? { reason } : {}) } })
+  }
+  /** Страховка от потерянного конца: запись фона, молчащая дольше `bgSilenceMs`, снимается. */
+  const sweepBackground = (): void => {
+    let any = false
+    for (const l of live.values()) {
+      if (l.closing) continue
+      const gone = l.bg.sweep()
+      if (gone.length) {
+        logger.warn('фоновая работа codex молчит слишком долго — снята со счёта', { session: l.spec.name, silenceMs: bgSilenceMs, tasks: gone })
+        emitBackground(l, 'background_silence')
+      }
+      if (l.bg.pending()) any = true
+    }
+    if (!any && bgTimer) { clearInterval(bgTimer); bgTimer = null }
+  }
+  const watchBackground = (): void => {
+    if (bgTimer) return
+    bgTimer = setInterval(sweepBackground, Math.max(50, Math.min(60_000, Math.floor(bgSilenceMs / 4))))
+    bgTimer.unref?.()
+  }
+  /** Снять весь фон сессии (закрыта, процесс умер): счёт обнуляется событием, если в фоне что-то было. */
+  const clearBackground = (l: Live, reason: string): void => {
+    if (l.bg.clear()) emitBackground(l, reason)
+  }
 
   const netProbe = opts.netCheck
     ?? ((provider: 'codex'): Promise<NetCheck> =>
@@ -688,9 +723,11 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
       // Держать УМЕРШИЙ процесс нельзя: иначе сессия, чей ход не дошёл до `turn`, навсегда
       // числилась бы занятой и блокировала соседям перезапуск под новый профиль сети.
       l.usingProcess = false
+      // Субагенты и команды жили в умершем процессе — фон кончился вместе с ним. ДО конца хода: иначе его
+      // открытые элементы на миг ушли бы в фон.
+      if (!l.closing) clearBackground(l, 'provider_exit')
       const ctx = l.turn
-      if (!ctx) continue
-      ctx.finish({ turnId: ctx.turnId, ok: false, errorCode: 'provider_unavailable', message: why })
+      if (ctx) ctx.finish({ turnId: ctx.turnId, ok: false, errorCode: 'provider_unavailable', message: why })
     }
     if (!shuttingDown) logger.error('общий процесс codex умер', { code, signal, sessions: live.size })
   }
@@ -1379,8 +1416,18 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
     if (!l || l.closing) return
     trackMcpCall(threadId, method, params)
     const own = owner.parentNodeId === undefined
+    // Признак жизни фоновой записи: уведомление её команды (`itemId`, в том числе `outputDelta`, который
+    // переводчик глушит) или треда её субагента.
+    if (own) { const itemId = str(params['itemId']); if (itemId) l.bg.touch(itemId) } else l.bg.touch(owner.parentNodeId as string)
     const mapped = l.mapper.push(method, params, own ? {} : { parentId: owner.parentNodeId as string })
-    for (const draft of mapped.drafts) { if (!l.closing && live.get(owner.name) === l) emit(draft) }
+    let bgMoved = false
+    for (const draft of mapped.drafts) {
+      if (!l.closing && live.get(owner.name) === l) {
+        emit(draft)
+        if (l.bg.onDraft(draft)) bgMoved = true
+      }
+    }
+    if (bgMoved && !l.closing && live.get(owner.name) === l) emitBackground(l)
     if (mapped.live && !l.closing && live.get(owner.name) === l) for (const sig of mapped.live) opts.live?.(owner.name, sig)
     for (const sig of mapped.signals) applySignal(l, sig, own)
   }
@@ -1663,6 +1710,9 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
             ...(!outcome.ok && outcome.message ? { message: redactString(outcome.message.slice(0, 2000)) } : {}),
           })
         }
+        // Субагенты и команды, пережившие ход, — в фон («фон · N»): их конец придёт позже, статус он не двигает.
+        // Процесс умер (`provider_unavailable`) — им не пережить его: фон снимет `onProcessGone`.
+        if (!gone() && l.bg.turnEnded()) { emitBackground(l); watchBackground() }
         resolve(outcome)
       }
     })
@@ -1770,6 +1820,7 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
         threadPolicy: null,
         sandboxObjects: {},
         pendingMcpKey: '',
+        bg: newBackground(),
       })
       // Ни процесса, ни треда: тред без хода не возобновляется (измерено), поэтому заводить
       // его заранее незачем, а выдумывать `providerSessionId` — тем более. Пустая строка
@@ -1857,6 +1908,7 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
         threadPolicy: null,
         sandboxObjects: {},
         pendingMcpKey: '',
+        bg: newBackground(),
       })
       if (threadId) threadOwner.set(threadId, { name })
     },
@@ -1911,6 +1963,8 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
           }
         }
       }
+      // Фон сессии снимается вместе с ней: её субагенты и команды больше никому не отчитываются.
+      clearBackground(l, 'session_closed')
       live.delete(name)
       status(name, 'done', {})
     },
@@ -1952,6 +2006,7 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
       live.clear()
       threadOwner.clear()
       approvals.clear()
+      if (bgTimer) { clearInterval(bgTimer); bgTimer = null }
     },
   }
 }

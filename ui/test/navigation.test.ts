@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import type { AgentView } from '../src/model/agents.js'
+import { statusView } from '../src/model/agents.js'
 import { chatSections, chatStatus, projectChats, projectPreview } from '../src/model/navigation.js'
 import { groupByProject } from '../src/model/projects.js'
 
@@ -44,6 +45,24 @@ describe('единый список бесед', () => {
     assert.deepEqual(order([{ ...older, lastActivity: '2026-10-28T12:00:00Z', title: 'А новое название' }, newer]), ['newer', 'older'])
     const same = { ...newer, createdAt: older.createdAt }
     assert.deepEqual(order([older, same]), order([{ ...older, title: 'Я последнее название' }, same]))
+  })
+
+  it('фон после ответа (субагенты, команды): среди «Работают» с «В фоне», поле ввода не заперто; кончился — назад в недавние', () => {
+    const bg = { count: 2, tasks: ['субагент /root/checker', 'npm test'] }
+    const withBg = a('bg', { provider: 'codex', status: 'idle', background: bg })
+    const sections = (x: AgentView): string[] => chatSections(groupByProject(['/srv/pult'], [x, a('quiet')]))
+      .flatMap((s) => s.rows.filter((r) => r.agent.name === x.name).map(() => s.key))
+    assert.deepEqual(sections(withBg), ['working'])
+    assert.deepEqual(chatStatus(withBg), { label: 'В фоне', tone: 'run', detail: 'Фоновые задачи: 2' })
+    assert.equal(statusView(withBg.status).busy, false, 'статус idle — ввод открыт')
+    const [chats] = projectChats(groupByProject(['/srv/pult'], [withBg, a('quiet')]), '', 'working')
+    assert.deepEqual(chats?.rows.map((r) => r.name), ['bg'])
+    assert.equal(chats?.working, 1)
+    const { background: _gone, ...after } = withBg
+    assert.deepEqual(sections(after), ['recent'])
+    // Ошибка хода важнее фона: подпись «ошибка» остаётся, фон — значком.
+    assert.equal(chatStatus(a('f', { status: 'failed', background: bg })).label, 'ошибка')
+    assert.deepEqual(sections(a('f', { status: 'failed', background: bg })), ['working'])
   })
 
   it('состояние не маскирует ожидание зелёным готово; cold — история, без технического жаргона', () => {

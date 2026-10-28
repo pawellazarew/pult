@@ -485,12 +485,20 @@ export function createManager(opts: ManagerOptions): SessionManager {
     const ev = opts.publish(withTurnTiming(draft.kind === 'context.updated' ? withKnownContext(draft) : draft))
     if (ev.kind === 'context.updated') trackContext(ev)
     const prev = statuses.get(ev.sessionId)
+    let settleOutsideTurn = false
     if (prev !== undefined) {
       lastEventAt.set(ev.sessionId, Date.now())
       const next = reduceStatusEvent(prev, ev)
       if (next !== prev) {
         statuses.set(ev.sessionId, next)
         registry.update(ev.sessionId, { lastStatus: next, lastEventId: ev.id, ...unsavedContext(ev.sessionId) })
+      }
+      // Вопрос задали ВНЕ хода (субагент или фоновая команда Codex, пережившие ход), человек ответил — свёртка
+      // по правилу «решение принято — ход продолжается» сделала бы сессию `working` без хода: поле ввода
+      // заперто до следующего хода. Хода нет — сессия снова свободна, и это пишется явным событием, чтобы окно
+      // (та же свёртка по журналу) не разошлось с демоном.
+      if (ev.kind === 'permission.resolved' && next === 'working' && prev !== 'working' && !turnStartedAt.has(ev.sessionId)) {
+        settleOutsideTurn = true
       }
       if (ev.kind === 'status.changed') {
         const st = ev.data['status']
@@ -532,6 +540,9 @@ export function createManager(opts: ManagerOptions): SessionManager {
     }
     if (ev.kind === 'usage.updated') trackUsage(ev)
     if (statuses.has(ev.sessionId) || ev.kind === 'session.ended') phases.event(ev)
+    if (settleOutsideTurn) {
+      emit({ sessionId: ev.sessionId, provider: ev.provider, kind: 'status.changed', data: { status: 'idle', reason: 'permission_outside_turn' } })
+    }
     return ev
   }
 
@@ -729,15 +740,22 @@ export function createManager(opts: ManagerOptions): SessionManager {
   }
 
   // Сторож тишины: один таймер на демон, проход по статусам — дёшево и без таймера на событие.
+  //
+  // КРИЧИТ ТОЛЬКО О НАСТОЯЩЕМ ХОДЕ (28.10.2026). Ход идёт — значит был `status.changed working` и ещё не было
+  // конца (`turnStartedAt`). Без хода «завис» — ложь: так кричало после конца хода Codex, когда запоздалый
+  // `agent.finished` его субагента поднимал сессию в `working`. Признаки жизни — любое событие сессии (и
+  // дельты, и поток субагентов) и живые сигналы адаптера (размышления, «провайдер отозвался», новое обращение
+  // к модели — `live`). Пока открыт инструмент хода (долгий тест, `sleep`, ожидание), сторож молчит: строка
+  // фазы показывает инструмент и секунды, а его конец — событие, с которого отсчёт начнётся заново.
   const silenceMs = Math.round(opts.config.watchdog.silenceMinutes * 60_000)
   const checkSilence = (): void => {
     const now = Date.now()
     for (const name of statuses.keys()) {
       if (currentStatus(name) !== 'working') continue
       const t0 = turnStartedAt.get(name)
-      const last = lastEventAt.get(name) ?? t0
-      if (last === undefined) continue
-      const key = t0 ?? -1
+      if (t0 === undefined || phases.toolOpen(name)) continue
+      const last = Math.max(lastEventAt.get(name) ?? t0, t0)
+      const key = t0
       if (stalledFor.get(name) === key || now - last < silenceMs) continue
       const rec = registry.get(name)
       if (!rec) continue
@@ -1374,7 +1392,12 @@ export function createManager(opts: ManagerOptions): SessionManager {
 
     phaseNames() { return phases.names().filter((n) => registry.get(n)) },
 
-    live(name, sig) { if (statuses.has(name)) phases.live(name, sig) },
+    live(name, sig) {
+      if (!statuses.has(name)) return
+      phases.live(name, sig)
+      // Живой сигнал в журнал не пишется, но это признак жизни хода: сторож тишины его видит.
+      if (turnStartedAt.has(name)) lastEventAt.set(name, Date.now())
+    },
 
     async stop(name, turnId) {
       const rec = needRec(name)

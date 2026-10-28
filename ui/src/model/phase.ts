@@ -65,8 +65,12 @@ export function formatElapsed(ms: number): string {
   return `${Math.floor(m / 60)} ч ${String(m % 60).padStart(2, '0')} мин`
 }
 
-/** Имя инструмента покороче: `mcp__browser__browser_navigate` → `browser_navigate`. */
+/**
+ * Имя инструмента покороче: `mcp__browser__browser_navigate` → `browser_navigate`; команда Codex
+ * (`commandExecution`) — `shell`, как `Bash` у Claude.
+ */
 export function shortToolName(name: string): string {
+  if (name === 'commandExecution') return 'shell'
   const m = /^mcp__[^_]+(?:_[^_]+)*?__(.+)$/.exec(name)
   return m ? (m[1] as string) : name
 }
@@ -82,7 +86,7 @@ export function phaseText(p: TurnPhase): string {
     case 'writing': return `пишет…${bg}`
     case 'tool': {
       const t = p.tool
-      const what = t ? `${t.name}${t.detail ? ` ${t.detail}` : ''}` : 'инструмент'
+      const what = t ? `${t.name === 'commandExecution' ? shortToolName(t.name) : t.name}${t.detail ? ` ${t.detail}` : ''}` : 'инструмент'
       return `выполняет: ${what}…${bg}`
     }
     case 'waiting': return `${p.waiting?.kind === 'question' ? 'ждёт ответа на вопрос' : 'ждёт тебя'}${bg}`

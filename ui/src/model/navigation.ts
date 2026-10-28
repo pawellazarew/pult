@@ -1,6 +1,6 @@
 // Поиск, фильтры состояния и стабильное дерево проектов; недавние служат ярлыками к тем же чатам.
 import type { AgentView } from './agents.js'
-import { agentLabel, sortAgents, statusRank, statusView } from './agents.js'
+import { agentLabel, agentRank, sortAgents, statusView } from './agents.js'
 import type { ProjectGroup } from './projects.js'
 import { treePhaseLabel } from './phase.js'
 
@@ -15,9 +15,9 @@ export function chatSections(groups: readonly ProjectGroup[], query = ''): ChatS
   const byName = new Map(rows.map((r) => [r.agent.name, r]))
   const ordered = sortAgents(rows.map((r) => r.agent)).map((a) => byName.get(a.name)!)
   return [
-    { key: 'waiting', label: 'Ждут ответа', rows: ordered.filter((r) => statusRank(r.agent.status, r.agent.pending) === 0) },
-    { key: 'working', label: 'Работают', rows: ordered.filter((r) => statusRank(r.agent.status, r.agent.pending) === 1) },
-    { key: 'recent', label: 'Недавние', rows: ordered.filter((r) => statusRank(r.agent.status, r.agent.pending) === 2) },
+    { key: 'waiting', label: 'Ждут ответа', rows: ordered.filter((r) => agentRank(r.agent) === 0) },
+    { key: 'working', label: 'Работают', rows: ordered.filter((r) => agentRank(r.agent) === 1) },
+    { key: 'recent', label: 'Недавние', rows: ordered.filter((r) => agentRank(r.agent) === 2) },
   ]
 }
 
@@ -28,6 +28,9 @@ export function chatStatus(a: AgentView): { label: string; tone: string; detail:
     const phase = treePhaseLabel(a.phase)
     return { label: 'Работает', tone: 'run', detail: phase && phase !== 'идёт' ? phase : 'Выполняет задачу' }
   }
+  // Ответ готов, а субагенты или команды ещё доделывают работу: поле ввода открыто, но строка — среди «Работают».
+  // Ошибка и лимит важнее: их подпись остаётся, фон виден значком «фон · N».
+  if (a.background?.count && a.status !== 'failed' && a.status !== 'limited') return { label: 'В фоне', tone: 'run', detail: `Фоновые задачи: ${a.background.count}` }
   const sv = statusView(a.status)
   if (a.status === 'cold') return { label: 'История', tone: 'queued', detail: 'Можно продолжить' }
   if (a.status === 'idle' || a.status === 'done') return { label: 'Готово', tone: 'ok', detail: 'Можно продолжить' }
@@ -43,9 +46,9 @@ export function projectChats(groups: readonly ProjectGroup[], query = '', filter
   const terms = query.toLocaleLowerCase().trim().split(/\s+/).filter(Boolean)
   return groups.flatMap((group) => {
     const all = group.sessions.filter((a) => !a.archived && matched.has(a.name))
-    const working = all.filter((a) => statusRank(a.status, a.pending) === 1).length
-    const waiting = all.filter((a) => statusRank(a.status, a.pending) === 0).length
-    const rows = all.filter((a) => filter === 'all' || statusRank(a.status, a.pending) === (filter === 'waiting' ? 0 : 1))
+    const working = all.filter((a) => agentRank(a) === 1).length
+    const waiting = all.filter((a) => agentRank(a) === 0).length
+    const rows = all.filter((a) => filter === 'all' || agentRank(a) === (filter === 'waiting' ? 0 : 1))
       .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? '') || a.name.localeCompare(b.name))
     const emptyMatches = filter === 'all' && !group.sessions.length && terms.every((term) => `${group.name} ${group.path}`.toLocaleLowerCase().includes(term))
     return rows.length || emptyMatches ? [{ group, rows, working, waiting }] : []
@@ -54,5 +57,5 @@ export function projectChats(groups: readonly ProjectGroup[], query = '', filter
 
 /** A long project stays manageable; the selected and busy chats never disappear behind “more”. */
 export function projectPreview(rows: readonly AgentView[], selected: string | null, expanded: boolean, limit = 4): AgentView[] {
-  return rows.filter((a, i) => expanded || i < limit || a.name === selected || statusRank(a.status, a.pending) < 2)
+  return rows.filter((a, i) => expanded || i < limit || a.name === selected || agentRank(a) < 2)
 }

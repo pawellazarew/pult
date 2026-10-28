@@ -37,6 +37,11 @@ export interface PhaseTracker {
   get(name: string, opts?: { reasoning?: boolean }): TurnPhase | null
   /** Сессии, у которых сейчас есть фаза. */
   names(): string[]
+  /**
+   * В идущем ходе открыт инструмент или субагент корня (`tool.called`/`agent.spawned` без конца): долгий тест,
+   * `sleep`, ожидание. Сторож тишины в это время молчит — строка фазы и так показывает инструмент и секунды.
+   */
+  toolOpen(name: string): boolean
   forget(name: string): void
 }
 
@@ -240,6 +245,10 @@ export function createPhaseTracker(opts: PhaseTrackerOptions = {}): PhaseTracker
 
     names() {
       return [...new Set([...turns.keys(), ...bg.keys()])]
+    },
+
+    toolOpen(name) {
+      return (turns.get(name)?.tools.length ?? 0) > 0
     },
 
     forget(name) {

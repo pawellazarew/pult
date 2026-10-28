@@ -59,6 +59,12 @@ export const PHASE_FRAME_KIND = 'turn.phase'
  */
 export type PhaseFrameData = { reset: true } | { phase: TurnPhase | null }
 
+/** `/bin/zsh -lc "npm test"` → `npm test`; всё остальное — как есть. */
+export function unwrapShell(cmd: string): string {
+  const m = /^(?:\/(?:usr\/)?bin\/)?(?:ba|z)?sh\s+-l?c\s+(['"])([\s\S]*)\1\s*$/.exec(cmd.trim())
+  return m ? (m[2] as string) : cmd
+}
+
 /** Короткая подпись инструмента для свёрнутой строки и строки фазы: что именно он трогает. */
 export function toolSummary(name: string, input: Record<string, unknown>): string {
   const pick = (...keys: string[]): string | undefined => {
@@ -67,6 +73,11 @@ export function toolSummary(name: string, input: Record<string, unknown>): strin
   }
   const cmd = input['command']
   if (Array.isArray(cmd)) return cmd.filter((x) => typeof x === 'string').join(' ')
+  // Codex пишет команду обёрткой оболочки (`/bin/zsh -lc "npm test"`): строке фазы и ленте нужна сама команда.
+  if (typeof cmd === 'string' && cmd) {
+    const inner = unwrapShell(cmd)
+    return inner.length > 160 ? `${inner.slice(0, 160)}…` : inner
+  }
   // Поиск: что ищем важнее, где ищем.
   const pattern = pick('pattern')
   if (pattern) { const where = pick('path'); return where ? `${pattern}  в ${where}` : pattern }
