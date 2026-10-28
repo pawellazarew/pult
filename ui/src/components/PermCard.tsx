@@ -10,6 +10,7 @@ import { answersReady, buildAnswers, isQuestionTool, questionsOf } from '../mode
 import type { QuestionView } from '../model/questions.js'
 import { ago, shortPath } from '../model/agents.js'
 import { CMD, Icon, Kbd, ProviderTag } from './common.js'
+import { plural } from '../lib/ru.js'
 
 export interface PermCardProps {
   permId: string
@@ -32,6 +33,8 @@ export interface PermCardProps {
   rule?: { kind: string; label: string }
   busy?: boolean
   onFocus?(): void
+  /** Inbox: прыжок к этой карточке в ленте разговора (в самой ленте кнопка не нужна). */
+  onJump?(): void
   /** Без аргумента — один раз (так зовёт и ⌘↵); `session` / `rule` — только из своих кнопок. */
   onApprove?(scope?: Exclude<PermissionScope, 'once'>): void
   onDeny?(reason: string): void
@@ -78,11 +81,21 @@ export function PermCard(p: PermCardProps): ReactElement {
         <span className="lbl" title={v.title}>{v.title}</span>
         {p.agent && <><span className="who" title={p.agent.key && p.agent.key !== p.agent.name ? `${p.agent.name} · имя для CLI: ${p.agent.key}` : p.agent.name}>{p.agent.name}</span><ProviderTag provider={p.agent.provider} /></>}
         {p.state === 'pending' && <span className="waited">ждёт {ago(p.createdAt, p.now)}</span>}
+        {p.onJump && <button type="button" className="btn btn-ghost btn-sm perm-jump" data-testid="perm-jump"
+          title="Открыть разговор и показать этот запрос в ленте" onClick={(e) => { e.stopPropagation(); p.onJump?.() }}>в ленту<Icon name="chev" /></button>}
       </div>
       {v.target && <div className={`perm-target${v.kind === 'command' ? ' cmd' : ''}`}>{v.target}</div>}
       {v.reason && <div className="perm-reason">{v.reason}</div>}
       {v.cwd && <div className="perm-opts" title={v.cwd}>в папке {shortPath(v.cwd, 48)}</div>}
       {p.state === 'pending' && v.diffs.map((d, i) => <Diff key={i} d={d} />)}
+      {/* Решённая карточка сохраняет diff свёрнутым: утром проверяется, что именно разрешили ночью. */}
+      {p.state !== 'pending' && v.diffs.length > 0 && (
+        <details className="perm-diff-resolved" data-testid="perm-diff-resolved">
+          <summary>{v.diffs.length === 1 && v.diffs[0]?.path ? v.diffs[0].path : `изменения · ${v.diffs.length} ${plural(v.diffs.length, 'файл', 'файла', 'файлов')}`}
+            {' '}<span className="a">+{v.diffs.reduce((n, d) => n + d.added, 0)}</span> <span className="d">−{v.diffs.reduce((n, d) => n + d.removed, 0)}</span></summary>
+          {v.diffs.map((d, i) => <Diff key={i} d={d} />)}
+        </details>
+      )}
       {p.state === 'pending' && v.fields.length > 0 && (
         <dl className="perm-fields">
           {v.fields.map(([k, val]) => <FieldRow key={k} k={k} v={val} />)}

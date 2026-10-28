@@ -3,6 +3,8 @@ import { it } from 'node:test'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { Conversation } from '../src/components/Conversation.js'
+import { sessionMenuItems } from '../src/components/ProjectTree.js'
+import type { AgentView } from '../src/model/agents.js'
 import { Markdown } from '../src/components/Markdown.js'
 import { hotkeyAction } from '../src/model/hotkeys.js'
 import type { ConvItem } from '../src/model/conversation.js'
@@ -22,6 +24,33 @@ const render = (items: ConvItem[] = []): string => renderToStaticMarkup(createEl
   items, now: 0, usage: undefined, focusedPerm: null, permBusy: new Set<string>(), sendError: null, sending: false,
   onSend: async () => true, onRename: async () => true, onStop: noop, onRemove: noop, onReveal: noop, onApprove: noop, onDeny: noop, onFocusPerm: noop, onConfigure: noop,
 }))
+
+it('меню «⋯» в шапке разговора — то же, что у строки сайдбара: удаление последнее, не единственное', () => {
+  // Без `menu` (старая оболочка) — прежний вид с одним «Удалить беседу»; при идущем ходе меню нет вовсе.
+  const idleAgent = { name: 'w', provider: 'codex', status: 'idle', cwd: '/w/project', model: 'test-model', approval: 'full', pending: 0, lastActivity: '2026-10-27T10:00:00Z' } as const
+  assert.match(renderToStaticMarkup(createElement(Conversation, {
+    agent: idleAgent, items: [], now: 0, usage: undefined, focusedPerm: null, permBusy: new Set<string>(), sendError: null, sending: false,
+    onSend: async () => true, onRename: async () => true, onStop: noop, onRemove: noop, onReveal: noop, onApprove: noop, onDeny: noop, onFocusPerm: noop, onConfigure: noop,
+  })), /data-testid="remove-agent"/)
+  // С `menu` — контекстное меню на кнопке «⋯»; «Удалить…» в нём последний и опасный пункт.
+  const withMenu = renderToStaticMarkup(createElement(Conversation, {
+    agent: idleAgent, items: [], now: 0, usage: undefined, focusedPerm: null, permBusy: new Set<string>(), sendError: null, sending: false,
+    onSend: async () => true, onRename: async () => true, onStop: noop, onRemove: noop, onReveal: noop, onApprove: noop, onDeny: noop, onFocusPerm: noop, onConfigure: noop,
+    menu: { onRename: noop, onReveal: noop, onExport: noop, onArchive: noop, onRemove: noop },
+  }))
+  assert.match(withMenu, /data-testid="conv-menu"/)
+  assert.doesNotMatch(withMenu, /data-testid="remove-agent"/)
+  const items = sessionMenuItems(
+    { name: 'w', provider: 'codex', status: 'idle', cwd: '/w', pending: 0, lastActivity: '2026-10-27T10:00:00Z' },
+    { onRename: noop, onReveal: noop, onExport: noop, onArchive: noop, onRemove: noop },
+  )
+  // Заголовки/примечания в меню сессии не бывают — но союз типов их знает, отсюда «—».
+  const labels: string[] = items.map((x) => (typeof x === 'string' ? x : 'label' in x ? x.label : '—'))
+  assert.equal(labels[0], 'Переименовать…')
+  assert.equal(labels[labels.length - 1], 'Удалить…')
+  assert.equal(labels[labels.length - 2], 'sep')
+  assert.ok(labels.includes('Экспорт в Markdown') && labels.includes('В архив'), 'меню разговора не уже меню сайдбара')
+})
 
 it('⌘K/⌘B работают по коду клавиши в русской раскладке и не забирают другие сочетания', () => {
   const key = { key: 'л', code: 'KeyK', metaKey: true, ctrlKey: false, shiftKey: false, altKey: false }

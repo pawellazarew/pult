@@ -93,6 +93,12 @@ describe('M8d: модель Inbox и ленты', () => {
     const r = reconcileInbox(EMPTY_INBOX, [{ id: 'p2', sessionId: 'c', toolName: 'fileChange', input: {}, offers: { session: true }, createdAt: '2026-10-19T09:59:00Z', waitingMs: 1 }])
     assert.deepEqual(r['p2']?.offers, { session: true })
   })
+  it('Inbox: номер события приносит события, сверка с perm.list — нет («в ленту» без прыжка)', () => {
+    const s = applyInbox(EMPTY_INBOX, ev(7, 'permission.requested', { id: 'p1', toolName: 'Bash', input: {} }))
+    assert.equal(s['p1']?.eventId, 7)
+    const r = reconcileInbox(EMPTY_INBOX, [{ id: 'p2', sessionId: 'c', toolName: 'fileChange', input: {}, createdAt: '2026-10-19T09:59:00Z', waitingMs: 1 }])
+    assert.equal(r['p2']?.eventId, undefined)
+  })
   it('лента: решение помнит ширину и правило', () => {
     let conv = applyConversation(EMPTY_CONVERSATION, ev(1, 'permission.requested', { id: 'p1', toolName: 'commandExecution', input: {}, offers: { rule: RULE } }))
     conv = applyConversation(conv, ev(2, 'permission.resolved', { id: 'p1', decision: 'allow', scope: 'rule', rule: { kind: 'execpolicy', label: RULE.label }, by: 'human' }))

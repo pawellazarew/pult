@@ -30,7 +30,7 @@ import { explainFailure, exitCodeIn } from '../model/errors.js'
 // О2 (docs/14): почтовый ящик всего, что требует человека. Фильтр «Все» — запросы и непрочитанные
 // ошибки, «Непрочитанные» — все непрочитанные сессии, «Ошибки» — только ошибки.
 
-export function Inbox({ items, cards = [], filter = 'all', counts, agents, focused, busy, retrying, now, onFocus, onApprove, onAnswer, onDeny, onClose, onFilter, onOpen, onRetry, onStop, onWait }: {
+export function Inbox({ items, cards = [], filter = 'all', counts, agents, focused, busy, retrying, now, waitingCount = 0, onFocus, onApprove, onAnswer, onDeny, onClose, onFilter, onOpen, onRetry, onStop, onWait, onNextWaiting, onJumpPerm }: {
   items: readonly InboxItem[]
   /** Карточки сессий (ошибки или непрочитанное) — model/inbox.ts `inboxView`. */
   cards?: readonly SessionCard[]
@@ -42,6 +42,8 @@ export function Inbox({ items, cards = [], filter = 'all', counts, agents, focus
   /** Сессии, чей «Повторить» уже ушёл демону. */
   retrying?: ReadonlySet<string>
   now: number
+  /** Сколько сессий ждут внимания (очередь ⌘⌥L) — кнопка разбора и подсказка в пустом состоянии. */
+  waitingCount?: number
   onFocus(id: string): void
   /** Без `scope` — один раз; `session` / `rule` — кнопки M8d. */
   onApprove(id: string, scope?: 'session' | 'rule'): void
@@ -55,6 +57,10 @@ export function Inbox({ items, cards = [], filter = 'all', counts, agents, focus
   onStop?(name: string, upTo: number, turnId?: string): void
   /** «Похоже, завис» → «Ждать»: карточка прочитана до этого события, ход идёт дальше. */
   onWait?(name: string, upTo: number): void
+  /** Следующая сессия, которая ждёт тебя (то же, что ⌘⌥L). */
+  onNextWaiting?(): void
+  /** «в ленту» карточки запроса: открыть разговор и показать запрос (нет события — просто открыть). */
+  onJumpPerm?(sessionId: string, eventId?: number): void
 }): ReactElement {
   // `name` карточки — подпись (название), `key` — имя сессии: два агента с одним названием различимы по подсказке.
   const who = (name: string): { name: string; provider: string; key: string } => {
@@ -75,6 +81,11 @@ export function Inbox({ items, cards = [], filter = 'all', counts, agents, focus
           </div>
         ) : <span className="count">{items.length ? `${items.length} ждут` : ''}</span>}
         <span className="grow" />
+        {onNextWaiting && waitingCount > 0 && (
+          <button type="button" className="btn btn-ghost btn-sm inbox-next" data-testid="inbox-next-waiting"
+            title={`Следующая сессия, которая ждёт тебя: ошибки → запросы → готовые (${attentionKeys(IS_MAC).next})`}
+            onClick={onNextWaiting}>ждут {waitingCount}<Kbd>{attentionKeys(IS_MAC).next}</Kbd></button>
+        )}
         <button type="button" className="btn btn-ghost btn-sm" onClick={onClose} title={`Скрыть (${CMD}I)`}><Icon name="x" /></button>
       </div>
       <div className="inbox-list">
@@ -84,6 +95,8 @@ export function Inbox({ items, cards = [], filter = 'all', counts, agents, focus
             {filter === 'unread' ? <>Непрочитанного нет.<br />Здесь появятся сессии, которые закончили ход, упали или спросили, пока ты был не на них.</>
               : filter === 'errors' ? <>Ошибок нет.<br />Упавший ход, исчерпанный лимит, отказ стража и зависший ход появятся здесь.</>
                 : <>Никто ничего не ждёт.<br />Запросы разрешений и ошибки всех сессий появятся здесь.</>}
+            {waitingCount > 0 && <p className="inbox-waiting-hint" data-testid="inbox-waiting-hint">
+              {waitingCount} {plural(waitingCount, 'сессия ждёт', 'сессии ждут', 'сессий ждут')} тебя вне этого фильтра — {attentionKeys(IS_MAC).next} ведёт к ним.</p>}
           </div>
         ) : <>
           {cards.filter((c) => c.error).map((c) => <SessionCardView key={`s:${c.name}`} c={c} agent={who(c.name)} now={now}
@@ -92,7 +105,8 @@ export function Inbox({ items, cards = [], filter = 'all', counts, agents, focus
             <PermCard key={p.id} permId={p.id} toolName={p.toolName} input={p.input} state="pending"
               agent={who(p.sessionId)} createdAt={p.createdAt} now={now}
               focused={focused === p.id} busy={busy.has(p.id)} {...(p.offers ? { offers: p.offers } : {})} {...(p.concealed ? { concealed: true } : {})}
-              onFocus={() => onFocus(p.id)} onApprove={(scope) => onApprove(p.id, scope)} onAnswer={(answers) => onAnswer?.(p.id, answers)} onDeny={(r) => onDeny(p.id, r)} />
+              onFocus={() => onFocus(p.id)} onApprove={(scope) => onApprove(p.id, scope)} onAnswer={(answers) => onAnswer?.(p.id, answers)} onDeny={(r) => onDeny(p.id, r)}
+              {...(onJumpPerm ? { onJump: () => onJumpPerm(p.sessionId, p.eventId) } : {})} />
           ))}
           {cards.filter((c) => !c.error).map((c) => <SessionCardView key={`s:${c.name}`} c={c} agent={who(c.name)} now={now}
             retrying={false} onOpen={onOpen} />)}

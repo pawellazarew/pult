@@ -23,6 +23,12 @@ export interface InboxItem {
   /** Показанный вход не равен исполняемому (src/perm/broker.ts). */
   concealed?: true
   createdAt: string
+  /**
+   * Номер события `permission.requested` в журнале: «в ленту» из Inbox прыгает к карточке этого
+   * события в разговоре. Отсутствует только у карточек, восстановленных сверкой с `perm.list`
+   * (живого события под рукой нет) — тогда кнопка просто открывает сессию.
+   */
+  eventId?: number
 }
 
 export type InboxState = Readonly<Record<string, InboxItem>>
@@ -47,6 +53,7 @@ export function applyInbox(state: InboxState, ev: PultEvent): InboxState {
           ...(offers ? { offers } : {}),
           ...(ev.data['concealed'] === true ? { concealed: true as const } : {}),
           createdAt: ev.ts,
+          eventId: ev.id,
         },
       }
     }

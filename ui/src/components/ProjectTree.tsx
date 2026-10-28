@@ -70,6 +70,34 @@ export function browserItems(a: AgentView, onBrowser: (name: string, on: boolean
   ]
 }
 
+/** Действия меню сессии. Один и тот же набор — в строке сайдбара и в шапке разговора («⋯»). */
+export interface SessionMenuApi {
+  onRename?(name: string): void
+  onReveal?(path: string): void
+  onExport?(name: string): void
+  onBrowser?(name: string, on: boolean, headed: boolean): void
+  onArchive?(name: string, archived: boolean): void
+  onRemove?(name: string): void
+}
+
+/**
+ * Пункты меню сессии: ровно те же для сайдбара (правый клик и «⋯» строки) и для шапки разговора.
+ * «Удалить» — всегда последняя и опасная: самое заметное меню не должно состоять из одного удаления.
+ */
+export function sessionMenuItems(a: AgentView, api: SessionMenuApi): MenuEntry[] {
+  return [
+    { label: 'Переименовать…', onSelect: () => api.onRename?.(a.name), disabled: !api.onRename, testId: 'row-rename' },
+    { label: 'Показать папку в Finder', onSelect: () => api.onReveal?.(a.cwd), disabled: !api.onReveal, testId: 'row-reveal' },
+    { label: 'Экспорт в Markdown', onSelect: () => api.onExport?.(a.name), disabled: !api.onExport, testId: 'row-export' },
+    ...(api.onBrowser ? browserItems(a, api.onBrowser) : []),
+    a.archived
+      ? { label: 'Вернуть из архива', onSelect: () => api.onArchive?.(a.name, false), disabled: !api.onArchive, testId: 'row-unarchive' }
+      : { label: 'В архив', onSelect: () => api.onArchive?.(a.name, true), disabled: !api.onArchive, testId: 'row-archive' },
+    'sep',
+    { label: 'Удалить…', onSelect: () => api.onRemove?.(a.name), danger: true, disabled: !api.onRemove, testId: 'row-remove' },
+  ]
+}
+
 export function ProjectTree(p: ProjectTreeProps): ReactElement {
   const archived = p.archived ?? []
   const [menu, setMenu] = useState<OpenMenu | null>(null)
@@ -134,17 +162,7 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
   }
   const sessionMenu = (e: MouseEvent<HTMLElement>, a: AgentView): void => {
     e.preventDefault(); e.stopPropagation()
-    setMenu({ at: menuAt(e), testId: 'session-menu-list', items: [
-      { label: 'Переименовать…', onSelect: () => p.onRename?.(a.name), disabled: !p.onRename, testId: 'row-rename' },
-      { label: 'Показать папку в Finder', onSelect: () => p.onReveal?.(a.cwd), disabled: !p.onReveal, testId: 'row-reveal' },
-      { label: 'Экспорт в Markdown', onSelect: () => p.onExport?.(a.name), disabled: !p.onExport, testId: 'row-export' },
-      ...(p.onBrowser ? browserItems(a, p.onBrowser) : []),
-      a.archived
-        ? { label: 'Вернуть из архива', onSelect: () => p.onArchive?.(a.name, false), disabled: !p.onArchive, testId: 'row-unarchive' }
-        : { label: 'В архив', onSelect: () => p.onArchive?.(a.name, true), disabled: !p.onArchive, testId: 'row-archive' },
-      'sep',
-      { label: 'Удалить…', onSelect: () => p.onRemove?.(a.name), danger: true, disabled: !p.onRemove, testId: 'row-remove' },
-    ] })
+    setMenu({ at: menuAt(e), testId: 'session-menu-list', items: sessionMenuItems(a, p) })
   }
   const row = (a: AgentView, project: string, shortcut = false): ReactElement =>
     <SessionRow key={a.name} a={a} project={project} shortcut={shortcut} selected={a.name === p.selected} now={p.now} onSelect={(name) => {

@@ -98,7 +98,7 @@ export function Header(p: {
           <span className={`t-${p.doctorTone} ic-wrap`}><Icon name="pulse" /></span><span className="doctor-label">Диагностика</span>
         </button>
         <button type="button" className="btn" aria-pressed={p.inboxOpen} onClick={p.onInbox} data-testid="toggle-inbox" title={`Inbox (${CMD}I)`}>
-          <Icon name="inbox" />Ответы
+          <Icon name="inbox" />Inbox
           <span className={`badge${p.inboxCount ? '' : ' zero'}`} data-testid="inbox-count">{p.inboxCount}</span>
           <Kbd>{`${CMD}I`}</Kbd>
         </button>

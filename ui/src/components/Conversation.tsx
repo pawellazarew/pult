@@ -27,6 +27,8 @@ import { plural } from '../lib/ru.js'
 import { friendlyTool, groupActivity } from '../model/activity.js'
 import { ContextMenu } from './ContextMenu.js'
 import type { MenuEntry } from './ContextMenu.js'
+import { sessionMenuItems } from './ProjectTree.js'
+import type { SessionMenuApi } from './ProjectTree.js'
 import { settingsMenu } from '../model/sessionSettings.js'
 import type { SettingsPick } from '../model/sessionSettings.js'
 import type { ProviderCatalog } from '../model/types.js'
@@ -102,6 +104,11 @@ export interface ConversationProps {
   onStop(): void
   onRemove(): void
   onReveal(path: string): void
+  /**
+   * Меню «⋯» в шапке разговора — те же пункты, что у строки сайдбара (ProjectTree `sessionMenuItems`).
+   * Нет — старая оболочка: меню не показывается вовсе, удаление остаётся в сайдбаре.
+   */
+  menu?: SessionMenuApi
   /** Без `scope` — один раз; `session` / `rule` — кнопки M8d. */
   onApprove(permId: string, scope?: 'session' | 'rule'): void
   onAnswer?(permId: string, answers: Record<string, { answers: string[] }>): void
@@ -238,14 +245,7 @@ export function Conversation(p: ConversationProps): ReactElement {
           </div>
           <div className="conv-location" data-testid="conv-location" title={agent.cwd}><Icon name="folder" />{agent.cwd.split('/').filter(Boolean).pop() ?? agent.cwd}{agent.branch ? ` / ${agent.branch}` : ''}</div>
         </div>
-        {!sv.busy && (
-          <details className="conv-actions">
-            <summary aria-label="Действия с беседой">···</summary>
-            <button type="button" className="btn btn-ghost btn-sm" onClick={p.onRemove} data-testid="remove-agent" title="Удалить сессию">
-              <Icon name="trash" />Удалить беседу
-            </button>
-          </details>
-        )}
+        <ConversationMenu agent={agent} menu={p.menu} busy={sv.busy} onRemove={p.onRemove} />
       </header>
 
       {limited && (
@@ -307,6 +307,36 @@ export function Conversation(p: ConversationProps): ReactElement {
         {...(p.onConfigure ? { onConfigure: p.onConfigure } : {})} catalog={p.catalog ?? null} windows={p.windows ?? EMPTY_WINDOWS} />} />
     </section>
     </ImageContext.Provider>
+  )
+}
+
+/**
+ * Меню «⋯» в шапке разговора — те же пункты, что у строки сайдбара (переименовать, экспорт, архив,
+ * браузер, удалить). Раньше здесь было одно-единственное действие «Удалить беседу»: самое заметное
+ * меню состояло из самого опасного пункта (ревью UX 29.10.2026). Без `menu` (старая оболочка) —
+ * прежний вид с одним удалением.
+ */
+function ConversationMenu({ agent, menu, busy, onRemove }: { agent: AgentView; menu?: SessionMenuApi; busy: boolean; onRemove(): void }): ReactElement | null {
+  const [at, setAt] = useState<{ x: number; y: number } | null>(null)
+  if (busy) return null
+  if (!menu) {
+    return (
+      <details className="conv-actions">
+        <summary aria-label="Действия с беседой">···</summary>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={onRemove} data-testid="remove-agent" title="Удалить сессию">
+          <Icon name="trash" />Удалить беседу
+        </button>
+      </details>
+    )
+  }
+  return (
+    <>
+      <button type="button" className="conv-menu" data-testid="conv-menu" aria-label="Действия с беседой" title="Действия с беседой"
+        onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); setAt({ x: r.left, y: r.bottom + 2 }) }}>
+        <span className="dots" aria-hidden="true">⋯</span>
+      </button>
+      {at && <ContextMenu at={at} items={sessionMenuItems(agent, menu)} onClose={() => setAt(null)} testId="session-menu-list" label={`Действия с беседой ${agentLabel(agent)}`} />}
+    </>
   )
 }
 
