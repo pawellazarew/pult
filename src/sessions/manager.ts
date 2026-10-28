@@ -19,6 +19,7 @@ import type { PultConfig } from '../core/config.js'
 import { coversDir } from '../core/paths.js'
 import type { EventDraft, PultEvent } from '../core/events.js'
 import type { Logger } from '../core/log.js'
+import { MAX_LINE_BYTES } from '../core/ndjson.js'
 import { redactString } from '../core/log.js'
 import type { PultPaths } from '../core/paths.js'
 import type { EventStore } from '../core/store.js'
@@ -1428,12 +1429,42 @@ export function createManager(opts: ManagerOptions): SessionManager {
       const events = opts.store.readFrom(since, { sessionId: name })
       const cursor = events.length ? (events[events.length - 1] as PultEvent).id : since
       const wt = rec.worktree ? { worktree: rec.worktree } : {}
-      if (format === 'json') return { cursor, events, ...wt }
-      const text = events
+      // Ответ демона уезжает ОДНОЙ строкой NDJSON, а клиент рвёт соединение на строке длиннее
+      // MAX_LINE_BYTES (src/core/ndjson.ts): длинная сессия теряла окну связь с демоном целиком
+      // — вместе со всеми подписками. Хвост дозапрашивается следующим `read` от вернувшегося
+      // курсора; `truncated: true` говорит, что хвост есть. (Ревью 28.10.2026.)
+      const budget = MAX_LINE_BYTES - 4096
+      if (format === 'json') {
+        const out: PultEvent[] = []
+        let used = 0
+        for (const e of events) {
+          const w = Buffer.byteLength(JSON.stringify(e), 'utf8') + 1
+          // Хотя бы одно событие — всегда: пустой ответ на непустой журнал выглядел бы концом.
+          if (out.length > 0 && used + w > budget) break
+          out.push(e)
+          used += w
+        }
+        const cut = out[out.length - 1] as PultEvent | undefined
+        return {
+          cursor: cut ? cut.id : since,
+          events: out,
+          ...(out.length < events.length ? { truncated: true } : {}),
+          ...wt,
+        }
+      }
+      let text = events
         .filter((e) => e.kind === 'message.done')
         .map((e) => String((e.data as { text?: unknown }).text ?? ''))
         .filter((t) => t.length > 0)
         .join('\n')
+      if (text.length > 0) {
+        let truncatedText = false
+        while (text.length > 0 && Buffer.byteLength(JSON.stringify(text), 'utf8') > budget) {
+          text = text.slice(0, Math.floor(text.length * 0.9))
+          truncatedText = true
+        }
+        if (truncatedText) text += '\n… [ответ обрезан: длиннее строки NDJSON; целиком — --format json порциями по --since]'
+      }
       return { cursor, text, ...wt }
     },
 

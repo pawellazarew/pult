@@ -421,9 +421,15 @@ export function createStore(paths: PultPaths, deps: StoreDeps = {}): EventStore 
       const fd = openRead()
       if (fd === null) return []
       const buf = Buffer.allocUnsafe(length)
-      let got: number
+      let got = 0
       try {
-        got = readSync(fd, buf, 0, length, from)
+        // `readSync` обычного файла почти всегда читает всё, но «почти» — не гарантия: короткое
+        // чтение молча отдавало бы ОБРЕЗАННЫЙ хвост журнала. Дочитываем до конца диапазона.
+        while (got < length) {
+          const n = readSync(fd, buf, got, length - got, from + got)
+          if (!(n > 0)) break
+          got += n
+        }
       } catch {
         return []
       }

@@ -805,7 +805,14 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
       cwd: paths.home,
       env: buildChildEnv(process.env, { network: netEnv, extra: {} }),
       onNotification: (method, params) => { onNotification(method, params) },
-      onServerRequest: (id, method, params) => { void onServerRequest(id, method, params) },
+      onServerRequest: (id, method, params) => {
+        // Бросок из async-обработчика — это unhandled rejection, а не ответ серверу: ход codex
+        // висел бы на вопросе навсегда. Отвечаем ошибкой сами (ревью 28.10.2026).
+        void onServerRequest(id, method, params).catch((e: unknown) => {
+          logger.error('обработка запроса app-server упала', { method, error: (e as Error).message })
+          try { client?.respondError(id, -32603, `pult: внутренняя ошибка: ${(e as Error).message}`) } catch { /* процесс уже ушёл */ }
+        })
+      },
       onExit: (code, signal) => { onProcessGone(code, signal) },
       onSpawnError: (e) => { logger.error('codex app-server не запустился', { bin: opts.bin, error: e.message }) },
       onStderr: (line) => { logger.debug('codex stderr', { line: redactString(line.slice(0, 400)) }) },
@@ -2023,7 +2030,14 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
       }
       const threadId = l.threadId
       if (threadId) {
-        for (const [id, owner] of [...threadOwner]) if (owner.name === name) threadOwner.delete(id)
+        // Вместе с владельцем уходит и хвост незавершённых MCP-вызовов (`mcpCalls`): ход снят,
+        // `item/completed` уже не придёт, а аргументы вызова бывают мегабайтными — без этого
+        // закрытая сессия держала бы их до конца демона (ревью 28.10.2026).
+        for (const [id, owner] of [...threadOwner]) {
+          if (owner.name !== name) continue
+          threadOwner.delete(id)
+          mcpCalls.delete(id)
+        }
         // Закрываем ТРЕД, а не процесс: он общий. ИЗМЕРЕНО 21.09.2026 — ответ
         // `{status: "unsubscribed"}`, повторный вызов `{status: "notSubscribed"}`.
         if (client && client.alive() && l.attached) {
