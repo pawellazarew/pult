@@ -1,8 +1,9 @@
 // Список агентов слева: подпись статуса, сортировка, строка «папка · ветка». Чистые функции.
 //
-// ПОРЯДОК (docs/12 §3 п.1): сначала те, кто ждёт человека, потом работающие, потом остальные —
-// по последней активности, свежие выше. Внутри групп тоже по активности: из двух ждущих выше тот,
-// кто спросил позже, — его вопрос свежее в голове.
+// ПОРЯДОК (docs/12 §3 п.1): сначала те, кто ждёт человека, потом работающие, потом остальные. Внутри
+// групп — по началу последнего хода (`lastTurnAt`, затем `createdAt`, затем имя): беседа встаёт наверх
+// один раз, когда человек отправил реплику, и стоит на месте, пока идёт ход и после него. События потока,
+// инструменты, субагенты и фон порядок не двигают — строка не прыгает под курсором.
 
 import { isUnread, parseAttention } from '../../../src/sessions/attention.js'
 import type { SessionContext } from './context.js'
@@ -55,6 +56,8 @@ export interface AgentView {
   lastActivity: string
   /** Неизменная дата из реестра: порядок работающих бесед не зависит от событий потока. */
   createdAt?: string
+  /** Начало последнего хода человека: ключ порядка бесед. Нет — `createdAt`. */
+  lastTurnAt?: string
   /** В архиве: в дереве — в секции «Архив», а не под проектом. */
   archived?: boolean
   /** Фоновые задачи сессии (субагенты, команды), которые ещё идут после ответа. */
@@ -105,17 +108,19 @@ export function agentRank(a: Pick<AgentView, 'status' | 'pending' | 'background'
   return statusRank(a.status, a.pending, a.background?.count ?? 0)
 }
 
+/** Порядок бесед в любом списке: свежий ход выше, затем новее заведённая, затем имя (оно не меняется). */
+export function byLastTurn(a: AgentView, b: AgentView): number {
+  const time = (iso: string | undefined): number => { const t = Date.parse(iso ?? ''); return Number.isFinite(t) ? t : 0 }
+  return time(b.lastTurnAt ?? b.createdAt) - time(a.lastTurnAt ?? a.createdAt)
+    || time(b.createdAt) - time(a.createdAt)
+    || a.name.localeCompare(b.name)
+}
+
 export function sortAgents(list: readonly AgentView[]): AgentView[] {
   return [...list].sort((a, b) => {
     const r = agentRank(a) - agentRank(b)
     if (r !== 0) return r
-    if (agentRank(a) === 1) {
-      const created = (x: AgentView): number => { const t = Date.parse(x.createdAt ?? ''); return Number.isFinite(t) ? t : 0 }
-      return created(b) - created(a) || a.name.localeCompare(b.name)
-    }
-    const t = Date.parse(b.lastActivity) - Date.parse(a.lastActivity)
-    if (Number.isFinite(t) && t !== 0) return t
-    return agentLabel(a).localeCompare(agentLabel(b))
+    return byLastTurn(a, b)
   })
 }
 
@@ -125,11 +130,13 @@ export function sortAgents(list: readonly AgentView[]): AgentView[] {
  */
 export function buildAgents(
   records: readonly AgentRecord[],
-  live: Readonly<Record<string, { status?: SessionStatus; lastTs?: string; pending?: number; background?: { count: number; tasks: readonly string[] }; context?: SessionContext; phase?: TurnPhase }>>,
+  live: Readonly<Record<string, { status?: SessionStatus; lastTs?: string; lastTurnTs?: string; pending?: number; background?: { count: number; tasks: readonly string[] }; context?: SessionContext; phase?: TurnPhase }>>,
 ): AgentView[] {
   return sortAgents(records.map((r) => {
     const l = live[r.name] ?? {}
     const lastActivity = l.lastTs && Date.parse(l.lastTs) > Date.parse(r.createdAt) ? l.lastTs : r.createdAt
+    // Реестр знает ход после рестарта, живой поток — раньше `agent.list`; у обоих одно и то же `ts`.
+    const lastTurnAt = l.lastTurnTs && Date.parse(l.lastTurnTs) > Date.parse(r.lastTurnAt ?? r.createdAt) ? l.lastTurnTs : r.lastTurnAt ?? r.createdAt
     const context = l.context ?? r.context
     // Демон старше 0.2.21 полей не знает — тогда ничего не «непрочитано», как и было.
     const attention = parseAttention(r.attention)
@@ -148,6 +155,7 @@ export function buildAgents(
       pending: l.pending ?? r.pendingPermissions,
       lastActivity,
       createdAt: r.createdAt,
+      lastTurnAt,
       ...(l.background?.count ? { background: l.background } : {}),
       ...(context ? { context } : {}),
       ...(attention ? { attention } : {}),

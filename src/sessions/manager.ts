@@ -429,6 +429,19 @@ export function createManager(opts: ManagerOptions): SessionManager {
   // О2: записи до 0.2.21 отметки «видел» не знают — всё прошлое считается прочитанным (см. seedSeen).
   const seeded = registry.seedSeen(opts.store.lastId)
   if (seeded) opts.logger.info('отметка «видел» проставлена старым сессиям', { count: seeded, lastId: opts.store.lastId })
+  // Порядок бесед (`lastTurnAt`) у записей старше поля — из журнала сессии, один раз: последняя реплика человека,
+  // без неё — последнее событие. Читается только файл сессии (`events/<имя>.jsonl`), не общий журнал.
+  const turnsSeeded = registry.seedLastTurn((rec) => {
+    try {
+      const evs = opts.store.readSession(rec.name)
+      for (let i = evs.length - 1; i >= 0; i--) if ((evs[i] as PultEvent).kind === 'message.user') return (evs[i] as PultEvent).ts
+      return evs.at(-1)?.ts
+    } catch (e) {
+      opts.logger.warn('начало хода из журнала не прочитано', { session: rec.name, error: (e as Error).message })
+      return undefined
+    }
+  })
+  if (turnsSeeded) opts.logger.info('начало последнего хода проставлено старым сессиям', { count: turnsSeeded })
   for (const rec of registry.list()) {
     statuses.set(rec.name, rec.lastStatus)
     if (rec.context) contexts.set(rec.name, rec.context)
@@ -944,12 +957,15 @@ export function createManager(opts: ManagerOptions): SessionManager {
       const adapter = adapterFor(params.kind)
       await adapter.close(params.name)
       const rec = registry.update(params.name, { providerSessionId, ...(forkOnResume ? { forkOnResume: true } : {}) })!
+      let lastTurnAt: string | undefined
       for (const m of messages) {
-        emit({ sessionId: rec.name, provider: rec.provider, kind: m.role === 'user' ? 'message.user' : 'message.done',
+        const ev = emit({ sessionId: rec.name, provider: rec.provider, kind: m.role === 'user' ? 'message.user' : 'message.done',
           data: { text: redactString(m.text), ...(m.role === 'assistant' ? { itemId: `import-${rec.name}-${Date.now()}-${Math.random()}` } : {}) } })
+        if (ev.kind === 'message.user') lastTurnAt = ev.ts
       }
       statuses.set(rec.name, 'cold')
-      registry.update(rec.name, { lastStatus: 'cold' })
+      // Окно поднимает беседу по последней импортированной реплике (`message.user`) — реестр помнит то же время.
+      registry.update(rec.name, { lastStatus: 'cold', ...(lastTurnAt ? { lastTurnAt } : {}) })
       return rec
     },
 
@@ -1101,10 +1117,18 @@ export function createManager(opts: ManagerOptions): SessionManager {
       // «что сказал человек → почему не получилось». Отдельный вид, а не `message.done`:
       // статус сессии и текст ответа (`agent read`) реплика человека менять не должна.
       // Текст — через ту же редакцию, что и ответы модели (инвариант 7).
-      emit({ sessionId: name, provider: rec.provider, kind: 'message.user', data: { text: redactString(text) } })
+      const user = emit({ sessionId: name, provider: rec.provider, kind: 'message.user', data: { text: redactString(text) } })
       phases.accepted(name)
+      // Начало хода — время для порядка бесед в окне (`lastTurnAt`): одна запись реестра на ход, тем же `ts`, что у
+      // `message.user`, — окно поднимает строку по событию, и `agent.list` её уже не сдвинет.
       // Реплика в архивную сессию — она снова в работе: из архива её возвращает сама реплика.
-      if (rec.archived) registry.update(name, { archived: undefined })
+      // Запись — украшение порядка, а не часть хода: диск полон или реестр не пишется — ход всё равно идёт (иначе
+      // строка висела бы «запускается…», а реплика из очереди после повтора задвоилась бы в журнале).
+      try {
+        registry.update(name, { lastTurnAt: user.ts, ...(rec.archived ? { archived: undefined } : {}) })
+      } catch (e) {
+        opts.logger.warn('начало хода не записано в реестр', { session: name, error: (e as Error).message })
+      }
       maybeAutoTitle(name, text)
       prompting.set(name, (prompting.get(name) ?? 0) + 1)
       // ПОДЦЕПЛЕНИЕ ПОСЛЕ РЕСТАРТА. Реестр сессию пережил, а адаптер — нет: он живёт ровно
