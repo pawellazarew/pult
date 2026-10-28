@@ -134,6 +134,14 @@ describe('дерево проектов: сколько запросов ждё�
     assert.match(out, /data-testid="chat-filter"/)
   })
 
+  it('свёрнутый проект показывает самое срочное состояние и сохраняет число работающих в подсказке', () => {
+    const props = tree([agent({ name: 'wait', status: 'blocked_question' }), agent({ name: 'run', status: 'working' })], ['/w/pult'])
+    const out = html(ProjectTree, { ...props, collapsed: new Set(['/w/pult']) })
+    assert.match(out, /aria-label="1 ждёт ответа"/)
+    assert.match(out, /1 ждёт ответа · 1 в работе/)
+    assert.equal((out.match(/class="project-state /g) ?? []).length, 1)
+  })
+
   it('«Ждёт ответа · 2» вместо загадочного «2?»', () => {
     const out = text(html(ProjectTree, tree([agent({ pending: 2 })])))
     assert.match(out, /Ждёт ответа · 2/)

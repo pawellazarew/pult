@@ -167,6 +167,7 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
             const closed = !query && p.collapsed.has(g.path)
             const full = !!query || filter !== 'all' || longProjects.has(g.path)
             const shown = projectPreview(rows, p.selected, full)
+            const waitLabel = `${waiting} ${plural(waiting, 'ждёт ответа', 'ждут ответа', 'ждут ответа')}`
             return <details key={g.path} className={`proj project-group${selectedProject === g.path ? ' current-project' : ''}`} open={!closed}
               data-testid="project" data-project={g.path} data-pinned={g.pinned ? '1' : '0'}
               onToggle={(e) => { if (!query && e.currentTarget.open === p.collapsed.has(g.path)) p.onToggle(g.path) }}>
@@ -174,8 +175,8 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
                 <Icon name="chev" className="ic proj-chev" /><Icon name="folder" />
                 <span className="proj-name">{g.name}</span><span className="project-chat-count" aria-label={`${rows.length} чатов`}>{rows.length}</span>
                 <span className="grow" />
-                {closed && waiting > 0 && <span className="project-state t-wait" title={`${waiting} ждут ответа`} aria-label={`${waiting} ждут ответа`}>● {waiting}</span>}
-                {closed && working > 0 && <span className="project-state t-run" title={`${working} в работе`} aria-label={`${working} в работе`}>● {working}</span>}
+                {closed && waiting > 0 && <span className="project-state t-wait" title={`${waitLabel}${working ? ` · ${working} в работе` : ''}`} aria-label={waitLabel}>● {waiting}</span>}
+                {closed && waiting === 0 && working > 0 && <span className="project-state t-run" title={`${working} в работе`} aria-label={`${working} в работе`}>● {working}</span>}
                 {g.unread > 0 && <span className="proj-unread" data-testid="project-unread" title={`${g.unread} ${plural(g.unread, 'непрочитанная беседа', 'непрочитанные беседы', 'непрочитанных бесед')}`}>{g.unread}</span>}
                 <button type="button" className="proj-btn" title={`Новая сессия в ${shortPath(g.path, 60)}`} aria-label={`Новый чат в ${g.name}`} data-testid="project-new-session"
                   onKeyDown={(e) => e.stopPropagation()} onClick={(e) => { e.preventDefault(); e.stopPropagation(); p.onNew(g.path) }}><Icon name="plus" /></button>

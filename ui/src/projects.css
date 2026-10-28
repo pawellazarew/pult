@@ -42,3 +42,7 @@
 .project-sidebar .chat-recent .chat-section-title { padding-top: 5px; }
 .project-sidebar .chat-recent .ag { padding-top: 8px; padding-bottom: 8px; }
 @media (prefers-reduced-motion: reduce) { .project-group::details-content { transition: none; } }
+
+@media (max-width: 950px) {
+  .project-manager .project-group > .proj-h > .ic:not(.proj-chev), .project-chat-count { display: none; }
+}
