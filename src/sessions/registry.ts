@@ -351,25 +351,52 @@ export function createRegistry(paths: PultPaths): SessionRegistry {
     create(rec) {
       if (find(rec.name)) return false
       list.push({ ...rec })
-      save()
+      try {
+        save()
+      } catch (e) {
+        // Диск кончился: сессии, которой нет на диске, не должно быть и в памяти — иначе
+        // следующий демон её не увидит, а этот будет врать, что она есть.
+        const i = list.findIndex((s) => s.name === rec.name)
+        if (i >= 0) list.splice(i, 1)
+        throw e
+      }
       return true
     },
     update(name, patch) {
       const s = find(name)
       if (!s) return null
       const rec = s as unknown as Record<string, unknown>
+      // Патч применяется в памяти ДО записи на диск. Если `save` упал (ENOSPC и т.п.), запись
+      // обязана вернуться к прежнему виду: иначе «неудачная» смена режима подтверждений
+      // (`approval: full` при отказавшем диске) молча действовала бы со следующего хода,
+      // хотя человек увидел ошибку (ревью 28.10.2026).
+      const prev = new Map<string, { had: boolean; value: unknown }>()
       for (const [k, v] of Object.entries(patch)) {
+        prev.set(k, { had: Object.prototype.hasOwnProperty.call(rec, k), value: rec[k] })
         if (v === undefined) delete rec[k]
         else rec[k] = v
       }
-      save()
+      try {
+        save()
+      } catch (e) {
+        for (const [k, old] of prev) {
+          if (old.had) rec[k] = old.value
+          else delete rec[k]
+        }
+        throw e
+      }
       return { ...s }
     },
     remove(name) {
       const i = list.findIndex((s) => s.name === name)
       if (i < 0) return false
-      list.splice(i, 1)
-      save()
+      const [removed] = list.splice(i, 1)
+      try {
+        save()
+      } catch (e) {
+        if (removed) list.splice(i, 0, removed)
+        throw e
+      }
       return true
     },
     coolDown() {

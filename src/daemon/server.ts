@@ -240,10 +240,26 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
   let connSeq = 0
   let stopping = false
 
+  let journalBroken: string | null = null
   const emit = (draft: EventDraft): PultEvent => {
-    const ev = store.append(draft)
-    bus.emit(ev)
-    return ev
+    // Сломанный журнал — деградация ДЕМОНА, а не одного события: продолжать работу, теряя каждое
+    // событие, нельзя (статусы, разрешения и очередь разъедутся с журналом). Первый же сбой записи
+    // запускает мягкую остановку; сам `emit` продолжает бросать, чтобы вызывающий путь (RPC или
+    // таймер) узнал, что события НЕТ, и не построил состояние вокруг фантома.
+    try {
+      const ev = store.append(draft)
+      bus.emit(ev)
+      return ev
+    } catch (e) {
+      if (journalBroken === null) {
+        journalBroken = (e as Error).message
+        logger.error('журнал событий не пишется — останавливаю демон', { error: journalBroken })
+        // Через таймер, не сразу: `stop` объявлен ниже по файлу, а сюда можно попасть и из
+        // синхронного участка сборки демона. Повторный вызов безвреден — `stop` идемпотентен.
+        setTimeout(() => { void stop(`журнал событий не пишется: ${journalBroken}`).catch((stopErr) => { logger.error('мягкая остановка не удалась', { error: (stopErr as Error).message }) }) }, 0).unref?.()
+      }
+      throw e
+    }
   }
 
   // --- разрешения, адаптеры, сессии -----------------------------------------
@@ -1205,7 +1221,9 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
       case 'daemon.stop':
         send({ id: req.id, result: { stopping: true } })
         // Останавливаемся ПОСЛЕ ответа: клиент должен успеть его прочитать.
-        setTimeout(() => { void stop('запрошено через daemon.stop') }, 20)
+        setTimeout(() => {
+          void stop('запрошено через daemon.stop').catch((e) => { logger.error('остановка по daemon.stop не удалась', { error: (e as Error).message }) })
+        }, 20)
         return
 
       case 'doctor.run':

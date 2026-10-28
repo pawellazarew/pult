@@ -11,7 +11,16 @@ export function atomicWrite(file: string, content: string | Buffer, mode: number
   const tmp = `${file}.tmp-${process.pid}-${Date.now()}`
   const fd = openSync(tmp, 'w', mode)
   try {
-    writeSync(fd, typeof content === 'string' ? Buffer.from(content, 'utf8') : content)
+    // `writeSync` имеет право записать МЕНЬШЕ, чем просили (почти полный диск): без дочитывающего
+    // цикла усечённый файл атомарно заменял бы целый. Такой же цикл уже есть в store.ts
+    // (`writeAllSync`) и registry.ts — это третий его экземпляр (ревью 28.10.2026).
+    const buf = typeof content === 'string' ? Buffer.from(content, 'utf8') : content
+    let off = 0
+    while (off < buf.length) {
+      const n = writeSync(fd, buf, off, buf.length - off)
+      if (!(n > 0)) throw new Error(`atomicWrite: запись вернула ${n} из ${buf.length - off} байт`)
+      off += n
+    }
     fsyncSync(fd)
   } finally {
     closeSync(fd)

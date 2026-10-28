@@ -116,25 +116,32 @@ export function createBroker(opts: BrokerOptions): PermBroker {
     if (!pending.has(entry.id)) return
     pending.delete(entry.id)
     clearTimeout(entry.timer)
-    opts.emit({
-      sessionId: entry.req.sessionId,
-      provider: 'pult',
-      kind: 'permission.resolved',
-      data: {
-        id: entry.id,
-        toolName: entry.req.toolName,
-        ...(entry.req.toolUseId ? { toolUseId: entry.req.toolUseId } : {}),
-        decision: decision.behavior,
-        // M8d: ширина «да» — в журнал, чтобы история показывала «в этой сессии» / «всегда для …». У отказа её нет.
-        ...(decision.behavior === 'allow' ? { scope: decision.scope ?? 'once' } : {}),
-        ...(decision.behavior === 'allow' && decision.scope === 'rule' && entry.offers?.rule
-          ? { rule: { kind: entry.offers.rule.kind, label: entry.offers.rule.label } } : {}),
-        by: how,
-        ...(decision.message ? { message: decision.message } : {}),
-        waitingMs: Date.now() - entry.createdAt,
-      },
-    })
-    entry.settle(decision, how)
+    // Событие — в `try`, решение — в `finally`: если журнал сломан и `emit` бросил, спрашивающий
+    // всё равно обязан получить ответ. Потерянное событие восстановит перезапуск демона (журнал
+    // и так не пишется), а вот «Разрешить», съеденное вместе с карточкой, не восстанавливается:
+    // заглушка `mcp-ask` или запрос codex висели бы до конца хода (ревью 28.10.2026).
+    try {
+      opts.emit({
+        sessionId: entry.req.sessionId,
+        provider: 'pult',
+        kind: 'permission.resolved',
+        data: {
+          id: entry.id,
+          toolName: entry.req.toolName,
+          ...(entry.req.toolUseId ? { toolUseId: entry.req.toolUseId } : {}),
+          decision: decision.behavior,
+          // M8d: ширина «да» — в журнал, чтобы история показывала «в этой сессии» / «всегда для …». У отказа её нет.
+          ...(decision.behavior === 'allow' ? { scope: decision.scope ?? 'once' } : {}),
+          ...(decision.behavior === 'allow' && decision.scope === 'rule' && entry.offers?.rule
+            ? { rule: { kind: entry.offers.rule.kind, label: entry.offers.rule.label } } : {}),
+          by: how,
+          ...(decision.message ? { message: decision.message } : {}),
+          waitingMs: Date.now() - entry.createdAt,
+        },
+      })
+    } finally {
+      entry.settle(decision, how)
+    }
   }
 
   return {
@@ -169,23 +176,32 @@ export function createBroker(opts: BrokerOptions): PermBroker {
           settle: (decision) => resolve(decision),
         }
         // `unref` намеренно НЕ зовём: пока кто-то ждёт решения, демон обязан быть жив.
+        // Вопрос публикуется ДО `pending.set`: если журнал сломан и `emit` бросил, карточки в
+        // Inbox просто не будет — без записи в `pending`, без призрака до таймаута и без второго
+        // броска из таймера. Спрашивающий получает отказ сразу: вопроса не задали — согласия нет.
+        try {
+          opts.emit({
+            sessionId: req.sessionId,
+            provider: 'pult',
+            kind: 'permission.requested',
+            data: {
+              id,
+              toolName: req.toolName,
+              ...(req.toolUseId ? { toolUseId: req.toolUseId } : {}),
+              input: redacted,
+              ...(offers ? { offers } : {}),
+              ...(concealed ? { concealed: true } : {}),
+            },
+          })
+        } catch {
+          clearTimeout(entry.timer)
+          resolve({ behavior: 'deny', message: 'pult: журнал недоступен — вопрос не задан' })
+          return
+        }
         pending.set(id, entry)
         const gone = (): void => {
           finish(entry, { behavior: 'deny', message: `pult: ${ro.reason ?? ASKER_GONE_REASON}` }, 'provider_gone')
         }
-        opts.emit({
-          sessionId: req.sessionId,
-          provider: 'pult',
-          kind: 'permission.requested',
-          data: {
-            id,
-            toolName: req.toolName,
-            ...(req.toolUseId ? { toolUseId: req.toolUseId } : {}),
-            input: redacted,
-            ...(offers ? { offers } : {}),
-            ...(concealed ? { concealed: true } : {}),
-          },
-        })
         // Подписка — ПОСЛЕ `permission.requested`: в журнале отказ всегда идёт за вопросом, даже если
         // спрашивающий умер ещё до того, как вопрос дошёл до брокера.
         if (ro.signal) {

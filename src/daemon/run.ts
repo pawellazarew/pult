@@ -19,6 +19,8 @@ export const EXIT_ALREADY_RUNNING = 3
 export interface SignalGate {
   pending: string | null
   handler: ((signal: string) => void) | null
+  /** Фатальная ошибка (`uncaughtException`/`unhandledRejection`) после готовности демона — мягкая остановка. */
+  fatal: ((origin: string, error: unknown) => void) | null
 }
 
 export async function runDaemon(gate: SignalGate): Promise<void> {
@@ -48,12 +50,36 @@ export async function runDaemon(gate: SignalGate): Promise<void> {
     if (!daemon) { pendingSignal = signal; return }
     stopping = true
     const d = daemon
-    void d.stop(`сигнал ${signal}`).then(() => {
-      logger.close()
-      process.exit(EXIT_OK)
-    })
+    d.stop(`сигнал ${signal}`)
+      .then(() => {
+        logger.close()
+        process.exit(EXIT_OK)
+      })
+      .catch((e) => {
+        // Застрявшая остановка не должна оставлять полуживого демона: неудача — тоже выход,
+        // только с кодом ошибки, чтобы служба (KeepAlive по неуспеху) подняла процесс заново.
+        logger.error('мягкая остановка провалилась — выхожу с ошибкой', { error: (e as Error).message })
+        logger.close()
+        process.exit(EXIT_ERROR)
+      })
   }
   gate.handler = shutdown
+  // Фатальная ошибка после готовности: остановку начинаем, но код выхода — ошибка, а не чистый ноль
+  // (launchd по `SuccessfulExit: false` должен понять, что это не «попросили и вышли»).
+  gate.fatal = (origin, error) => {
+    if (stopping) return
+    if (!daemon) {
+      logger.error('фатальная ошибка до готовности демона — выхожу', { origin, error: error instanceof Error ? error.message : String(error) })
+      process.exit(EXIT_ERROR)
+      return
+    }
+    stopping = true
+    logger.error('фатальная ошибка — мягкая остановка', { origin, error: error instanceof Error ? error.message : String(error) })
+    const d = daemon
+    d.stop(`фатальная ошибка: ${origin}`)
+      .then(() => { logger.close(); process.exit(EXIT_ERROR) })
+      .catch(() => { logger.close(); process.exit(EXIT_ERROR) })
+  }
 
   let started
   try {
