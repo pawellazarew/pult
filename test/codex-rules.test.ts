@@ -46,7 +46,7 @@ describe('правила codex: разбор строк и метки', () => {
   it('путь: CODEX_HOME или HOME/.codex; файл app-server Пульта — по HOME ребёнка (CODEX_HOME ему не передаётся)', () => {
     assert.equal(codexRulesPath({ CODEX_HOME: '/x/ch' }, '/h'), '/x/ch/rules/default.rules')
     assert.equal(codexRulesPath({}, '/h'), '/h/.codex/rules/default.rules')
-    assert.equal(codexChildRulesPath({ CODEX_HOME: '/x/ch', HOME: '/home/u' }, '/h'), '/home/u/.codex/rules/default.rules')
+    assert.equal(codexChildRulesPath({ CODEX_HOME: '/x/ch', HOME: '/home/user' }, '/h'), '/home/user/.codex/rules/default.rules')
   })
   it('prefix_rule: JSON-литералы с кавычками, запятыми и \\n; альтернативы, deny и мусор — null', () => {
     const argv = ['/bin/zsh', '-lc', 'echo "a, b" ] [\n']
