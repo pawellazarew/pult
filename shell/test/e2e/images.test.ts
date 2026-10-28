@@ -7,7 +7,12 @@ import type { Harness } from './harness.js'
 
 describe('изображения: живой ответ, просмотр и история', () => {
   let h: Harness
-  before(async () => { h = await launch({ name: 'images' }) })
+  before(async () => {
+    h = await launch({ name: 'images' })
+    // Демона поднимает окно уже после загрузки страницы: под нагрузкой клиент теста раньше него
+    // ловил «нет файла токена — демон не запущен». Ждём подключения окна, как остальные наборы.
+    assert.ok(await waitFor(async () => (await h.win.getAttribute('.app', 'data-conn')) === 'up', 20_000), 'окно не подключилось')
+  })
   after(async () => { await h?.close() })
   it('три локальных изображения видны, увеличиваются и остаются после перезапуска окна', async () => {
     const c = await h.client()
