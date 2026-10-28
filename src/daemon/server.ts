@@ -429,16 +429,19 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
       } })
     },
   })
-  const revokeRule = (id: unknown, by: string): RevokeOutcome => {
+  const revokeRule = async (id: unknown, by: string): Promise<RevokeOutcome> => {
     if (typeof id !== 'string' || !id) throw new ManagerError(ERROR_CODES.invalidParams, 'нужен id правила из pult perm rules')
     let r: { rule: CodexRule; stillAllowedBy: number }
-    try { r = rules.revoke(id) } catch (e) {
+    try { r = await rules.revoke(id) } catch (e) {
       if (e instanceof RulesError) throw new ManagerError(e.code === 'not_found' ? ERROR_CODES.notFound : ERROR_CODES.internal, e.message)
       throw new ManagerError(ERROR_CODES.internal, (e as Error).message)
     }
     // Codex держит правила в памяти процесса — перезапустить его, как только ходов нет (идущие не рвутся).
-    const codexState = codex.reloadPolicy?.(`Правило «Всегда» отозвано (${ruleWords(r.rule)})`) ?? 'not_running'
-    const outcome: RevokeOutcome = { rule: { id: r.rule.id, kind: r.rule.kind, label: r.rule.label }, stillAllowedBy: r.stillAllowedBy, codex: codexState }
+    const reload = codex.reloadPolicy?.(`Правило «Всегда» отозвано (${ruleWords(r.rule)})`) ?? { codex: 'not_running' as const }
+    const codexState = reload.codex
+    const outcome: RevokeOutcome = {
+      rule: { id: r.rule.id, kind: r.rule.kind, label: r.rule.label }, stillAllowedBy: r.stillAllowedBy, codex: codexState, ...(reload.busy ? { busy: reload.busy } : {}),
+    }
     emit({ sessionId: DAEMON_SESSION, provider: 'pult', kind: 'rule.revoked', data: {
       id: r.rule.id, kind: r.rule.kind, label: r.rule.label, session: r.rule.session, at: r.rule.at, by, stillAllowedBy: r.stillAllowedBy, codex: codexState,
     } })
@@ -858,7 +861,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
           if (keys.length !== 1 || !rk || rk.length !== 1 || rk[0] !== 'revoke' || typeof (r as Record<string, unknown>)['revoke'] !== 'string') {
             throw new ManagerError(ERROR_CODES.invalidParams, 'settings.set: codexRules — только {revoke: id}, отдельным вызовом')
           }
-          const outcome = revokeRule((r as Record<string, unknown>)['revoke'], `${conn.client}#${conn.id}`)
+          const outcome = await revokeRule((r as Record<string, unknown>)['revoke'], `${conn.client}#${conn.id}`)
           return { ...settingsReply(), codexRulesRevoked: { ...outcome, text: revokeSummary(outcome) } }
         }
         let ns: NewSessionSettings | undefined
@@ -1179,7 +1182,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
         return rules.list()
       case 'perm.rules.revoke':
       {
-        const outcome = revokeRule(p['id'], `${conn.client}#${conn.id}`)
+        const outcome = await revokeRule(p['id'], `${conn.client}#${conn.id}`)
         return { revoked: outcome.rule, stillAllowedBy: outcome.stillAllowedBy, codex: outcome.codex, text: revokeSummary(outcome) }
       }
       case 'perm.resolve': {
@@ -1744,7 +1747,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     // SIGKILL через 5 с; оборванную замену доведёт или откатит следующий старт по журналу apps/swap.json.
     await appUpdater.stop()
     notifyRunner?.close()
-    rules.close()
+    try { await rules.close() } catch (e) { logger.warn('правила codex: ожидания меток не закрыты', { error: (e as Error).message }) }
     // Журнал мог сломаться (диск кончился) — это не повод не доводить остановку до конца.
     try {
       emit({ sessionId: DAEMON_SESSION, provider: 'pult', kind: 'daemon.stopping', data: { reason } })

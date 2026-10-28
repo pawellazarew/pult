@@ -54,7 +54,9 @@ describe('правила «Всегда»: раздел «Настроек»', (
     assert.match(t, /Правила «Всегда»/)
     assert.match(t, /\/h\/\.codex\/rules\/default\.rules/)
     assert.match(t, /Команды, начинающиеся с «git push» 29\.10\.2026 13:05 · сессия w · \/srv\/p Отозвать/)
-    assert.match(t, /Codex читает правила только при запуске, поэтому после отзыва Пульт перезапускает его: сразу, если ходов Codex нет, иначе — когда они закончатся/)
+    assert.match(t, /Codex читает правила только при запуске, поэтому после отзыва Пульт перезапускает свой Codex: сразу, если он свободен, иначе — когда закончатся ходы, фон и вопросы/)
+    assert.match(t, /разрешения «в этой сессии» у всех сессий Codex сбрасываются/)
+    assert.match(t, /Codex, запущенный вне Пульта \(терминал, IDE\), держит правило до своего перезапуска/)
     assert.doesNotMatch(t, /могут помнить/)
     assert.match(t, /Ещё 3 строки/)
   })
@@ -68,7 +70,7 @@ describe('правила «Всегда»: раздел «Настроек»', (
   it('осталась копия прерванной записи — предупреждение с путём', () => {
     const out = html(RulesSection, { panel: { list: { ...LIST, backup: '/h/.codex/rules/default.rules.pult.bak' }, onRevoke: async () => ({ ok: '' }) } })
     assert.match(out, /data-testid="rules-backup"/)
-    assert.match(text(out), /default\.rules\.pult\.bak.*до этого Пульт файл не правит/)
+    assert.match(text(out), /default\.rules\.pult\.bak — до её удаления Пульт файл не правит\. Если файл правил пуст или обрезан — mv \/h\/\.codex\/rules\/default\.rules\.pult\.bak \/h\/\.codex\/rules\/default\.rules\s*, затем проверь последние строки/)
   })
   it('в диалоге — только когда демон отдаёт правила', () => {
     const base = { settings: null, catalog: null, onSave: async () => null, onClose: () => {} }

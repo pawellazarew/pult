@@ -10,13 +10,17 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, it } from 'node:test'
-import { codexRuleTarget } from '../dist/adapters/codex/adapter.js'
+import { codexRuleTarget, createCodexAdapter, RELOAD_REMIND_MS } from '../dist/adapters/codex/adapter.js'
+import { defaultConfig } from '../dist/core/config.js'
+import type { EventDraft } from '../dist/core/events.js'
+import { createLogger } from '../dist/core/log.js'
+import { createBroker } from '../dist/perm/broker.js'
 import { connectClient } from '../dist/cli/client.js'
 import { ensureLayout, layout } from '../dist/core/paths.js'
 import type { PultPaths } from '../dist/core/paths.js'
 import {
-  codexChildRulesPath, codexRulesPath, countMatching, createCodexRules, formatMarker, listCodexRules, markNewRule, normalizeHost, openLocked, parseMarker,
-  parseRuleLine, revokeCodexRule, ruleSha,
+  backupAdvice, codexChildRulesPath, codexRulesPath, countMatching, createCodexRules, editRulesFile, formatMarker, listCodexRules, markNewRule, normalizeHost,
+  openLocked, parseMarker, parseRuleLine, revokeCodexRule, ruleSha,
 } from '../dist/perm/codexRules.js'
 import { revokeSummary } from '../dist/perm/rulesText.js'
 import { CLI_ENTRY, FAKE_CLAUDE, FAKE_CODEX_SCRIPTED, startTestDaemon, tempHome, waitFor } from './helpers.js'
@@ -84,9 +88,14 @@ describe('правила codex: разбор строк и метки', () => {
   })
   it('итог отзыва словами: перезапущен / после хода / не запущен; «ещё разрешено N другими строками»', () => {
     const rule = { id: 'r-1', kind: 'execpolicy' as const, label: 'git push' }
-    assert.match(revokeSummary({ rule, stillAllowedBy: 0, codex: 'restarted' }), /^Отозвано: команды, начинающиеся с «git push»\. Codex перезапущен/)
-    assert.match(revokeSummary({ rule, stillAllowedBy: 0, codex: 'deferred' }), /до его конца правило ещё действует, потом Пульт перезапустит Codex/)
-    assert.match(revokeSummary({ rule, stillAllowedBy: 0, codex: 'not_running' }), /Codex не запущен/)
+    const restarted = revokeSummary({ rule, stillAllowedBy: 0, codex: 'restarted' })
+    assert.match(restarted, /^Отозвано: команды, начинающиеся с «git push»\. Codex в Пульте перезапущен/)
+    assert.match(restarted, /продолжатся с того же места, но разрешения «в этой сессии» у всех сессий Codex сброшены/, 'оговорка обязательна')
+    assert.match(restarted, /вне Пульта \(терминал, IDE\), держит правило до своего перезапуска/)
+    const deferred = revokeSummary({ rule, stillAllowedBy: 0, codex: 'deferred', busy: 'работает фон — субагенты или команды' })
+    assert.match(deferred, /Codex занят \(работает фон — субагенты или команды\): пока он не освободится, правило в нём ещё действует/)
+    assert.match(deferred, /«в этой сессии» у всех сессий Codex сброшены/)
+    assert.match(revokeSummary({ rule, stillAllowedBy: 0, codex: 'not_running' }), /Codex в Пульте не запущен — правило больше не действует; codex, запущенный вне Пульта/)
     assert.match(revokeSummary({ rule, stillAllowedBy: 2, codex: 'restarted' }), /ещё разрешено 2 другими строками/)
     assert.match(revokeSummary({ rule, stillAllowedBy: 1, codex: 'restarted' }), /ещё разрешено 1 другой строкой/)
   })
@@ -95,7 +104,7 @@ describe('правила codex: разбор строк и метки', () => {
 describe('правила codex: метка, список, отзыв — байт в байт', () => {
   const grant = { kind: 'execpolicy' as const, argv: ['git', 'push'], sessionId: 'w', cwd: '/srv/p' }
 
-  it('метит только НОВУЮ строку; остальное — байт в байт; отзыв на месте (тот же inode) возвращает файл как был', () => {
+  it('метит только НОВУЮ строку; остальное — байт в байт; отзыв на месте (тот же inode) возвращает файл как был', async () => {
     const dir = tmp()
     try {
       const f = join(dir, 'default.rules')
@@ -104,18 +113,18 @@ describe('правила codex: метка, список, отзыв — бай�
       const ino = statSync(f).ino
       const baseline = countMatching(readFileSync(f), grant)
       assert.equal(baseline, 0)
-      assert.equal(markNewRule(f, grant, baseline, { id: 'r-1', at: '2026-10-29T10:00:00.000Z' }), null, 'codex ещё не дописал — метить нечего')
+      assert.equal(await markNewRule(f, grant, baseline, { id: 'r-1', at: '2026-10-29T10:00:00.000Z' }), null, 'codex ещё не дописал — метить нечего')
       assert.ok(readFileSync(f).equals(USER_TEXT), 'файл не тронут')
       appendFileSync(f, `\n${RULE(['git', 'push'])}\n`)
       const withRule = readFileSync(f)
-      const marked = markNewRule(f, grant, baseline, { id: 'r-1', at: '2026-10-29T10:00:00.000Z' })
+      const marked = await markNewRule(f, grant, baseline, { id: 'r-1', at: '2026-10-29T10:00:00.000Z' })
       assert.deepEqual(marked, { id: 'r-1', at: '2026-10-29T10:00:00.000Z', session: 'w', cwd: '/srv/p', kind: 'execpolicy', label: 'git push' })
       const listed = listCodexRules(f)
       assert.deepEqual(listed.rules, [marked])
       assert.equal(listed.unmarked, 2, 'чужие allow-строки — только счётчиком; deny не в счёт')
       assert.equal(statSync(f).mode & 0o777, 0o640, 'режим файла сохранён')
-      assert.equal(markNewRule(f, grant, baseline, { id: 'r-2', at: 'x' }), null, 'повторная метка не ставится')
-      const revoked = revokeCodexRule(f, 'r-1')
+      assert.equal(await markNewRule(f, grant, baseline, { id: 'r-2', at: 'x' }), null, 'повторная метка не ставится')
+      const revoked = await revokeCodexRule(f, 'r-1')
       assert.equal(revoked.rule.label, 'git push')
       assert.equal(revoked.stillAllowedBy, 0)
       const back = readFileSync(f)
@@ -123,11 +132,11 @@ describe('правила codex: метка, список, отзыв — бай�
       assert.ok(!back.equals(withRule))
       assert.equal(statSync(f).ino, ino, 'правка на месте, а не rename')
       assert.equal(existsSync(`${f}.pult.bak`), false, 'копия убрана после записи')
-      assert.throws(() => revokeCodexRule(f, 'r-1'), /нет/)
+      await assert.rejects(revokeCodexRule(f, 'r-1'), /нет/)
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
 
-  it('запись codex в дескриптор, открытый ДО правки Пульта, не теряется', () => {
+  it('запись codex в дескриптор, открытый ДО правки Пульта, не теряется', async () => {
     const dir = tmp()
     try {
       const f = join(dir, 'default.rules')
@@ -135,14 +144,14 @@ describe('правила codex: метка, список, отзыв — бай�
       writeFileSync(f, `${MARK('r-5', line)}\n${line}\n`)
       const codexFd = openSync(f, 'a')
       try {
-        revokeCodexRule(f, 'r-5')
+        await revokeCodexRule(f, 'r-5')
         writeSync(codexFd, `${RULE(['cargo', 'test'])}\n`)
       } finally { closeSync(codexFd) }
       assert.equal(readFileSync(f, 'utf8'), `${RULE(['cargo', 'test'])}\n`)
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
 
-  it('замок codex (flock) занят — Пульт ждёт и отказывает, файл не тронут (macOS: O_EXLOCK)', { skip: process.platform !== 'darwin' }, () => {
+  it('замок codex (flock) занят — Пульт ждёт и отказывает, файл не тронут (macOS: O_EXLOCK)', { skip: process.platform !== 'darwin' }, async () => {
     const dir = tmp()
     try {
       const f = join(dir, 'default.rules')
@@ -151,14 +160,14 @@ describe('правила codex: метка, список, отзыв — бай�
       writeFileSync(f, text)
       const held = openSync(f, fsc.O_RDWR | 0x20)
       try {
-        assert.throws(() => revokeCodexRule(f, 'r-5'), /держит другой процесс/)
+        await assert.rejects(revokeCodexRule(f, 'r-5'), /держит другой процесс/)
       } finally { closeSync(held) }
       assert.equal(readFileSync(f, 'utf8'), text)
-      assert.equal(openLocked(f).locked, true)
+      assert.equal((await openLocked(f)).locked, true)
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
 
-  it('осталась копия прерванной записи — список её показывает, правки нет до человека', () => {
+  it('осталась копия прерванной записи — список её показывает, правки нет до человека', async () => {
     const dir = tmp()
     try {
       const f = join(dir, 'default.rules')
@@ -167,13 +176,13 @@ describe('правила codex: метка, список, отзыв — бай�
       writeFileSync(f, text)
       writeFileSync(`${f}.pult.bak`, 'старое')
       assert.equal(listCodexRules(f).backup, `${realpathSync(f)}.pult.bak`)
-      assert.throws(() => revokeCodexRule(f, 'r-5'), /копия прерванной записи/)
+      await assert.rejects(revokeCodexRule(f, 'r-5'), /копия прерванной записи/)
       assert.equal(readFileSync(f, 'utf8'), text)
       assert.equal(readFileSync(`${f}.pult.bak`, 'utf8'), 'старое', 'копию не затираем')
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
 
-  it('строка уже была в файле до «Всегда» (codex не дублирует) — метки нет, чужое не отзывается', () => {
+  it('строка уже была в файле до «Всегда» (codex не дублирует) — метки нет, чужое не отзывается', async () => {
     const dir = tmp()
     try {
       const f = join(dir, 'default.rules')
@@ -181,15 +190,15 @@ describe('правила codex: метка, список, отзыв — бай�
       const before = readFileSync(f)
       const baseline = countMatching(before, grant)
       assert.equal(baseline, 1)
-      assert.equal(markNewRule(f, grant, baseline, { id: 'r-1', at: 'x' }), null)
+      assert.equal(await markNewRule(f, grant, baseline, { id: 'r-1', at: 'x' }), null)
       assert.ok(readFileSync(f).equals(before))
       assert.deepEqual(listCodexRules(f).rules, [])
-      assert.throws(() => revokeCodexRule(f, 'r-1'))
+      await assert.rejects(revokeCodexRule(f, 'r-1'))
       assert.ok(readFileSync(f).equals(before), 'неотмеченную строку отзыв не трогает')
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
 
-  it('метка-сирота не усыновляет строку человека под собой и следующую запись codex', () => {
+  it('метка-сирота не усыновляет строку человека под собой и следующую запись codex', async () => {
     const dir = tmp()
     try {
       const f = join(dir, 'default.rules')
@@ -199,16 +208,16 @@ describe('правила codex: метка, список, отзыв — бай�
       writeFileSync(f, text)
       assert.deepEqual(listCodexRules(f).rules, [])
       assert.equal(listCodexRules(f).unmarked, 1)
-      assert.throws(() => revokeCodexRule(f, 'r-9'), /нет/)
+      await assert.rejects(revokeCodexRule(f, 'r-9'), /нет/)
       assert.equal(readFileSync(f, 'utf8'), text, 'строка человека на месте')
       // codex дописывает новую строку сразу под меткой-сиротой в конце файла — та её тоже не берёт.
       appendFileSync(f, `${RULE(['cargo'])}\n`)
       assert.deepEqual(listCodexRules(f).rules, [])
-      assert.throws(() => revokeCodexRule(f, 'r-8'), /нет/)
+      await assert.rejects(revokeCodexRule(f, 'r-8'), /нет/)
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
 
-  it('две метки с одним id — ни одна не в списке, обе строки — «без метки»', () => {
+  it('две метки с одним id — ни одна не в списке, обе строки — «без метки»', async () => {
     const dir = tmp()
     try {
       const f = join(dir, 'default.rules')
@@ -217,11 +226,11 @@ describe('правила codex: метка, список, отзыв — бай�
       writeFileSync(f, `${MARK('r-1', a)}\n${a}\n${MARK('r-1', b)}\n${b}\n`)
       const l = listCodexRules(f)
       assert.deepEqual([l.rules.length, l.unmarked], [0, 2])
-      assert.throws(() => revokeCodexRule(f, 'r-1'), /нет/)
+      await assert.rejects(revokeCodexRule(f, 'r-1'), /нет/)
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
 
-  it('после отзыва — сколько строк ещё разрешают то же: такая же, префикс шире, соседний *.rules', () => {
+  it('после отзыва — сколько строк ещё разрешают то же: такая же, префикс шире, соседний *.rules', async () => {
     const dir = tmp()
     try {
       const f = join(dir, 'default.rules')
@@ -229,12 +238,12 @@ describe('правила codex: метка, список, отзыв — бай�
       writeFileSync(f, `${MARK('r-1', line)}\n${line}\n${line}\n${RULE(['git'])}\n${RULE(['git', 'push', '--force'])}\n`)
       writeFileSync(join(dir, 'extra.rules'), `${RULE(['git', 'push'])}\n`)
       writeFileSync(join(dir, 'notes.txt'), `${RULE(['git', 'push'])}\n`)
-      const r = revokeCodexRule(f, 'r-1')
+      const r = await revokeCodexRule(f, 'r-1')
       assert.equal(r.stillAllowedBy, 3, 'такая же + «git» + extra.rules; более узкий префикс и не-*.rules не в счёт')
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
 
-  it('симлинк остаётся симлинком: правится его цель', () => {
+  it('симлинк остаётся симлинком: правится его цель', async () => {
     const dir = tmp()
     try {
       const real = join(dir, 'dotfiles.rules.txt')
@@ -242,18 +251,78 @@ describe('правила codex: метка, список, отзыв — бай�
       const line = RULE(['make'])
       writeFileSync(real, `${MARK('r-5', line)}\n${line}\n# хвост\n`)
       symlinkSync(real, link)
-      revokeCodexRule(link, 'r-5')
+      await revokeCodexRule(link, 'r-5')
       assert.ok(lstatSync(link).isSymbolicLink())
       assert.equal(readFileSync(real, 'utf8'), '# хвост\n')
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
 
-  it('файла нет — список пуст, exists: false, метка не создаёт файл', () => {
+  it('файла нет — список пуст, exists: false, метка не создаёт файл', async () => {
     const dir = tmp()
     try {
       const f = join(dir, 'nope', 'default.rules')
       assert.deepEqual(listCodexRules(f), { path: f, exists: false, rules: [], unmarked: 0 })
-      assert.equal(markNewRule(f, grant, 0, { id: 'r-1', at: 'x' }), null)
+      assert.equal(await markNewRule(f, grant, 0, { id: 'r-1', at: 'x' }), null)
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+
+  it('без замка (Linux): codex дописал во время записи — перечитать и повторить; не уймётся — предупреждение', async () => {
+    const dir = tmp()
+    try {
+      const f = join(dir, 'default.rules')
+      const line = RULE(['make'])
+      writeFileSync(f, `${MARK('r-5', line)}\n${line}\n`)
+      let once = false
+      await revokeCodexRule(f, 'r-5', { lock: false, afterWrite: () => { if (!once) { once = true; appendFileSync(f, `${RULE(['cargo'])}\n`) } } })
+      assert.equal(readFileSync(f, 'utf8'), `${RULE(['cargo'])}\n`, 'запись codex пережила правку без замка')
+      writeFileSync(f, '# моё\n')
+      const warns: string[] = []
+      let n = 0
+      await editRulesFile(f, (b) => Buffer.concat([b, Buffer.from('# метка\n')]), { lock: false, afterWrite: () => { appendFileSync(f, `# codex ${++n}\n`) }, warn: (m) => warns.push(m) })
+      assert.equal(warns.length, 1)
+      assert.match(warns[0]!, /изменился во время записи без замка/)
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+
+  it('копия прерванной записи — совет, как вернуть файл', () => {
+    assert.equal(backupAdvice('/r/default.rules'),
+      'осталась копия прерванной записи /r/default.rules.pult.bak: если default.rules пуст или обрезан — mv /r/default.rules.pult.bak /r/default.rules, затем проверь последние строки; иначе удали копию')
+  })
+
+  it('замок занят — ждём таймером, цикл событий демона не стоит', { skip: process.platform !== 'darwin' }, async () => {
+    const dir = tmp()
+    try {
+      const f = join(dir, 'default.rules')
+      const line = RULE(['make'])
+      writeFileSync(f, `${MARK('r-5', line)}\n${line}\n`)
+      const held = openSync(f, fsc.O_RDWR | 0x20)
+      let ticks = 0
+      const t = setInterval(() => { ticks++ }, 50)
+      try {
+        const p = revokeCodexRule(f, 'r-5')
+        setTimeout(() => closeSync(held), 400)
+        const r = await p
+        assert.equal(r.rule.id, 'r-5', 'замок отпустили — правка прошла')
+        assert.ok(ticks >= 4, `таймеры стояли, пока ждали замок: ${ticks}`)
+      } finally { clearInterval(t) }
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+
+  it('второе «Всегда» на то же: строка уже помечена — новой метки и заметки «не помечено» нет', async () => {
+    const dir = tmp()
+    try {
+      const f = join(dir, 'default.rules')
+      const line = RULE(['git', 'push'])
+      writeFileSync(f, `${MARK('r-1', line)}\n${line}\n`)
+      const before = readFileSync(f)
+      const unmarked: string[] = []
+      const rules = createCodexRules({ path: f, pollMs: 20, waitMs: 150, onUnmarked: (_g, why) => unmarked.push(why) })
+      rules.granted({ ...grant, sessionId: 'w2' })
+      await new Promise((r) => setTimeout(r, 400))
+      assert.deepEqual(unmarked, [])
+      assert.ok(readFileSync(f).equals(before))
+      await rules.close()
+      assert.deepEqual(unmarked, [])
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
 
@@ -269,7 +338,7 @@ describe('правила codex: метка, список, отзыв — бай�
       assert.ok(await waitFor(() => rules.list().rules.length === 1, 3000), 'метки нет')
       const r = rules.list().rules[0]!
       assert.deepEqual([r.kind, r.label, r.session], ['network', 'example.com', 's1'])
-      rules.revoke(r.id)
+      await rules.revoke(r.id)
       assert.equal(readFileSync(f, 'utf8'), '# моё\n')
       rules.granted({ kind: 'execpolicy', argv: ['ls'], sessionId: 's2' })
       assert.ok(await waitFor(() => unmarked.length === 1, 3000))
@@ -280,11 +349,80 @@ describe('правила codex: метка, список, отзыв — бай�
       slow.granted({ kind: 'execpolicy', argv: ['make'], sessionId: 's3' })
       slow.granted({ kind: 'execpolicy', argv: ['cargo'], sessionId: 's4' })
       appendFileSync(f, `${RULE(['make'])}\n`)
-      slow.close()
+      await slow.close()
       assert.deepEqual(slow.list().rules.map((x) => x.session), ['s3'])
       assert.match(unmarked.at(-1)!, /^s4: демон остановлен/)
-      rules.close()
+      await rules.close()
     } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+})
+
+// --- адаптер: перезапуск ради правил ------------------------------------------------------------------------------
+
+function adapterRig(fake: Record<string, unknown>, now?: () => number) {
+  const dir = tmp()
+  const paths = layout(join(dir, 'h'))
+  ensureLayout(paths)
+  const cwd = join(dir, 'work')
+  mkdirSync(cwd, { recursive: true })
+  const logOut = join(dir, 'server.jsonl')
+  writeFileSync(join(paths.home, '.pult-fake-scripted.json'), JSON.stringify({ logOut, ...fake }))
+  const drafts: EventDraft[] = []
+  const broker = createBroker({ emit: (d) => { drafts.push(d) } })
+  const adapter = createCodexAdapter({
+    paths, config: defaultConfig(), logger: createLogger(paths.logFile), bin: FAKE_CODEX_SCRIPTED,
+    emit: (d) => { drafts.push(d) },
+    askPermission: (req) => broker.request(req),
+    netCheck: async () => ({ ok: true, provider: 'codex', path: 'direct', loc: 'XX', reason: 'ok', fellBack: false, guard: ['RU'], attempts: [], ms: 1, checkedAt: '2026-10-29T10:00:00.000Z', cached: false }) as never,
+    schemaCheck: () => ({ status: 'ok', expected: 'x', actual: 'x', files: 310, detail: 'тест' }),
+    ...(now ? { now } : {}),
+  })
+  const log = (): Array<Record<string, unknown>> => (existsSync(logOut)
+    ? readFileSync(logOut, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>) : [])
+  return { adapter, broker, drafts, cwd, log, remove: () => { reap(logOut); rmSync(dir, { recursive: true, force: true }) } }
+}
+const notices = (drafts: EventDraft[]): string[] => drafts.filter((d) => d.kind === 'session.configured').map((d) => String((d.data as Record<string, unknown>)['notice']))
+
+describe('правила codex: адаптер — перезапуск ради отозванного правила', () => {
+  it('снятый процесс: новый не поднимается, пока старый жив; его поздние уведомления и запросы до сессии не доходят', async () => {
+    const r = adapterRig({ lingerOnTerm: 1200 })
+    try {
+      await r.adapter.startSession({ name: 'w', cwd: r.cwd, mode: 'turn', broker: true })
+      const t1 = await r.adapter.send('w', 'делай [[simple]]')
+      assert.equal((await t1.done).ok, true)
+      const before = r.drafts.length
+      assert.equal(r.adapter.reloadPolicy?.('тест').codex, 'restarted')
+      const t2 = await r.adapter.send('w', 'делай [[simple]]')
+      assert.equal((await t2.done).ok, true)
+      const log = r.log()
+      const exit = log.find((x) => x['ev'] === 'exit')
+      const boots = log.filter((x) => x['ev'] === 'boot')
+      assert.equal(boots.length, 2)
+      assert.ok(exit && Number(boots[1]!['t']) >= Number(exit['t']), 'второй процесс поднят до выхода первого')
+      const late = r.drafts.slice(before)
+      assert.equal(JSON.stringify(late).includes('ПОЗДНЕЕ-СТАРОГО'), false, 'позднее сообщение старого процесса дошло до сессии')
+      assert.equal(r.broker.list('w').length, 0, 'запрос старого процесса попал в Inbox')
+      assert.ok(log.some((x) => x['ev'] === 'client' && (x['msg'] as { method?: string }).method === 'thread/resume'), 'тред не возобновлён')
+    } finally { await r.adapter.shutdown(); r.remove() }
+  })
+
+  it('занят дольше 10 мин — одно напоминание в ленту; причина названа', async () => {
+    let t = Date.parse('2026-10-29T10:00:00Z')
+    const r = adapterRig({}, () => t)
+    try {
+      await r.adapter.startSession({ name: 'w', cwd: r.cwd, mode: 'turn', broker: true })
+      const turn = await r.adapter.send('w', 'делай [[hang]]')
+      const res = r.adapter.reloadPolicy?.('Правило отозвано')
+      assert.deepEqual(res, { codex: 'deferred', busy: 'идёт ход' })
+      assert.match(notices(r.drafts).at(-1)!, /^Правило отозвано: Codex занят \(идёт ход\) — пока он не освободится, правило в нём ещё действует; потом Пульт перезапустит Codex, и разрешения «в этой сессии» у всех сессий Codex сброшены/)
+      t += RELOAD_REMIND_MS + 1000
+      assert.ok(await waitFor(() => notices(r.drafts).some((n) => /всё ещё занят \(идёт ход\)/.test(n)), 3000), 'напоминания нет')
+      await new Promise((ok) => setTimeout(ok, 1200))
+      assert.equal(notices(r.drafts).filter((n) => /всё ещё занят/.test(n)).length, 1, 'напоминание одно')
+      await r.adapter.interrupt('w')
+      await turn.done
+      assert.ok(await waitFor(() => notices(r.drafts).some((n) => /Codex в Пульте перезапущен/.test(n)), 3000), 'после хода — перезапуск')
+    } finally { await r.adapter.shutdown(); r.remove() }
   })
 })
 
@@ -344,7 +482,7 @@ describe('правила codex: демон — «Всегда» → метка �
       assert.deepEqual(after1.codexRules.rules, [])
       // Ход идёт — Codex перезапустится после него, а не сейчас; правило до конца хода ещё действует.
       assert.equal(after1.codexRulesRevoked.codex, 'deferred')
-      assert.match(after1.codexRulesRevoked.text, /до его конца правило ещё действует/)
+      assert.match(after1.codexRulesRevoked.text, /Codex занят \(идёт ход\): пока он не освободится, правило в нём ещё действует/)
       assert.ok(readFileSync(rulesFile).equals(Buffer.concat([USER_TEXT, Buffer.from('\n')])), 'чужое — байт в байт, ушли метка и строка')
       await assert.rejects(c.request('perm.rules.revoke', { id: rule.id }), code('not_found'))
       await c.request('agent.wait', { name: 'c', timeoutMs: 10_000 })
@@ -360,8 +498,8 @@ describe('правила codex: демон — «Всегда» → метка �
       // Ход кончился — общий процесс снят ради правил (не авария), в ленте сессии — две заметки.
       assert.ok(await waitFor(async () => (events = await all()).some((e) => e.kind === 'provider.restarted' && e.data['reason'] === 'policy_reload'), 5000), 'codex не перезапущен после хода')
       const notes = events.filter((e) => e.sessionId === 'c' && e.kind === 'session.configured').map((e) => String(e.data['notice']))
-      assert.ok(notes.some((n) => /идёт ход Codex/.test(n)), notes.join(' | '))
-      assert.ok(notes.some((n) => /Codex перезапущен/.test(n)), notes.join(' | '))
+      assert.ok(notes.some((n) => /Codex занят \(идёт ход\)/.test(n)), notes.join(' | '))
+      assert.ok(notes.some((n) => /Codex в Пульте перезапущен .*но разрешения «в этой сессии» у всех сессий Codex сброшены/.test(n)), notes.join(' | '))
       // Следующая реплика поднимает новый процесс и возвращается в тот же тред (thread/resume).
       await c.request('agent.prompt', { name: 'c', text: 'делай [[simple]]' })
       await c.request('agent.wait', { name: 'c', timeoutMs: 10_000 })
@@ -384,7 +522,7 @@ describe('правила codex: демон — «Всегда» → метка �
       const id2 = ((await c.request('perm.rules')) as Listing).rules[0]!.id
       const now2 = (await c.request('perm.rules.revoke', { id: id2 })) as { codex: string; text: string }
       assert.equal(now2.codex, 'restarted')
-      assert.match(now2.text, /Codex перезапущен — правило больше не действует/)
+      assert.match(now2.text, /Codex в Пульте перезапущен — правило больше не действует; .*«в этой сессии».*сброшены/)
     } finally {
       c.close(); await d.stop('конец теста'); reap(logOut)
       home.remove(); rmSync(root, { recursive: true, force: true })

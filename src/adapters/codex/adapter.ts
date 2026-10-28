@@ -80,6 +80,8 @@ export const INTERRUPT_SETTLE_MS = 5_000
 export const TERM_WAIT_MS = 3_000
 /** План 16, № 11: как часто проверять, кончились ли ходы Codex, чтобы перезапустить процесс ради отозванного правила. */
 export const RELOAD_POLL_MS = 500
+/** Перезапуск ради правил ждёт занятый Codex дольше этого — одно напоминание в ленту. */
+export const RELOAD_REMIND_MS = 10 * 60_000
 export const KILL_WAIT_MS = 3_000
 
 /**
@@ -517,7 +519,15 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
    */
   let reloadWanted: string | null = null
   let reloadTimer: NodeJS.Timeout | null = null
+  /** С какого момента перезапуск ждёт занятый Codex и напомнили ли уже (раз, через `RELOAD_REMIND_MS`). */
+  let reloadSince = 0
+  let reloadReminded = false
   const retired = new Set<AppServerClient>()
+  /**
+   * Снятый процесс ещё гасится (до TERM_WAIT_MS + KILL_WAIT_MS): `ensureClient` ждёт его, чтобы новый процесс не поднялся,
+   * пока старый жив с тем же загруженным тредом. Ревью #30.
+   */
+  let retiring: Promise<void> | null = null
   let freeRespawn = false
   let providerBlocked: string | null = null
   let schemaChecked = false
@@ -803,10 +813,22 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
     }
   }
 
-  /** Ничто не держит общий процесс: ни хода (своего, серверного, заводящегося), ни фона, ни вопроса, ни спавна. */
-  const policyIdle = (): boolean => starting === null
-    && ![...live.values()].some((l) => l.turn !== null || l.usingProcess || l.starting || l.serverTurn !== null || l.bg.pending())
-    && ![...approvals.values()].some((p) => !p.answered)
+  /**
+   * Что держит общий процесс — словами для заметки (ход, фон, вопрос, спавн); null — ничего, можно перезапускать.
+   */
+  const policyBusy = (): string | null => {
+    if (starting !== null || retiring !== null) return 'поднимается процесс Codex'
+    const ls = [...live.values()]
+    if (ls.some((l) => l.turn !== null || l.usingProcess || l.starting || l.serverTurn !== null)) return 'идёт ход'
+    if ([...approvals.values()].some((p) => !p.answered)) return 'ждёт ответа на вопрос разрешения'
+    if (ls.some((l) => l.bg.pending())) return 'работает фон — субагенты или команды'
+    return null
+  }
+
+  /** Перезапуск сбрасывает и «в этой сессии» — человек должен это знать, а не узнать по новому вопросу. */
+  const RELOAD_CAVEAT = 'разрешения «в этой сессии» у всех сессий Codex сброшены — Codex спросит заново'
+  /** Codex вне Пульта (терминал, IDE) — свой процесс: Пульт его не перезапускает. */
+  const RELOAD_OUTSIDE = 'codex, запущенный вне Пульта (терминал, IDE), держит правило до своего перезапуска'
 
   /**
    * Перезапустить общий процесс ради правил, если можно сейчас. Процесса нет — нечего перечитывать: следующий старт
@@ -814,32 +836,44 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
    * отвязываются (`detachAll`) — следующий ход поднимет новый процесс и вернётся в тред через `thread/resume`, как
    * после любого перезапуска.
    */
-  const tryReload = (): CodexReload => {
+  const tryReload = (): { codex: CodexReload; busy?: string } => {
     const why = reloadWanted
-    if (why === null) return 'not_running'
+    if (why === null) return { codex: 'not_running' }
     if (shuttingDown || ((!client || !client.alive()) && starting === null)) {
       reloadWanted = null
-      return 'not_running'
+      return { codex: 'not_running' }
     }
-    if (!client || !policyIdle()) {
+    const busy = client ? policyBusy() : 'поднимается процесс Codex'
+    if (busy !== null) {
       if (!reloadTimer) {
+        reloadSince = now()
+        reloadReminded = false
         reloadTimer = setInterval(() => {
-          if (tryReload() !== 'deferred' && reloadTimer) { clearInterval(reloadTimer); reloadTimer = null }
+          const r = tryReload()
+          if (r.codex !== 'deferred') {
+            if (reloadTimer) { clearInterval(reloadTimer); reloadTimer = null }
+            return
+          }
+          // Ход бывает долгим: через 10 мин — одно напоминание, что правило в Codex всё ещё действует.
+          if (!reloadReminded && now() - reloadSince >= RELOAD_REMIND_MS) {
+            reloadReminded = true
+            noticeAll(`${why}: Codex всё ещё занят (${r.busy ?? 'идёт ход'}) — правило в нём пока действует; перезапуск — когда освободится.`)
+          }
         }, RELOAD_POLL_MS)
         reloadTimer.unref?.()
       }
-      return 'deferred'
+      return { codex: 'deferred', busy }
     }
     reloadWanted = null
-    const old = client
+    const old = client as AppServerClient
     client = null
     retired.add(old)
     freeRespawn = true
     detachAll()
     logger.info('перезапуск app-server: отозвано правило «Всегда» — codex перечитает правила', { why, pid: old.pid })
-    void killClient(old)
-    noticeAll(`${why}: Codex перезапущен — правило больше не действует; разговор продолжится с того же места.`)
-    return 'restarted'
+    retiring = killClient(old).catch(() => {}).finally(() => { retiring = null })
+    noticeAll(`${why}: Codex в Пульте перезапущен — правило больше не действует; разговор продолжится с того же места, но ${RELOAD_CAVEAT}. Codex, запущенный вне Пульта (терминал, IDE), держит правило до своего перезапуска.`)
+    return { codex: 'restarted' }
   }
 
   const killClient = async (c: AppServerClient): Promise<void> => {
@@ -888,13 +922,22 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
       // просто существующая папка, которая точно наша.
       cwd: paths.home,
       env: buildChildEnv(process.env, { network: netEnv, extra: {} }),
-      onNotification: (method, params) => { onNotification(method, params) },
+      // Снятый ради правил процесс (`retired`) ещё жив несколько секунд: его поздние уведомления не должны дойти до
+      // сессий, а запросы — до брокера. Ответ на его запрос — ЕМУ ЖЕ (`c`), а не новому клиенту: id у них общие (ревью #30).
+      onNotification: (method, params) => {
+        if (retired.has(c)) return
+        onNotification(method, params)
+      },
       onServerRequest: (id, method, params) => {
+        if (retired.has(c)) {
+          try { c.respondError(id, -32603, 'pult: процесс перезапускается — запрос не принят') } catch { /* уже ушёл */ }
+          return
+        }
         // Бросок из async-обработчика — это unhandled rejection, а не ответ серверу: ход codex
-        // висел бы на вопросе навсегда. Отвечаем ошибкой сами (ревью 28.10.2026).
+        // висел бы на вопросе навсегда. Отвечаем ошибкой сами (ревью 28.10.2026) — тому процессу, что спросил.
         void onServerRequest(id, method, params).catch((e: unknown) => {
           logger.error('обработка запроса app-server упала', { method, error: (e as Error).message })
-          try { client?.respondError(id, -32603, `pult: внутренняя ошибка: ${(e as Error).message}`) } catch { /* процесс уже ушёл */ }
+          try { c.respondError(id, -32603, `pult: внутренняя ошибка: ${(e as Error).message}`) } catch { /* процесс уже ушёл */ }
         })
       },
       onExit: (code, signal) => {
@@ -998,6 +1041,8 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
     // значит, профиль пляшет быстрее, чем поднимается процесс, и честнее отказать ходу, чем
     // молотить вечно.
     for (let pass = 0; pass < 3; pass++) {
+      // Процесс, снятый ради правил, ещё гасится — новый не поднимаем, пока жив старый с тем же тредом (ревью #30).
+      while (retiring) await retiring
       if (shuttingDown) throw Object.assign(new Error('адаптер codex останавливается'), { code: 'provider_unavailable' })
       if (providerBlocked !== null) throw Object.assign(new Error(providerBlocked), { code: 'provider_unavailable' })
       if (client && client.alive() && key === clientNetKey) { holdProcess(sessionId); return client }
@@ -2163,8 +2208,10 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
     reloadPolicy(why) {
       reloadWanted = why
       const r = tryReload()
-      if (r === 'deferred') noticeAll(`${why}: идёт ход Codex — до его конца правило ещё действует, потом Пульт перезапустит Codex.`)
-      if (r === 'not_running') noticeAll(`${why}: Codex не запущен — правило больше не действует.`)
+      if (r.codex === 'deferred') {
+        noticeAll(`${why}: Codex занят (${r.busy ?? 'идёт ход'}) — пока он не освободится, правило в нём ещё действует; потом Пульт перезапустит Codex, и ${RELOAD_CAVEAT}.`)
+      }
+      if (r.codex === 'not_running') noticeAll(`${why}: Codex в Пульте не запущен — правило больше не действует; ${RELOAD_OUTSIDE}.`)
       return r
     },
 
@@ -2189,6 +2236,8 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
           await killClient(late)
         } catch { /* спавн сам всё убрал: либо не удался, либо увидел флаг */ }
       }
+      // Процесс, снятый ради правил, ещё гасится: дождаться — иначе его выход запишется в журнал уже закрытого демона.
+      if (retiring) await retiring
       const c = client
       client = null
       if (c) {

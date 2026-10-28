@@ -258,16 +258,27 @@ export function countMatching(buf: Buffer, target: RuleTarget): number {
 const O_EXLOCK = process.platform === 'darwin' ? 0x20 : 0
 const LOCK_TRIES = 100
 const LOCK_PAUSE_MS = 20
-const nap = (ms: number): void => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) }
+/** Пауза между попытками взять замок — таймером, не блокируя цикл событий демона (ревью #30). */
+const nap = (ms: number): Promise<void> => new Promise((r) => { setTimeout(r, ms) })
+
+/** Параметры правки — шов для тестов: путь без замка (как на Linux) и момент сразу после записи. */
+export interface EditOptions {
+  /** false — без замка, как на Linux (по умолчанию — замок, где платформа его умеет). */
+  lock?: boolean
+  /** Тест: сразу после записи, до сверки. */
+  afterWrite?(): void
+  /** Предупреждение без отказа: без замка файл изменился во время записи. */
+  warn?(msg: string): void
+}
 
 /** Открыть файл на чтение-запись под замком codex; занят дольше ~2 с — отказ. */
-export function openLocked(path: string): { fd: number; locked: boolean } {
-  if (!O_EXLOCK) return { fd: openSync(path, fsc.O_RDWR), locked: false }
+export async function openLocked(path: string, lock = O_EXLOCK !== 0): Promise<{ fd: number; locked: boolean }> {
+  if (!lock || !O_EXLOCK) return { fd: openSync(path, fsc.O_RDWR), locked: false }
   for (let i = 0; i < LOCK_TRIES; i++) {
     try { return { fd: openSync(path, fsc.O_RDWR | O_EXLOCK | fsc.O_NONBLOCK), locked: true } } catch (e) {
       const code = (e as NodeJS.ErrnoException).code
       if (code !== 'EAGAIN' && code !== 'EWOULDBLOCK') throw e
-      nap(LOCK_PAUSE_MS)
+      await nap(LOCK_PAUSE_MS)
     }
   }
   throw new RulesError('internal', `${path} держит другой процесс (codex пишет правило) — повтори`)
@@ -298,24 +309,36 @@ function fsyncDir(dir: string): void {
   try { const d = openSync(dir, 'r'); try { fsyncSync(d) } finally { closeSync(d) } } catch { /* платформа не умеет — не повод падать */ }
 }
 
+/** Что сказать человеку про оставшуюся копию: как вернуть файл, если запись оборвалась. */
+export function backupAdvice(real: string): string {
+  const bak = backupOf(real)
+  return `осталась копия прерванной записи ${bak}: если ${basename(real)} пуст или обрезан — mv ${bak} ${real}, затем проверь последние строки; иначе удали копию`
+}
+
 /**
  * Правка файла правил НА МЕСТЕ под замком codex: `edit` получает байты и возвращает новые (null — править нечего).
  * Порядок: замок → чтение → копия `.pult.bak` (fsync, fsync папки) → усечение и запись → fsync → копия удаляется.
- * Без замка (Linux) — перед перезаписью сверка, что файл не изменился с чтения; изменился — заново, до 5 раз.
+ * Без замка (Linux: `O_EXLOCK` нет) — перед перезаписью сверка «файл не изменился с чтения» (изменился — заново, до 5
+ * раз), а после записи — перечитать: не то, что записали (codex дописал в это мгновение), — заново; не вышло — `warn`.
+ * Читатель БЕЗ замка (codex при старте читает файл просто так) в окно между усечением и записью может увидеть пустой или
+ * недописанный файл — это цена записи на месте; окно — одна запись в несколько КБ.
  * Файла нет — записи нет. Симлинк остаётся симлинком: правится цель, inode и режим те же.
  */
-function editRules(path: string, edit: (buf: Buffer) => Buffer | null): boolean {
+export async function editRulesFile(path: string, edit: (buf: Buffer) => Buffer | null, opts: EditOptions = {}): Promise<boolean> {
   if (!existsSync(path)) return false
   const real = realpathSync(path)
+  // Записали хоть раз: повтор после записи (без замка) нашёл, что править уже нечего, — правка всё равно сделана.
+  let wrote = false
   for (let attempt = 0; attempt < 5; attempt++) {
-    const { fd, locked } = openLocked(real)
+    const { fd, locked } = await openLocked(real, opts.lock ?? true)
+    let next: Buffer | null
     try {
       const before = readAllFd(fd)
-      const next = edit(before)
-      if (next === null) return false
+      next = edit(before)
+      if (next === null) return wrote
       const bak = backupOf(real)
       // Копия прошлой оборванной записи — единственный след того, что было до обрыва: не затираем, ждём человека.
-      if (existsSync(bak)) throw new RulesError('internal', `осталась копия прерванной записи ${bak} — сверь с ${real} и удали её`)
+      if (existsSync(bak)) throw new RulesError('internal', backupAdvice(real))
       const b = openSync(bak, 'wx', 0o600)
       try { writeAllFd(b, before, 0); fsyncSync(b) } finally { closeSync(b) }
       fsyncDir(dirname(real))
@@ -323,11 +346,18 @@ function editRules(path: string, edit: (buf: Buffer) => Buffer | null): boolean 
       ftruncateSync(fd, 0)
       writeAllFd(fd, next, 0)
       fsyncSync(fd)
+      wrote = true
+      opts.afterWrite?.()
       unlinkSync(bak)
       fsyncDir(dirname(real))
-      return true
     } finally {
       closeSync(fd)
+    }
+    if (locked || readFileSync(real).equals(next)) return true
+    // Без замка codex дописал строку ровно во время записи: её мы могли затереть или она легла после — проверить ещё раз.
+    if (attempt === 4) {
+      opts.warn?.(`${real} изменился во время записи без замка — проверь его последние строки`)
+      return true
     }
   }
   throw new RulesError('internal', `${path} меняется прямо сейчас — правка не записана, повтори`)
@@ -337,10 +367,9 @@ function editRules(path: string, edit: (buf: Buffer) => Buffer | null): boolean 
  * Поставить метку над НОВОЙ строкой правила: строк, разрешающих это, стало больше, чем было до ответа (`baseline`), —
  * последняя из них (codex дописывает в конец) получает метку. Уже помеченная — не трогаем. Вернёт правило или null.
  */
-export function markNewRule(path: string, grant: RuleGrant, baseline: number, meta: { id: string; at: string }): CodexRule | null {
+export async function markNewRule(path: string, grant: RuleGrant, baseline: number, meta: { id: string; at: string }, opts: EditOptions = {}): Promise<CodexRule | null> {
   let marked: CodexRule | null = null
-  editRules(path, (buf) => {
-    marked = null
+  const wrote = await editRulesFile(path, (buf) => {
     const s = scan(buf)
     const hits: number[] = []
     s.text.forEach((l, i) => { const t = parseRuleLine(l); if (t && sameTarget(t, grant)) hits.push(i) })
@@ -352,8 +381,19 @@ export function markNewRule(path: string, grant: RuleGrant, baseline: number, me
     const marker = formatMarker({ id: meta.id, sha: ruleSha(line), at: meta.at, session: grant.sessionId, ...(grant.cwd ? { cwd: grant.cwd } : {}) })
     marked = { id: meta.id, at: meta.at, session: grant.sessionId, ...(grant.cwd ? { cwd: grant.cwd } : {}), kind: t.kind, label: labelOf(t) }
     return joinLines([...s.lines.slice(0, i), Buffer.from(marker, 'utf8'), ...s.lines.slice(i)])
-  })
-  return marked
+  }, opts)
+  return wrote ? marked : null
+}
+
+/**
+ * Последняя строка, разрешающая `target`, уже под действительной меткой Пульта — второе «Всегда» на то же: codex строку
+ * не продублирует, и метить нечего (а «не помечено» было бы неправдой).
+ */
+export function lastMatchMarked(buf: Buffer, target: RuleTarget): boolean {
+  const s = scan(buf)
+  let last = -1
+  s.text.forEach((l, i) => { const t = parseRuleLine(l); if (t && sameTarget(t, target)) last = i })
+  return last > 0 && s.marked.some((m) => m.at === last - 1)
 }
 
 /** Сколько строк в соседних `*.rules` той же папки разрешают `target` или шире. */
@@ -377,20 +417,19 @@ function coveredElsewhere(real: string, target: RuleTarget): number {
  * Отозвать правило с меткой `id`: убрать метку и строку под ней. Нет такой пары — `not_found`. `stillAllowedBy` — сколько
  * других строк (этот файл и соседние `*.rules`) всё ещё разрешают то же самое или шире.
  */
-export function revokeCodexRule(path: string, id: string): { rule: CodexRule; stillAllowedBy: number } {
+export async function revokeCodexRule(path: string, id: string, opts: EditOptions = {}): Promise<{ rule: CodexRule; stillAllowedBy: number }> {
   let removed: Pair | null = null
   let rest: Buffer | null = null
-  editRules(path, (buf) => {
-    removed = null
+  const wrote = await editRulesFile(path, (buf) => {
     const s = scan(buf)
     const hit = s.marked.find((m) => m.rule.id === id)
     if (!hit) return null
     removed = hit
     rest = joinLines([...s.lines.slice(0, hit.at), ...s.lines.slice(hit.at + 2)])
     return rest
-  })
+  }, opts)
   const r = removed as Pair | null
-  if (!r || !rest) throw new RulesError('not_found', `правила ${id} с меткой Пульта в ${path} нет`)
+  if (!wrote || !r || !rest) throw new RulesError('not_found', `правила ${id} с меткой Пульта в ${path} нет`)
   const here = splitLines(rest).reduce((n, l) => { const t = parseRuleLine(l.toString('utf8')); return t && covers(t, r.target) ? n + 1 : n }, 0)
   return { rule: r.rule, stillAllowedBy: here + coveredElsewhere(realpathSync(path), r.target) }
 }
@@ -412,9 +451,9 @@ export interface CodexRules {
   /** «Всегда» нажато: снимок сейчас (до ответа серверу), метка — когда codex допишет строку. Не бросает. */
   granted(g: RuleGrant): void
   list(): CodexRulesList
-  revoke(id: string): { rule: CodexRule; stillAllowedBy: number }
+  revoke(id: string): Promise<{ rule: CodexRule; stillAllowedBy: number }>
   /** Остановка демона: последняя попытка пометить ждущие правила, остальные — `onUnmarked`. */
-  close(): void
+  close(): Promise<void>
 }
 
 export type { CodexReload }
@@ -423,6 +462,14 @@ export function createCodexRules(opts: CodexRulesOptions): CodexRules {
   const pollMs = opts.pollMs ?? 100
   const waitMs = opts.waitMs ?? 15_000
   const log = opts.log ?? (() => {})
+  const edit: EditOptions = { warn: (msg) => log('warn', `правила codex: ${msg}`, {}) }
+  // Правки файла внутри демона — по одной: на Linux замка нет, а метка и отзыв могут совпасть по времени.
+  let chain: Promise<unknown> = Promise.resolve()
+  const serial = <T>(fn: () => Promise<T>): Promise<T> => {
+    const run = chain.then(fn, fn)
+    chain = run.catch(() => {})
+    return run
+  }
   interface Wait { grant: RuleGrant; baseline: number; meta: { id: string; at: string }; deadline: number; timer: NodeJS.Timeout | null }
   const waits = new Set<Wait>()
   const unmarked = (w: Wait, reason: string): void => {
@@ -431,9 +478,9 @@ export function createCodexRules(opts: CodexRulesOptions): CodexRules {
     try { opts.onUnmarked?.(w.grant, reason) } catch { /* журнал сломан — строка в журнале демона уже есть */ }
   }
   /** true — дело кончено (помечено или отказ), false — ждать дальше. */
-  const attempt = (w: Wait): boolean => {
+  const attempt = async (w: Wait): Promise<boolean> => {
     let rule: CodexRule | null = null
-    try { rule = markNewRule(opts.path, w.grant, w.baseline, w.meta) } catch (e) {
+    try { rule = await serial(() => markNewRule(opts.path, w.grant, w.baseline, w.meta, edit)) } catch (e) {
       unmarked(w, `файл правил не записан: ${(e as Error).message}`)
       return true
     }
@@ -448,36 +495,44 @@ export function createCodexRules(opts: CodexRulesOptions): CodexRules {
     path: opts.path,
     granted(g) {
       let baseline: number
-      try { baseline = countMatching(readOrEmpty(opts.path), g) } catch (e) {
+      let buf: Buffer
+      try { buf = readOrEmpty(opts.path); baseline = countMatching(buf, g) } catch (e) {
         try { opts.onUnmarked?.(g, `файл правил не прочитан: ${(e as Error).message}`) } catch { /* см. выше */ }
+        return
+      }
+      // То же «Всегда» второй раз: строка уже есть и уже наша — codex её не продублирует, метить нечего (ревью #30).
+      if (baseline > 0 && lastMatchMarked(buf, g)) {
+        log('info', 'правила codex: такое правило уже помечено — новой метки не будет', { session: g.sessionId, kind: g.kind })
         return
       }
       const w: Wait = { grant: g, baseline, meta: { id: `r-${randomBytes(4).toString('hex')}`, at: new Date().toISOString() }, deadline: Date.now() + waitMs, timer: null }
       waits.add(w)
-      const tick = (): void => {
+      const tick = async (): Promise<void> => {
         w.timer = null
-        if (!waits.has(w) || attempt(w)) return
+        if (!waits.has(w) || await attempt(w)) return
+        if (!waits.has(w)) return
         if (Date.now() >= w.deadline) {
           unmarked(w, baseline > 0 ? 'такая строка уже была в файле правил до «Всегда»' : 'codex не дописал строку правила')
           return
         }
-        w.timer = setTimeout(tick, pollMs)
+        w.timer = setTimeout(() => { void tick() }, pollMs)
         w.timer.unref()
       }
-      w.timer = setTimeout(tick, pollMs)
+      w.timer = setTimeout(() => { void tick() }, pollMs)
       w.timer.unref()
     },
     list: () => listCodexRules(opts.path),
-    revoke(id) {
-      const r = revokeCodexRule(opts.path, id)
+    async revoke(id) {
+      const r = await serial(() => revokeCodexRule(opts.path, id, edit))
       log('info', 'правила codex: правило отозвано', { id, kind: r.rule.kind, stillAllowedBy: r.stillAllowedBy })
       return r
     },
-    close() {
+    async close() {
       for (const w of [...waits]) {
         if (w.timer) clearTimeout(w.timer)
         w.timer = null
-        if (!attempt(w)) unmarked(w, 'демон остановлен раньше, чем codex дописал строку правила')
+        waits.delete(w)
+        if (!await attempt(w)) unmarked(w, 'демон остановлен раньше, чем codex дописал строку правила')
       }
     },
   }

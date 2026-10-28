@@ -310,11 +310,11 @@ export function RulesSection({ panel }: { panel: RulesPanel }): ReactElement {
   return (
     <section className="settings-sec" aria-labelledby="settings-rules-h" data-testid="settings-rules">
       <h3 id="settings-rules-h">Правила «Всегда»</h3>
-      <span className="note">«Всегда …» на карточке разрешения Codex записывает правило в <span className="mono">{list.path}</span> — оно действует во всех сессиях Codex. Здесь — правила, которые записал Пульт; «Отозвать» убирает строку из файла. Codex читает правила только при запуске, поэтому после отзыва Пульт перезапускает его: сразу, если ходов Codex нет, иначе — когда они закончатся (до этого идущий ход ещё пользуется правилом). Разговоры продолжаются с того же места. У Claude кнопки «Всегда» нет.</span>
+      <span className="note">«Всегда …» на карточке разрешения Codex записывает правило в <span className="mono">{list.path}</span> — оно действует во всех сессиях Codex. Здесь — правила, которые записал Пульт; «Отозвать» убирает строку из файла. Codex читает правила только при запуске, поэтому после отзыва Пульт перезапускает свой Codex: сразу, если он свободен, иначе — когда закончатся ходы, фон и вопросы (до этого правило в нём ещё действует). Разговоры продолжаются с того же места, но разрешения «в этой сессии» у всех сессий Codex сбрасываются. Codex, запущенный вне Пульта (терминал, IDE), держит правило до своего перезапуска. У Claude кнопки «Всегда» нет.</span>
       {list.error && <span className="err" role="alert" data-testid="rules-read-error">Файл правил не прочитан: {list.error}</span>}
       {list.backup && (
         <div className="upd-state upd-warn" role="alert" data-testid="rules-backup">
-          <span className="grow">Осталась копия прерванной записи <span className="mono">{list.backup}</span>. Сверь файл правил с ней и удали копию — до этого Пульт файл не правит.</span>
+          <span className="grow">Осталась копия прерванной записи <span className="mono">{list.backup}</span> — до её удаления Пульт файл не правит. Если файл правил пуст или обрезан — <span className="mono">mv {list.backup} {list.backup.replace(/\.pult\.bak$/, '')}</span>, затем проверь последние строки; иначе удали копию.</span>
         </div>
       )}
       {!list.rules.length && !list.error && <span className="note" data-testid="rules-empty">Пульт ещё не записал ни одного правила.</span>}

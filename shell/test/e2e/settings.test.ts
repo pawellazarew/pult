@@ -175,7 +175,7 @@ describe('окно: настройки сессии M8f', () => {
     assert.ok(await waitFor(async () => (await row.count()) === 0, 5000), 'строка правила не ушла из окна')
     assert.equal(readFileSync(file, 'utf8'), mine, 'ушли ровно метка и правило')
     // Codex в этом прогоне не запускался — итог так и говорит.
-    assert.match((await h.win.getByTestId('rules-done').textContent()) ?? '', /^Отозвано: команды, начинающиеся с «git push»\. Codex не запущен/)
+    assert.match((await h.win.getByTestId('rules-done').textContent()) ?? '', /^Отозвано: команды, начинающиеся с «git push»\. Codex в Пульте не запущен — правило больше не действует; codex, запущенный вне Пульта/)
     await h.win.getByTestId('rules-empty').waitFor({ timeout: 5000 })
     const events = ((await c.request('events.tail', { since: 0, sessionId: 'daemon' })) as { events: Array<{ kind: string; data: Record<string, unknown> }> }).events
     assert.equal(events.find((e) => e.kind === 'rule.revoked')?.data['id'], 'r-e2e00001', 'отзыва нет в журнале')

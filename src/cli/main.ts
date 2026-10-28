@@ -834,7 +834,11 @@ async function cmdPerm(paths: PultPaths, args: ParsedArgs): Promise<number> {
         if (asJson) { out(JSON.stringify(r)); return done(EXIT.ok) }
         out(`файл правил Codex: ${r.path}${r.exists ? '' : ' (ещё нет)'}`)
         if (r.error) err(`не прочитан: ${r.error}`)
-        if (r.backup) err(`ВНИМАНИЕ: осталась копия прерванной записи ${r.backup} — сверь файл с ней и удали её; до этого Пульт файл не правит`)
+        if (r.backup) {
+          const file = r.backup.replace(/\.pult\.bak$/, '')
+          err(`ВНИМАНИЕ: осталась копия прерванной записи ${r.backup}; до её удаления Пульт файл не правит.`)
+          err(`  если ${file} пуст или обрезан — mv ${r.backup} ${file}, затем проверь последние строки; иначе удали копию`)
+        }
         if (!r.rules.length) out('правил «Всегда», записанных Пультом, нет')
         for (const x of r.rules) {
           out(`${String(x['id'])}  ${String(x['at'])}  сессия ${String(x['session'])}${x['cwd'] ? ` · ${String(x['cwd'])}` : ''}`)

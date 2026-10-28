@@ -213,8 +213,10 @@ Every question from every session goes to the Inbox (⌘I in the window, `pult p
   Pult marks the line it caused with a `# pult: rule=…` comment; marked rules are listed (date, source session) in
   Settings → «Правила „Всегда“» (Always rules) and by `pult perm rules`, and can be revoked there or with `pult perm rules revoke <id>` —
   only the marker and that line are removed, a running turn is not interrupted. Codex reads rules only at start-up, so
-  after a revoke Pult restarts it: at once if no Codex turn is running, otherwise when the turns finish (until then the
-  running turn still uses the rule); conversations resume where they were. Pult also tells you if other lines still
+  after a revoke Pult restarts its Codex: at once if it is idle, otherwise when turns, background work and questions
+  finish (until then the rule still applies there); conversations resume where they were, but "this session" approvals
+  of every Codex session are reset. A codex running outside Pult (terminal, IDE) keeps the rule until it restarts. On
+  Linux the file is edited without codex's lock (on macOS under it). Pult also tells you if other lines still
   allow the same thing. Unmarked lines are never touched.
 - **Claude** doesn't offer reusable rules to Pult today, so Claude cards only offer "once".
 - **A card says when it shows less than will run.** The secret filter masks e-mails, tokens and URL credentials on
