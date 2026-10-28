@@ -5,7 +5,7 @@
 
 - Заметки по дизайну в истории проекта не публикуются.
 - Спецификация по слоям силы: [`01-SPEC-v0.1.md`](01-SPEC-v0.1.md) < [`02-FACTS.md`](02-FACTS.md) < [`03-DELTA-v0.2.md`](03-DELTA-v0.2.md) < [`04-DELTA-v0.3.md`](04-DELTA-v0.3.md) < [`05-DELTA-v0.4-spike.md`](05-DELTA-v0.4-spike.md) < [`06-DELTA-v0.5-spike-claude.md`](06-DELTA-v0.5-spike-claude.md) (самый сильный — Claude и сеть, поправки дизайна по итогам спайка).
-- План Ф1 и инварианты — [`07-PLAN-F1.md`](07-PLAN-F1.md); решения В4 — [`08-PLAN-F1-M4.md`](08-PLAN-F1-M4.md); Hermes — [`09-DELTA-hermes-spike.md`](09-DELTA-hermes-spike.md), [`10-PLAN-hermes-ideas.md`](10-PLAN-hermes-ideas.md); замеры приёмки — [`11-MEASURE-F1.md`](11-MEASURE-F1.md).
+- План Ф1 и инварианты — [`07-PLAN-F1.md`](07-PLAN-F1.md); решения В4 — [`08-PLAN-F1-M4.md`](08-PLAN-F1-M4.md); Hermes — [`09-DELTA-hermes-spike.md`](09-DELTA-hermes-spike.md), [`10-PLAN-hermes-ideas.md`](10-PLAN-hermes-ideas.md); замеры приёмки — [`11-MEASURE-F1.md`](11-MEASURE-F1.md); спайк ZCode (третий провайдер) — [`17-SPIKE-zcode.md`](17-SPIKE-zcode.md).
 - Спайк Ф0: [`spike/README.md`](../spike/README.md) — 15 строк проверок и скрипты ног; итоги — в DELTA v0.4 и v0.5. Ресёрч, сводка результатов
   и журналы прогонов в публичное дерево не входят (раздел «M9: публичное дерево»).
 
