@@ -28,15 +28,15 @@ describe('единый список бесед', () => {
     assert.equal(chatSections(groups, 'нет такого').flatMap((s) => s.rows).length, 0)
   })
 
-  it('сортирует свежие беседы внутри каждой группы; проект совпадает с выбранным корнем', () => {
-    const groups = groupByProject(['/srv'], [a('old'), a('new', { lastActivity: '2026-10-27T11:00:00Z' })])
+  it('сортирует беседы по началу хода внутри каждой группы; проект совпадает с выбранным корнем', () => {
+    const groups = groupByProject(['/srv'], [a('old', { lastActivity: '2026-10-27T12:00:00Z' }), a('new', { lastTurnAt: '2026-10-27T11:00:00Z' })])
     const recent = chatSections(groups)[2]!.rows
     assert.deepEqual(recent.map((r) => r.agent.name), ['new', 'old'])
     assert.equal(recent[0]?.project, 'srv')
     assert.equal(recent[0]?.projectPath, '/srv')
   })
 
-  it('работающие идут по созданию, новые сверху; активность и переименование не меняют порядок', () => {
+  it('работающие без новых ходов идут по созданию, новые сверху; активность и переименование не меняют порядок', () => {
     const older = a('older', { status: 'working', createdAt: '2026-10-27T08:00:00Z', lastActivity: '2026-10-27T12:00:00Z' })
     const newer = a('newer', { status: 'working', createdAt: '2026-10-27T09:00:00Z', lastActivity: '2026-10-27T10:00:00Z' })
     const order = (xs: AgentView[]): string[] => chatSections(groupByProject(['/srv'], xs))[1]!.rows.map((r) => r.agent.name)
@@ -67,6 +67,23 @@ describe('чаты внутри проектов', () => {
     const changed = groupByProject(['/srv/empty', '/srv/pult'], [{ ...older, status: 'working' as const, lastActivity: '2027-01-01' }, newer])
     assert.deepEqual(projectChats(changed)[1]!.rows.map((r) => r.name), ['newer', 'older'])
     assert.equal(projectChats(changed, '', 'working')[0]!.rows[0]?.name, 'older')
+  })
+  it('новый ход поднимает чат из середины наверх один раз; события хода, фон и конец хода его не двигают', () => {
+    const chats = ['c0', 'c1', 'c2', 'c3', 'c4'].map((n, i) => a(n, { createdAt: `2026-10-27T0${i}:00:00Z` }))
+    const order = (xs: AgentView[], filter: 'all' | 'working' = 'all'): string[] => projectChats(groupByProject(['/srv/pult'], xs), '', filter)[0]!.rows.map((r) => r.name)
+    assert.deepEqual(order(chats), ['c4', 'c3', 'c2', 'c1', 'c0'])
+    // Реплика в c1: ход начался — c1 наверху, и в общем списке, и среди работающих.
+    const started = chats.map((c) => c.name === 'c1' ? { ...c, status: 'working' as const, lastTurnAt: '2026-10-27T10:00:00Z', lastActivity: '2026-10-27T10:00:00Z' } : c)
+    assert.deepEqual(order(started), ['c1', 'c4', 'c3', 'c2', 'c0'])
+    // Идёт ход в c2 без новой реплики (фон, субагенты, инструменты): активность растёт, порядок тот же.
+    const busy = started.map((c) => c.name === 'c2' ? { ...c, status: 'working' as const, lastActivity: '2026-10-27T11:00:00Z', background: { count: 2, tasks: [] } } : c)
+    assert.deepEqual(order(busy), ['c1', 'c4', 'c3', 'c2', 'c0'])
+    assert.deepEqual(order(busy, 'working'), ['c1', 'c2'])
+    // Ход c1 кончился, позже упал c3 — порядок прежний.
+    const ended = busy.map((c) => c.name === 'c1' ? { ...c, status: 'idle' as const, lastActivity: '2026-10-27T12:00:00Z' } : c.name === 'c3' ? { ...c, status: 'failed' as const } : c)
+    assert.deepEqual(order(ended), ['c1', 'c4', 'c3', 'c2', 'c0'])
+    // Старая запись без lastTurnAt и без createdAt не роняет сортировку: по имени.
+    assert.deepEqual(order([a('b'), a('a')]), ['a', 'b'])
   })
   it('ищет по названию проекта и чата, фильтрует ожидание, не возвращает архив', () => {
     const groups = groupByProject(['/srv/pult'], [a('fix', { title: 'Исправить PDF', pending: 1 }), a('gone', { archived: true })])

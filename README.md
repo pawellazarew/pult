@@ -157,7 +157,8 @@ you (with a link to the Inbox card); reasoning text, when the provider streams i
 "Размышления". The line is never written to the event journal.
 
 The sidebar groups chats inside expandable projects. Click a project to open its conversations; project order
-and chat creation order stay stable as agents work. Long lists have a “Show more” button, keeping the selected
+stays fixed. A chat moves to the top once, when you send it a message (from the window, the queue or the CLI), and
+then stays put while the turn runs, after it ends and while background tasks report in. Long lists have a “Show more” button, keeping the selected
 and busy chats visible. “Working” and “Waiting” filters narrow the project tree. Collapsed projects show activity
 and attention counts; each project has its own new-chat button and menu.
 Recent conversations remain below the projects. Drag their separator, use its arrow keys, or double-click to

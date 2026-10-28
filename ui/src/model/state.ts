@@ -35,6 +35,8 @@ export interface SessionLive {
   /** id события, которое последним сменило статус в свёртке (0 — статус из реестра). */
   statusId: number
   lastTs: string
+  /** Начало последнего хода по живому потоку (`message.user`): строка встаёт наверх сразу, до `agent.list`. */
+  lastTurnTs?: string
   conv: Conversation
   /** Фоновые задачи (`background.changed`): процесс сессии жив ради них и после ответа. */
   background?: { count: number; tasks: readonly string[] }
@@ -156,8 +158,10 @@ export function foldSession(prev: SessionLive | undefined, ev: PultEvent, withCo
   // Событие из-под «пола» старше того, что история уже показала: время назад не идёт.
   const lastTs = ev.kind === 'message.delta' || ev.kind === 'context.updated' || (!withConv && Date.parse(ev.ts) <= Date.parse(base.lastTs)) ? base.lastTs : ev.ts
   const background = ev.kind === 'background.changed' ? backgroundOf(ev) : base.background
-  if (prev && status === prev.status && conv === prev.conv && lastTs === prev.lastTs && background === prev.background && context === prev.context) return prev
-  return { status, statusId, lastTs, conv, ...(background ? { background } : {}), ...(context ? { context } : {}) }
+  // Порядок бесед двигает только начало хода — реплика человека; всё, что идёт внутри хода и после, — нет.
+  const lastTurnTs = ev.kind === 'message.user' ? laterTs(base.lastTurnTs, ev.ts) : base.lastTurnTs
+  if (prev && status === prev.status && conv === prev.conv && lastTs === prev.lastTs && background === prev.background && context === prev.context && lastTurnTs === prev.lastTurnTs) return prev
+  return { status, statusId, lastTs, ...(lastTurnTs ? { lastTurnTs } : {}), conv, ...(background ? { background } : {}), ...(context ? { context } : {}) }
 }
 
 /**
@@ -181,10 +185,12 @@ export function bootState(snap: EventsSnapshot, prev: UiState = EMPTY_STATE): Ui
     const lastTs = snap.activity[name] ?? folded?.lastTs ?? before?.lastTs ?? new Date(0).toISOString()
     const background = folded?.background
     const context = folded?.context ?? before?.context
+    const lastTurnTs = before?.lastTurnTs
     sessions[name] = {
       status: before?.status ?? 'cold',
       statusId: before?.statusId ?? 0,
       lastTs,
+      ...(lastTurnTs ? { lastTurnTs } : {}),
       conv: EMPTY_CONVERSATION,
       ...(background ? { background } : {}),
       ...(context ? { context } : {}),
@@ -233,12 +239,16 @@ export function finishHydrate(s: UiState, name: string, page: HistoryPageReply):
     const lastTs = cur && Date.parse(cur.lastTs) > Date.parse(live.lastTs) ? cur.lastTs : live.lastTs
     const background = cur ? cur.background : live.background
     const context = cur?.context ?? live.context
+    // Начало хода — только из живого потока (оно уже в `cur`): реплика из истории старше того, что знает реестр, а у
+    // записи без `lastTurnAt` подняла бы беседу в момент, когда её просто открыли.
+    const lastTurnTs = cur?.lastTurnTs
     sessions = {
       ...sessions,
       [name]: {
         status: cur ? cur.status : seen?.status ?? 'cold',
         statusId: cur ? cur.statusId : seen?.statusId ?? 0,
         lastTs,
+        ...(lastTurnTs ? { lastTurnTs } : {}),
         conv: expirePermissionsBefore(live.conv, s.bootId),
         ...(background ? { background } : {}),
         ...(context ? { context } : {}),
@@ -282,6 +292,12 @@ export function failEarlier(s: UiState, name: string): UiState {
   return e ? { ...s, earlier: { ...s.earlier, [name]: { ...e, loading: false } } } : s
 }
 
+/** Более позднее из двух ISO-времён; время начала хода назад не идёт (история приходит после живого потока). */
+function laterTs(a: string | undefined, b: string | undefined): string | undefined {
+  if (!a || !b) return a || b
+  return Date.parse(b) > Date.parse(a) ? b : a
+}
+
 function backgroundOf(ev: PultEvent): { count: number; tasks: string[] } {
   const tasks = Array.isArray(ev.data['tasks'])
     ? (ev.data['tasks'] as unknown[]).flatMap((t) => { const d = t && typeof t === 'object' ? str((t as Record<string, unknown>)['description']) : null; return d ? [d] : [] })
@@ -307,7 +323,7 @@ export function syncStatuses(s: UiState, records: readonly AgentRecord[]): UiSta
   for (const r of records) {
     const cur = sessions[r.name]
     if (cur && (cur.status === r.lastStatus || cur.statusId > r.lastEventId)) continue
-    sessions = { ...sessions, [r.name]: { conv: cur?.conv ?? EMPTY_CONVERSATION, lastTs: cur?.lastTs ?? r.createdAt, status: r.lastStatus, statusId: cur?.statusId ?? 0, ...(cur?.background ? { background: cur.background } : {}), ...(cur?.context ? { context: cur.context } : {}) } }
+    sessions = { ...sessions, [r.name]: { conv: cur?.conv ?? EMPTY_CONVERSATION, lastTs: cur?.lastTs ?? r.createdAt, ...(cur?.lastTurnTs ? { lastTurnTs: cur.lastTurnTs } : {}), status: r.lastStatus, statusId: cur?.statusId ?? 0, ...(cur?.background ? { background: cur.background } : {}), ...(cur?.context ? { context: cur.context } : {}) } }
   }
   return sessions === s.sessions ? s : { ...s, sessions }
 }

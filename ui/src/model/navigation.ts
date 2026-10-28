@@ -1,6 +1,6 @@
 // Поиск, фильтры состояния и стабильное дерево проектов; недавние служат ярлыками к тем же чатам.
 import type { AgentView } from './agents.js'
-import { agentLabel, sortAgents, statusRank, statusView } from './agents.js'
+import { agentLabel, byLastTurn, sortAgents, statusRank, statusView } from './agents.js'
 import type { ProjectGroup } from './projects.js'
 import { treePhaseLabel } from './phase.js'
 
@@ -37,7 +37,10 @@ export function chatStatus(a: AgentView): { label: string; tone: string; detail:
 export type ProjectFilter = 'all' | 'working' | 'waiting'
 export interface ProjectChats { group: ProjectGroup; rows: AgentView[]; working: number; waiting: number }
 
-/** Projects keep their position; chats keep creation order even when their status changes. */
+/**
+ * Projects keep their position. Chats go by the start of their latest turn (`byLastTurn`): a chat jumps to the
+ * top once, when a new turn starts, and stays put while it runs, after it ends and under background activity.
+ */
 export function projectChats(groups: readonly ProjectGroup[], query = '', filter: ProjectFilter = 'all'): ProjectChats[] {
   const matched = new Set(chatSections(groups, query).flatMap((s) => s.rows.map((r) => r.agent.name)))
   const terms = query.toLocaleLowerCase().trim().split(/\s+/).filter(Boolean)
@@ -46,7 +49,7 @@ export function projectChats(groups: readonly ProjectGroup[], query = '', filter
     const working = all.filter((a) => statusRank(a.status, a.pending) === 1).length
     const waiting = all.filter((a) => statusRank(a.status, a.pending) === 0).length
     const rows = all.filter((a) => filter === 'all' || statusRank(a.status, a.pending) === (filter === 'waiting' ? 0 : 1))
-      .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? '') || a.name.localeCompare(b.name))
+      .sort(byLastTurn)
     const emptyMatches = filter === 'all' && !group.sessions.length && terms.every((term) => `${group.name} ${group.path}`.toLocaleLowerCase().includes(term))
     return rows.length || emptyMatches ? [{ group, rows, working, waiting }] : []
   })

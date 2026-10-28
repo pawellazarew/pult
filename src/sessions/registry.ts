@@ -129,6 +129,13 @@ export interface SessionRecord {
    */
   autoTitled?: boolean
   createdAt: string
+  /**
+   * Начало последнего хода человека (`message.user` из `agent.prompt`: реплика из окна, из очереди или из CLI).
+   * По нему окно ставит беседу наверх списка — один раз, в момент старта хода. События хода, субагенты, фон,
+   * смена статуса и сторож тишины его не трогают: строка не прыгает, пока идёт ход. Нет поля — ходов ещё не
+   * было (или запись старше поля): порядок по `createdAt`.
+   */
+  lastTurnAt?: string
   lastStatus: SessionStatus
   /** Номер последнего события этой сессии в общем журнале. */
   lastEventId: number
@@ -230,6 +237,13 @@ export interface SessionRegistry {
    * исправленных записей.
    */
   seedSeen(lastId: number): number
+  /**
+   * Разовая миграция порядка бесед при старте демона: записи без `lastTurnAt` получают время от `lookup` (последняя
+   * реплика человека в журнале сессии), а без него — `createdAt`. Иначе после обновления «Недавние» встали бы по
+   * дате создания, и беседа, заведённая месяц назад, но живая вчера, утонула бы. Пишется сразу, один раз на запись:
+   * следующий старт журнал уже не читает. Отдаёт число исправленных записей.
+   */
+  seedLastTurn(lookup: (rec: SessionRecord) => string | undefined): number
 }
 
 function isStatus(x: unknown): x is SessionStatus {
@@ -269,6 +283,7 @@ export function parseSessions(raw: unknown): SessionRecord[] {
       ...(o['archived'] === true ? { archived: true } : {}),
       ...(o['autoTitled'] === true ? { autoTitled: true } : {}),
       createdAt: typeof o['createdAt'] === 'string' ? o['createdAt'] : new Date(0).toISOString(),
+      ...(typeof o['lastTurnAt'] === 'string' && Number.isFinite(Date.parse(o['lastTurnAt'])) ? { lastTurnAt: o['lastTurnAt'] } : {}),
       lastStatus: isStatus(o['lastStatus']) ? o['lastStatus'] : 'cold',
       lastEventId: typeof o['lastEventId'] === 'number' && Number.isSafeInteger(o['lastEventId']) ? o['lastEventId'] : 0,
       ...(context ? { context } : {}),
@@ -362,6 +377,17 @@ export function createRegistry(paths: PultPaths): SessionRegistry {
       for (const s of list) {
         if (ENDED_STATUSES.has(s.lastStatus) || s.lastStatus === 'cold') continue
         s.lastStatus = 'cold'
+        n++
+      }
+      if (n) save()
+      return n
+    },
+    seedLastTurn(lookup) {
+      let n = 0
+      for (const s of list) {
+        if (s.lastTurnAt !== undefined) continue
+        const found = lookup({ ...s })
+        s.lastTurnAt = found && Number.isFinite(Date.parse(found)) ? found : s.createdAt
         n++
       }
       if (n) save()

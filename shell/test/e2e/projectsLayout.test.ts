@@ -41,6 +41,10 @@ describe('раскрытие проектов и размер недавних',
     assert.ok(heights.some((height) => height > heights[0]! + 2 && height < heights.at(-1)! - 2), 'нет промежуточных размеров при раскрытии')
     await toggle.click()
     assert.ok(await waitFor(async () => await project.getAttribute('open') === null))
+    // `open` у details снимается сразу по клику, а в localStorage свёрнутость попадает позже: `toggle` → React → эффект.
+    // Перезагрузка раньше записи теряла её (раннер macOS под нагрузкой: проект после reload открыт).
+    const path = await project.getAttribute('data-project')
+    assert.ok(await waitFor(async () => h.win.evaluate((p) => (JSON.parse(localStorage.getItem('pult.collapsed') ?? '[]') as string[]).includes(p!), path)))
     await h.win.reload()
     assert.ok(await waitFor(async () => await h.win.getByTestId('project').count() === 3))
     assert.equal(await h.win.getByTestId('project').first().getAttribute('open'), null)
