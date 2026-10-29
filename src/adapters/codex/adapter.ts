@@ -37,6 +37,7 @@
 
 import { createImageCapture } from '../../core/images.js'
 import { randomUUID } from 'node:crypto'
+import { approvalContext } from '../approvalContext.js'
 import { join } from 'node:path'
 import type { PultConfig } from '../../core/config.js'
 import type { EventDraft } from '../../core/events.js'
@@ -1943,7 +1944,7 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
       const res = await c.request('turn/start', {
         threadId: l.threadId,
         // Реплика уходит В ТЕЛЕ ЗАПРОСА, никогда в argv (инвариант «промпт не в argv»).
-        input: [{ type: 'text', text }],
+        input: [{ type: 'text', text }, { type: 'text', text: approvalContext('codex', flags.approval, l.spec.broker) }],
         ...(flags.model ? { model: flags.model } : {}),
         ...(flags.effort ? { effort: flags.effort } : {}),
         // M8f: режим снимка отличается от действующего у треда — по схеме «для этого хода и следующих».

@@ -259,6 +259,11 @@ update) for cards and memory-backed files. Each Claude session receives only its
 | `workspace` ("Правки в папке без вопросов") | `acceptEdits` | `workspace-write`, no questions |
 | `full` ("Полный доступ") | `bypassPermissions` | `danger-full-access`, no questions |
 
+Every turn includes an explanation of the selected mode, including after a live mode change. For Codex,
+`workspace` rejects requests to leave the sandbox; switch the session to `ask` and repeat the request when that access
+is needed. Nested CLIs inherit the sandbox, so `Not logged in` there alone does not establish that the terminal login
+has expired. Claude's `acceptEdits` follows its own permission rules for other tools.
+
 `full` means no sandbox and no questions: the agent can do anything your user can. It needs an explicit confirmation
 (`--yes` in the CLI).
 

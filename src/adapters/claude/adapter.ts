@@ -55,6 +55,7 @@ import type {
 } from '../types.js'
 import { APPROVAL_WORDS } from '../../sessions/settings.js'
 import { buildClaudeArgv, mcpConfigBody, userTurnLine } from './argv.js'
+import { approvalContext } from '../approvalContext.js'
 import { createAskKeys } from '../../perm/askKeys.js'
 import type { AskKeys } from '../../perm/askKeys.js'
 import { createClaudeMapper, NO_CONVERSATION_RE } from './mapper.js'
@@ -1107,7 +1108,7 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
       // Промпт идёт в stdin, НИКОГДА в argv. И stdin НЕ закрывается здесь даже в режиме
       // «процесс на ход»: закрой мы его сейчас — второй ход после фонового субагента не
       // пришёл бы. Закрытие делает finish().
-      try { stdin.write(userTurnLine(text, userUuid)) } catch { /* обработает close */ }
+      try { stdin.write(userTurnLine(text, userUuid, approvalContext('claude', flags.approval, l.spec.broker))) } catch { /* обработает close */ }
     })
     return { turnId, done }
   }

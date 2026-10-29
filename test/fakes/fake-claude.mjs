@@ -53,6 +53,7 @@ try { fileCfg = JSON.parse(readFileSync(join(process.cwd(), '.pult-fake.json'), 
 const cfg = {
   scenario: process.env.PULT_FAKE_SCENARIO ?? fileCfg.scenario ?? 'simple',
   argvOut: process.env.PULT_FAKE_ARGV_OUT ?? fileCfg.argvOut ?? null,
+  stdinOut: fileCfg.stdinOut ?? null,
   speed: Number(process.env.PULT_FAKE_SPEED ?? fileCfg.speed ?? 60) || 0,
   hang: Number(process.env.PULT_FAKE_HANG ?? fileCfg.hang ?? 0) || 0,
   hangAfterInit: Number(process.env.PULT_FAKE_HANG_AFTER_INIT ?? fileCfg.hangAfterInit ?? 0) || 0,
@@ -399,6 +400,7 @@ process.stdin.on('data', (chunk) => {
     if (!line.trim()) continue
     let msg
     try { msg = JSON.parse(line) } catch { continue }
+    if (cfg.stdinOut) appendFileSync(cfg.stdinOut, JSON.stringify(msg) + '\n')
     const text = msg?.message?.content?.[0]?.text ?? ''
     const marked = scenarioFromText(text)
     if (marked && marked !== scenario) { scenario = marked; turns = null; turnIndex = 0; played.clear() }

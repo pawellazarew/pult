@@ -228,8 +228,25 @@ describe('адаптер codex: один процесс на всех', () => {
       const turn = r.client().find((c) => c.msg.method === 'turn/start')
       const input = (turn?.msg.params as { input: Array<{ text: string }> }).input
       assert.equal(input[0]?.text, 'СЕКРЕТНАЯ РЕПЛИКА про деньги')
+      assert.match(input[1]?.text ?? '', /«Спрашивать»/)
       assert.equal((turn?.msg.params as { effort: string }).effort, 'low')
       assert.equal((turn?.msg.params as { model: string }).model, 'gpt-6-astra')
+    } finally { await r.adapter.shutdown(); r.remove() }
+  })
+
+  it('пояснение Codex берётся из снимка каждого хода, включая смену workspace → ask', async () => {
+    const r = rig()
+    try {
+      await r.adapter.startSession(spec(r))
+      for (const approval of ['workspace', 'ask'] as const) {
+        assert.equal((await (await r.adapter.send('w', `запрос ${approval}`, { approval, browser: null })).done).ok, true)
+      }
+      const turns = r.client().filter((c) => c.msg.method === 'turn/start')
+      const texts = turns.map((t) => (t.msg.params?.['input'] as Array<{ text: string }>)[1]!.text)
+      assert.match(texts[0]!, /approval_policy=never/)
+      assert.match(texts[0]!, /Правки в папке без вопросов/)
+      assert.match(texts[1]!, /approval_policy=on-request/)
+      assert.doesNotMatch(texts[1]!, /approval_policy=never/)
     } finally { await r.adapter.shutdown(); r.remove() }
   })
 })
