@@ -1,3 +1,4 @@
+import { t as tr } from './i18n.js'
 // Связь окна с демоном (docs/12 §2 «Переподключение»). Живёт в main-процессе; токен демона
 // остаётся здесь и в рендерер не уходит никогда.
 //
@@ -114,14 +115,14 @@ export class DaemonLink {
     await this.attach(true, true)
     if (!this.client) {
       const s = this.state
-      throw new LinkError('no_daemon', s.state === 'down' ? s.reason : 'демон не поднялся')
+      throw new LinkError('no_daemon', s.state === 'down' ? s.reason : tr('демон не поднялся'))
     }
   }
 
   /** Вызов метода демона. Нет связи — отказ `no_daemon`, а не ожидание: окно покажет плашку. */
   async call(method: string, params?: Record<string, unknown>): Promise<unknown> {
     const c = this.client
-    if (!c) throw new LinkError('no_daemon', 'демон недоступен')
+    if (!c) throw new LinkError('no_daemon', tr('демон недоступен'))
     return c.request(method, params)
   }
 
@@ -159,7 +160,7 @@ export class DaemonLink {
   /** Остановка демона кнопкой: после неё окно не долбит сокет повторами. */
   async stopDaemon(): Promise<void> {
     const c = this.client
-    if (!c) throw new LinkError('no_daemon', 'демон недоступен')
+    if (!c) throw new LinkError('no_daemon', tr('демон недоступен'))
     this.stoppedByUser = true
     try {
       await c.request('daemon.stop')
@@ -209,7 +210,7 @@ export class DaemonLink {
     } catch (e) {
       this.busy = false
       const msg = (e as Error).message ?? String(e)
-      this.deps.log?.('демон не отвечает', { error: msg, attempt: this.attempt })
+      this.deps.log?.(tr('демон не отвечает'), { error: msg, attempt: this.attempt })
       this.scheduleRetry(shortReason(e))
       return
     }
@@ -228,7 +229,7 @@ export class DaemonLink {
     this.client = null
     for (const sub of this.subs.values()) { sub.daemonSub = null; sub.client = null }
     if (this.closed) return
-    this.scheduleRetry(this.stoppedByUser ? 'остановлен кнопкой' : 'соединение с демоном закрыто')
+    this.scheduleRetry(this.stoppedByUser ? tr('остановлен кнопкой') : tr('соединение с демоном закрыто'))
   }
 
   private async attachSub(client: Client, key: string, sub: Sub): Promise<void> {
@@ -239,7 +240,7 @@ export class DaemonLink {
       if (this.subs.get(key) !== sub || sub.client !== client) return
       if (!Number.isInteger(ev.id) || ev.id <= sub.lastId) return
       sub.lastId = ev.id
-      try { sub.onEvent(ev) } catch (e) { this.deps.log?.('обработчик события упал', { error: (e as Error).message }) }
+      try { sub.onEvent(ev) } catch (e) { this.deps.log?.(tr('обработчик события упал'), { error: (e as Error).message }) }
     }
     try {
       const { sub: n } = await client.subscribe({ since: sub.lastId }, deliver)
@@ -247,15 +248,15 @@ export class DaemonLink {
       else client.request('events.unsubscribe', { sub: n }).catch(() => { /* неважно */ })
     } catch (e) {
       // Соединение упало посреди подписки: onLost переподключит и подпишет заново.
-      this.deps.log?.('подписка не удалась', { error: (e as Error).message })
+      this.deps.log?.(tr('подписка не удалась'), { error: (e as Error).message })
     }
   }
 }
 
 function shortReason(e: unknown): string {
   const code = (e as { code?: unknown })?.code
-  if (code === 'no_daemon') return 'сокет не отвечает'
-  if (code === 'bad_token') return 'токен демона не подошёл'
+  if (code === 'no_daemon') return tr('сокет не отвечает')
+  if (code === 'bad_token') return tr('токен демона не подошёл')
   const msg = (e as Error)?.message ?? String(e)
   return msg.length > 160 ? `${msg.slice(0, 157)}…` : msg
 }

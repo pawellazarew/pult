@@ -2,6 +2,9 @@
 // Основа перенесена из spike/env/sock-server.mjs (проверка S9f): каталог 0700 и файлы 0600
 // явным chmod, lock с проверкой живости pid, старый сокет удаляется ТОЛЬКО после взятия lock.
 
+import { withLanguage } from '../i18n/context.js'
+import { getLanguage, isLanguageSetting, resolveLanguage } from '../i18n/core.js'
+import type { LanguageSetting } from '../i18n/core.js'
 import { existsSync, chmodSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync } from 'node:fs'
 import net from 'node:net'
 import { homedir } from 'node:os'
@@ -72,13 +75,13 @@ import { createLiveChannel } from './live.js'
 import type { LiveChannel } from './live.js'
 import { LIVE_CURSOR_BASE } from '../sessions/turnPhase.js'
 import {
-  approvalBrowserRefusal, browserDirs, BYPASS_REFUSAL, claudeDefaultMode, createBrowserInstaller, ensureBrowserDirs, findChrome, PLAYWRIGHT_MCP_VERSION, sweepDeadBrowserDirs,
+  approvalBrowserRefusal, browserDirs, bypassRefusal, claudeDefaultMode, createBrowserInstaller, ensureBrowserDirs, findChrome, PLAYWRIGHT_MCP_VERSION, sweepDeadBrowserDirs,
 } from '../mcp/browser.js'
 import type { BrowserInstaller, InstallResult } from '../mcp/browser.js'
 import { browserDoctorItems, bypassDoctorItems, mcpDoctorItems } from '../mcp/doctor.js'
 import { createMcpExtras } from '../mcp/session.js'
 import { listServers, RESERVED_MCP_NAMES } from '../mcp/servers.js'
-import { MCP_SERVER_NAME_RE, MCP_SERVERS_MAX, writeMcpSelection, writeNetworkGuard, writeNewSession, writeUpdatesCheck } from '../core/config.js'
+import { MCP_SERVER_NAME_RE, MCP_SERVERS_MAX, writeMcpSelection, writeNetworkGuard, writeLanguage, writeNewSession, writeUpdatesCheck } from '../core/config.js'
 import { GuardError, guardLine, guardVerdict, parseGuardShape, parseGuardStrict, sameGuard } from '../core/guard.js'
 import type { GuardRule } from '../core/guard.js'
 import type { SessionBrowser, SessionRecord, SessionStatus } from '../sessions/registry.js'
@@ -218,7 +221,12 @@ export function ownParams(raw: unknown): Record<string, unknown> {
   return out
 }
 
-export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
+/** Background work follows this daemon's current settings, without changing another daemon's locale. */
+export function startDaemon(opts: DaemonOptions): Promise<StartResult> {
+  return withLanguage(() => resolveLanguage(opts.config.language, process.env['LC_ALL'] || process.env['LC_MESSAGES'] || process.env['LANG'] || Intl.DateTimeFormat().resolvedOptions().locale), () => startDaemonInContext(opts))
+}
+
+async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
   const { paths, config, logger } = opts
   const backlogLimit = opts.writeBacklogLimit ?? WRITE_BACKLOG_LIMIT
   ensureLayout(paths)
@@ -361,13 +369,13 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
       .filter(([k]) => !allowed || allowed.has(k as string)).map(([, f]) => f as string)
     return claudeDefaultMode(files) ?? 'default'
   }
-  /** О3: в режиме `bypassPermissions` браузер Claude не включается (src/mcp/browser.ts BYPASS_REFUSAL). */
+  /** О3: в режиме `bypassPermissions` браузер Claude не включается (src/mcp/browser.ts bypassRefusal). */
   const refuseBypass = (kind: string, cwd: string, approval?: ApprovalMode): void => {
     // M8d: и режим подтверждений самой сессии — «полный доступ» у Claude, «без вопросов» у Codex.
     const byMode = approvalBrowserRefusal(kind, approval)
     if (byMode) throw new ManagerError(ERROR_CODES.invalidParams, byMode)
     if (kind === 'claude' && claudeDefaultMode(claudeSettings(cwd)) === 'bypassPermissions') {
-      throw new ManagerError(ERROR_CODES.invalidParams, BYPASS_REFUSAL)
+      throw new ManagerError(ERROR_CODES.invalidParams, bypassRefusal())
     }
   }
   // Старт: следы удалений прошлого демона (`*.dead-*`) — в фоне; файлы `--mcp-config` прошлых процессов —
@@ -662,6 +670,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
   // `network` — только правило стража и последние известные выходы (из кэша проверок, без новой пробы): прокси,
   // профили и noProxy окну не отдаются.
   const settingsReply = (): Record<string, unknown> => ({
+    language: config.language,
     newSession: config.newSession, lastUsed: readLastUsed(), updates: { check: config.updates.check },
     network: { guard: { mode: config.guard.mode, countries: [...config.guard.countries] }, exits: lastNetExits() },
     codexRules: rules.list(),
@@ -740,9 +749,10 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     doctorNetLast.set(provider, { at: Date.now(), gen, check })
     return check
   }
-  const doctorRuns = new Map<boolean, Promise<DoctorReport>>()
+  const doctorRuns = new Map<string, Promise<DoctorReport>>()
   const doctorOnce = (skipNet: boolean): Promise<DoctorReport> => {
-    const running = doctorRuns.get(skipNet)
+    const key = `${skipNet}:${getLanguage()}`
+    const running = doctorRuns.get(key)
     if (running) return running
     const run = runDoctor({
       paths,
@@ -771,8 +781,8 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
       // 0.3.7: сеть в песочнице Codex; тестовый демон читает файл в PULT_HOME, а не config.toml машины.
       codexConfig: opts.testMode ? join(paths.home, 'codex-config.toml') : codexConfigPath(),
       ...(opts.doctor ?? {}),
-    }).finally(() => { doctorRuns.delete(skipNet) })
-    doctorRuns.set(skipNet, run)
+    }).finally(() => { doctorRuns.delete(key) })
+    doctorRuns.set(key, run)
     return run
   }
 
@@ -850,8 +860,8 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
         // `network.guard` (0.3.6): профили сети, прокси, noProxy, команды, адрес канала (`updates.url`) и всё прочее
         // config.json отсюда не достать. Разбор строгий — кривое поле отказывает целиком, и тогда файл не трогается вовсе.
         const keys = Object.keys(p)
-        if (!keys.length || keys.some((k) => k !== 'newSession' && k !== 'updates' && k !== 'network' && k !== 'codexRules')) {
-          throw new ManagerError(ERROR_CODES.invalidParams, 'settings.set: можно менять только newSession, updates.check, network.guard и codexRules.revoke')
+        if (!keys.length || keys.some((k) => k !== 'language' && k !== 'newSession' && k !== 'updates' && k !== 'network' && k !== 'codexRules')) {
+          throw new ManagerError(ERROR_CODES.invalidParams, 'settings.set: можно менять только language, newSession, updates.check, network.guard и codexRules.revoke')
         }
         // План 16, № 11: «Отозвать» из «Настроек» — через уже разрешённый оболочке метод (Pult.app не меняется).
         // Только `{revoke: id}` и только отдельным вызовом: отзыв — живая кнопка, а не часть черновика «Сохранить».
@@ -863,6 +873,11 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
           }
           const outcome = await revokeRule((r as Record<string, unknown>)['revoke'], `${conn.client}#${conn.id}`)
           return { ...settingsReply(), codexRulesRevoked: { ...outcome, text: revokeSummary(outcome) } }
+        }
+        let language: LanguageSetting | undefined
+        if (p['language'] !== undefined) {
+          if (!isLanguageSetting(p['language'])) throw new ManagerError(ERROR_CODES.invalidParams, 'settings.set: language must be auto, ru or en')
+          language = p['language']
         }
         let ns: NewSessionSettings | undefined
         if (p['newSession'] !== undefined) {
@@ -901,10 +916,12 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
           }
         }
         try {
+          if (language !== undefined) writeLanguage(paths.config, language)
           if (ns !== undefined) writeNewSession(paths.config, ns)
           if (check !== undefined) writeUpdatesCheck(paths.config, check)
           if (guard !== undefined) writeNetworkGuard(paths.config, guard)
         } catch (e) { throw new ManagerError(ERROR_CODES.internal, (e as Error).message) }
+        if (language !== undefined) config.language = language
         if (ns !== undefined) {
           config.newSession = ns
           logger.info('настройки новой сессии записаны', { newSession: ns })
@@ -1290,7 +1307,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
         return
 
       case 'doctor.run':
-        send({ id: req.id, result: await doctorOnce(params['net'] === false) })
+        send({ id: req.id, result: await withLanguage(params['locale'] === 'en' || params['locale'] === 'ru' ? params['locale'] : getLanguage(), () => doctorOnce(params['net'] === false)) })
         return
 
       // --- M8c: канал обновлений -------------------------------------------------------
@@ -1678,7 +1695,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
           writeFrame(conn, { id: req.id ?? null, error: { code: ERROR_CODES.invalidParams, message: 'нужны поля id и method' } })
           continue
         }
-        void dispatch(conn, req).catch((e: unknown) => {
+        void withLanguage(req.locale === 'ru' || req.locale === 'en' ? req.locale : () => resolveLanguage(config.language, process.env['LC_ALL'] || process.env['LC_MESSAGES'] || process.env['LANG'] || Intl.DateTimeFormat().resolvedOptions().locale), () => dispatch(conn, req)).catch((e: unknown) => {
           logger.error('метод упал', { method: req.method, error: (e as Error).message })
           try {
             writeFrame(conn, { id: req.id, error: { code: ERROR_CODES.internal, message: String((e as Error).message) } })

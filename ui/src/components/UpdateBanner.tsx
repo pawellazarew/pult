@@ -1,3 +1,4 @@
+import { t } from '../lib/i18n.js'
 // Плашка обновления (M8c) — одна тихая строка над окном. Что в ней писать, решает model/update.ts.
 
 import type { ReactElement } from 'react'
@@ -19,14 +20,14 @@ export function UpdateBanner(p: {
       <Icon name={v.kind === 'failed' || v.kind === 'rolledback' || v.kind === 'app-failed' ? 'alert' : v.kind === 'waiting' || v.kind === 'applying' ? 'clock' : 'info'} />
       <span className="grow">{v.text}</span>
       {v.notes && (
-        <button type="button" className="btn btn-ghost btn-sm" onClick={() => p.onNotes(v.notes as string)} data-testid="update-notes">Что нового</button>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={() => p.onNotes(v.notes as string)} data-testid="update-notes">{t("Что нового")}</button>
       )}
       {v.action && (
         <button type="button" className={`btn btn-sm${v.action.force ? '' : ' btn-primary'}`} disabled={p.busy}
           onClick={() => { if (v.action) p.onAction(v.action) }} data-testid={v.action.rollback ? 'update-apply-app' : 'update-apply'}>{v.action.label}</button>
       )}
       {v.dismissKey && (
-        <button type="button" className="btn btn-ghost btn-sm" title="Скрыть" aria-label="Скрыть"
+        <button type="button" className="btn btn-ghost btn-sm" title={t("Скрыть")} aria-label={t("Скрыть")}
           onClick={() => p.onDismiss(v.dismissKey as string)} data-testid="update-dismiss"><Icon name="x" /></button>
       )}
     </div>

@@ -1,3 +1,6 @@
+import type { LanguageSetting } from '../../src/i18n/core.js'
+import { settleAttachmentDrafts } from './components/useAttachments.js'
+import { getLanguage, t as tr } from './lib/i18n.js'
 // Окно целиком: связь с демоном, поток событий, запросы к демону и горячие клавиши. Всё, что
 // «событие → вид», — в model/*.ts; здесь только провода между мостом, свёрткой и компонентами.
 
@@ -251,7 +254,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   const runDoctor = useCallback(async (): Promise<void> => {
     setDoctor((d) => ({ ...d, loading: true, error: null }))
     try {
-      const report = (await bridge.call('doctor.run', { net: true })) as DoctorReport
+      const report = (await bridge.call('doctor.run', { net: true, locale: getLanguage() })) as DoctorReport
       setDoctor({ report, loading: false, error: null })
     } catch (e) {
       setDoctor((d) => ({ ...d, loading: false, error: errorText(e) }))
@@ -441,14 +444,14 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     const prefill = t.newSession !== undefined ? linkPrefill(t.newSession) : null
     if (prefill) {
       if (modalRef.current?.type === 'new') {
-        setBannerError('Пришла ссылка pult:// — закрой диалог «Новая сессия» и открой ссылку снова')
+        setBannerError(tr('Пришла ссылка pult:// — закрой диалог «Новая сессия» и открой ссылку снова'))
         return
       }
       setModal({ type: 'new', prefill, seq: ++linkSeq.current })
       return
     }
     if (t.sessionId) {
-      if (loadedRef.current && !known.current.has(t.sessionId)) setBannerError(`Сессии ${t.sessionId} нет — ссылка устарела или с опечаткой`)
+      if (loadedRef.current && !known.current.has(t.sessionId)) setBannerError(tr`Сессии ${t.sessionId} нет — ссылка устарела или с опечаткой`)
       else select(t.sessionId)
     }
     if (t.permId || t.inbox) setInboxOpen(true)
@@ -542,7 +545,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         setUi((s) => failHydrate(s, currentName))
         // Переход из поиска ждал эту ленту — без неё ему некуда вести.
         setJump((j) => (j?.name === currentName ? null : j))
-        setBannerError(`история сессии ${currentName} не загрузилась: ${errorText(e)}`)
+        setBannerError(tr`история сессии ${currentName} не загрузилась: ${errorText(e)}`)
       },
     )
   }, [bridge, currentName, conn, ui.lazy])
@@ -556,7 +559,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         setUi((s) => failEarlier(s, name))
         // Переход из поиска ждал эту страницу — бросаем его, иначе он просил бы её снова и снова.
         setJump(null)
-        setBannerError(`ранняя история не загрузилась: ${errorText(err)}`)
+        setBannerError(tr`ранняя история не загрузилась: ${errorText(err)}`)
       },
     )
   }, [bridge])
@@ -583,7 +586,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   const openHit = (hit: SearchHit): void => {
     setModal(null)
     // Сессию удалили, пока смотрели выдачу: открывать нечего.
-    if (!agents.some((a) => a.name === hit.sessionId)) { setBannerError(`сессии ${hit.sessionId} больше нет`); return }
+    if (!agents.some((a) => a.name === hit.sessionId)) { setBannerError(tr`сессии ${hit.sessionId} больше нет`); return }
     select(hit.sessionId)
     setJump({ name: hit.sessionId, eventId: hit.eventId, nonce: ++jumpNonce.current, kind: hit.kind, ...(hit.parentId !== undefined ? { parentId: hit.parentId } : {}) })
   }
@@ -596,7 +599,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   }
   /** «в ленту» из карточки Inbox: открыть разговор и прыгнуть к карточке запроса (нет события — просто открыть). */
   const jumpToPerm = (sessionId: string, eventId?: number): void => {
-    if (!agents.some((a) => a.name === sessionId)) { setBannerError(`сессии ${sessionId} больше нет`); return }
+    if (!agents.some((a) => a.name === sessionId)) { setBannerError(tr`сессии ${sessionId} больше нет`); return }
     select(sessionId)
     if (eventId !== undefined) setJump({ name: sessionId, eventId, nonce: ++jumpNonce.current, kind: 'permission.requested' })
   }
@@ -610,8 +613,8 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   /** Меню сессии «Экспорт в Markdown»: демон пишет файл в PULT_HOME/exports, Finder показывает его. */
   const exportAgent = (name: string): void => {
     bridge.call('agent.export', { name }).then(
-      (r) => bridge.revealPath((r as { path: string }).path).catch((e: unknown) => setBannerError(`файл выгружен, но Finder не открылся: ${errorText(e)}`)),
-      (e: unknown) => setBannerError(`экспорт не удался: ${errorText(e)}`),
+      (r) => bridge.revealPath((r as { path: string }).path).catch((e: unknown) => setBannerError(tr`файл выгружен, но Finder не открылся: ${errorText(e)}`)),
+      (e: unknown) => setBannerError(tr`экспорт не удался: ${errorText(e)}`),
     )
   }
   const loadEvents = useCallback(
@@ -636,7 +639,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   const view = connView(conn)
   const waiting = waitingCount(agents)
 
-  useEffect(() => { document.title = waiting ? `Пульт · ждут ${waiting}` : 'Пульт' }, [waiting])
+  useEffect(() => { document.title = waiting ? tr`Пульт · ждут ${waiting}` : tr('Пульт') }, [waiting])
 
   // --- действия ----------------------------------------------------------------------
   const withPerm = (id: string, fn: () => Promise<unknown>): void => {
@@ -715,7 +718,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
       const r = (await bridge.call('agent.queue.move', { name, id, hold: true })) as { edit?: { text?: unknown; holdMs?: unknown } } | null
       const text = r?.edit?.text
       // Старый демон молча переставил бы реплику вместо правки — без полного текста правку не открываем.
-      if (typeof text !== 'string') throw new Error('демон не умеет править очередь — обнови Пульт')
+      if (typeof text !== 'string') throw new Error(tr('демон не умеет править очередь — обнови Пульт'))
       return { text, holdMs: typeof r?.edit?.holdMs === 'number' ? r.edit.holdMs : 10 * 60_000 }
     },
     save: async (id, text) => {
@@ -864,12 +867,14 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
       setBannerError(settingsErrorText(isBridgeError(e) ? e.code : null, errorText(e)))
     })
   }
-  const saveSettings = async (next: NewSessionSettings, autoCheck: boolean | null, guardRule: { rule: GuardRule; expect: GuardRule } | null): Promise<string | null> => {
+  const saveSettings = async (next: NewSessionSettings, autoCheck: boolean | null, guardRule: { rule: GuardRule; expect: GuardRule } | null, language?: LanguageSetting): Promise<string | null> => {
     // Флаг автопроверки и правило стража — только если сменились: старый демон их не принимает, и зря трогать файл незачем.
     const updates = autoCheck !== null && settings?.updates && autoCheck !== settings.updates.check ? autoCheck : undefined
     const guardNext = guardRule && settings?.network ? guardRule : undefined
     try {
-      setSettings(await bridge.call('settings.set', settingsParams(next, updates, guardNext?.rule, guardNext?.expect)) as SettingsReply)
+      if (language !== undefined) await settleAttachmentDrafts()
+      setSettings(await bridge.call('settings.set', { ...settingsParams(next, updates, guardNext?.rule, guardNext?.expect), ...(language !== undefined ? { language } : {}) }) as SettingsReply)
+      if (language !== undefined) bridge.reloadWindow?.()
     } catch (e) {
       // Правило сменили снаружи — свежее в окне сразу; диалог открывается заново на нём.
       if (isBridgeError(e) && e.code === 'guard_changed') void refreshSettings()
@@ -885,7 +890,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     try {
       const r = await bridge.call('settings.set', revokeParams(id)) as SettingsReply & { codexRulesRevoked?: { text?: string } }
       setSettings(r)
-      return { ok: r.codexRulesRevoked?.text ?? 'Отозвано.' }
+      return { ok: r.codexRulesRevoked?.text ?? tr('Отозвано.') }
     } catch (e) {
       void refreshSettings()
       return { error: errorText(e) }
@@ -1079,27 +1084,26 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         <div className="banner banner-fail" role="alert" data-testid="conn-banner">
           <Icon name="alert" />
           <span className="grow" title={view.reason ?? undefined}>
-            <b>Демон недоступен.</b> {view.banner} Сессии ждут его: их ходы и история вернутся после запуска.
-            {view.reasonVisible && view.reason ? <span className="banner-err"> {view.reason}</span> : null}
+            <b>{tr("Демон недоступен.")}</b> {view.banner}{tr(" Сессии ждут его: их ходы и история вернутся после запуска.")}{view.reasonVisible && view.reason ? <span className="banner-err"> {view.reason}</span> : null}
           </span>
           {bannerError && <span className="banner-err">{bannerError}</span>}
           <button type="button" className="btn btn-primary" onClick={startDaemon} disabled={starting} data-testid="start-daemon">
-            {starting ? 'запускаю…' : 'Запустить демона'}
+            {starting ? tr('запускаю…') : tr('Запустить демона')}
           </button>
         </div>
       )}
       {!view.banner && blocked.map((b) => (
         <div key={b.provider} className="banner banner-fail" role="alert" data-testid="provider-blocked">
           <Icon name="alert" />
-          <span className="grow"><b>Провайдер {b.provider} остановлен целиком.</b> {b.reason ?? ''} — проверь VPN и вход, потом сними остановку.</span>
-          <button type="button" className="btn" onClick={() => resetProvider(b.provider)} data-testid="provider-reset">Снять остановку</button>
+          <span className="grow"><b>{tr("Провайдер ")}{b.provider}{tr(" остановлен целиком.")}</b> {b.reason ?? ''}{tr(" — проверь VPN и вход, потом сними остановку.")}</span>
+          <button type="button" className="btn" onClick={() => resetProvider(b.provider)} data-testid="provider-reset">{tr("Снять остановку")}</button>
         </div>
       ))}
       {!view.banner && guard.tone === 'fail' && (
         <div className="banner banner-wait" role="alert" data-testid="net-blocked">
           <Icon name="alert" />
-          <span className="grow"><b>Страж сети не пускает ходы:</b> {guard.detail}.</span>
-          <button type="button" className="btn" onClick={() => { setModal({ type: 'doctor' }); void runDoctor() }}>Перепроверить</button>
+          <span className="grow"><b>{tr("Страж сети не пускает ходы:")}</b> {guard.detail}.</span>
+          <button type="button" className="btn" onClick={() => { setModal({ type: 'doctor' }); void runDoctor() }}>{tr("Перепроверить")}</button>
         </div>
       )}
       {!view.banner && (
@@ -1111,7 +1115,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         <div className="banner banner-update" role="status" data-testid="update-latest">
           <Icon name="info" />
           <span className="grow">{updNote}</span>
-          <button type="button" className="btn btn-ghost btn-sm" title="Скрыть" aria-label="Скрыть" onClick={() => setUpdNote(null)}><Icon name="x" /></button>
+          <button type="button" className="btn btn-ghost btn-sm" title={tr("Скрыть")} aria-label={tr("Скрыть")} onClick={() => setUpdNote(null)}><Icon name="x" /></button>
         </div>
       )}
       {!view.banner && bannerError && (
@@ -1131,9 +1135,9 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
             archived={archivedViews} onRename={(name) => setModal({ type: 'rename', name })}
             onArchive={archiveSession} onRemove={(name) => setModal({ type: 'rm', name })} onExport={exportAgent}
             onReveal={(p) => void bridge.revealPath(p)} onBrowser={setBrowser} />
-          <button type="button" className="btn external-open" disabled={conn.state !== 'up'} onClick={() => setModal({ type: 'external' })} data-testid="open-external-sessions"><Icon name="folder" />Существующие чаты</button>
-          <button type="button" className="btn sidebar-settings" onClick={() => setModal({ type: 'settings' })} data-testid="open-settings"><Icon name="tool" />Настройки<Kbd>{`${CMD},`}</Kbd></button>
-          <div className="ag-foot mono journal" data-testid="event-count" title="Курсор журнала демона (служебный, скрыт с экрана)">журнал #{ui.lastId}</div>
+          <button type="button" className="btn external-open" disabled={conn.state !== 'up'} onClick={() => setModal({ type: 'external' })} data-testid="open-external-sessions"><Icon name="folder" />{tr("Существующие чаты")}</button>
+          <button type="button" className="btn sidebar-settings" onClick={() => setModal({ type: 'settings' })} data-testid="open-settings"><Icon name="tool" />{tr("Настройки")}<Kbd>{`${CMD},`}</Kbd></button>
+          <div className="ag-foot mono journal" data-testid="event-count" title={tr("Курсор журнала демона (служебный, скрыт с экрана)")}>{tr("журнал #")}{ui.lastId}</div>
         </div>
         <div className="conv-col">
         {current ? (
@@ -1169,11 +1173,11 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         ) : (
           <section className="conv">
             <div className="conv-empty" data-testid="conv-empty">
-              <h3>{conn.state !== 'up' ? 'Жду демона' : agents.length ? 'Открой сессию слева' : 'Здесь будет разговор'}</h3>
+              <h3>{conn.state !== 'up' ? tr('Жду демона') : agents.length ? tr('Открой сессию слева') : tr('Здесь будет разговор')}</h3>
               <div>{agents.length
-                ? 'Выбери беседу слева. Вверху списка — агенты, которые ждут ответа, затем работающие и недавние.'
-                : 'Заведи сессию — выбери папку и провайдера, напиши, что сделать. Разрешения всех сессий собираются в Inbox справа.'}</div>
-              <div className="keys mono"><span>{CMD}N — сессия</span><span>{CMD}1…9 — беседы</span><span>{CMD}I — Inbox</span><span>{CMD}⇧F — поиск</span><span>{CMD}/ — все клавиши</span></div>
+                ? tr('Выбери беседу слева. Вверху списка — агенты, которые ждут ответа, затем работающие и недавние.')
+                : tr('Заведи сессию — выбери папку и провайдера, напиши, что сделать. Разрешения всех сессий собираются в Inbox справа.')}</div>
+              <div className="keys mono"><span>{CMD}{tr("N — сессия")}</span><span>{CMD}{tr("1…9 — беседы")}</span><span>{CMD}I — Inbox</span><span>{CMD}{tr("⇧F — поиск")}</span><span>{CMD}{tr("/ — все клавиши")}</span></div>
             </div>
           </section>
         )}
@@ -1211,13 +1215,16 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
           onSave={saveMcp} onClose={() => setModal({ type: 'doctor' })} />
       )}
       {modal?.type === 'stop' && (
-        <Confirm title="Остановить ход?" testId="confirm-stop" action="Остановить" danger
-          text={<>Сессия {whoIs(modal.name)} прервёт текущий ход. Разговор сохранится — можно продолжить новой репликой.</>}
+        <Confirm title={tr("Остановить ход?")} testId="confirm-stop" action={tr("Остановить")} danger
+          text={<>{tr("Сессия ")}{whoIs(modal.name)}{tr(" прервёт текущий ход. Разговор сохранится — можно продолжить новой репликой.")}</>}
           onOk={() => stopAgent(modal.name)} onCancel={() => setModal(null)} />
       )}
       {modal?.type === 'help' && <HotkeysHelp onClose={() => setModal(null)} />}
       {modal?.type === 'settings' && (
         <SettingsDialog settings={settings?.newSession ?? null} catalog={providers} onSave={saveSettings} onClose={() => setModal(null)}
+          language={settings?.language ?? 'auto'}
+          languageSupported={!!bridge.reloadWindow && !!bridge.language}
+          languageOverride={bridge.languageOverride ?? null}
           autoCheck={settings?.updates?.check ?? null}
           {...(settings?.network ? {
             netGuard: {
@@ -1245,12 +1252,11 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
       )}
       {modal?.type === 'configure' && (
         <Confirm testId="confirm-configure" danger
-          title={modal.reason === 'full' ? 'Полный доступ?' : 'Разговор не влезет в окно модели'}
-          action={modal.reason === 'full' ? 'Включить полный доступ' : 'Всё равно сменить'}
+          title={modal.reason === 'full' ? tr('Полный доступ?') : tr('Разговор не влезет в окно модели')}
+          action={modal.reason === 'full' ? tr('Включить полный доступ') : tr('Всё равно сменить')}
           text={modal.reason === 'full'
-            ? <>Сессия {whoIs(modal.name)} со следующего хода: {APPROVAL_FULL_WARNING}.</>
-            : <>{modal.text ?? (modal.pick.kind === 'model' ? `${modal.pick.misfit ?? ''}: разговор сессии больше окна модели ${modal.pick.model}` : '')}. Сменить модель сессии {whoIs(modal.name)} всё равно?
-              Первый ход после смены модели дороже — кэш промпта у каждой модели свой.</>}
+            ? <>{tr("Сессия ")}{whoIs(modal.name)}{tr(" со следующего хода: ")}{APPROVAL_FULL_WARNING}.</>
+            : <>{modal.text ?? (modal.pick.kind === 'model' ? tr`${modal.pick.misfit ?? ''}: разговор сессии больше окна модели ${modal.pick.model}` : '')}{tr(". Сменить модель сессии ")}{whoIs(modal.name)}{tr(" всё равно? Первый ход после смены модели дороже — кэш промпта у каждой модели свой.")}</>}
           onOk={() => configureAgent(modal.name, modal.pick, true)} onCancel={() => setModal(null)} />
       )}
       {modal?.type === 'search' && <SearchDialog run={runSearch} labelOf={labelOf} now={now} onOpen={openHit} onClose={() => setModal(null)} />}
@@ -1259,20 +1265,19 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
           onSave={(title) => renameAgent(modal.name, title)} onClose={() => setModal(null)} />
       )}
       {modal?.type === 'hide' && modal.busy.length > 0 && (
-        <Confirm title="Пока нельзя убрать" testId="confirm-hide-busy" action="Понятно"
-          text={<>Папка <b>{projectName(modal.path)}</b>: сначала останови {modal.busy.map((n, i) => <span key={n}>{i ? ', ' : ''}{whoIs(n)}</span>)} —
-            {modal.busy.length === 1 ? ' она работает или ждёт тебя' : ' они работают или ждут тебя'}. Убрать в архив занятую сессию — потерять её из виду посреди дела.</>}
+        <Confirm title={tr("Пока нельзя убрать")} testId="confirm-hide-busy" action={tr("Понятно")}
+          text={<>{tr("Папка ")}<b>{projectName(modal.path)}</b>{tr(": сначала останови ")}{modal.busy.map((n, i) => <span key={n}>{i ? ', ' : ''}{whoIs(n)}</span>)} —
+            {modal.busy.length === 1 ? tr(' она работает или ждёт тебя') : tr(' они работают или ждут тебя')}{tr(". Убрать в архив занятую сессию — потерять её из виду посреди дела.")}</>}
           onOk={() => setModal(null)} onCancel={() => setModal(null)} />
       )}
       {modal?.type === 'hide' && modal.busy.length === 0 && (
-        <Confirm title="Убрать из списка?" testId="confirm-hide" action="Убрать"
-          text={<>Папка <b>{projectName(modal.path)}</b>: {modal.sessions.length} {plural(modal.sessions.length, 'сессия уйдёт', 'сессии уйдут', 'сессий уйдут')} в архив,
-            папка на диске не трогается. Новая сессия в этой папке вернёт её в список.</>}
+        <Confirm title={tr("Убрать из списка?")} testId="confirm-hide" action={tr("Убрать")}
+          text={<>{tr("Папка ")}<b>{projectName(modal.path)}</b>: {modal.sessions.length} {plural(modal.sessions.length, tr('сессия уйдёт'), tr('сессии уйдут'), tr('сессий уйдут'))}{tr(" в архив, папка на диске не трогается. Новая сессия в этой папке вернёт её в список.")}</>}
           onOk={() => hideProject(modal.path, modal.sessions)} onCancel={() => setModal(null)} />
       )}
       {modal?.type === 'rm' && (
-        <Confirm title="Удалить сессию?" testId="confirm-rm" action="Удалить" danger
-          text={<>Сессия {whoIs(modal.name)} исчезнет из списка, её лента — тоже. Папка и worktree на диске останутся.</>}
+        <Confirm title={tr("Удалить сессию?")} testId="confirm-rm" action={tr("Удалить")} danger
+          text={<>{tr("Сессия ")}{whoIs(modal.name)}{tr(" исчезнет из списка, её лента — тоже. Папка и worktree на диске останутся.")}</>}
           onOk={() => removeAgent(modal.name)} onCancel={() => setModal(null)} />
       )}
     </div>

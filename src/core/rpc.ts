@@ -45,6 +45,8 @@ export type HandshakeErrorCode =
   | 'line_too_long'
 
 export interface RpcRequest {
+  /** Optional display language; does not affect method authorization or stored conversation text. */
+  locale?: 'ru' | 'en'
   id: number | string
   method: string
   params?: Record<string, unknown>

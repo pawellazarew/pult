@@ -1,3 +1,4 @@
+import { tr } from '../i18n/shared.js'
 // M8f: настройки сессии после заведения (модель, усилие, режим подтверждений) и настройки «+ Сессия»
 // (умолчания и последний выбор). ЧИСТЫЕ функции: их зовут демон (`agent.configure`, `settings.*`), CLI
 // (`pult agent set`, умолчания `pult agent start`) и окно (меню подвала, форма, «Настройки») — ответ на
@@ -39,10 +40,10 @@ export function claudeChoices(): ModelChoice[] {
 
 /** Режимы подтверждений словами — строчными, для строки ленты и CLI. */
 export const APPROVAL_WORDS: Readonly<Record<ApprovalMode, string>> = {
-  'read-only': 'только чтение',
-  ask: 'спрашивать',
-  workspace: 'правки в папке без вопросов',
-  full: 'полный доступ',
+  get 'read-only'() { return tr('только чтение') },
+  get ask() { return tr('спрашивать') },
+  get workspace() { return tr('правки в папке без вопросов') },
+  get full() { return tr('полный доступ') },
 }
 
 /**
@@ -50,8 +51,12 @@ export const APPROVAL_WORDS: Readonly<Record<ApprovalMode, string>> = {
  * пропустят), а предупреждение в «+ Сессия» и в `pult agent start`: в любом режиме, кроме «Только чтение», агент
  * правит файлы под папкой — а там настройки самих агентов и оболочки.
  */
-export const HOME_CWD_WARNING = 'папка — домашняя или выше: агент сможет менять ~/.claude, ~/.codex, ~/.zshrc и др. без вопросов '
-  + 'в режимах «Правки в папке без вопросов» и «Полный доступ» (у Codex — и в «Спрашивать»)'
+export function homeCwdWarning(): string {
+  return tr('папка — домашняя или выше: агент сможет менять ~/.claude, ~/.codex, ~/.zshrc и др. без вопросов ')
+  + tr('в режимах «Правки в папке без вопросов» и «Полный доступ» (у Codex — и в «Спрашивать»)')
+}
+/** Compatibility export for callers using the default Russian locale. */
+export const HOME_CWD_WARNING = homeCwdWarning()
 
 // --- смена модели, усилия и режима у живой сессии -------------------------------------------------
 
@@ -122,7 +127,7 @@ export function modelWindows(entries: ReadonlyArray<{ model?: string | null; con
 /** «не влезет: 300k > 200k» — или null, если влезает или окно неизвестно. */
 export function windowMisfit(used: number | null | undefined, window: number | undefined): string | null {
   if (!used || !window || used <= window) return null
-  return `не влезет: ${tokensShort(used)} > ${tokensShort(window)}`
+  return tr`не влезет: ${tokensShort(used)} > ${tokensShort(window)}`
 }
 
 /** Модель списка, к которой относится выбор: названная, иначе модель по умолчанию списка. */
@@ -140,16 +145,16 @@ function choiceFor(list: readonly ModelChoice[], model: string | null | undefine
 export function planConfigure(cur: ConfigureTarget, req: ConfigureRequest, list: readonly ModelChoice[] | null, windows: ReadonlyMap<string, number>): ConfigureChanges {
   const changes: ConfigureChanges = {}
   if (req.model !== undefined) {
-    if (typeof req.model !== 'string' || !MODEL_RE.test(req.model)) throw new ConfigureError('invalid_params', 'модель — непустое имя без пробелов')
+    if (typeof req.model !== 'string' || !MODEL_RE.test(req.model)) throw new ConfigureError('invalid_params', tr('модель — непустое имя без пробелов'))
     if (list && list.length && req.model !== cur.model && !list.some((m) => m.id === req.model)) {
-      throw new ConfigureError('invalid_params', `модели ${req.model} нет у ${cur.provider}: ${list.map((m) => m.id).join(', ')}`)
+      throw new ConfigureError('invalid_params', tr`модели ${req.model} нет у ${cur.provider}: ${list.map((m) => m.id).join(', ')}`)
     }
   }
   if (req.effort !== undefined && (typeof req.effort !== 'string' || !EFFORT_RE.test(req.effort))) {
-    throw new ConfigureError('invalid_params', 'усилие — слово латиницей (low, medium, high…)')
+    throw new ConfigureError('invalid_params', tr('усилие — слово латиницей (low, medium, high…)'))
   }
   if (req.approval !== undefined && !isApprovalMode(req.approval)) {
-    throw new ConfigureError('invalid_params', 'режим подтверждений — read-only | ask | workspace | full')
+    throw new ConfigureError('invalid_params', tr('режим подтверждений — read-only | ask | workspace | full'))
   }
   const model = req.model ?? cur.model ?? null
   const modelChanged = req.model !== undefined && req.model !== (cur.model ?? null)
@@ -161,19 +166,19 @@ export function planConfigure(cur: ConfigureTarget, req: ConfigureRequest, list:
   let effort = req.effort
   // Нынешнее усилие при той же модели не спорим (сессию могли завести из CLI с любым); новой модели — только её.
   if (effort !== undefined && efforts.length && !efforts.includes(effort) && (modelChanged || effort !== cur.effort)) {
-    throw new ConfigureError('invalid_params', `усилия ${effort} нет у модели ${model ?? 'по умолчанию'}: ${efforts.join(', ')}`)
+    throw new ConfigureError('invalid_params', tr`усилия ${effort} нет у модели ${model ?? tr('по умолчанию')}: ${efforts.join(', ')}`)
   }
   if (effort === undefined && modelChanged && cur.effort && choice && !choice.efforts.includes(cur.effort)) effort = choice.defaultEffort
   if (modelChanged) {
     const misfit = windowMisfit(cur.used, model ? windows.get(model) : undefined)
-    if (misfit && req.confirm !== true) throw new ConfigureError('needs_confirm', `${misfit} — разговор не поместится в окно модели ${model}; подтверди, если всё равно менять`)
+    if (misfit && req.confirm !== true) throw new ConfigureError('needs_confirm', tr`${misfit} — разговор не поместится в окно модели ${model}; подтверди, если всё равно менять`)
     changes.model = { from: cur.model ?? null, to: model }
   }
   if (effort !== undefined && effort !== (cur.effort ?? null)) changes.effort = { from: cur.effort ?? null, to: effort }
   const approvalNow: ApprovalMode = cur.approval ?? 'ask'
   if (req.approval !== undefined && req.approval !== approvalNow) {
     if (req.approval === 'full' && req.confirm !== true) {
-      throw new ConfigureError('invalid_params', 'полный доступ — агент делает что угодно без вопросов, песочницы нет; нужен confirm: true')
+      throw new ConfigureError('invalid_params', tr('полный доступ — агент делает что угодно без вопросов, песочницы нет; нужен confirm: true'))
     }
     changes.approval = { from: approvalNow, to: req.approval }
   }
@@ -186,19 +191,19 @@ export function hasChanges(c: ConfigureChanges): boolean {
 
 /** Строка ленты: «модель: opus → sonnet · усилие: high → medium · режим: спрашивать → только чтение — со следующего хода». */
 export function describeChanges(c: ConfigureChanges, when: ConfigureWhen = 'next_turn'): string {
-  const v = (x: string | null): string => x ?? 'по умолчанию'
+  const v = (x: string | null): string => x ?? tr('по умолчанию')
   const parts: string[] = []
-  if (c.model) parts.push(`модель: ${v(c.model.from)} → ${v(c.model.to)}`)
-  if (c.effort) parts.push(`усилие: ${v(c.effort.from)} → ${v(c.effort.to)}`)
-  if (c.approval) parts.push(`режим: ${APPROVAL_WORDS[c.approval.from ?? 'ask']} → ${APPROVAL_WORDS[c.approval.to ?? 'ask']}`)
-  const tail = when === 'after_background' ? ' — когда доделаются фоновые задачи (процесс Claude ещё жив ради них)' : ' — со следующего хода'
+  if (c.model) parts.push(tr`модель: ${v(c.model.from)} → ${v(c.model.to)}`)
+  if (c.effort) parts.push(tr`усилие: ${v(c.effort.from)} → ${v(c.effort.to)}`)
+  if (c.approval) parts.push(tr`режим: ${APPROVAL_WORDS[c.approval.from ?? 'ask']} → ${APPROVAL_WORDS[c.approval.to ?? 'ask']}`)
+  const tail = when === 'after_background' ? tr(' — когда доделаются фоновые задачи (процесс Claude ещё жив ради них)') : tr(' — со следующего хода')
   return parts.length ? `${parts.join(' · ')}${tail}` : ''
 }
 
 /** Заметка о браузере после смены режима. */
 export function browserNote(c: ConfigureChanges): string | null {
-  if (c.browser === 'off') return 'браузер для агента выключен: в этом режиме вызовы браузера шли бы без вопроса'
-  if (c.browser === 'on') return 'браузер для агента снова включён — как было до смены режима'
+  if (c.browser === 'off') return tr('браузер для агента выключен: в этом режиме вызовы браузера шли бы без вопроса')
+  if (c.browser === 'on') return tr('браузер для агента снова включён — как было до смены режима')
   return null
 }
 
@@ -245,20 +250,20 @@ export function modeBlocksBrowser(provider: Provider, mode: ApprovalMode | undef
 
 function parseProviderDefaults(provider: Provider, x: unknown, path: string, bad: (m: string) => void, strict: boolean): ProviderDefaults {
   if (x === undefined) return {}
-  if (x === null || typeof x !== 'object' || Array.isArray(x)) { bad(`${path} — объект`); return {} }
+  if (x === null || typeof x !== 'object' || Array.isArray(x)) { bad(tr`${path} — объект`); return {} }
   const o = x as Record<string, unknown>
   const out: ProviderDefaults = {}
-  for (const k of Object.keys(o)) if (!PROVIDER_KEYS.has(k)) { if (strict) bad(`${path}.${k} — незнакомое поле`) }
+  for (const k of Object.keys(o)) if (!PROVIDER_KEYS.has(k)) { if (strict) bad(tr`${path}.${k} — незнакомое поле`) }
   if (o['model'] !== undefined) {
     if (typeof o['model'] === 'string' && MODEL_RE.test(o['model'])) out.model = o['model']
-    else bad(`${path}.model — имя модели без пробелов`)
+    else bad(tr`${path}.model — имя модели без пробелов`)
   }
   if (o['effort'] !== undefined) {
     if (typeof o['effort'] === 'string' && EFFORT_RE.test(o['effort'])) out.effort = o['effort']
-    else bad(`${path}.effort — слово латиницей`)
+    else bad(tr`${path}.effort — слово латиницей`)
   }
   if (o['approval'] !== undefined) {
-    if (o['approval'] === 'full') bad(`${path}.approval — полный доступ по умолчанию не ставится: только явно при заведении`)
+    if (o['approval'] === 'full') bad(tr`${path}.approval — полный доступ по умолчанию не ставится: только явно при заведении`)
     else if (isApprovalMode(o['approval'])) out.approval = o['approval'] as DefaultApproval
     else bad(`${path}.approval — read-only | ask | workspace`)
   }
@@ -272,7 +277,7 @@ function parseProviderDefaults(provider: Provider, x: unknown, path: string, bad
     else bad(`${path}.${k} — true | false`)
   }
   if (out.browser && modeBlocksBrowser(provider, out.approval)) {
-    bad(`${path}: браузер с режимом «${APPROVAL_WORDS[out.approval ?? 'ask']}» не включается — сними браузер или выбери режим тише`)
+    bad(tr`${path}: браузер с режимом «${APPROVAL_WORDS[out.approval ?? 'ask']}» не включается — сними браузер или выбери режим тише`)
     delete out.browser
   }
   return out
@@ -290,19 +295,19 @@ export function parseNewSession(x: unknown, strict: boolean): { value: NewSessio
   }
   const value = defaultNewSession()
   if (x === undefined) return { value, warnings }
-  if (x === null || typeof x !== 'object' || Array.isArray(x)) { bad('— объект'); return { value, warnings } }
+  if (x === null || typeof x !== 'object' || Array.isArray(x)) { bad(tr('— объект')); return { value, warnings } }
   const o = x as Record<string, unknown>
-  for (const k of Object.keys(o)) if (k !== 'rememberLast' && k !== 'defaults' && strict) bad(`.${k} — незнакомое поле`)
+  for (const k of Object.keys(o)) if (k !== 'rememberLast' && k !== 'defaults' && strict) bad(tr`.${k} — незнакомое поле`)
   if (o['rememberLast'] !== undefined) {
     if (typeof o['rememberLast'] === 'boolean') value.rememberLast = o['rememberLast']
     else bad('.rememberLast — true | false')
   }
   const d = o['defaults']
   if (d !== undefined) {
-    if (d === null || typeof d !== 'object' || Array.isArray(d)) bad('.defaults — объект')
+    if (d === null || typeof d !== 'object' || Array.isArray(d)) bad(tr('.defaults — объект'))
     else {
       const dd = d as Record<string, unknown>
-      for (const k of Object.keys(dd)) if (k !== 'provider' && k !== 'claude' && k !== 'codex' && strict) bad(`.defaults.${k} — незнакомое поле`)
+      for (const k of Object.keys(dd)) if (k !== 'provider' && k !== 'claude' && k !== 'codex' && strict) bad(tr`.defaults.${k} — незнакомое поле`)
       if (dd['provider'] !== undefined) {
         if (dd['provider'] === 'claude' || dd['provider'] === 'codex') value.defaults.provider = dd['provider']
         else bad('.defaults.provider — claude | codex')

@@ -1,3 +1,5 @@
+import { t as tr } from './i18n.js'
+import { getLanguage } from '../../src/i18n/core.js'
 // Меню Пульта в строке меню macOS (docs/12 §2 «Строка меню»). Здесь только модель меню — чистая
 // функция от состояния связи, `daemon.status`, `agent.list` и `perm.list`. Electron сюда не
 // импортируется: main превращает модель в `Menu.buildFromTemplate`, юнит-тесты гоняют её как есть.
@@ -73,7 +75,7 @@ const STATUS_LABEL: Record<SessionStatus, string> = {
 
 /** Статус по-русски, как в списке окна; незнакомый — как есть. */
 export function statusLabel(s: string): string {
-  return (STATUS_LABEL as Record<string, string>)[s] ?? (s || '—')
+  return tr((STATUS_LABEL as Record<string, string>)[s] ?? (s || '—'))
 }
 
 /** Как сессия подписана: название, а без него — имя. */
@@ -83,7 +85,7 @@ export function sessionLabel(s: { name: string; title?: string | undefined }): s
 
 /** Что просит запрос: вопрос Codex — «вопрос», остальное — имя инструмента. */
 export function requestWhat(toolName: string): string {
-  return toolName === 'requestUserInput' || toolName === 'AskUserQuestion' ? 'вопрос' : toolName || 'инструмент'
+  return toolName === 'requestUserInput' || toolName === 'AskUserQuestion' ? tr('вопрос') : toolName || tr('инструмент')
 }
 
 function clip(s: string, max = LABEL_MAX): string {
@@ -93,7 +95,7 @@ function clip(s: string, max = LABEL_MAX): string {
 
 /** 1, 21, 101 → «ждёт»; 2, 5, 11, 12 → «ждут». */
 function verb(n: number, one: string, many: string): string {
-  return n % 10 === 1 && n % 100 !== 11 ? one : many
+  return (getLanguage() === 'en' ? n === 1 : n % 10 === 1 && n % 100 !== 11) ? one : many
 }
 
 function waitingRank(s: TraySession, waiting: number): number {
@@ -129,11 +131,11 @@ function waitingBySession(list: readonly TraySession[], pending: readonly TrayRe
 function daemonLine(conn: ConnState, status: TrayInput['status']): TrayItem {
   if (conn.state === 'up') {
     const version = status?.version ?? conn.daemon.version
-    const mode = status ? ` · ${status.mode === 'service' ? 'служба' : 'по требованию'}` : ''
-    return { kind: 'item', id: 'daemon', label: `Демон ${version}${mode}`, enabled: false }
+    const mode = status ? ` · ${status.mode === 'service' ? tr('служба') : tr('по требованию')}` : ''
+    return { kind: 'item', id: 'daemon', label: tr`Демон ${version}${mode}`, enabled: false }
   }
-  if (conn.state === 'connecting') return { kind: 'item', id: 'daemon', label: 'Демон: подключение…', enabled: false }
-  return { kind: 'item', id: 'daemon', label: 'Демон недоступен', enabled: false, ...(conn.reason ? { sublabel: clip(conn.reason, 64) } : {}) }
+  if (conn.state === 'connecting') return { kind: 'item', id: 'daemon', label: tr('Демон: подключение…'), enabled: false }
+  return { kind: 'item', id: 'daemon', label: tr('Демон недоступен'), enabled: false, ...(conn.reason ? { sublabel: clip(conn.reason, 64) } : {}) }
 }
 
 export function trayModel(input: TrayInput): TrayModel {
@@ -150,7 +152,7 @@ export function trayModel(input: TrayInput): TrayModel {
   if (pending && pending.length > 0) {
     // Старые сверху, как в Inbox окна: кто ждёт дольше, тот и первый.
     const list = [...pending].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt) || a.id.localeCompare(b.id))
-    items.push({ kind: 'separator' }, { kind: 'header', label: 'Ждут тебя' })
+    items.push({ kind: 'separator' }, { kind: 'header', label: tr('Ждут тебя') })
     for (const p of list.slice(0, TRAY_MAX_REQUESTS)) {
       items.push({
         kind: 'item',
@@ -165,7 +167,7 @@ export function trayModel(input: TrayInput): TrayModel {
       items.push({
         kind: 'item',
         id: 'perm:more',
-        label: `Ещё ${rest.length} — в Inbox окна`,
+        label: tr`Ещё ${rest.length} — в Inbox окна`,
         enabled: true,
         action: { kind: 'open', target: { sessionId: rest[0].sessionId, permId: rest[0].id } },
       })
@@ -173,9 +175,9 @@ export function trayModel(input: TrayInput): TrayModel {
   }
 
   if (sessions) {
-    items.push({ kind: 'separator' }, { kind: 'header', label: 'Сессии' })
+    items.push({ kind: 'separator' }, { kind: 'header', label: tr('Сессии') })
     const sorted = sortSessions(sessions, pending)
-    if (sorted.length === 0) items.push({ kind: 'item', id: 'sessions:none', label: 'Сессий пока нет', enabled: false })
+    if (sorted.length === 0) items.push({ kind: 'item', id: 'sessions:none', label: tr('Сессий пока нет'), enabled: false })
     for (const s of sorted.slice(0, TRAY_MAX_SESSIONS)) {
       items.push({
         kind: 'item',
@@ -186,14 +188,14 @@ export function trayModel(input: TrayInput): TrayModel {
       })
     }
     if (sorted.length > TRAY_MAX_SESSIONS) {
-      items.push({ kind: 'item', id: 'sessions:more', label: `Ещё ${sorted.length - TRAY_MAX_SESSIONS} — в окне`, enabled: true, action: { kind: 'open', target: {} } })
+      items.push({ kind: 'item', id: 'sessions:more', label: tr`Ещё ${sorted.length - TRAY_MAX_SESSIONS} — в окне`, enabled: true, action: { kind: 'open', target: {} } })
     }
   }
 
   items.push(
     { kind: 'separator' },
-    { kind: 'item', id: 'open', label: 'Открыть Пульт', enabled: true, action: { kind: 'open', target: {} } },
-    { kind: 'item', id: 'quit', label: 'Выйти из Пульта', sublabel: 'Сессии продолжат работать в демоне', enabled: true, action: { kind: 'quit' } },
+    { kind: 'item', id: 'open', label: tr('Открыть Пульт'), enabled: true, action: { kind: 'open', target: {} } },
+    { kind: 'item', id: 'quit', label: tr('Выйти из Пульта'), sublabel: tr('Сессии продолжат работать в демоне'), enabled: true, action: { kind: 'quit' } },
   )
 
   const badge = dockBadge(sessions, pending)
@@ -223,13 +225,13 @@ export function dockBadge(sessions: readonly TraySession[] | null, pending: read
 }
 
 function tooltip(conn: ConnState, waiting: number, sessions: readonly TraySession[] | null): string {
-  if (conn.state === 'down') return 'Пульт · демон недоступен'
-  if (conn.state === 'connecting') return 'Пульт · подключение к демону…'
+  if (conn.state === 'down') return tr('Пульт · демон недоступен')
+  if (conn.state === 'connecting') return tr('Пульт · подключение к демону…')
   const working = (sessions ?? []).filter((s) => s.lastStatus === 'working').length
-  const parts = ['Пульт']
-  if (waiting > 0) parts.push(`${waiting} ${verb(waiting, 'ждёт', 'ждут')} тебя`)
-  if (working > 0) parts.push(`${working} ${verb(working, 'идёт', 'идут')}`)
-  if (parts.length === 1) parts.push('всё спокойно')
+  const parts = [tr('Пульт')]
+  if (waiting > 0) parts.push(tr`${waiting} ${verb(waiting, tr('ждёт'), tr('ждут'))} тебя`)
+  if (working > 0) parts.push(`${working} ${verb(working, tr('идёт'), tr('идут'))}`)
+  if (parts.length === 1) parts.push(tr('всё спокойно'))
   return parts.join(' · ')
 }
 

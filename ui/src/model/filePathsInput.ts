@@ -1,3 +1,4 @@
+import { t as tr } from '../lib/i18n.js'
 // Файлы в поле текста: ⌘V на файлах из Finder и перетаскивание кладут в поле их пути (поле реплики разговора и
 // «первая реплика» в «+ Сессия»), а папка, брошенная на форму «+ Сессия», становится папкой сессии. ⌘V на картинке
 // без файла (скриншот, «Копировать картинку» в браузере) — окно 0.1.20 сохраняет её PNG-файлом и кладёт его путь.
@@ -47,7 +48,7 @@ export interface PathsField {
 }
 
 /** Окно 0.1.15 и старше не умеет сохранять картинку из буфера: метода моста нет. */
-export const OLD_WINDOW_IMAGE_HINT = 'Вставка картинок — в окне 0.1.20 и новее: Настройки → Обновления → «Перезапустить и обновить»'
+export const OLD_WINDOW_IMAGE_HINT = tr('Вставка картинок — в окне 0.1.20 и новее: Настройки → Обновления → «Перезапустить и обновить»')
 
 /**
  * Что делать с ⌘V — решается синхронно, в обработчике (отменить вставку можно только там):
@@ -116,7 +117,7 @@ export function pathsInputHandlers(t: PathsField): {
         let r: Awaited<ReturnType<NonNullable<typeof src.image>>>
         try { r = await src.image(t.session?.() ?? '') } catch (err) {
           const m = (err as { message?: unknown } | null)?.message
-          r = { error: typeof m === 'string' && m ? m : 'картинка не сохранилась' }
+          r = { error: typeof m === 'string' && m ? m : tr('картинка не сохранилась') }
         }
         if ('error' in r) { t.notice?.(r.error); return }
         t.put([r.path], ...at())
@@ -139,7 +140,7 @@ export function pathsInputHandlers(t: PathsField): {
 // --- папка перетаскиванием -----------------------------------------------------------
 
 /** Подсказка, когда на форму «+ Сессия» бросили файлы, а не одну папку: форма их не берёт. */
-export const FOLDER_DROP_HINT = 'Сюда — одну папку. Файлы перетащи в поле «первая реплика»: туда встанут их пути.'
+export const FOLDER_DROP_HINT = tr('Сюда — одну папку. Файлы перетащи в поле «первая реплика»: туда встанут их пути.')
 
 /** Что брошено на форму: одна папка, файлы (их сюда не берём) или ничего с путём. */
 export type FolderDrop = { kind: 'folder'; path: string } | { kind: 'files'; count: number } | { kind: 'none' }

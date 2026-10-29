@@ -1,3 +1,4 @@
+import { t as tr } from './i18n.js'
 // Где лежит пакет pult и чем запускать демона — для оболочки (docs/12 §2).
 // Функции чистые: файловую систему им передают, поэтому юнит-тесты гоняют их без диска.
 
@@ -45,13 +46,13 @@ export function locatePackage(env: NodeJS.ProcessEnv, fs: FsProbe, opts: { packa
     const root = path.resolve(dev.trim())
     return ok(root)
       ? { root, via: 'PULT_UI_ROOT' }
-      : { error: `PULT_UI_ROOT=${root}: нет собранного пакета (нужны dist/cli и dist/ui — npm run build)` }
+      : { error: tr`PULT_UI_ROOT=${root}: нет собранного пакета (нужны dist/cli и dist/ui — npm run build)` }
   }
   const current = path.join(pultHome(env), 'current')
   const installed = path.join(current, 'lib', 'node_modules', 'pult')
   if (ok(installed)) return { root: installed, via: 'installed' }
   if (ok(current)) return { root: current, via: 'dev' }
-  return { error: `пакет pult не найден в ${current} — поставь Пульт (install.sh) или задай PULT_UI_ROOT` }
+  return { error: tr`пакет pult не найден в ${current} — поставь Пульт (install.sh) или задай PULT_UI_ROOT` }
 }
 
 /** Где искать node, если ни PULT_NODE, ни node-path не сработали: PATH окна из Finder почти пуст. */

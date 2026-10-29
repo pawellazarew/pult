@@ -1,3 +1,4 @@
+import { t as tr } from '../lib/i18n.js'
 // Inbox: запросы разрешений всех агентов (docs/12 §3 п.3). Чистые функции.
 //
 // Живёт на событиях (`permission.requested` добавляет, `permission.resolved` и `session.ended`
@@ -154,9 +155,9 @@ export function composerApproves(focused: InboxItem | null, currentAgent: string
 export type InboxFilter = 'all' | 'unread' | 'errors'
 
 export const INBOX_FILTERS: ReadonlyArray<readonly [InboxFilter, string]> = [
-  ['all', 'Все'],
-  ['unread', 'Непрочитанные'],
-  ['errors', 'Ошибки'],
+  ['all', tr('Все')],
+  ['unread', tr('Непрочитанные')],
+  ['errors', tr('Ошибки')],
 ]
 
 export function isInboxFilter(x: unknown): x is InboxFilter {
@@ -180,12 +181,12 @@ export interface SessionCard {
 
 /** Подпись вида события для карточки. */
 export const ATTENTION_LABEL: Record<AttentionKind, string> = {
-  done: 'Готово',
-  failed: 'Ход упал',
-  ask: 'Вопрос или разрешение',
-  limit: 'Лимит исчерпан',
-  blocked: 'Страж не пустил',
-  stalled: 'Похоже, завис',
+  done: tr('Готово'),
+  failed: tr('Ход упал'),
+  ask: tr('Вопрос или разрешение'),
+  limit: tr('Лимит исчерпан'),
+  blocked: tr('Страж не пустил'),
+  stalled: tr('Похоже, завис'),
 }
 
 function card(a: AgentView): SessionCard | null {

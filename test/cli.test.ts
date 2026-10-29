@@ -28,7 +28,7 @@ interface CliRun {
 function runCli(paths: PultPaths, args: string[], extraEnv: Record<string, string> = {}): Promise<CliRun> {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [CLI, ...args], {
-      env: { ...process.env, PULT_HOME: paths.home, PULT_TEST: '1', ...extraEnv },
+      env: { ...process.env, PULT_LANG: 'ru', PULT_HOME: paths.home, PULT_TEST: '1', ...extraEnv },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     let stdout = ''
@@ -94,7 +94,7 @@ describe('CLI из конца в конец', () => {
     const daemonEntry = fileURLToPath(new URL('../dist/daemon/main.js', import.meta.url))
     const code = await new Promise<number | null>((resolve) => {
       const child = spawn(process.execPath, [daemonEntry], {
-        env: { ...process.env, PULT_HOME: paths.home },
+        env: { ...process.env, PULT_LANG: 'ru', PULT_HOME: paths.home },
         stdio: 'ignore',
       })
       child.on('exit', (c) => resolve(c))
@@ -191,7 +191,7 @@ describe('CLI из конца в конец', () => {
 
     const { stdout, code } = await new Promise<{ stdout: string; code: number | null }>((resolve) => {
       const child = spawn(process.execPath, [CLI, 'events', 'tail', '--json', '--no-follow', '--since', String(before.lastEventId)], {
-        env: { ...process.env, PULT_HOME: paths.home, PULT_TEST: '1' },
+        env: { ...process.env, PULT_LANG: 'ru', PULT_HOME: paths.home, PULT_TEST: '1' },
         stdio: ['ignore', 'pipe', 'ignore'],
       })
       let out = ''

@@ -1,3 +1,4 @@
+import { t } from '../cli/i18n.js'
 // `pult doctor` — свод состояния машины. Каждая строка: ok | warn | fail + ТОЧНАЯ команда,
 // которой это чинят. Всё, что ходит наружу (запуск CLI, сеть, сокет демона), инъецируется:
 // тест гоняет доктора на фальшивках и не трогает ни настоящие CLI, ни сеть.
@@ -178,38 +179,38 @@ export function daemonNodeItem(node: DaemonNode): DoctorItem {
   if (!node.alive) {
     return {
       id: 'daemon.node',
-      title: 'Node демона',
+      title: t('Node демона'),
       status: 'fail',
-      detail: `node демона ${node.path} (${node.version}) удалён или заменён обновлением (brew upgrade?) — macOS не пустит `
-        + 'агентов в ~/Desktop, ходы claude там падают с «An unknown error occurred (Unexpected)». Перезапусти демона',
+      detail: t`node демона ${node.path} (${node.version}) удалён или заменён обновлением (brew upgrade?) — macOS не пустит `
+        + t('агентов в ~/Desktop, ходы claude там падают с «An unknown error occurred (Unexpected)». Перезапусти демона'),
       ...cmd('pult daemon stop && pult daemon start'),
     }
   }
   if (!node.own) {
     return {
       id: 'daemon.node',
-      title: 'Node демона',
+      title: t('Node демона'),
       status: 'warn',
-      detail: `системный node ${node.path} (${node.version}) — его обновление (brew upgrade node) уронит доступ агентов к ~/Desktop. `
-        + 'Свой node Пульта: pult runtime install, затем перезапуск демона',
+      detail: t`системный node ${node.path} (${node.version}) — его обновление (brew upgrade node) уронит доступ агентов к ~/Desktop. `
+        + t('Свой node Пульта: pult runtime install, затем перезапуск демона'),
       ...cmd('pult runtime install && pult daemon stop && pult daemon start'),
     }
   }
-  return { id: 'daemon.node', title: 'Node демона', status: 'ok', detail: `свой node Пульта ${node.version}: ${node.path}` }
+  return { id: 'daemon.node', title: t('Node демона'), status: 'ok', detail: t`свой node Пульта ${node.version}: ${node.path}` }
 }
 
 function claudeSubscriptionItem(loggedIn: boolean | null, raw: unknown): DoctorItem {
   const { subscriptionType, authMethod } = claudeSubscription(raw)
-  const how = authMethod ? `, вход ${authMethod}` : ''
+  const how = authMethod ? t`, вход ${authMethod}` : ''
   // null — ответ `auth status` не разобран (CLI сменил формат, мусор в stdout). Это НЕ «не вошёл»:
   // строка входа выше так и пишет «ответ не разобран», и строка подписки не имеет права
   // противоречить ей советом `claude /login` — вход, скорее всего, есть, неизвестен только тип.
   if (loggedIn === null) {
     return {
       id: 'subscription.claude',
-      title: 'Подписка claude',
+      title: t('Подписка claude'),
       status: 'warn',
-      detail: 'вход не разобран — тип подписки неизвестен',
+      detail: t('вход не разобран — тип подписки неизвестен'),
       ...cmd('claude auth status'),
       data: { subscriptionType, authMethod },
     }
@@ -217,20 +218,20 @@ function claudeSubscriptionItem(loggedIn: boolean | null, raw: unknown): DoctorI
   if (loggedIn === false) {
     return {
       id: 'subscription.claude',
-      title: 'Подписка claude',
+      title: t('Подписка claude'),
       status: 'warn',
-      detail: 'не вошёл — ходам агентов claude тратить нечего',
+      detail: t('не вошёл — ходам агентов claude тратить нечего'),
       ...cmd('claude /login'),
       data: { subscriptionType, authMethod },
     }
   }
   return {
     id: 'subscription.claude',
-    title: 'Подписка claude',
+    title: t('Подписка claude'),
     status: subscriptionType ? 'ok' : 'warn',
     detail: subscriptionType
-      ? `${subscriptionType}${how} — ходы агентов Пульта тратят лимиты ЭТОЙ подписки: той, в которую вошёл терминальный claude`
-      : `тип подписки не сообщён${how} — ходы Пульта тратят тот вход, что у терминального claude`,
+      ? t`${subscriptionType}${how} — ходы агентов Пульта тратят лимиты ЭТОЙ подписки: той, в которую вошёл терминальный claude`
+      : t`тип подписки не сообщён${how} — ходы Пульта тратят тот вход, что у терминального claude`,
     ...(subscriptionType ? {} : cmd('claude auth status')),
     data: { subscriptionType, authMethod },
   }
@@ -260,19 +261,19 @@ export function codexLoginLine(r: RunResult): string {
  */
 function chatgptCodexFix(tool: LocatedTool, home: string, linkState: (p: string) => LinkState): { fix: string; fixCmd?: string } {
   if (tool.path && tool.realpath && tool.realpath !== tool.path) {
-    return { fix: 'ничего не ломается; после обновления ChatGPT.app перезапусти pult doctor — если симлинк повиснет, здесь будет команда починки' }
+    return { fix: t('ничего не ломается; после обновления ChatGPT.app перезапусти pult doctor — если симлинк повиснет, здесь будет команда починки') }
   }
   const link = join(home, '.local/bin/codex')
   const state = tool.path && tool.path !== link ? linkState(link) : 'other'
   if (state === 'symlink') {
     const c = `ln -sf ${tool.path} ${link}`
-    return { fix: `симлинк ${link} повис (ChatGPT.app переложил codex) — перенаправь: ${c}`, fixCmd: c }
+    return { fix: t`симлинк ${link} повис (ChatGPT.app переложил codex) — перенаправь: ${c}`, fixCmd: c }
   }
   if (state === 'missing') {
     const c = `mkdir -p ${dirname(link)} && ln -sf ${tool.path} ${link}`
-    return { fix: `codex не виден в PATH терминала — положи симлинк: ${c}`, fixCmd: c }
+    return { fix: t`codex не виден в PATH терминала — положи симлинк: ${c}`, fixCmd: c }
   }
-  return { fix: 'ничего не ломается; Пульт ищет codex внутри ChatGPT.app по обеим раскладкам (Resources/codex-cli/bin/codex и Resources/codex)' }
+  return { fix: t('ничего не ломается; Пульт ищет codex внутри ChatGPT.app по обеим раскладкам (Resources/codex-cli/bin/codex и Resources/codex)') }
 }
 
 function toolItem(tool: LocatedTool, required: boolean, home: string, linkState: (p: string) => LinkState): DoctorItem {
@@ -281,8 +282,8 @@ function toolItem(tool: LocatedTool, required: boolean, home: string, linkState:
       id: `cli.${tool.name}`,
       title: `CLI ${tool.name}`,
       status: required ? 'fail' : 'warn',
-      detail: `не найден (проверено ${tool.triedCount} кандидатов и PATH логин-шелла)`,
-      fix: `установи ${tool.name} и убедись, что он лежит в PATH логин-шелла`,
+      detail: t`не найден (проверено ${tool.triedCount} кандидатов и PATH логин-шелла)`,
+      fix: t`установи ${tool.name} и убедись, что он лежит в PATH логин-шелла`,
     }
   }
   const chatgpt = tool.name === 'codex' && codexInsideChatGPTApp(tool)
@@ -294,9 +295,9 @@ function toolItem(tool: LocatedTool, required: boolean, home: string, linkState:
     title: `CLI ${tool.name}`,
     status: chatgpt ? 'warn' : 'ok',
     detail: `${tool.path}${tool.realpath && tool.realpath !== tool.path ? ` → ${tool.realpath}` : ''}`
-      + `, версия ${version ?? 'неизвестна'}`
-      + (chatgpt ? ' — бинарь внутри ChatGPT.app: меняется с каждым обновлением приложения' : '')
-      + (tool.viaPath ? ' (найден через PATH логин-шелла, не по списку кандидатов)' : ''),
+      + t`, версия ${version ?? t('неизвестна')}`
+      + (chatgpt ? t(' — бинарь внутри ChatGPT.app: меняется с каждым обновлением приложения') : '')
+      + (tool.viaPath ? t(' (найден через PATH логин-шелла, не по списку кандидатов)') : ''),
     ...(chatgpt ? chatgptCodexFix(tool, home, linkState) : {}),
     data: { path: tool.path, realpath: tool.realpath, version },
   }
@@ -321,7 +322,7 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
     id: 'node.version',
     title: 'Node',
     status: major >= MIN_NODE_MAJOR ? 'ok' : 'fail',
-    detail: `${nodeVersion} (нужен >= ${MIN_NODE_MAJOR})`,
+    detail: t`${nodeVersion} (нужен >= ${MIN_NODE_MAJOR})`,
     ...(major >= MIN_NODE_MAJOR ? {} : cmd('brew upgrade node')),
   })
 
@@ -353,11 +354,11 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
     const parsed = parseClaudeAuth(r.stdout)
     items.push({
       id: 'login.claude',
-      title: 'Вход claude',
+      title: t('Вход claude'),
       status: parsed.loggedIn === true ? 'ok' : parsed.loggedIn === false ? 'fail' : 'warn',
       detail: parsed.loggedIn === null
-        ? `ответ не разобран (код выхода ${r.status}) — код выхода мы игнорируем намеренно`
-        : `loggedIn: ${parsed.loggedIn} (код выхода ${r.status} игнорируется — измерено спайком)`,
+        ? t`ответ не разобран (код выхода ${r.status}) — код выхода мы игнорируем намеренно`
+        : t`loggedIn: ${parsed.loggedIn} (код выхода ${r.status} игнорируется — измерено спайком)`,
       // null — ответ не разобран, вход, скорее всего, есть: советовать `/login` значило бы
       // противоречить строке подписки ниже (там тот же случай чинится `claude auth status`).
       ...(parsed.loggedIn === true ? {} : cmd(parsed.loggedIn === false ? 'claude /login' : 'claude auth status')),
@@ -370,10 +371,10 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
     const line = codexLoginLine(r)
     items.push({
       id: 'login.codex',
-      title: 'Вход codex',
+      title: t('Вход codex'),
       status: r.status === 0 ? 'ok' : 'fail',
       // `codex login status` может напечатать учётку — в отчёт она идёт только через redactString.
-      detail: `код выхода ${r.status}${line ? `: ${line}` : ''}`,
+      detail: t`код выхода ${r.status}${line ? `: ${line}` : ''}`,
       ...(r.status === 0 ? {} : cmd('codex login')),
       data: { exitCode: r.status },
     })
@@ -382,9 +383,9 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
     if (r.status === 0) {
       items.push({
         id: 'subscription.codex',
-        title: 'Подписка codex',
+        title: t('Подписка codex'),
         status: 'ok',
-        detail: `${line || 'вход есть, способ не сообщён'} — ходы агентов Пульта тратят ту учётку, в которую вошёл терминальный codex`,
+        detail: t`${line || t('вход есть, способ не сообщён')} — ходы агентов Пульта тратят ту учётку, в которую вошёл терминальный codex`,
         data: { login: line },
       })
     }
@@ -397,13 +398,13 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
     const schema = await codexSchema
     items.push({
       id: 'codex.schema',
-      title: 'Схема протокола codex',
+      title: t('Схема протокола codex'),
       status: schema.status === 'ok' ? 'ok' : 'warn',
       detail: schema.detail,
       ...(schema.status === 'drift'
         ? {
-            fix: `сверь изменения для адаптера (node scripts/diff-codex-schema.mjs <старая> <новая> по spike/codex/schema/) `
-              + `и обнови CODEX_SCHEMA_SHA256 в src/adapters/codex/schema.ts на ${schema.actual}`,
+            fix: t`сверь изменения для адаптера (node scripts/diff-codex-schema.mjs <старая> <новая> по spike/codex/schema/) `
+              + t`и обнови CODEX_SCHEMA_SHA256 в src/adapters/codex/schema.ts на ${schema.actual}`,
           }
         : {}),
       data: { expected: schema.expected, actual: schema.actual, files: schema.files, state: schema.status },
@@ -415,11 +416,11 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
   const opencode = tools.opencode
   items.push({
     id: 'login.opencode',
-    title: 'Вход opencode',
+    title: t('Вход opencode'),
     status: opencode?.path ? 'ok' : 'warn',
     detail: opencode?.path
-      ? 'проверяется только наличие CLI: ключи opencode живут в его конфиге, отдельной команды входа Пульт не дёргает'
-      : 'CLI не найден — проверять нечего',
+      ? t('проверяется только наличие CLI: ключи opencode живут в его конфиге, отдельной команды входа Пульт не дёргает')
+      : t('CLI не найден — проверять нечего'),
     ...(opencode?.path ? {} : cmd('brew install sst/tap/opencode')),
   })
 
@@ -429,15 +430,15 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
   const emptyAllow = rule.mode === 'allow' && rule.countries.length === 0
   items.push({
     id: 'guard.rule',
-    title: 'Страж сети',
+    title: t('Страж сети'),
     status: emptyAllow ? 'fail' : guardOff(rule) ? 'warn' : 'ok',
     detail: emptyAllow
-      ? `${guardLine(rule)} — все ходы запрещены: в режиме allow нет ни одной страны (config.json → network.guard)`
+      ? t`${guardLine(rule)} — все ходы запрещены: в режиме allow нет ни одной страны (config.json → network.guard)`
       : guardOff(rule)
-      ? `${guardLine(rule)} — страж выключен: ходы идут из любой известной страны (неизвестная — по-прежнему отказ)`
-      : `${guardLine(rule)} — для claude, codex и opencode; неизвестная страна — отказ`,
-    ...(emptyAllow ? { fix: 'добавь страну в «Настройки» (⌘,) → «Страж сети» или: pult net guard --allow DE' }
-      : guardOff(rule) ? { fix: 'верни страны в «Настройки» (⌘,) → «Страж сети» или: pult net guard --deny RU,BY' } : {}),
+      ? t`${guardLine(rule)} — страж выключен: ходы идут из любой известной страны (неизвестная — по-прежнему отказ)`
+      : t`${guardLine(rule)} — для claude, codex и opencode; неизвестная страна — отказ`,
+    ...(emptyAllow ? { fix: t('добавь страну в «Настройки» (⌘,) → «Страж сети» или: pult net guard --allow DE') }
+      : guardOff(rule) ? { fix: t('верни страны в «Настройки» (⌘,) → «Страж сети» или: pult net guard --deny RU,BY') } : {}),
     data: { mode: rule.mode, countries: [...rule.countries] },
   })
   if (!deps.skipNet) {
@@ -449,20 +450,20 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
       const check = checks[i] as NetCheck
       items.push({
         id: `net.${provider}`,
-        title: `Сеть ${provider}`,
+        title: t`Сеть ${provider}`,
         status: check.ok ? (check.fellBack ? 'warn' : 'ok') : 'fail',
         // В строке есть адрес прокси — он может нести логин и пароль.
         detail: redactString(netLine(check)),
         ...(check.ok ? {} : {
           fix: check.reason === 'no_proxy'
-            ? `network.${provider}.mode = "required" без proxy — ходы запрещены: укажи network.${provider}.proxy или поставь mode = "off" в ${deps.paths.config}`
+            ? t`network.${provider}.mode = "required" без proxy — ходы запрещены: укажи network.${provider}.proxy или поставь mode = "off" в ${deps.paths.config}`
             : check.reason === 'proxy_dead'
             ? (check.proxy
-              ? `подними прокси ${redactString(check.proxy)} или поставь network.${provider}.mode = "auto" в ${deps.paths.config}`
-              : `укажи network.${provider}.proxy или поставь network.${provider}.mode = "off" в ${deps.paths.config}`)
+              ? t`подними прокси ${redactString(check.proxy)} или поставь network.${provider}.mode = "auto" в ${deps.paths.config}`
+              : t`укажи network.${provider}.proxy или поставь network.${provider}.mode = "off" в ${deps.paths.config}`)
             : check.reason === 'not_allowed_country'
-            ? `выход ${check.loc ?? 'неизвестен'} не в списке разрешённых (${check.guard.join(',')}): смени выход VPN или правило — «Настройки» → «Страж сети», pult net guard`
-            : `подними VPN: выход ${check.loc ?? 'неизвестен'}, список-страж ${check.guard.join(',')}`,
+            ? t`выход ${check.loc ?? t('неизвестен')} не в списке разрешённых (${check.guard.join(',')}): смени выход VPN или правило — «Настройки» → «Страж сети», pult net guard`
+            : t`подними VPN: выход ${check.loc ?? t('неизвестен')}, список-страж ${check.guard.join(',')}`,
         }),
         data: { mode: check.mode, path: check.path, loc: check.loc, reason: check.reason, ms: check.ms, checkedAt: check.checkedAt },
       })
@@ -484,11 +485,11 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
   }
   items.push({
     id: 'home.permissions',
-    title: 'Права PULT_HOME',
+    title: t('Права PULT_HOME'),
     status: dirProblems.length || fileProblems.length ? 'warn' : 'ok',
     detail: dirProblems.length || fileProblems.length
-      ? `ожидаются каталоги 0700 и файлы 0600; не так: ${[...dirProblems, ...fileProblems].join(', ')}`
-      : `каталоги 0700, файлы 0600 — ${deps.paths.home}`,
+      ? t`ожидаются каталоги 0700 и файлы 0600; не так: ${[...dirProblems, ...fileProblems].join(', ')}`
+      : t`каталоги 0700, файлы 0600 — ${deps.paths.home}`,
     ...(dirProblems.length || fileProblems.length
       ? cmd(`chmod 700 ${deps.paths.home} ${deps.paths.run} && chmod 600 ${deps.paths.token}`)
       : {}),
@@ -498,11 +499,11 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
   const status = deps.daemonStatus ? await deps.daemonStatus() : null
   items.push({
     id: 'daemon',
-    title: 'Демон pultd',
+    title: t('Демон pultd'),
     status: status ? 'ok' : 'warn',
     detail: status
-      ? `версия ${status.version}, pid ${status.pid}, аптайм ${Math.round(status.uptimeMs / 1000)} с, события до ${status.lastEventId}`
-      : 'не отвечает (это нормально: демон поднимается по требованию)',
+      ? t`версия ${status.version}, pid ${status.pid}, аптайм ${Math.round(status.uptimeMs / 1000)} с, события до ${status.lastEventId}`
+      : t('не отвечает (это нормально: демон поднимается по требованию)'),
     ...(status ? {} : cmd('pult daemon start')),
   })
   if (status?.node) items.push(daemonNodeItem(status.node))
@@ -512,7 +513,7 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
     try {
       items.push(...deps.versionItems(status))
     } catch (e) {
-      items.push({ id: 'version.current', title: 'Активная версия', status: 'warn', detail: `проверка не удалась: ${(e as Error).message}` })
+      items.push({ id: 'version.current', title: t('Активная версия'), status: 'warn', detail: t`проверка не удалась: ${(e as Error).message}` })
     }
   }
 
@@ -521,7 +522,7 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
     try {
       items.push(...(await deps.mcpItems(status)))
     } catch (e) {
-      items.push({ id: 'browser.mcp', title: 'Браузер агента', status: 'warn', detail: `проверка не удалась: ${(e as Error).message}` })
+      items.push({ id: 'browser.mcp', title: t('Браузер агента'), status: 'warn', detail: t`проверка не удалась: ${(e as Error).message}` })
     }
   }
 
@@ -530,7 +531,7 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
     try {
       items.push(...(await deps.serviceItems()))
     } catch (e) {
-      items.push({ id: 'service', title: 'Служба', status: 'warn', detail: `проверка не удалась: ${(e as Error).message}` })
+      items.push({ id: 'service', title: t('Служба'), status: 'warn', detail: t`проверка не удалась: ${(e as Error).message}` })
     }
   }
 
@@ -550,8 +551,8 @@ export function formatDoctor(report: DoctorReport): string {
   const lines: string[] = [`pult doctor · ${report.home}`]
   for (const it of report.items) {
     lines.push(`[${sign(it.status)}] ${it.title}: ${it.detail}`)
-    if (it.fix) lines.push(`         почини: ${it.fix}`)
+    if (it.fix) lines.push(t`         почини: ${it.fix}`)
   }
-  lines.push(`итог: ok ${report.counts.ok} · warn ${report.counts.warn} · fail ${report.counts.fail}`)
+  lines.push(t`итог: ok ${report.counts.ok} · warn ${report.counts.warn} · fail ${report.counts.fail}`)
   return lines.join('\n')
 }

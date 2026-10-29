@@ -1,3 +1,4 @@
+import { t as tr } from './i18n.js'
 // Картинка из буфера (скриншот без файла, «Копировать картинку» в браузере) → PNG-файл, путь которого окно вставляет
 // в поле реплики, как путь скопированного файла. Решает здесь main, а не окно: ни пути, ни байтов окно не передаёт —
 // метод моста `clipboardImage.save(session)` получает только имя сессии (contract.ts). Модуль без Electron:
@@ -112,7 +113,7 @@ export function attachmentName(now: Date, hex: string): { day: string; file: str
 export function ensurePrivateDir(dir: string): void {
   try { mkdirSync(dir, { mode: 0o700 }) } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e }
   const st = lstatSync(dir)
-  if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(`${dir} — не папка`)
+  if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(tr`${dir} — не папка`)
   chmodSync(dir, 0o700)
 }
 
@@ -155,26 +156,26 @@ export interface SaveImageOptions {
 }
 
 export function saveClipboardImage(o: SaveImageOptions): SaveImageResult {
-  if (!path.isAbsolute(o.home)) return { error: 'PULT_HOME не абсолютный' }
+  if (!path.isAbsolute(o.home)) return { error: tr('PULT_HOME не абсолютный') }
   if (typeof o.session !== 'string' || !SESSION_NAME_RE.test(o.session)) {
-    return { error: 'картинке нужна сессия: сначала задай имя (латиница, цифры, - и _)' }
+    return { error: tr('картинке нужна сессия: сначала задай имя (латиница, цифры, - и _)') }
   }
-  if (!o.bytes || o.bytes.length === 0) return { error: 'в буфере нет картинки' }
+  if (!o.bytes || o.bytes.length === 0) return { error: tr('в буфере нет картинки') }
   const head = imageHeaderSize(o.bytes)
-  if (!head) return { error: 'картинка в незнакомом формате (нужен PNG или JPEG) — сохрани её файлом и вставь путь' }
-  if (!(head.width > 0 && head.height > 0)) return { error: 'в буфере нет картинки' }
+  if (!head) return { error: tr('картинка в незнакомом формате (нужен PNG или JPEG) — сохрани её файлом и вставь путь') }
+  if (!(head.width > 0 && head.height > 0)) return { error: tr('в буфере нет картинки') }
   const maxPixels = o.maxPixels ?? MAX_IMAGE_PIXELS
-  if (head.width * head.height > maxPixels) return { error: `картинка слишком большая: ${head.width}×${head.height}` }
+  if (head.width * head.height > maxPixels) return { error: tr`картинка слишком большая: ${head.width}×${head.height}` }
   let img: ImageLike | null = o.decode(o.bytes)
-  if (!img || img.isEmpty()) return { error: 'картинка не читается' }
+  if (!img || img.isEmpty()) return { error: tr('картинка не читается') }
   const { width, height } = img.getSize()
   // Декодер обязан согласиться с заголовком: иначе проверка размера выше ничего не стоила.
-  if (!(width > 0 && height > 0) || width * height > maxPixels) return { error: 'картинка не читается' }
+  if (!(width > 0 && height > 0) || width * height > maxPixels) return { error: tr('картинка не читается') }
   const maxBytes = o.maxBytes ?? MAX_IMAGE_BYTES
   const png = img.toPNG()
   img = null
   if (png.length > maxBytes) {
-    return { error: `картинка больше ${Math.round(maxBytes / 1024 / 1024)} МБ (${(png.length / 1024 / 1024).toFixed(1)} МБ в PNG) — сохрани её файлом и вставь путь` }
+    return { error: tr`картинка больше ${Math.round(maxBytes / 1024 / 1024)} МБ (${(png.length / 1024 / 1024).toFixed(1)} МБ в PNG) — сохрани её файлом и вставь путь` }
   }
   const now = o.now ?? new Date()
   const hex = (o.rand ?? (() => randomBytes(3)))().toString('hex').slice(0, 6)
@@ -182,7 +183,7 @@ export function saveClipboardImage(o: SaveImageOptions): SaveImageResult {
   const root = attachmentsDir(o.home)
   const maxDay = o.maxDayBytes ?? MAX_DAY_BYTES
   if (dayBytes(root, day) + png.length > maxDay) {
-    return { error: `за сегодня вставлено больше ${Math.round(maxDay / 1024 / 1024)} МБ картинок — сохрани файлом и вставь путь` }
+    return { error: tr`за сегодня вставлено больше ${Math.round(maxDay / 1024 / 1024)} МБ картинок — сохрани файлом и вставь путь` }
   }
   const sessionDir = path.join(root, o.session)
   const dayDir = path.join(sessionDir, day)
@@ -205,7 +206,7 @@ export function saveClipboardImage(o: SaveImageOptions): SaveImageResult {
     } finally { closeSync(fd) }
     chmodSync(full, 0o600)
   } catch (e) {
-    return { error: `картинка не сохранилась: ${(e as Error).message}` }
+    return { error: tr`картинка не сохранилась: ${(e as Error).message}` }
   }
   return { path: full, width, height, bytes: png.length }
 }

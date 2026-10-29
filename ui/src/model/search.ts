@@ -1,3 +1,4 @@
+import { t as tr } from '../lib/i18n.js'
 // Поиск ⌘⇧F, метки реплик человека и переход к событию в ленте (О2, docs/14 «Поиск, метки, экспорт»).
 // ЧИСТЫЕ функции: компоненты только рисуют и меряют DOM.
 
@@ -55,9 +56,9 @@ export function flatHits(groups: readonly SearchGroup[]): SearchHit[] {
 /** Значок и подпись вида события в выдаче. */
 export function kindView(kind: string): { icon: string; label: string } {
   switch (kind) {
-    case 'message.user': return { icon: 'you', label: 'ты' }
-    case 'message.done': return { icon: 'model', label: 'ответ' }
-    case 'tool.called': return { icon: 'tool', label: 'инструмент' }
+    case 'message.user': return { icon: 'you', label: tr('ты') }
+    case 'message.done': return { icon: 'model', label: tr('ответ') }
+    case 'tool.called': return { icon: 'tool', label: tr('инструмент') }
     default: return { icon: 'info', label: kind }
   }
 }

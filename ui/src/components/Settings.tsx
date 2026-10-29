@@ -1,3 +1,5 @@
+import type { LanguageSetting } from '../../../src/i18n/core.js'
+import { t } from '../lib/i18n.js'
 // M8f: «Настройки» (⌘,). Раздел «Новая сессия» — умолчания по провайдерам и «Подставлять последний выбор»;
 // «Обновления» — версия, состояние канала, «Проверить сейчас», «Перезапустить и обновить» и флаг автопроверки (что писать —
 // model/update.ts); «Страж сети» (0.3.6) — режим deny/allow, страны, выходы провайдеров под черновиком
@@ -39,46 +41,46 @@ function ProviderDefaultsBox({ provider, draft, catalog, onChange }: {
     <fieldset data-testid={`settings-${provider}`}>
       <legend>{provider}</legend>
       <label className="field" htmlFor={id('model')}>
-        <span className="lbl">модель</span>
+        <span className="lbl">{t("модель")}</span>
         <select id={id('model')} value={d.model ?? ''} data-testid={`settings-${provider}-model`}
           onChange={(e) => onChange(setDefault(draft, provider, 'model', e.target.value))}>
-          <option value="">{provider === 'codex' ? 'по умолчанию Codex' : `как в форме (${PRESETS.claude.defaultModel})`}</option>
+          <option value="">{provider === 'codex' ? t('по умолчанию Codex') : t`как в форме (${PRESETS.claude.defaultModel})`}</option>
           {models.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
         </select>
-        {provider === 'codex' && !catalog?.codex.models.length && <span className="note">список моделей Codex не загружен — «Проверить» в «+ Сессия»</span>}
+        {provider === 'codex' && !catalog?.codex.models.length && <span className="note">{t("список моделей Codex не загружен — «Проверить» в «+ Сессия»")}</span>}
       </label>
       <label className="field" htmlFor={id('effort')}>
-        <span className="lbl">усилие</span>
+        <span className="lbl">{t("усилие")}</span>
         <select id={id('effort')} value={d.effort ?? ''} data-testid={`settings-${provider}-effort`}
           onChange={(e) => onChange(setDefault(draft, provider, 'effort', e.target.value))}>
-          <option value="">как в форме</option>
+          <option value="">{t("как в форме")}</option>
           {effortList.map((x) => <option key={x} value={x}>{x}</option>)}
         </select>
       </label>
       <label className="field" htmlFor={id('approval')}>
-        <span className="lbl">подтверждения</span>
+        <span className="lbl">{t("подтверждения")}</span>
         <select id={id('approval')} value={d.approval ?? ''} data-testid={`settings-${provider}-approval`}
           onChange={(e) => onChange(setDefault(draft, provider, 'approval', e.target.value as typeof d.approval | ''))}>
-          <option value="">как в форме ({APPROVAL_LABEL.ask.toLowerCase()})</option>
+          <option value="">{t("как в форме (")}{APPROVAL_LABEL.ask.toLowerCase()})</option>
           {DEFAULT_APPROVALS.map((a) => <option key={a} value={a}>{APPROVAL_LABEL[a]}</option>)}
         </select>
-        <span className="note">«Полный доступ» по умолчанию не ставится — только явно при заведении.</span>
+        <span className="note">{t("«Полный доступ» по умолчанию не ставится — только явно при заведении.")}</span>
       </label>
       <label className="check">
         <input type="checkbox" checked={d.mode === 'warm'} data-testid={`settings-${provider}-warm`}
           onChange={(e) => onChange(setDefault(draft, provider, 'mode', e.target.checked ? 'warm' : undefined))} />
-        <span>Тёплый процесс между репликами</span>
-        {provider === 'codex' && <span className="note">у Codex процесс app-server и так общий — флаг ни на что не влияет</span>}
+        <span>{t("Тёплый процесс между репликами")}</span>
+        {provider === 'codex' && <span className="note">{t("у Codex процесс app-server и так общий — флаг ни на что не влияет")}</span>}
       </label>
       <label className="check">
         <input type="checkbox" checked={d.browser === true} data-testid={`settings-${provider}-browser`}
           onChange={(e) => onChange(setDefault(draft, provider, 'browser', e.target.checked ? true : undefined))} />
-        <span>Браузер для агента</span>
+        <span>{t("Браузер для агента")}</span>
       </label>
       <label className="check">
         <input type="checkbox" checked={d.worktree === true} data-testid={`settings-${provider}-worktree`}
           onChange={(e) => onChange(setDefault(draft, provider, 'worktree', e.target.checked ? true : undefined))} />
-        <span>Предлагать ветку worktree (pult/&lt;имя&gt;)</span>
+        <span>{t("Предлагать ветку worktree (pult/<имя>)")}</span>
       </label>
     </fieldset>
   )
@@ -119,18 +121,18 @@ export function UpdatesSection({ panel, auto, onAuto }: {
   const winV = panel.status?.app?.installed ?? panel.windowVersion
   return (
     <section className="settings-sec" aria-labelledby="settings-upd-h" data-testid="settings-updates">
-      <h3 id="settings-upd-h">Обновления</h3>
+      <h3 id="settings-upd-h">{t("Обновления")}</h3>
       <div className="upd-versions" data-testid="settings-update-versions">
-        <span>Пульт <span className="mono">{pkgV ?? '—'}</span></span>
+        <span>{t("Пульт ")}<span className="mono">{pkgV ?? '—'}</span></span>
         {winV !== null && pkgV !== null && winV !== pkgV && (
-          <span className="note" data-testid="settings-window-version">окно <span className="mono">{winV}</span></span>
+          <span className="note" data-testid="settings-window-version">{t("окно ")}<span className="mono">{winV}</span></span>
         )}
       </div>
       <div className={`upd-state${tone}`} role="status" data-testid="settings-update-state" data-state={v.state}>
         {(v.state === 'checking' || v.state === 'applying' || v.state === 'downloading') && <span className="spin" aria-hidden="true" />}
         <span className="grow">{v.text}</span>
         {v.notes && (
-          <button type="button" className="btn btn-ghost btn-sm" onClick={() => panel.onNotes(v.notes as string)} data-testid="settings-update-notes">Что нового</button>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => panel.onNotes(v.notes as string)} data-testid="settings-update-notes">{t("Что нового")}</button>
         )}
       </div>
       {v.note && <span className="note" data-testid="settings-update-note">{v.note}</span>}
@@ -139,7 +141,7 @@ export function UpdatesSection({ panel, auto, onAuto }: {
         <span className="note" data-testid="settings-update-checked">{v.checked}</span>
         <span className="grow" />
         <button type="button" className="btn btn-sm" disabled={!v.canCheck} onClick={panel.onCheck} data-testid="settings-update-check">
-          {panel.checking ? 'Проверяю…' : 'Проверить сейчас'}
+          {panel.checking ? t('Проверяю…') : t('Проверить сейчас')}
         </button>
         {v.action && (
           <button type="button" className={`btn btn-sm${v.action.force ? '' : ' btn-primary'}`} disabled={panel.busy}
@@ -163,8 +165,8 @@ export function UpdatesSection({ panel, auto, onAuto }: {
       {auto !== null && (
         <label className="check">
           <input type="checkbox" checked={auto} data-testid="settings-update-auto" onChange={(e) => onAuto(e.target.checked)} />
-          <span>Проверять обновления автоматически</span>
-          <span className="note">Раз в 6 ч и когда окно возвращается на экран (не чаще раза в 10 мин): один запрос latest.json к GitHub. Новая версия скачивается заранее, ставится только по кнопке.</span>
+          <span>{t("Проверять обновления автоматически")}</span>
+          <span className="note">{t("Раз в 6 ч и когда окно возвращается на экран (не чаще раза в 10 мин): один запрос latest.json к GitHub. Новая версия скачивается заранее, ставится только по кнопке.")}</span>
         </label>
       )}
     </section>
@@ -213,41 +215,41 @@ export function NetGuardSection({ panel, rule, onChange }: {
   }
   return (
     <section className="settings-sec" aria-labelledby="settings-guard-h" data-testid="settings-net-guard">
-      <h3 id="settings-guard-h">Страж сети</h3>
-      <span className="note">Перед ходом Пульт проверяет страну выхода тем путём, которым пойдёт агент. Правило одно для claude, codex и opencode; страну определить не удалось — ход не идёт. У каждого режима свой список. Действует со следующего хода, идущий ход не прерывается.</span>
+      <h3 id="settings-guard-h">{t("Страж сети")}</h3>
+      <span className="note">{t("Перед ходом Пульт проверяет страну выхода тем путём, которым пойдёт агент. Правило одно для claude, codex и opencode; страну определить не удалось — ход не идёт. У каждого режима свой список. Действует со следующего хода, идущий ход не прерывается.")}</span>
       {panel.rule.mode === 'allow' && !panel.rule.countries.length && (
         <div className="upd-state upd-warn" role="alert" data-testid="guard-closed">
-          <span className="grow">Сейчас все ходы запрещены: в config.json режим «Разрешать только» без стран. Добавь страну и сохрани — или выбери «Запрещать страны из списка».</span>
+          <span className="grow">{t("Сейчас все ходы запрещены: в config.json режим «Разрешать только» без стран. Добавь страну и сохрани — или выбери «Запрещать страны из списка».")}</span>
         </div>
       )}
       {guardOff(rule) && (
         <div className="upd-state upd-warn" role="status" data-testid="guard-off">
-          <span className="grow">Страж выключен: список запрета пуст — ходы пойдут из любой известной страны (неизвестная — по-прежнему отказ).</span>
+          <span className="grow">{t("Страж выключен: список запрета пуст — ходы пойдут из любой известной страны (неизвестная — по-прежнему отказ).")}</span>
         </div>
       )}
-      <div className="guard-modes" role="radiogroup" aria-label="Режим стража">
+      <div className="guard-modes" role="radiogroup" aria-label={t("Режим стража")}>
         <label className="check">
           <input type="radio" name="guard-mode" checked={rule.mode === 'deny'} data-testid="guard-mode-deny" onChange={() => mode('deny')} />
-          <span>Запрещать страны из списка</span>
+          <span>{t("Запрещать страны из списка")}</span>
         </label>
         <label className="check">
           <input type="radio" name="guard-mode" checked={rule.mode === 'allow'} data-testid="guard-mode-allow" onChange={() => mode('allow')} />
-          <span>Разрешать только страны из списка</span>
+          <span>{t("Разрешать только страны из списка")}</span>
         </label>
       </div>
-      <div className="guard-chips" data-testid="guard-chips" aria-label="Страны в списке">
+      <div className="guard-chips" data-testid="guard-chips" aria-label={t("Страны в списке")}>
         {rule.countries.map((c) => (
           <span key={c} className="guard-chip" data-testid="guard-chip" data-code={c}>
             {countryLabel(c)}
-            <button type="button" aria-label={`Убрать ${countryLabel(c)}`} title="Убрать из списка" data-testid={`guard-chip-remove-${c}`}
+            <button type="button" aria-label={t`Убрать ${countryLabel(c)}`} title={t("Убрать из списка")} data-testid={`guard-chip-remove-${c}`}
               onClick={() => onChange(removeCountry(rule, c))}>×</button>
           </span>
         ))}
-        {!rule.countries.length && <span className="note" data-testid="guard-empty">список пуст</span>}
+        {!rule.countries.length && <span className="note" data-testid="guard-empty">{t("список пуст")}</span>}
       </div>
       <label className="field" htmlFor="guard-search">
-        <span className="lbl">добавить страну</span>
-        <input id="guard-search" type="search" value={q} placeholder="Германия, DE…" autoComplete="off" data-testid="guard-search"
+        <span className="lbl">{t("добавить страну")}</span>
+        <input id="guard-search" type="search" value={q} placeholder={t("Германия, DE…")} autoComplete="off" data-testid="guard-search"
           aria-controls="guard-found"
           onChange={(e) => setQ(e.target.value)}
           onKeyDown={(e) => {
@@ -260,7 +262,7 @@ export function NetGuardSection({ panel, rule, onChange }: {
           {found.map((c) => (
             <li key={c}><button type="button" className="btn btn-ghost btn-sm" data-testid={`guard-add-${c}`} onClick={() => add(c)}>{countryLabel(c)}</button></li>
           ))}
-          {!found.length && <li className="note">ничего не нашлось</li>}
+          {!found.length && <li className="note">{t("ничего не нашлось")}</li>}
         </ul>
       )}
       <div className="guard-exits" data-testid="guard-exits" role="status">
@@ -271,11 +273,11 @@ export function NetGuardSection({ panel, rule, onChange }: {
       </div>
       {warn && <div className="upd-state upd-warn" role="alert" data-testid="guard-warning"><span className="grow">{warn}</span></div>}
       <div className="upd-actions">
-        <span className="note" data-testid="guard-checked">{newest ? `проверено ${new Date(newest).toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' })}` : 'выход ещё не проверялся'}</span>
+        <span className="note" data-testid="guard-checked">{newest ? t`проверено ${new Date(newest).toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' })}` : t('выход ещё не проверялся')}</span>
         <span className="grow" />
         <button type="button" className="btn btn-sm" disabled={!canCheck} data-testid="guard-check"
           onClick={() => { setCoolUntil(Date.now() + NET_CHECK_COOLDOWN_MS); panel.onCheck() }}>
-          {panel.checking ? 'Проверяю…' : 'Проверить сеть'}
+          {panel.checking ? t('Проверяю…') : t('Проверить сеть')}
         </button>
       </div>
     </section>
@@ -309,15 +311,15 @@ export function RulesSection({ panel }: { panel: RulesPanel }): ReactElement {
   }
   return (
     <section className="settings-sec" aria-labelledby="settings-rules-h" data-testid="settings-rules">
-      <h3 id="settings-rules-h">Правила «Всегда»</h3>
-      <span className="note">«Всегда …» на карточке разрешения Codex записывает правило в <span className="mono">{list.path}</span> — оно действует во всех сессиях Codex. Здесь — правила, которые записал Пульт; «Отозвать» убирает строку из файла. Codex читает правила только при запуске, поэтому после отзыва Пульт перезапускает свой Codex: сразу, если он свободен, иначе — когда закончатся ходы, фон и вопросы (до этого правило в нём ещё действует). Разговоры продолжаются с того же места, но разрешения «в этой сессии» у всех сессий Codex сбрасываются. Codex, запущенный вне Пульта (терминал, IDE), держит правило до своего перезапуска. У Claude кнопки «Всегда» нет.</span>
-      {list.error && <span className="err" role="alert" data-testid="rules-read-error">Файл правил не прочитан: {list.error}</span>}
+      <h3 id="settings-rules-h">{t("Правила «Всегда»")}</h3>
+      <span className="note">{t("«Всегда …» на карточке разрешения Codex записывает правило в ")}<span className="mono">{list.path}</span>{t(" — оно действует во всех сессиях Codex. Здесь — правила, которые записал Пульт; «Отозвать» убирает строку из файла. Codex читает правила только при запуске, поэтому после отзыва Пульт перезапускает свой Codex: сразу, если он свободен, иначе — когда закончатся ходы, фон и вопросы (до этого правило в нём ещё действует). Разговоры продолжаются с того же места, но разрешения «в этой сессии» у всех сессий Codex сбрасываются. Codex, запущенный вне Пульта (терминал, IDE), держит правило до своего перезапуска. У Claude кнопки «Всегда» нет.")}</span>
+      {list.error && <span className="err" role="alert" data-testid="rules-read-error">{t("Файл правил не прочитан: ")}{list.error}</span>}
       {list.backup && (
         <div className="upd-state upd-warn" role="alert" data-testid="rules-backup">
-          <span className="grow">Осталась копия прерванной записи <span className="mono">{list.backup}</span> — до её удаления Пульт файл не правит. Если файл правил пуст или обрезан — <span className="mono">mv {list.backup} {list.backup.replace(/\.pult\.bak$/, '')}</span>, затем проверь последние строки; иначе удали копию.</span>
+          <span className="grow">{t("Осталась копия прерванной записи ")}<span className="mono">{list.backup}</span>{t(" — до её удаления Пульт файл не правит. Если файл правил пуст или обрезан — ")}<span className="mono">mv {list.backup} {list.backup.replace(/\.pult\.bak$/, '')}</span>{t(", затем проверь последние строки; иначе удали копию.")}</span>
         </div>
       )}
-      {!list.rules.length && !list.error && <span className="note" data-testid="rules-empty">Пульт ещё не записал ни одного правила.</span>}
+      {!list.rules.length && !list.error && <span className="note" data-testid="rules-empty">{t("Пульт ещё не записал ни одного правила.")}</span>}
       {list.rules.map((r) => (
         <div key={r.id} className="upd-state" data-testid="rule-row" data-id={r.id} data-kind={r.kind}>
           <span className="grow">
@@ -326,7 +328,7 @@ export function RulesSection({ panel }: { panel: RulesPanel }): ReactElement {
             <span className="note" data-testid="rule-meta">{ruleMeta(r, panel.sessionLabel)}</span>
           </span>
           <button type="button" className="btn btn-sm" disabled={busy !== null} data-testid={`rule-revoke-${r.id}`}
-            onClick={() => void revoke(r.id)}>{busy === r.id ? 'Отзываю…' : 'Отозвать'}</button>
+            onClick={() => void revoke(r.id)}>{busy === r.id ? t('Отзываю…') : t('Отозвать')}</button>
         </div>
       ))}
       {unmarked && <span className="note" data-testid="rules-unmarked">{unmarked}</span>}
@@ -336,8 +338,11 @@ export function RulesSection({ panel }: { panel: RulesPanel }): ReactElement {
   )
 }
 
-export function SettingsDialog({ settings, catalog, updates, autoCheck = null, netGuard, rules, onSave, onClose }: {
+export function SettingsDialog({ settings, catalog, updates, autoCheck = null, netGuard, rules, language = 'auto', languageSupported = false, languageOverride = null, onSave, onClose }: {
   settings: NewSessionSettings | null
+  language?: LanguageSetting
+  languageSupported?: boolean
+  languageOverride?: LanguageSetting | null
   catalog: ProviderCatalog | null
   /** Раздел «Обновления»; нет — раздела нет. */
   updates?: UpdatesPanel
@@ -351,9 +356,16 @@ export function SettingsDialog({ settings, catalog, updates, autoCheck = null, n
    * `null` — записано; строка — отказ демона. `autoCheck` — флаг автопроверки (null — не трогать); `guard` — новое
    * правило стража и то, на котором стоял черновик (null — не менялось или раздела нет).
    */
-  onSave(next: NewSessionSettings, autoCheck: boolean | null, guard: { rule: GuardRule; expect: GuardRule } | null): Promise<string | null>
+  onSave(next: NewSessionSettings, autoCheck: boolean | null, guard: { rule: GuardRule; expect: GuardRule } | null, language?: LanguageSetting): Promise<string | null>
   onClose(): void
 }): ReactElement {
+  const [languageDraft, setLanguageDraft] = useState(language)
+  const previousLanguage = useRef(language)
+  useEffect(() => {
+    const previous = previousLanguage.current
+    setLanguageDraft((draft) => draft === previous ? language : draft)
+    previousLanguage.current = language
+  }, [language])
   const [draft, setDraft] = useState<NewSessionSettings>(() => settingsDraft(settings))
   const [auto, setAuto] = useState<boolean | null>(autoCheck)
   // Правило, на котором стоит черновик: на «Сохранить» уходит только СМЕНА, и с ним же как `expect` — демон откажет
@@ -380,36 +392,36 @@ export function SettingsDialog({ settings, catalog, updates, autoCheck = null, n
     if (busy || invalid) return
     setBusy(true)
     setErr(null)
-    const e = await onSave(draft, auto, guard && initialGuard && !sameGuard(guard, initialGuard) ? { rule: guard, expect: initialGuard } : null)
+    const e = await onSave(draft, auto, guard && initialGuard && !sameGuard(guard, initialGuard) ? { rule: guard, expect: initialGuard } : null, languageSupported && !languageOverride && languageDraft !== language ? languageDraft : undefined)
     setBusy(false)
     if (e) setErr(e)
   }
   return (
-    <Dialog title="Настройки" size="wide" onClose={onClose} testId="settings-dialog"
+    <Dialog title={t("Настройки")} size="wide" onClose={onClose} testId="settings-dialog"
       footer={<>
         {(err ?? invalid) && <span className="err" role="alert" data-testid="settings-error">{err ?? invalid}</span>}
         <span className="grow" />
-        <button type="button" className="btn" onClick={onClose}>Отмена <Kbd>Esc</Kbd></button>
+        <button type="button" className="btn" onClick={onClose}>{t("Отмена ")}<Kbd>Esc</Kbd></button>
         <button type="button" className="btn btn-primary" disabled={busy || !!invalid} onClick={() => void save()} data-testid="settings-save">
-          {busy ? 'Сохраняю…' : 'Сохранить'} <Kbd>{`${CMD}↵`}</Kbd>
+          {busy ? t('Сохраняю…') : t('Сохранить')} <Kbd>{`${CMD}↵`}</Kbd>
         </button>
       </>}>
       <div className="form-stack" onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); e.stopPropagation(); void save() } }}>
         <section className="settings-sec" aria-labelledby="settings-new-h" data-testid="settings-new-session">
-          <h3 id="settings-new-h">Новая сессия</h3>
+          <h3 id="settings-new-h">{t("Новая сессия")}</h3>
           <label className="field" htmlFor="set-provider">
-            <span className="lbl">провайдер по умолчанию</span>
+            <span className="lbl">{t("провайдер по умолчанию")}</span>
             <select id="set-provider" ref={first} value={draft.defaults.provider ?? ''} data-testid="settings-provider"
               onChange={(e) => setDraft(setDefaultProvider(draft, e.target.value as Provider | ''))}>
-              <option value="">как в форме (claude)</option>
+              <option value="">{t("как в форме (claude)")}</option>
               {PROVIDERS.map((p) => <option key={p} value={p}>{p}</option>)}
             </select>
           </label>
           <label className="check">
             <input type="checkbox" checked={draft.rememberLast} data-testid="settings-remember-last"
               onChange={(e) => setDraft({ ...draft, rememberLast: e.target.checked })} />
-            <span>Подставлять последний выбор</span>
-            <span className="note">«+ Сессия» откроется с тем, что ты выбрал в прошлый раз (кроме реплики и «Полного доступа»); иначе — с умолчаниями ниже. pult agent start всегда берёт умолчания.</span>
+            <span>{t("Подставлять последний выбор")}</span>
+            <span className="note">{t("«+ Сессия» откроется с тем, что ты выбрал в прошлый раз (кроме реплики и «Полного доступа»); иначе — с умолчаниями ниже. pult agent start всегда берёт умолчания.")}</span>
           </label>
           <div className="settings-prov">
             {PROVIDERS.map((p) => <ProviderDefaultsBox key={p} provider={p} draft={draft} catalog={catalog} onChange={setDraft} />)}
@@ -419,8 +431,18 @@ export function SettingsDialog({ settings, catalog, updates, autoCheck = null, n
         {rules && <RulesSection panel={rules} />}
         {updates && <UpdatesSection panel={updates} auto={auto} onAuto={setAuto} />}
         <section className="settings-sec" aria-labelledby="settings-look-h" data-testid="settings-appearance">
-          <h3 id="settings-look-h">Внешний вид</h3>
-          <span className="note">Темы и цвета — после редизайна.</span>
+          <label className="field" htmlFor="settings-language">
+            <span className="lbl">{t('Язык / Language')}</span>
+            <select id="settings-language" data-testid="settings-language" value={languageDraft} disabled={busy || !languageSupported || !!languageOverride}
+              onChange={(e) => setLanguageDraft(e.target.value as LanguageSetting)}>
+              <option value="auto">{t('Как в системе')}</option>
+              <option value="ru">Русский</option>
+              <option value="en">English</option>
+            </select>
+            <span className="note">{!languageSupported ? t('Для смены языка обнови окно Пульта через «Настройки → Обновления».') : languageOverride ? t`Язык задан переменной PULT_LANG=${languageOverride}. Убери её, чтобы выбирать язык здесь.` : t('Смена языка применяется кнопкой «Сохранить» и перезагружает окно. Переписка сохранится.')}</span>
+          </label>
+          <h3 id="settings-look-h">{t("Внешний вид")}</h3>
+          <span className="note">{t("Темы и цвета — после редизайна.")}</span>
         </section>
       </div>
     </Dialog>

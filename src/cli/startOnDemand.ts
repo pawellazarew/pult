@@ -1,3 +1,4 @@
+import { t as tr } from './i18n.js'
 // Подъём демона по требованию: любая команда, которой нужен демон, запускает `pultd`
 // ОТСОЕДИНЁННЫМ (detached + unref), чтобы он пережил закрытие терминала, и ждёт сокет.
 // stdout/stderr ребёнка уходят в файл журнала: без этого закрытие терминала уронило бы
@@ -86,6 +87,8 @@ export function daemonSpawnEnv(paths: PultPaths, parentEnv: NodeJS.ProcessEnv): 
   return buildChildEnv(parentEnv, {
     extra: {
       PULT_HOME: paths.home,
+      ...(parentEnv['LC_ALL'] ? { LC_ALL: parentEnv['LC_ALL'] } : {}),
+      ...(parentEnv['LC_MESSAGES'] ? { LC_MESSAGES: parentEnv['LC_MESSAGES'] } : {}),
       ...(parentEnv['PULT_TEST'] ? { PULT_TEST: parentEnv['PULT_TEST'] } : {}),
       // Переменные САМОГО Пульта пробрасываем осознанно: PULT_CLAUDE_BIN перебивает поиск
       // CLI (им же тест подставляет фальшивый `claude`). Это не дыра в белом списке —
@@ -188,11 +191,11 @@ export async function ensureDaemon(
       // Менеджер службу принял, а демон не ответил: второй демон в обход службы здесь только
       // навредит (он займёт lock, служебный уйдёт в петлю кода 3). Объясняем и выходим.
       throw new Error(
-        `служба ${svc.name} запущена (${st.cmd}), но демон не ответил за ${waitMs} мс: `
-        + `${(lastError as Error)?.message ?? 'причина неизвестна'}. Смотри ${paths.serviceLog} и pult doctor`,
+        tr`служба ${svc.name} запущена (${st.cmd}), но демон не ответил за ${waitMs} мс: `
+        + tr`${(lastError as Error)?.message ?? tr('причина неизвестна')}. Смотри ${paths.serviceLog} и pult doctor`,
       )
     }
-    warn(`pult: служба ${svc.name} не запустилась (${st.cmd}: ${st.detail}) — поднимаю демона напрямую, в обход службы`)
+    warn(tr`pult: служба ${svc.name} не запустилась (${st.cmd}: ${st.detail}) — поднимаю демона напрямую, в обход службы`)
   }
 
   const child = spawnDaemonDetached(paths, daemonEntry(), parentEnv, opts.nodePath)
@@ -205,7 +208,7 @@ export async function ensureDaemon(
     return { client, spawned: true, via: 'spawn', ...(child.pid !== undefined ? { pid: child.pid } : {}) }
   }
   throw new Error(
-    `демон не поднялся за ${waitMs} мс: ${(lastError as Error)?.message ?? 'причина неизвестна'}. `
-    + `Смотри журнал ${paths.logFile}`,
+    tr`демон не поднялся за ${waitMs} мс: ${(lastError as Error)?.message ?? tr('причина неизвестна')}. `
+    + tr`Смотри журнал ${paths.logFile}`,
   )
 }

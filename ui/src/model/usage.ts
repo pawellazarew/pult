@@ -1,3 +1,5 @@
+import { getLanguage } from '../../../src/i18n/core.js'
+import { t as tr } from '../lib/i18n.js'
 // Лимиты подписок в шапке: окна 5 ч и 7 дн по провайдерам (docs/12 §3 п.4). Чистые функции.
 //
 // Источник — события `usage.updated` / `limit.hit` с полем `windows`: у Claude это
@@ -87,21 +89,21 @@ export function usageTone(u: number | null | undefined, status?: string): Tone {
 export function formatResetIn(resetsAtSec: number | null | undefined, nowMs: number): string {
   if (resetsAtSec === null || resetsAtSec === undefined || !Number.isFinite(resetsAtSec)) return ''
   const s = Math.round(resetsAtSec - nowMs / 1000)
-  if (s <= 0) return 'ожидаем свежие данные'
+  if (s <= 0) return tr('ожидаем свежие данные')
   const m = Math.ceil(s / 60)
-  if (m < 60) return `через ${m} мин`
+  if (m < 60) return tr`через ${m} мин`
   const h = Math.floor(m / 60)
-  if (h < 24) return `через ${h} ч${m % 60 ? ` ${m % 60} мин` : ''}`
+  if (h < 24) return tr`через ${h} ч${m % 60 ? tr` ${m % 60} мин` : ''}`
   const d = Math.floor(h / 24)
-  return `через ${d} дн${h % 24 ? ` ${h % 24} ч` : ''}`
+  return tr`через ${d} дн${h % 24 ? tr` ${h % 24} ч` : ''}`
 }
 
-const MONTHS = ['янв', 'фев', 'мар', 'апр', 'мая', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек']
+const MONTHS = [tr('янв'), tr('фев'), tr('мар'), tr('апр'), tr('мая'), tr('июн'), tr('июл'), tr('авг'), tr('сен'), tr('окт'), tr('ноя'), tr('дек')]
 
 /** Когда сброс: «14:30» сегодня, иначе «2 окт 14:30». `timeZone` — для тестов. */
 export function formatClock(epochMs: number, nowMs: number, timeZone?: string): string {
   const parts = (t: number): Record<string, string> => {
-    const f = new Intl.DateTimeFormat('ru-RU', {
+    const f = new Intl.DateTimeFormat(getLanguage() === 'ru' ? 'ru-RU' : 'en-GB', {
       year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
       ...(timeZone ? { timeZone } : {}),
     })
@@ -130,7 +132,7 @@ export function limitHolds(status: string | undefined, resetsAtSec: number | nul
 }
 
 /** Окно лимита для полосы под чатом: «5ч 12%» и когда сброс. */
-export interface LimitWindowView { key: '5ч' | '7дн'; pct: string; tone: Tone; reset: string; title: string }
+export interface LimitWindowView { key: string; pct: string; tone: Tone; reset: string; title: string }
 
 /**
  * Лимиты провайдера для полосы под полем ввода. Прошедшее окно — «ожидаем свежие данные», а не
@@ -140,7 +142,7 @@ export function limitWindowsView(usage: ProviderUsage | undefined, nowMs: number
   const u = usageForDisplay(usage, nowMs)
   if (!u) return []
   const out: LimitWindowView[] = []
-  for (const [key, w, name] of [['5ч', u.fiveHour, 'пятичасовое'], ['7дн', u.sevenDay, 'недельное']] as const) {
+  for (const [key, w, name] of [[tr('5ч'), u.fiveHour, tr('пятичасовое')], [tr('7дн'), u.sevenDay, tr('недельное')]] as const) {
     if (!w) continue
     const at = w.resetsAt
     // Сброс уже прошёл, свежих данных нет — окну нечего сказать: прошлая дата сброса только путает.
@@ -149,7 +151,7 @@ export function limitWindowsView(usage: ProviderUsage | undefined, nowMs: number
     const reset = at == null || !Number.isFinite(at) ? '' : today ? formatClock(at * 1000, nowMs) : formatResetIn(at, nowMs)
     out.push({
       key, pct: formatPct(w.utilization), tone: usageTone(w.utilization, u.status === 'limited' || u.status === 'blocked' || u.status === 'rejected' ? u.status : undefined), reset,
-      title: `${name} окно: использовано ${formatPct(w.utilization)}${at ? `, сброс ${formatResetIn(at, nowMs)} (${formatClock(at * 1000, nowMs)})` : ''}`,
+      title: tr`${name} окно: использовано ${formatPct(w.utilization)}${at ? tr`, сброс ${formatResetIn(at, nowMs)} (${formatClock(at * 1000, nowMs)})` : ''}`,
     })
   }
   return out

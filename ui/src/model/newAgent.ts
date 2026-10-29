@@ -1,3 +1,4 @@
+import { t as tr } from '../lib/i18n.js'
 // Форма «+ Агент» (docs/12 §3 п.5): пресеты модели и усилия, имя из папки, проверка, параметры
 // `agent.start`. Чистые функции.
 
@@ -5,7 +6,7 @@ import type { GuardRule } from '../../../src/core/guard.js'
 import type { CodexRulesList } from './rules.js'
 import type { NewSessionPrefill } from '../../../shell/src/contract.js'
 import type { ApprovalMode } from '../../../src/adapters/types.js'
-import { CLAUDE_DEFAULT_EFFORT, CLAUDE_DEFAULT_MODEL, CLAUDE_EFFORTS, CLAUDE_MODELS, CODEX_EFFORTS_FALLBACK, HOME_CWD_WARNING, modeBlocksBrowser } from '../../../src/sessions/settings.js'
+import { CLAUDE_DEFAULT_EFFORT, CLAUDE_DEFAULT_MODEL, CLAUDE_EFFORTS, CLAUDE_MODELS, CODEX_EFFORTS_FALLBACK, homeCwdWarning, modeBlocksBrowser } from '../../../src/sessions/settings.js'
 import type { LastUsed, NewSessionSettings, ProviderDefaults } from '../../../src/sessions/settings.js'
 import type { AgentProvider } from './types.js'
 import type { ProviderCatalog } from './types.js'
@@ -60,23 +61,23 @@ export interface NewAgentForm {
 /** M8d: режимы подтверждений по порядку «тише → шире» и что они значат у каждого провайдера — одной строкой. */
 export const APPROVAL_ORDER: readonly ApprovalMode[] = ['read-only', 'ask', 'workspace', 'full']
 export const APPROVAL_LABEL: Readonly<Record<ApprovalMode, string>> = {
-  'read-only': 'Только чтение',
-  ask: 'Спрашивать',
-  workspace: 'Правки в папке без вопросов',
-  full: 'Полный доступ',
+  'read-only': tr('Только чтение'),
+  ask: tr('Спрашивать'),
+  workspace: tr('Правки в папке без вопросов'),
+  full: tr('Полный доступ'),
 }
 const APPROVAL_HINT: Readonly<Record<AgentProvider, Record<ApprovalMode, string>>> = {
   claude: {
-    'read-only': 'правки запрещены, каждую команду спросит (manual без Write/Edit)',
-    ask: 'по твоим настройкам Claude (defaultMode): что он спросит — придёт в Inbox',
-    workspace: 'правки файлов без вопросов (acceptEdits), команды — через Inbox',
-    full: 'что угодно без вопросов (bypassPermissions); браузер для агента не включается',
+    'read-only': tr('правки запрещены, каждую команду спросит (manual без Write/Edit)'),
+    ask: tr('по твоим настройкам Claude (defaultMode): что он спросит — придёт в Inbox'),
+    workspace: tr('правки файлов без вопросов (acceptEdits), команды — через Inbox'),
+    full: tr('что угодно без вопросов (bypassPermissions); браузер для агента не включается'),
   },
   codex: {
-    'read-only': 'песочница read-only: читает папку, всё прочее — через Inbox',
-    ask: 'правит рабочую папку сам, всё шире — через Inbox',
-    workspace: 'правит рабочую папку без вопросов, шире песочница не пустит — не спрашивая; твои MCP-серверы тоже без вопросов (браузер выключен)',
-    full: 'что угодно без вопросов, песочницы нет (danger-full-access); твои MCP-серверы тоже без вопросов (браузер выключен)',
+    'read-only': tr('песочница read-only: читает папку, всё прочее — через Inbox'),
+    ask: tr('правит рабочую папку сам, всё шире — через Inbox'),
+    workspace: tr('правит рабочую папку без вопросов, шире песочница не пустит — не спрашивая; твои MCP-серверы тоже без вопросов (браузер выключен)'),
+    full: tr('что угодно без вопросов, песочницы нет (danger-full-access); твои MCP-серверы тоже без вопросов (браузер выключен)'),
   },
 }
 /** Подсказка под выбором режима — для провайдера формы. */
@@ -89,11 +90,11 @@ export function approvalHint(provider: AgentProvider, mode: ApprovalMode): strin
  */
 export function approvalFooter(provider: AgentProvider, mode: ApprovalMode, claudeMode?: string): string {
   const label = APPROVAL_LABEL[mode].toLowerCase()
-  return provider === 'claude' && mode === 'ask' && claudeMode ? `${label} — у Claude по твоим настройкам: ${claudeMode}` : label
+  return provider === 'claude' && mode === 'ask' && claudeMode ? tr`${label} — у Claude по твоим настройкам: ${claudeMode}` : label
 }
 
 /** Красное предупреждение у `full` (одинаково у обоих провайдеров). */
-export const APPROVAL_FULL_WARNING = 'агент делает что угодно без вопросов, песочницы нет'
+export const APPROVAL_FULL_WARNING = tr('агент делает что угодно без вопросов, песочницы нет')
 
 /**
  * Папка — домашняя или выше: `/`, `/Users`, `/home`, `/Users/<имя>`, `/home/<имя>`. Окну домашнюю папку никто не
@@ -110,7 +111,7 @@ export function cwdCoversHome(cwd: string): boolean {
  */
 export function homeWarning(form: Pick<NewAgentForm, 'cwd' | 'approval' | 'worktree'>): string | null {
   if (!form.cwd || form.approval === 'read-only' || form.worktree.trim()) return null
-  return cwdCoversHome(form.cwd) ? HOME_CWD_WARNING : null
+  return cwdCoversHome(form.cwd) ? homeCwdWarning() : null
 }
 
 /**
@@ -128,6 +129,7 @@ export function defaultForm(provider: AgentProvider = 'claude'): NewAgentForm {
 
 /** Ответ `settings.get` (M8f). */
 export interface SettingsReply {
+  language?: 'auto' | 'ru' | 'en'
   newSession: NewSessionSettings
   lastUsed: LastUsed
   /** Флаг автопроверки обновлений (с 0.3.3); нет — старый демон. */
@@ -267,16 +269,16 @@ export type FormErrors = Partial<Record<'name' | 'cwd' | 'worktree' | 'approval'
 
 export function validateForm(form: NewAgentForm, taken: readonly string[]): FormErrors {
   const err: FormErrors = {}
-  if (!form.cwd) err.cwd = 'выбери папку'
-  if (!AGENT_NAME_RE.test(form.name)) err.name = 'латиница, цифры, - и _; с буквы; до 32 знаков'
-  else if (taken.includes(form.name)) err.name = 'такая сессия уже есть'
+  if (!form.cwd) err.cwd = tr('выбери папку')
+  if (!AGENT_NAME_RE.test(form.name)) err.name = tr('латиница, цифры, - и _; с буквы; до 32 знаков')
+  else if (taken.includes(form.name)) err.name = tr('такая сессия уже есть')
   const b = form.worktree.trim()
   if (b && (/[\s~^:?*[\\]/.test(b) || b.startsWith('-') || b.includes('..') || b.endsWith('/') || b.endsWith('.lock'))) {
-    err.worktree = 'недопустимое имя ветки git'
+    err.worktree = tr('недопустимое имя ветки git')
   }
   // Демон такой старт всё равно отверг бы — говорим заранее и по-человечески.
   if (form.browser && approvalBlocksBrowser(form.provider, form.approval)) {
-    err.approval = 'в этом режиме браузер для агента не включается — сними галочку браузера или выбери режим тише'
+    err.approval = tr('в этом режиме браузер для агента не включается — сними галочку браузера или выбери режим тише')
   }
   return err
 }

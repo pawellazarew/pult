@@ -1,3 +1,4 @@
+import { t } from '../lib/i18n.js'
 import { ResizableDialog } from './ResizableDialog.js'
 // Inbox (справа), диалог «+ Агент», панель doctor и подтверждение. Логика форм и сортировок —
 // в model/*.ts; здесь только отрисовка и фокус.
@@ -73,30 +74,30 @@ export function Inbox({ items, cards = [], filter = 'all', counts, agents, focus
       <div className="pane-h">
         <span className="lbl">Inbox</span>
         {onFilter ? (
-          <div className="inbox-filter" role="group" aria-label="Что показать">
+          <div className="inbox-filter" role="group" aria-label={t("Что показать")}>
             {INBOX_FILTERS.map(([f, label]) => (
               <button key={f} type="button" className="btn btn-sm btn-ghost" aria-pressed={filter === f} data-testid={`inbox-filter-${f}`}
                 onClick={() => onFilter(f)}>{label}{counts?.[f] ? <span className="n">{counts[f]}</span> : null}</button>
             ))}
           </div>
-        ) : <span className="count">{items.length ? `${items.length} ждут` : ''}</span>}
+        ) : <span className="count">{items.length ? t`${items.length} ждут` : ''}</span>}
         <span className="grow" />
         {onNextWaiting && waitingCount > 0 && (
           <button type="button" className="btn btn-ghost btn-sm inbox-next" data-testid="inbox-next-waiting"
-            title={`Следующая сессия, которая ждёт тебя: ошибки → запросы → готовые (${attentionKeys(IS_MAC).next})`}
-            onClick={onNextWaiting}>ждут {waitingCount}<Kbd>{attentionKeys(IS_MAC).next}</Kbd></button>
+            title={t`Следующая сессия, которая ждёт тебя: ошибки → запросы → готовые (${attentionKeys(IS_MAC).next})`}
+            onClick={onNextWaiting}>{t("ждут ")}{waitingCount}<Kbd>{attentionKeys(IS_MAC).next}</Kbd></button>
         )}
-        <button type="button" className="btn btn-ghost btn-sm" onClick={onClose} title={`Скрыть (${CMD}I)`}><Icon name="x" /></button>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={onClose} title={t`Скрыть (${CMD}I)`}><Icon name="x" /></button>
       </div>
       <div className="inbox-list">
         {shown === 0 ? (
           <div className="inbox-empty" data-testid="inbox-empty">
             <Icon name="check" />
-            {filter === 'unread' ? <>Непрочитанного нет.<br />Здесь появятся сессии, которые закончили ход, упали или спросили, пока ты был не на них.</>
-              : filter === 'errors' ? <>Ошибок нет.<br />Упавший ход, исчерпанный лимит, отказ стража и зависший ход появятся здесь.</>
-                : <>Никто ничего не ждёт.<br />Запросы разрешений и ошибки всех сессий появятся здесь.</>}
+            {filter === 'unread' ? <>{t("Непрочитанного нет.")}<br />{t("Здесь появятся сессии, которые закончили ход, упали или спросили, пока ты был не на них.")}</>
+              : filter === 'errors' ? <>{t("Ошибок нет.")}<br />{t("Упавший ход, исчерпанный лимит, отказ стража и зависший ход появятся здесь.")}</>
+                : <>{t("Никто ничего не ждёт.")}<br />{t("Запросы разрешений и ошибки всех сессий появятся здесь.")}</>}
             {waitingCount > 0 && <p className="inbox-waiting-hint" data-testid="inbox-waiting-hint">
-              {waitingCount} {plural(waitingCount, 'сессия ждёт', 'сессии ждут', 'сессий ждут')} тебя вне этого фильтра — {attentionKeys(IS_MAC).next} ведёт к ним.</p>}
+              {waitingCount} {plural(waitingCount, t('сессия ждёт'), t('сессии ждут'), t('сессий ждут'))}{t(" тебя вне этого фильтра — ")}{attentionKeys(IS_MAC).next}{t(" ведёт к ним.")}</p>}
           </div>
         ) : <>
           {cards.filter((c) => c.error).map((c) => <SessionCardView key={`s:${c.name}`} c={c} agent={who(c.name)} now={now}
@@ -137,29 +138,29 @@ export function SessionCardView({ c, agent, now, retrying, onOpen, onRetry, onSt
       data-error={c.error ? '1' : '0'}>
       <div className="perm-h">
         <span className="lbl">{ATTENTION_LABEL[c.kind]}</span>
-        <span className="who" title={agent.key !== agent.name ? `${agent.name} · имя для CLI: ${agent.key}` : agent.name}>{agent.name}</span>
+        <span className="who" title={agent.key !== agent.name ? t`${agent.name} · имя для CLI: ${agent.key}` : agent.name}>{agent.name}</span>
         <ProviderTag provider={agent.provider} />
         <span className="waited">{ago(c.at, now)}</span>
       </div>
       {failure ? <div className="perm-reason failure-message" data-testid="inbox-error-text">
         <strong>{failure.title}</strong><p>{failure.explanation}</p><p>{failure.action}</p>
-        {c.text && <details className="error-details"><summary>Технические подробности</summary><pre>{c.text}</pre></details>}
+        {c.text && <details className="error-details"><summary>{t("Технические подробности")}</summary><pre>{c.text}</pre></details>}
       </div> : c.text && <div className="perm-reason" data-testid="inbox-error-text">{c.text}</div>}
       <div className="perm-actions">
         {c.retryable && onRetry && (
           <button type="button" className="btn btn-sm" disabled={retrying} data-testid="inbox-retry"
-            title="Отправить последнюю реплику ещё раз" onClick={() => onRetry(c.name)}><Icon name="refresh" />{retrying ? 'Повторяю…' : 'Повторить'}</button>
+            title={t("Отправить последнюю реплику ещё раз")} onClick={() => onRetry(c.name)}><Icon name="refresh" />{retrying ? t('Повторяю…') : t('Повторить')}</button>
         )}
         {/* Сторож тишины (О2): ход сам не обрывается — решает человек. */}
         {c.kind === 'stalled' && onStop && (
           <button type="button" className="btn btn-sm btn-danger" data-testid="inbox-stall-stop"
-            title="Остановить зависший ход" onClick={() => onStop(c.name, c.id, c.turnId)}><Icon name="stop" />Прервать</button>
+            title={t("Остановить зависший ход")} onClick={() => onStop(c.name, c.id, c.turnId)}><Icon name="stop" />{t("Прервать")}</button>
         )}
         {c.kind === 'stalled' && onWait && (
           <button type="button" className="btn btn-sm" data-testid="inbox-stall-wait"
-            title="Ход идёт дальше; карточка уйдёт" onClick={() => onWait(c.name, c.id)}>Ждать</button>
+            title={t("Ход идёт дальше; карточка уйдёт")} onClick={() => onWait(c.name, c.id)}>{t("Ждать")}</button>
         )}
-        <button type="button" className="btn btn-sm btn-ghost" data-testid="inbox-open" onClick={() => onOpen?.(c.name)}>Открыть</button>
+        <button type="button" className="btn btn-sm btn-ghost" data-testid="inbox-open" onClick={() => onOpen?.(c.name)}>{t("Открыть")}</button>
       </div>
     </div>
   )
@@ -174,7 +175,7 @@ export function Dialog({ title, children, footer, onClose, size, testId, extra }
   return (
     <div className="scrim" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}>
       <Frame className={`dlg${size ? ` ${size}` : ''}`} role="dialog" aria-modal="true" aria-label={title} data-testid={testId}>
-        <div className="dlg-h"><h2>{title}</h2><span className="grow" />{extra}<button type="button" className="btn btn-ghost btn-sm" onClick={onClose} aria-label="Закрыть"><Icon name="x" /></button></div>
+        <div className="dlg-h"><h2>{title}</h2><span className="grow" />{extra}<button type="button" className="btn btn-ghost btn-sm" onClick={onClose} aria-label={t("Закрыть")}><Icon name="x" /></button></div>
         <div className="dlg-b">{children}</div>
         <div className="dlg-f">{footer}</div>
       </Frame>
@@ -184,35 +185,35 @@ export function Dialog({ title, children, footer, onClose, size, testId, extra }
 
 /** Горячие клавиши окна — то, что раньше стояло строкой под полем ввода (открывается «?» и ⌘/). */
 export const HOTKEYS: ReadonlyArray<readonly [string, string]> = [
-  [`${CMD}K`, 'найти беседу в списке'],
-  [`${CMD}P`, 'файлы текущего проекта'],
-  [`${CMD}B`, 'скрыть или показать список бесед'],
-  ['Enter', 'отправить реплику · идёт ход — поставить её в очередь'],
-  ['Shift+Enter', 'новая строка в реплике'],
-  ['Esc', 'стоп хода (подтверждение) · закрыть диалог или меню'],
-  [`${CMD}↵`, 'разрешить выделенный запрос в Inbox'],
+  [`${CMD}K`, t('найти беседу в списке')],
+  [`${CMD}P`, t('файлы текущего проекта')],
+  [`${CMD}B`, t('скрыть или показать список бесед')],
+  ['Enter', t('отправить реплику · идёт ход — поставить её в очередь')],
+  ['Shift+Enter', t('новая строка в реплике')],
+  ['Esc', t('стоп хода (подтверждение) · закрыть диалог или меню')],
+  [`${CMD}↵`, t('разрешить выделенный запрос в Inbox')],
   // О2: «прервать и сказать» — только в поле реплики и только пока идёт ход.
-  [`${CMD}↵ в поле`, 'идёт ход — прервать его и сразу сказать реплику'],
-  [`${CMD}N`, 'новая сессия (в проекте текущей)'],
-  [`${CMD}1…9`, 'первые беседы в списке слева'],
-  [`${CMD}I`, 'показать или спрятать Inbox'],
+  [t`${CMD}↵ в поле`, t('идёт ход — прервать его и сразу сказать реплику')],
+  [`${CMD}N`, t('новая сессия (в проекте текущей)')],
+  [`${CMD}1…9`, t('первые беседы в списке слева')],
+  [`${CMD}I`, t('показать или спрятать Inbox')],
   // О2: разборка очереди с клавиатуры (как в Conductor и cmux).
-  [attentionKeys(IS_MAC).next, 'следующая сессия, которая ждёт тебя: ошибки → запросы → готовые'],
-  [attentionKeys(IS_MAC).snooze, 'отложить текущую: в конец очереди и к следующей'],
-  [attentionKeys(IS_MAC).unread, 'пометить текущую непрочитанной'],
+  [attentionKeys(IS_MAC).next, t('следующая сессия, которая ждёт тебя: ошибки → запросы → готовые')],
+  [attentionKeys(IS_MAC).snooze, t('отложить текущую: в конец очереди и к следующей')],
+  [attentionKeys(IS_MAC).unread, t('пометить текущую непрочитанной')],
   // О2 «Поиск, метки» (docs/14).
-  [searchKeys(IS_MAC).search, 'поиск по всем разговорам: реплики, ответы, инструменты'],
-  [`${searchKeys(IS_MAC).prevUser} ${searchKeys(IS_MAC).nextUser}`, 'предыдущая и следующая твоя реплика в ленте (метки — полоса слева)'],
-  [`${CMD}V`, 'вставить: на файлах из Finder — их пути'],
-  [`${CMD}/`, 'эта справка'],
-  [`${CMD},`, 'настройки: умолчания «+ Сессия», последний выбор'],
-  ['правый клик', 'меню сессии или проекта (как «⋯»): переименовать, экспорт в Markdown, архив'],
+  [searchKeys(IS_MAC).search, t('поиск по всем разговорам: реплики, ответы, инструменты')],
+  [`${searchKeys(IS_MAC).prevUser} ${searchKeys(IS_MAC).nextUser}`, t('предыдущая и следующая твоя реплика в ленте (метки — полоса слева)')],
+  [`${CMD}V`, t('вставить: на файлах из Finder — их пути')],
+  [`${CMD}/`, t('эта справка')],
+  [`${CMD},`, t('настройки: умолчания «+ Сессия», последний выбор')],
+  [t('правый клик'), t('меню сессии или проекта (как «⋯»): переименовать, экспорт в Markdown, архив')],
 ]
 
 export function HotkeysHelp({ onClose }: { onClose(): void }): ReactElement {
   return (
-    <Dialog title="Горячие клавиши" onClose={onClose} size="narrow" testId="hotkeys-help"
-      footer={<><span className="grow" /><button type="button" className="btn" onClick={onClose}>Закрыть <Kbd>Esc</Kbd></button></>}>
+    <Dialog title={t("Горячие клавиши")} onClose={onClose} size="narrow" testId="hotkeys-help"
+      footer={<><span className="grow" /><button type="button" className="btn" onClick={onClose}>{t("Закрыть ")}<Kbd>Esc</Kbd></button></>}>
       <dl className="hotkeys">
         {HOTKEYS.map(([k, v]) => <div key={k} className="hotkey"><dt><Kbd>{k}</Kbd></dt><dd>{v}</dd></div>)}
       </dl>
@@ -236,19 +237,19 @@ export function RenameDialog({ name, title, onSave, onClose }: {
     if (ok) onClose()
   }
   return (
-    <Dialog title="Переименовать сессию" onClose={onClose} size="narrow" testId="rename-dialog"
+    <Dialog title={t("Переименовать сессию")} onClose={onClose} size="narrow" testId="rename-dialog"
       footer={<>
         <span className="grow" />
-        <button type="button" className="btn" onClick={onClose}>Отмена <Kbd>Esc</Kbd></button>
-        <button type="button" className="btn btn-primary" onClick={() => void save()} disabled={busy} data-testid="rename-save">Сохранить <Kbd>↵</Kbd></button>
+        <button type="button" className="btn" onClick={onClose}>{t("Отмена ")}<Kbd>Esc</Kbd></button>
+        <button type="button" className="btn btn-primary" onClick={() => void save()} disabled={busy} data-testid="rename-save">{t("Сохранить ")}<Kbd>↵</Kbd></button>
       </>}>
       <label className="field">
-        <span className="lbl">Название</span>
+        <span className="lbl">{t("Название")}</span>
         <input ref={input} value={value} maxLength={60} placeholder={name} data-testid="rename-dialog-input"
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void save() } }} />
       </label>
-      <span className="note">Имя для CLI — <span className="mono">{name}</span> — не меняется. Пустое название — показывать имя.</span>
+      <span className="note">{t("Имя для CLI — ")}<span className="mono">{name}</span>{t(" — не меняется. Пустое название — показывать имя.")}</span>
     </Dialog>
   )
 }
@@ -262,7 +263,7 @@ export function Confirm({ title, text, action, danger, onOk, onCancel, testId }:
     <Dialog title={title} onClose={onCancel} size="narrow" testId={testId}
       footer={<>
         <span className="grow" />
-        <button type="button" className="btn" onClick={onCancel}>Отмена <Kbd>Esc</Kbd></button>
+        <button type="button" className="btn" onClick={onCancel}>{t("Отмена ")}<Kbd>Esc</Kbd></button>
         <button ref={ok} type="button" className={`btn ${danger ? 'btn-danger' : 'btn-primary'}`} onClick={onOk} data-testid="confirm-ok">{action} <Kbd>↵</Kbd></button>
       </>}>
       <div>{text}</div>
@@ -293,7 +294,7 @@ export function ApprovalField({ provider, approval, error, onChange }: {
 }): ReactElement {
   return (
     <div className="field" data-testid="new-agent-approval-field">
-      <span className="lbl">подтверждения</span>
+      <span className="lbl">{t("подтверждения")}</span>
       <select value={approval} data-testid="new-agent-approval" onChange={(e) => onChange(e.target.value as NewAgentForm['approval'])}>
         {APPROVAL_ORDER.map((m) => <option key={m} value={m}>{APPROVAL_LABEL[m]}</option>)}
       </select>
@@ -408,7 +409,7 @@ export function NewAgentDialog({ taken, pickFolder, onCreate, onClose, catalog, 
       const files = await prompt.finalize(form.name)
       const e = await onCreate({ ...form, prompt: attachmentPrompt(form.prompt, files) })
       if (e) setErr(e)
-    } catch (e) { setErr(e instanceof Error ? e.message : 'Не удалось подготовить вложения. Попробуй ещё раз.') }
+    } catch (e) { setErr(e instanceof Error ? e.message : t('Не удалось подготовить вложения. Попробуй ещё раз.')) }
     finally { setBusy(false) }
   }
   const onKey = (e: React.KeyboardEvent): void => {
@@ -416,56 +417,56 @@ export function NewAgentDialog({ taken, pickFolder, onCreate, onClose, catalog, 
   }
 
   return (
-    <Dialog title="Новая сессия" onClose={onClose} testId="new-agent-dialog"
+    <Dialog title={t("Новая сессия")} onClose={onClose} testId="new-agent-dialog"
       footer={<>
         {err && <span className="err" role="alert" data-testid="new-agent-error">{err}</span>}
         <span className="grow" />
-        <button type="button" className="btn" onClick={onClose}>Отмена <Kbd>Esc</Kbd></button>
+        <button type="button" className="btn" onClick={onClose}>{t("Отмена ")}<Kbd>Esc</Kbd></button>
         <button type="button" className="btn btn-primary" onClick={() => void submit()} disabled={busy || !armed || prompt.pending > 0} data-testid="new-agent-submit">
-          {busy ? 'Завожу…' : form.prompt.trim() || prompt.items.length ? 'Завести и отправить' : 'Завести'} <Kbd>{`${CMD}↵`}</Kbd>
+          {busy ? t('Завожу…') : form.prompt.trim() || prompt.items.length ? t('Завести и отправить') : t('Завести')} <Kbd>{`${CMD}↵`}</Kbd>
         </button>
       </>}>
       <div onKeyDown={onKey} className="form-stack" inert={busy} {...folderDrag}>
         {prefill && (
           <div className="field" data-testid="new-agent-from-link">
-            <span className="t-wait">Поля заполнены по ссылке pult:// — проверь папку и реплику. Без «Завести» ничего не запустится.</span>
+            <span className="t-wait">{t("Поля заполнены по ссылке pult:// — проверь папку и реплику. Без «Завести» ничего не запустится.")}</span>
             {prefill.pathRejected && (
-              <span className="bad" data-testid="new-agent-link-path-rejected">папка из ссылки не из твоих проектов — выбери сам</span>
+              <span className="bad" data-testid="new-agent-link-path-rejected">{t("папка из ссылки не из твоих проектов — выбери сам")}</span>
             )}
           </div>
         )}
         {fromLast && !prefill && (
-          <span className="note" data-testid="new-agent-prefilled">Подставлен прошлый выбор — сменить поведение: Настройки ({CMD},)</span>
+          <span className="note" data-testid="new-agent-prefilled">{t("Подставлен прошлый выбор — сменить поведение: Настройки (")}{CMD},)</span>
         )}
         <div className="row2">
           <div className="field">
-            <span className="lbl">провайдер</span>
-            <Seg label="Провайдер" prov value={form.provider} options={['claude', 'codex'] as AgentProvider[]} onChange={(v) => setForm((f) => switchProviderPrefill(f, v, settings ?? null))} />
+            <span className="lbl">{t("провайдер")}</span>
+            <Seg label={t("Провайдер")} prov value={form.provider} options={['claude', 'codex'] as AgentProvider[]} onChange={(v) => setForm((f) => switchProviderPrefill(f, v, settings ?? null))} />
           </div>
           <div className="field">
-            <span className="lbl">имя</span>
-            <input className="mono" value={form.name} placeholder="из папки" data-testid="new-agent-name"
+            <span className="lbl">{t("имя")}</span>
+            <input className="mono" value={form.name} placeholder={t("из папки")} data-testid="new-agent-name"
               onChange={(e) => { setNameTouched(true); setForm({ ...form, name: e.target.value }) }} />
             {tried && errors.name ? <span className="bad">{errors.name}</span>
-              : <span className="note">Латиницей — так сессию зовут демон и CLI. Название для списка задашь и поменяешь потом, в шапке разговора.</span>}
+              : <span className="note">{t("Латиницей — так сессию зовут демон и CLI. Название для списка задашь и поменяешь потом, в шапке разговора.")}</span>}
           </div>
         </div>
 
         <div className="field" data-testid="provider-readiness">
-          <span className={readiness?.state === 'ready' ? 't-ok' : 't-wait'}>{checking ? 'Проверяю подключение…' : readiness?.detail ?? 'Подключение ещё не проверено'}</span>
+          <span className={readiness?.state === 'ready' ? 't-ok' : 't-wait'}>{checking ? t('Проверяю подключение…') : readiness?.detail ?? t('Подключение ещё не проверено')}</span>
           {readiness?.fixCmd && <code>{readiness.fixCmd}</code>}
-          {onCheck && <button type="button" className="btn btn-sm" disabled={checking} onClick={onCheck}><Icon name="refresh" />Проверить</button>}
+          {onCheck && <button type="button" className="btn btn-sm" disabled={checking} onClick={onCheck}><Icon name="refresh" />{t("Проверить")}</button>}
         </div>
 
         <div className="field">
-          <span className="lbl">папка</span>
+          <span className="lbl">{t("папка")}</span>
           <div className="folder">
             {/* Из ссылки — путь целиком, с переносом: сокращённый путь прячет, какая папка на самом деле. */}
             <span className={`path${form.cwd ? ' set' : ''}${prefill ? ' full' : ''}${folderOver ? ' drop' : ''}`} data-testid="new-agent-cwd" data-path={form.cwd} title={form.cwd}
               data-drop={folderOver ? '1' : undefined}>
-              {form.cwd ? (prefill ? form.cwd : shortPath(form.cwd, 64)) : 'не выбрана'}
+              {form.cwd ? (prefill ? form.cwd : shortPath(form.cwd, 64)) : t('не выбрана')}
             </span>
-            <button type="button" className="btn" onClick={() => void choose()} data-testid="pick-folder"><Icon name="folder" />Выбрать…</button>
+            <button type="button" className="btn" onClick={() => void choose()} data-testid="pick-folder"><Icon name="folder" />{t("Выбрать…")}</button>
           </div>
           {tried && errors.cwd && <span className="bad">{errors.cwd}</span>}
           {homeWarning(form) && <span className="bad" role="alert" data-testid="new-agent-home-warning">{homeWarning(form)}</span>}
@@ -473,29 +474,29 @@ export function NewAgentDialog({ taken, pickFolder, onCreate, onClose, catalog, 
         </div>
 
         <div className="field">
-          <span className="lbl">ветка worktree</span>
-          <input className="mono" value={form.worktree} placeholder="необязательно — например feat/ui" data-testid="new-agent-worktree"
+          <span className="lbl">{t("ветка worktree")}</span>
+          <input className="mono" value={form.worktree} placeholder={t("необязательно — например feat/ui")} data-testid="new-agent-worktree"
             onChange={(e) => setForm({ ...form, worktree: e.target.value })} />
           {tried && errors.worktree ? <span className="bad">{errors.worktree}</span>
-            : <span className="note">Сессия получит свою копию репозитория в ветке — основная папка не тронута.</span>}
+            : <span className="note">{t("Сессия получит свою копию репозитория в ветке — основная папка не тронута.")}</span>}
         </div>
 
         {/* О3: браузер для агента — Playwright MCP, свой профиль на сессию; каждый вызов идёт через Inbox. */}
         <div className="field" data-testid="new-agent-browser-field">
-          <span className="lbl">браузер</span>
+          <span className="lbl">{t("браузер")}</span>
           <label className="check">
             <input type="checkbox" checked={form.browser} data-testid="new-agent-browser"
               onChange={(e) => setForm({ ...form, browser: e.target.checked })} />
-            <span>Браузер для агента — открывать страницы, брать данные, скачивать</span>
+            <span>{t("Браузер для агента — открывать страницы, брать данные, скачивать")}</span>
           </label>
           {form.browser && (
             <label className="check sub">
               <input type="checkbox" checked={form.browserHeaded} data-testid="new-agent-browser-headed"
                 onChange={(e) => setForm({ ...form, browserHeaded: e.target.checked })} />
-              <span>Показывать окно браузера (в нём можно войти на сайт руками)</span>
+              <span>{t("Показывать окно браузера (в нём можно войти на сайт руками)")}</span>
             </label>
           )}
-          <span className="note">Свой профиль браузера на сессию, не твой Chrome с его куками. Каждый вызов браузера — через Inbox.</span>
+          <span className="note">{t("Свой профиль браузера на сессию, не твой Chrome с его куками. Каждый вызов браузера — через Inbox.")}</span>
         </div>
 
         {/* M8d: как подтверждать действия — живёт в записи сессии; у живой сессии меняется из подвала (M8f). */}
@@ -504,33 +505,33 @@ export function NewAgentDialog({ taken, pickFolder, onCreate, onClose, catalog, 
 
         {/* Друг под другом: шесть уровней усилия в половину ширины диалога не помещаются. */}
         <div className="field">
-          <span className="lbl">модель</span>
+          <span className="lbl">{t("модель")}</span>
           {form.provider === 'codex' && preset.models.length
             ? <select value={form.model ?? ''} data-testid="new-agent-model" onChange={(e) => setForm({ ...form, model: e.target.value || null })}>
-              <option value="">По умолчанию Codex</option>
+              <option value="">{t("По умолчанию Codex")}</option>
               {catalog?.codex.models.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
             </select>
             : preset.models.length
-            ? <Seg label="Модель" value={form.model} options={preset.models} onChange={(v) => setForm({ ...form, model: v })} />
-            : <span className="note">по умолчанию codex</span>}
+            ? <Seg label={t("Модель")} value={form.model} options={preset.models} onChange={(v) => setForm({ ...form, model: v })} />
+            : <span className="note">{t("по умолчанию codex")}</span>}
         </div>
         <div className="field">
-          <span className="lbl">усилие</span>
-          <Seg label="Усилие" value={form.effort} options={preset.efforts} onChange={(v) => setForm({ ...form, effort: v })} />
+          <span className="lbl">{t("усилие")}</span>
+          <Seg label={t("Усилие")} value={form.effort} options={preset.efforts} onChange={(v) => setForm({ ...form, effort: v })} />
         </div>
 
         <div className="field">
-          <span className="lbl">первая реплика</span>
+          <span className="lbl">{t("первая реплика")}</span>
           <AttachmentStrip items={prompt.items} previews={prompt.previews} pending={prompt.pending} onRemove={prompt.remove} />
-          {prompt.enabled && <><input ref={attachmentPicker} className="attach-picker-input" type="file" multiple data-testid="new-attachment-picker" onChange={(e) => { prompt.addFiles(Array.from(e.target.files ?? [])); e.target.value = '' }} /><button type="button" className="btn" onClick={() => attachmentPicker.current?.click()} disabled={busy || prompt.pending > 0}>＋ Прикрепить файлы</button></>}
-          <textarea ref={promptBox} value={form.prompt} placeholder="что сделать — можно оставить пустой и написать потом" data-testid="new-agent-prompt"
+          {prompt.enabled && <><input ref={attachmentPicker} className="attach-picker-input" type="file" multiple data-testid="new-attachment-picker" onChange={(e) => { prompt.addFiles(Array.from(e.target.files ?? [])); e.target.value = '' }} /><button type="button" className="btn" onClick={() => attachmentPicker.current?.click()} disabled={busy || prompt.pending > 0}>{t("＋ Прикрепить файлы")}</button></>}
+          <textarea ref={promptBox} value={form.prompt} placeholder={t("что сделать — можно оставить пустой и написать потом")} data-testid="new-agent-prompt"
             className={prompt.over ? 'drop' : undefined} data-drop={prompt.over ? '1' : undefined}
             onChange={(e) => setForm({ ...form, prompt: e.target.value })}
             onPaste={prompt.onPaste} onDragEnter={prompt.onDragEnter} onDragOver={prompt.onDragOver} onDragLeave={prompt.onDragLeave} onDrop={prompt.onDrop} />
           {prompt.notice && <span className="note" role="status" data-testid="new-agent-paste-notice">{prompt.notice}</span>}
           {prefill && form.prompt && (() => {
             const st = promptStats(form.prompt)
-            return <span className="note" data-testid="new-agent-prompt-stats">{`${st.lines} ${plural(st.lines, 'строка', 'строки', 'строк')} · ${st.chars} ${plural(st.chars, 'знак', 'знака', 'знаков')}`}</span>
+            return <span className="note" data-testid="new-agent-prompt-stats">{`${st.lines} ${plural(st.lines, t('строка'), t('строки'), t('строк'))} · ${st.chars} ${plural(st.chars, t('знак'), t('знака'), t('знаков'))}`}</span>
           })()}
         </div>
       </div>
@@ -546,7 +547,7 @@ function DoctorDetail({ text, failed }: { text: string; failed: boolean }): Reac
   const failure = explainFailure(text, { scope: 'check' })
   return <span className="failure-message">
     <span>{failure.explanation}</span>
-    <details className="error-details"><summary>Технические подробности</summary><pre>{text}</pre></details>
+    <details className="error-details"><summary>{t("Технические подробности")}</summary><pre>{text}</pre></details>
   </span>
 }
 
@@ -563,23 +564,23 @@ export function DoctorPanel({ report, groups, loading, error, copied, onRerun, o
   onMcp?(): void
 }): ReactElement {
   return (
-    <Dialog title="Проверка окружения" size="wide" onClose={onClose} testId="doctor-panel"
+    <Dialog title={t("Проверка окружения")} size="wide" onClose={onClose} testId="doctor-panel"
       extra={report && (
         <span className="doc-sum">
-          <span className="chip tone-ok">{report.counts.ok} ок</span>
-          {report.counts.warn > 0 && <span className="chip tone-wait">{report.counts.warn} {plural(report.counts.warn, 'предупреждение', 'предупреждения', 'предупреждений')}</span>}
-          {report.counts.fail > 0 && <span className="chip tone-fail">{report.counts.fail} {plural(report.counts.fail, 'сбой', 'сбоя', 'сбоев')}</span>}
+          <span className="chip tone-ok">{report.counts.ok}{t(" ок")}</span>
+          {report.counts.warn > 0 && <span className="chip tone-wait">{report.counts.warn} {plural(report.counts.warn, t('предупреждение'), t('предупреждения'), t('предупреждений'))}</span>}
+          {report.counts.fail > 0 && <span className="chip tone-fail">{report.counts.fail} {plural(report.counts.fail, t('сбой'), t('сбоя'), t('сбоев'))}</span>}
         </span>
       )}
       footer={<>
-        <span className="mut mono small">{report ? `проверено в ${hhmm(report.generatedAt)}` : ''}</span>
+        <span className="mut mono small">{report ? t`проверено в ${hhmm(report.generatedAt)}` : ''}</span>
         {error && <span className="err">{error}</span>}
         <span className="grow" />
-        {onMcp && <button type="button" className="btn" onClick={onMcp} data-testid="open-mcp-settings" title="Свои MCP-серверы в сессиях Claude">MCP-серверы…</button>}
-        <button type="button" className="btn" onClick={onRerun} disabled={loading} data-testid="doctor-rerun"><Icon name="refresh" />{loading ? 'проверяю…' : 'Перепроверить'}</button>
-        <button type="button" className="btn btn-primary" onClick={onClose}>Готово</button>
+        {onMcp && <button type="button" className="btn" onClick={onMcp} data-testid="open-mcp-settings" title={t("Свои MCP-серверы в сессиях Claude")}>{t("MCP-серверы…")}</button>}
+        <button type="button" className="btn" onClick={onRerun} disabled={loading} data-testid="doctor-rerun"><Icon name="refresh" />{loading ? t('проверяю…') : t('Перепроверить')}</button>
+        <button type="button" className="btn btn-primary" onClick={onClose}>{t("Готово")}</button>
       </>}>
-      {!report && loading && <div className="mut">Проверяю окружение: CLI, вход, сеть, служба…</div>}
+      {!report && loading && <div className="mut">{t("Проверяю окружение: CLI, вход, сеть, служба…")}</div>}
       {groups.map((g) => (
         <section key={g.title} className="doc-group">
           <h3 className="lbl">{g.title}</h3>
@@ -597,7 +598,7 @@ export function DoctorPanel({ report, groups, loading, error, copied, onRerun, o
                 <div className="doc-fix">
                   <code>{it.fixCmd}</code>
                   <button type="button" className="btn btn-sm" onClick={() => onCopy(it.fixCmd as string)} data-testid="doctor-copy">
-                    <Icon name={copied === it.fixCmd ? 'check' : 'copy'} />{copied === it.fixCmd ? 'скопировано' : 'копировать'}
+                    <Icon name={copied === it.fixCmd ? 'check' : 'copy'} />{copied === it.fixCmd ? t('скопировано') : t('копировать')}
                   </button>
                 </div>
               )}
@@ -627,21 +628,19 @@ export function McpServersDialog({ listing, loading, error, saving, onSave, onCl
   const selected = chosen ?? listing?.selected ?? []
   const rows = mcpRows(listing, selected)
   return (
-    <Dialog title="MCP-серверы" onClose={onClose} testId="mcp-settings"
+    <Dialog title={t("MCP-серверы")} onClose={onClose} testId="mcp-settings"
       footer={<>
         {error && <span className="err" role="alert" data-testid="mcp-error">{error}</span>}
         <span className="grow" />
-        <button type="button" className="btn" onClick={onClose}>Отмена <Kbd>Esc</Kbd></button>
+        <button type="button" className="btn" onClick={onClose}>{t("Отмена ")}<Kbd>Esc</Kbd></button>
         <button type="button" className="btn btn-primary" disabled={saving || loading || !listing || chosen === null} data-testid="mcp-save"
-          onClick={() => onSave(selected)}>{saving ? 'Сохраняю…' : 'Сохранить'}</button>
+          onClick={() => onSave(selected)}>{saving ? t('Сохраняю…') : t('Сохранить')}</button>
       </>}>
       <span className="note">
-        Отмеченные серверы из ~/.claude.json подключаются к сессиям Claude со следующего хода — в тот же MCP-конфиг, что и
-        Inbox разрешений. Серверы проекта (.mcp.json) — позже. Codex свои серверы берёт из ~/.codex/config.toml сам.
-      </span>
-      {loading && !listing && <div className="mut">Читаю ~/.claude.json…</div>}
+        {t("Отмеченные серверы из ~/.claude.json подключаются к сессиям Claude со следующего хода — в тот же MCP-конфиг, что и Inbox разрешений. Серверы проекта (.mcp.json) — позже. Codex свои серверы берёт из ~/.codex/config.toml сам.")}</span>
+      {loading && !listing && <div className="mut">{t("Читаю ~/.claude.json…")}</div>}
       {listing?.warnings.map((w) => <div key={w} className="note t-wait" data-testid="mcp-warning">{w}</div>)}
-      {listing && !rows.length && <div className="mut" data-testid="mcp-empty">В ~/.claude.json своих MCP-серверов нет.</div>}
+      {listing && !rows.length && <div className="mut" data-testid="mcp-empty">{t("В ~/.claude.json своих MCP-серверов нет.")}</div>}
       <div className="mcp-list">
         {rows.map((r) => (
           <label key={r.name} className="check mcp-row" data-testid="mcp-row" data-name={r.name}>
@@ -655,7 +654,7 @@ export function McpServersDialog({ listing, loading, error, saving, onSave, onCl
           <label key={`missing:${n}`} className="check mcp-row" data-testid="mcp-missing" data-name={n}>
             <input type="checkbox" checked onChange={() => setChosen(toggleServer(selected, n))} />
             <span className="mono">{n}</span>
-            <span className="note">выбран, но в ~/.claude.json его нет — не подключается</span>
+            <span className="note">{t("выбран, но в ~/.claude.json его нет — не подключается")}</span>
           </label>
         ))}
       </div>

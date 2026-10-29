@@ -1,3 +1,4 @@
+import { t } from '../lib/i18n.js'
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import type { MouseEvent, ReactElement, ReactNode } from 'react'
 import type { ImageBridge } from './Images.js'
@@ -72,10 +73,10 @@ function InlineCode({ v }: { v: string }): ReactElement {
   const [flash, show] = useFlash()
   const onClick = (e: MouseEvent): void => {
     if (!bridge || !clickActs(selectionText(), e.detail)) return
-    bridge.copyText(v).then(() => show('Скопировано'), () => { /* буфер недоступен */ })
+    bridge.copyText(v).then(() => show(t('Скопировано')), () => { /* буфер недоступен */ })
   }
   return (
-    <code className={`md-icode${flash ? ' md-flash' : ''}`} title="Нажми — скопировать" onClick={onClick}
+    <code className={`md-icode${flash ? ' md-flash' : ''}`} title={t("Нажми — скопировать")} onClick={onClick}
       {...(flash ? { 'data-flash': flash } : {})}>{v}</code>
   )
 }
@@ -87,7 +88,7 @@ function Link({ href, url, title, children }: { href: string; url: string; title
     // Окно само никуда не ходит (оболочка режет навигацию): адрес уходит в системный браузер.
     e.preventDefault()
     if (!bridge || !clickActs(selectionText(), e.detail)) return
-    void followLink(bridge, href, url).then((r) => { if (r === 'copied') show('Ссылка скопирована') })
+    void followLink(bridge, href, url).then((r) => { if (r === 'copied') show(t('Ссылка скопирована')) })
   }
   return (
     <a href={href} className={`md-a${flash ? ' md-flash' : ''}`} title={title ? `${title}\n${url}` : url} rel="noreferrer"
@@ -116,17 +117,17 @@ function FileLink({ path, label }: { path: string; label?: string }): ReactEleme
     try {
       if (!reveal && preview) { preview.open(path); return }
       const result = await followFile(bridge, path, reveal)
-      if (result !== 'opened') show(result === 'revealed' ? 'Показан в Finder' : 'Путь скопирован')
-    } catch { setError('Файл недоступен: проверь, не перемещён ли он') }
+      if (result !== 'opened') show(result === 'revealed' ? t('Показан в Finder') : t('Путь скопирован'))
+    } catch { setError(t('Файл недоступен: проверь, не перемещён ли он')) }
     finally { setBusy(false) }
   }
   return <span className="file-reference">
     <button type="button" className="file-link" data-testid="file-link" title={path} disabled={!bridge || busy}
-      aria-label={`${finder ? 'Показать в Finder' : 'Открыть файл'}: ${name}`} onClick={() => void open()}>
-      <Icon name="file" /><span className="file-link-name">{label || name}</span><span className="file-link-action">{flash || (finder ? 'Finder' : 'Открыть')}</span>
+      aria-label={`${finder ? t('Показать в Finder') : t('Открыть файл')}: ${name}`} onClick={() => void open()}>
+      <Icon name="file" /><span className="file-link-name">{label || name}</span><span className="file-link-action">{flash || (finder ? 'Finder' : t('Открыть'))}</span>
     </button>
     {!finder && bridge?.revealPath && <button type="button" className="file-reveal" data-testid="file-reveal" disabled={busy}
-      title={`Показать в Finder: ${path}`} aria-label={`Показать в Finder: ${name}`} onClick={() => void open(true)}><Icon name="folder" /></button>}
+      title={t`Показать в Finder: ${path}`} aria-label={t`Показать в Finder: ${name}`} onClick={() => void open(true)}><Icon name="folder" /></button>}
     {error && <span className="file-link-error" role="alert">{error}</span>}
   </span>
 }
@@ -144,7 +145,7 @@ function Inl({ parts }: { parts: Inline[] }): ReactElement {
       case 'file': return <FileLink key={i} path={p.path} />
       case 'image': {
         const href = safeHref(p.url)
-        return href ? <Link key={i} href={href} url={p.url}>{p.alt || 'Открыть изображение'}</Link> : <ImagePreview key={i} source={p.url} label={p.alt} />
+        return href ? <Link key={i} href={href} url={p.url}>{p.alt || t('Открыть изображение')}</Link> : <ImagePreview key={i} source={p.url} label={p.alt} />
       }
       case 'link':
         if (isImagePath(p.url)) return <ImagePreview key={i} source={p.url} label={p.c.map((c) => c.t === 'text' ? c.v : '').join('') || undefined} />
@@ -165,13 +166,13 @@ function CodeBlock({ lang, v }: { lang: string; v: string }): ReactElement {
   const bridge = useContext(MdBridgeContext)
   const [flash, show] = useFlash()
   const copy = (): void => {
-    bridge?.copyText(v).then(() => show('Скопировано'), () => { /* буфер недоступен */ })
+    bridge?.copyText(v).then(() => show(t('Скопировано')), () => { /* буфер недоступен */ })
   }
   return (
     <div className="md-code" data-testid="md-code">
       <div className="md-code-head">
-        <span className="lang">{lang || 'код'}</span>
-        <button type="button" className={`md-copy${flash ? ' done' : ''}`} onClick={copy} data-testid="md-copy">{flash ?? 'Копировать'}</button>
+        <span className="lang">{lang || t('код')}</span>
+        <button type="button" className={`md-copy${flash ? ' done' : ''}`} onClick={copy} data-testid="md-copy">{flash ?? t('Копировать')}</button>
       </div>
       <pre><code>{v}</code></pre>
     </div>
@@ -203,7 +204,7 @@ function Item({ it }: { it: ListItem }): ReactElement {
   const tail = lead ? rest : it.c
   return (
     <li className={it.task ? 'md-task-li' : undefined}>
-      {it.task && <span className={`md-task${it.task.checked ? ' on' : ''}`} role="img" aria-label={it.task.checked ? 'сделано' : 'не сделано'} />}
+      {it.task && <span className={`md-task${it.task.checked ? ' on' : ''}`} role="img" aria-label={it.task.checked ? t('сделано') : t('не сделано')} />}
       {lead && <Inl parts={lead.v} />}
       {tail.length > 0 && <Blocks blocks={tail} />}
     </li>
@@ -239,7 +240,7 @@ function Blocks({ blocks, caret }: { blocks: Block[]; caret?: boolean }): ReactE
           (p.t === 'image' && !safeHref(p.url)) || (p.t === 'link' && isImagePath(p.url)))
         // Курсор «печатает» — в конце последнего абзаца, а не отдельной строкой под ним.
         const tail = caret && i === blocks.length - 1
-        return <p key={i} className={gallery ? 'image-gallery' : undefined}><Inl parts={gallery ? content : b.v} />{tail && <span className="caret" aria-label="печатает" />}</p>
+        return <p key={i} className={gallery ? 'image-gallery' : undefined}><Inl parts={gallery ? content : b.v} />{tail && <span className="caret" aria-label={t("печатает")} />}</p>
       }
     }
   })}</>
@@ -254,7 +255,7 @@ export function Markdown({ text, streaming, human }: { text: string; streaming?:
   return (
     <div className="md">
       <Blocks blocks={blocks} caret={!!streaming} />
-      {streaming && blocks[blocks.length - 1]?.t !== 'p' && <span className="caret" aria-label="печатает" />}
+      {streaming && blocks[blocks.length - 1]?.t !== 'p' && <span className="caret" aria-label={t("печатает")} />}
     </div>
   )
 }

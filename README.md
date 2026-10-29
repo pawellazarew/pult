@@ -10,9 +10,14 @@
   <img alt="The Pult window: conversations grouped by project on the left, a Claude conversation in the middle and collapsed tool activity" src="docs/images/hero-light.png" width="100%">
 </picture>
 
-> [!NOTE]
-> **The window and the CLI messages are in Russian for now.** Commands and flags are English, and this README
-> explains what the important messages mean. The screenshots show the Russian interface.
+**English and Russian are supported** in the window, notifications and CLI. Choose **Settings → Appearance → Language**
+(English, Русский or System default). Unsupported system languages use English. Click Save to apply a language change and reload the window;
+conversations and saved drafts remain in place. Commands, flags and JSON fields keep their original names.
+The screenshots and some older examples below show the Russian interface.
+
+For a single CLI command, override the setting with `PULT_LANG=en pult --help` (`ru` and `auto` are also supported).
+The saved setting is `language: "auto" | "ru" | "en"` in `~/.pult/config.json`. Model responses and your own text are
+shown as written; changing the interface language does not translate your conversations.
 
 ## What it does
 
@@ -56,7 +61,6 @@ Everything it does is written to an event journal in `~/.pult`, so the CLI and t
   terminal.
 - Node.js is optional: if there is no `node` 22 or newer in `PATH`, the installer downloads the official nodejs.org
   build pinned in the package, checks its sha256 and keeps it inside `~/.pult/runtime`.
-- Be ready for a **Russian interface** (see the note above).
 
 ## Install
 
