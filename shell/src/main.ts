@@ -31,6 +31,8 @@ import { externalUrl } from './externalUrl.js'
 import { DaemonLink } from './link.js'
 import { locatePackage, resolveNode } from './locate.js'
 import { isNotifyKind, notificationSound } from './notifySound.js'
+import { createNotificationRouter, sanitizeTarget } from './notifications.js'
+import { EventEmitter } from 'node:events'
 import { checkPultUrl, LINK_GAP_MS, LinkGate, LinkRate, linkFromArgv, linkTarget, matchKnownPath, PULT_SCHEME } from './pultUrl.js'
 import type { FsProbe } from './locate.js'
 import { menuLabel, pendingFrom, sessionsFrom, trayModel } from './tray.js'
@@ -67,6 +69,35 @@ let uiRoot = ''
 /** PULT_HOME — из paths() пакета, как у демона; пусто до boot. */
 let pultHome = ''
 let tray: Tray | null = null
+
+type TestNotice = { id: string; title?: string; body?: string; target: NotifyTarget; kind?: string; sound?: string; silent?: boolean }
+type NotificationTestGlobals = {
+  __pultTestNotifications?: TestNotice[]
+  __pultTestNotificationClick?: (id: string) => boolean
+}
+const testNotices = new Map<string, WeakRef<EventEmitter>>()
+const notifications = createNotificationRouter({
+  create(options) {
+    if (!TEST_MODE) return new Notification(options)
+    // Тот же жизненный цикл и обработчик click, без настоящего Notification Center в e2e.
+    // WeakRef не удерживает объект: сильную ссылку обязан держать production-маршрутизатор.
+    const n = Object.assign(new EventEmitter(), { id: options.id, show() {} })
+    testNotices.set(n.id, new WeakRef(n))
+    return n
+  },
+  open: (target) => openAt(target),
+  ...(process.platform === 'darwin' && !TEST_MODE ? { history: () => Notification.getHistory() } : {}),
+  warn: (message) => log(message),
+})
+if (TEST_MODE) {
+  ;(globalThis as NotificationTestGlobals).__pultTestNotificationClick = (id) => {
+    const n = testNotices.get(id)?.deref()
+    if (!n) return false
+    n.emit('click')
+    testNotices.delete(id)
+    return true
+  }
+}
 const saveRate = new SaveRate(1000)
 
 /** Только наше окно и только наша страница: IPC из чужого фрейма молча отвергается. */
@@ -150,7 +181,7 @@ function showWindow(): BrowserWindow {
 /** Открыть окно и повести его к сессии, запросу или диалогу новой сессии (уведомление, строка меню, ссылка). */
 function openAt(t: NavTarget): void {
   const w = showWindow()
-  if (!t.sessionId && !t.permId && !t.newSession) return
+  if (!t.sessionId && !t.permId && !t.newSession && !t.inbox) return
   // Окно могли закрыть: showWindow создал новое, и страница ещё грузится. Кадр, отправленный
   // сейчас, ушёл бы до preload и потерялся — окно открылось бы не на той сессии. Ждём конца
   // загрузки; дальше до подписки интерфейса кадр держит preload.
@@ -626,28 +657,12 @@ function registerIpc(): void {
     // Пока окно в фокусе, уведомление — шум: человек и так смотрит на Пульт.
     if (BrowserWindow.getFocusedWindow()) return false
     const t = sanitizeTarget(target)
-    // Тестовый прогон системных уведомлений не показывает: e2e читает их список из main.
-    if (TEST_MODE) {
-      const g = globalThis as { __pultTestNotifications?: Array<{ title: string; body: string; target: NotifyTarget; kind?: string; sound?: string; silent?: boolean }> }
-      ;(g.__pultTestNotifications ??= []).push({ title, body, target: t, ...(isNotifyKind(kind) ? { kind } : {}), ...notificationSound(kind, sound) })
-      return true
-    }
-    if (!Notification.isSupported()) return false
-    const n = new Notification({ title: title.slice(0, 120), body: body.slice(0, 400), ...notificationSound(kind, sound) })
-    n.on('click', () => openAt(t))
-    n.show()
+    if (!TEST_MODE && !Notification.isSupported()) return false
+    const options = { title: title.slice(0, 120), body: body.slice(0, 400), ...notificationSound(kind, sound) }
+    const id = notifications.show(options, t)
+    if (TEST_MODE) ((globalThis as NotificationTestGlobals).__pultTestNotifications ??= []).push({ id, ...options, target: t, ...(isNotifyKind(kind) ? { kind } : {}) })
     return true
   })
-}
-
-function sanitizeTarget(t: unknown): NotifyTarget {
-  const out: NotifyTarget = {}
-  if (t && typeof t === 'object') {
-    const o = t as Record<string, unknown>
-    if (typeof o['sessionId'] === 'string' && o['sessionId'].length <= 128) out.sessionId = o['sessionId']
-    if (typeof o['permId'] === 'string' && o['permId'].length <= 128) out.permId = o['permId']
-  }
-  return out
 }
 
 async function boot(): Promise<void> {
@@ -700,6 +715,7 @@ async function boot(): Promise<void> {
   session.defaultSession.setPermissionRequestHandler((_wc, _perm, cb) => cb(false))
   session.defaultSession.setPermissionCheckHandler(() => false)
   registerIpc()
+  await notifications.restore()
   powerMonitor.on('resume', () => { void link?.checkConnection() })
   createTray()
   showWindow()

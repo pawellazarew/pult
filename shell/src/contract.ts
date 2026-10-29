@@ -139,6 +139,8 @@ export type NotifyKind = 'ask' | 'done' | 'error'
 export interface NotifyTarget {
   sessionId?: string
   permId?: string
+  /** Сводное уведомление о нескольких беседах. */
+  inbox?: true
 }
 
 /**
