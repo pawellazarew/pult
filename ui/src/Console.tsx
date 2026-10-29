@@ -451,7 +451,8 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
       if (loadedRef.current && !known.current.has(t.sessionId)) setBannerError(`Сессии ${t.sessionId} нет — ссылка устарела или с опечаткой`)
       else select(t.sessionId)
     }
-    if (t.permId) { setInboxOpen(true); setFocusChosen(t.permId) }
+    if (t.permId || t.inbox) setInboxOpen(true)
+    if (t.permId) setFocusChosen(t.permId)
   }), [bridge, select])
   // Окно защиты после ссылки: Enter, ⌘Enter и буквы не доходят ни до горячих клавиш, ни до полей.
   // Ловим на window в фазе захвата — раньше любых обработчиков React и поля ввода.

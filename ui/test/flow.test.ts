@@ -82,7 +82,7 @@ describe('правила уведомлений', () => {
     assert.deepEqual(shown, [true, true, false, false, false])
     assert.equal(flushAt, 1000 + BURST_WINDOW_MS, 'сводка — когда закроется окно первого уведомления')
     const f = flushThrottle(t, flushAt as number)
-    assert.deepEqual(f.summary, { title: 'Пульт', body: 'ещё 2 сессии ждут тебя', target: {}, kind: 'error' })
+    assert.deepEqual(f.summary, { title: 'Пульт', body: 'ещё 2 сессии ждут тебя', target: { inbox: true }, kind: 'error' })
     assert.equal(f.t.held.length, 0)
     // Сводка заняла место в окне: пока второе уведомление (1100) не вышло из окна, новое ждёт.
     assert.equal(offerNotice(f.t, notice('e'), (flushAt as number) + 1).show, false)

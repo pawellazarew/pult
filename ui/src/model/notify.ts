@@ -11,7 +11,7 @@
 // ПРЕДЕЛ ПАЧКИ (как у Warp): не больше двух уведомлений за 10 с. Остальные копятся и, когда окно в 10 с
 // закрывается, уходят одной сводкой «ещё N сессий ждут тебя».
 
-import type { NotifyKind } from '../../../shell/src/contract.js'
+import type { NotifyKind, NotifyTarget } from '../../../shell/src/contract.js'
 import { attentionOf } from '../../../src/sessions/attention.js'
 import { plural } from '../lib/ru.js'
 import { describePermission } from './permissions.js'
@@ -39,7 +39,7 @@ export function notifyRules(x: unknown): NotifyRules {
 export interface Notice {
   title: string
   body: string
-  target: { sessionId?: string; permId?: string }
+  target: NotifyTarget
   kind: NotifyKind
 }
 
@@ -132,7 +132,7 @@ export function flushThrottle(t: Throttle, nowMs: number): { t: Throttle; summar
   const summary: Notice = {
     title: 'Пульт',
     body: `ещё ${n} ${plural(n, 'сессия ждёт', 'сессии ждут', 'сессий ждут')} тебя`,
-    target: names.length === 1 ? { sessionId: names[0] as string } : {},
+    target: names.length === 1 ? { sessionId: names[0] as string } : { inbox: true },
     kind,
   }
   return { t: { sent: [...recent(t.sent, nowMs), nowMs], held: [] }, summary }
