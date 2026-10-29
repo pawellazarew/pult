@@ -3,6 +3,11 @@ import { describe, it } from 'node:test'
 import { explainFailure, exitCodeIn } from '../src/model/errors.js'
 
 describe('пояснения ошибок вместо голых кодов', () => {
+  it('перегрузка модели — понятная причина вместо неопределённой ошибки', () => {
+    const f = explainFailure('Selected model is at capacity. Please try a different model. (3 попытки)', { scope: 'agent' })
+    assert.match(f.title, /модель перегружена/)
+    assert.match(f.action, /другую модель/)
+  })
   it('код 1 не подменяется выдуманной причиной', () => {
     const failure = explainFailure('claude завершился: код 1', { scope: 'agent' })
     assert.match(failure.explanation, /общий сигнал/)

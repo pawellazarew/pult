@@ -623,3 +623,10 @@ ChatGPT Terms of Use apply to your login.
 Pult is [MIT](LICENSE)-licensed. The window bundles third-party parts under their own MIT-compatible licenses: the
 Geologica, Onest and JetBrains Mono fonts (SIL OFL 1.1, see [`ui/fonts/LICENSES.md`](ui/fonts/LICENSES.md)); React,
 react-dom and scheduler (MIT); Electron (MIT, with the Chromium licenses that electron-builder ships inside the app).
+
+### Codex model capacity
+
+For `Selected model is at capacity`, Pult makes at most three attempts in total, waiting 2 and 5 seconds before
+retries. The conversation shows the attempt number; Stop cancels the wait. Automatic replay is limited to turns
+with no response text or tool activity. Subscription limits, permission failures and unknown errors are not retried.
+After exhaustion, the error card explains model capacity and suggests waiting or choosing another model.

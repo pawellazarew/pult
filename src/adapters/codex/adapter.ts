@@ -290,7 +290,11 @@ const APPROVAL_TOOL_NAME: Record<string, string> = {
   execCommandApproval: 'execCommand',
 }
 
+const MODEL_CAPACITY_RE = /(?:selected model is at capacity|model[^\n]{0,60}(?:at capacity|overloaded))/i
+
 export interface CodexAdapterOptions extends AdapterDeps {
+  /** Паузы двух повторов при перегрузке модели; тест сокращает ожидание. Всего три попытки. */
+  capacityRetryDelaysMs?: readonly [number, number]
   paths: PultPaths
   config: PultConfig
   logger: Logger
@@ -312,6 +316,10 @@ interface TurnCtx {
   turnId: string
   providerTurnId: string | null
   textParts: string[]
+  capacityAttempt: number
+  capacityError: string | null
+  retryTimer: ReturnType<typeof setTimeout> | null
+  replaySafe: boolean
   retries: number
   tokens: { input: number; output: number; cached: number }
   startedAt: number
@@ -1446,6 +1454,7 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
 
   const applySignal = (l: Live, sig: CodexSignal, own: boolean): void => {
     const ctx = l.turn
+    if (ctx?.retryTimer && own) return
     switch (sig.kind) {
       case 'turn_started': {
         if (!own) return
@@ -1504,7 +1513,7 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
           turnId: ctx.turnId,
           ok: false,
           errorCode: sig.errorInfo === 'unauthorized' ? 'provider_unavailable' : 'internal',
-          message: sig.errorMessage || `ход завершился со статусом ${sig.status}`,
+          message: sig.errorMessage || ctx.capacityError || `ход завершился со статусом ${sig.status}`,
           ...(ctx.textParts.length ? { text: ctx.textParts.join('\n') } : {}),
         })
         return
@@ -1551,6 +1560,9 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
       case 'failed': {
         if (!own) { logger.warn('ошибка на треде субагента', { session: l.spec.name, message: sig.message }); return }
         if (!ctx) return
+        // error — ещё не конец хода. Ждём turn/completed, прежде чем повторять, иначе сервер
+        // может ещё исполнять старый turn и отклонит новый как activeTurnNotSteerable.
+        if (MODEL_CAPACITY_RE.test(sig.message) && ctx.replaySafe) { ctx.capacityError = sig.message; return }
         ctx.finish({
           turnId: ctx.turnId,
           ok: false,
@@ -1619,6 +1631,7 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
     let bgMoved = false
     for (const draft of mapped.drafts) {
       if (!l.closing && live.get(owner.name) === l) {
+        if (l.turn && ['tool.called', 'tool.finished', 'agent.spawned', 'message.delta', 'message.done'].includes(draft.kind)) l.turn.replaySafe = false
         emit(draft)
         if (l.bg.onDraft(draft)) bgMoved = true
       }
@@ -1889,6 +1902,31 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
     const done = new Promise<TurnOutcome>((resolve) => {
       finishOuter = (outcome: TurnOutcome): void => {
         if (ctx.settled) return
+        const delays = opts.capacityRetryDelaysMs ?? [2000, 5000]
+        if (!outcome.ok && outcome.errorCode === 'internal' && MODEL_CAPACITY_RE.test(outcome.message ?? '')
+          && ctx.replaySafe && ctx.capacityAttempt < 3 && !l.stopRequested && !gone()) {
+          if (ctx.retryTimer) return
+          const delay = delays[ctx.capacityAttempt - 1] ?? 5000
+          ctx.capacityAttempt += 1
+          emitL({ sessionId: name, provider: 'codex', kind: 'session.configured', data: { changes: {},
+            notice: `Выбранная модель перегружена. Повтор ${ctx.capacityAttempt}/3 через ${delay / 1000} с.` } })
+          ctx.retryTimer = setTimeout(() => {
+            ctx.retryTimer = null
+            if (ctx.settled || l.turn !== ctx || l.stopRequested || gone()) {
+              ctx.finish({ turnId, ok: false, errorCode: 'interrupted', message: 'повтор отменён' })
+              return
+            }
+            ctx.providerTurnId = null
+            ctx.capacityError = null
+            void sendAttempt()
+          }, delay)
+          return
+        }
+        if (ctx.retryTimer) clearTimeout(ctx.retryTimer)
+        ctx.retryTimer = null
+        if (!outcome.ok && ctx.capacityAttempt === 3 && MODEL_CAPACITY_RE.test(outcome.message ?? '')) {
+          outcome = { ...outcome, message: `${outcome.message} (3 попытки)` }
+        }
         ctx.settled = true
         if (l.turn === ctx) l.turn = null
         // Ход кончился — общий процесс под этой сессией снова свободен для перезапуска.
@@ -1927,6 +1965,7 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
       turnId,
       providerTurnId: null,
       textParts: [],
+      capacityAttempt: 1, capacityError: null, retryTimer: null, replaySafe: true,
       retries: 0,
       tokens: { input: 0, output: 0, cached: 0 },
       startedAt: now(),
@@ -1940,40 +1979,47 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
     // Модель снимка — переводчику (`context.updated`), в момент хода, а не смены (ревью, LOW 7).
     if (flags.model) l.mapper.setModel(flags.model)
 
-    try {
-      const res = await c.request('turn/start', {
-        threadId: l.threadId,
-        // Реплика уходит В ТЕЛЕ ЗАПРОСА, никогда в argv (инвариант «промпт не в argv»).
-        input: [{ type: 'text', text }, { type: 'text', text: approvalContext('codex', flags.approval, l.spec.broker) }],
-        ...(flags.model ? { model: flags.model } : {}),
-        ...(flags.effort ? { effort: flags.effort } : {}),
-        // M8f: режим снимка отличается от действующего у треда — по схеме «для этого хода и следующих».
-        ...override,
-      }, controlMs)
-      l.threadPolicy = { ...target }
-      const turn = obj(res['turn'])
-      const providerTurnId = turn ? str(turn['id']) : null
-      if (providerTurnId && ctx.providerTurnId === null) ctx.providerTurnId = providerTurnId
-    } catch (e) {
-      const message = redactString((e as Error).message)
-      ctx.finish({
-        turnId, ok: false,
-        errorCode: c.alive() ? 'internal' : 'provider_unavailable',
-        message: `turn/start не удался: ${message}`,
-      })
-      return { turnId, done }
+    const sendAttempt = async (): Promise<void> => {
+      try {
+        const res = await c.request('turn/start', {
+          threadId: l.threadId,
+          // Реплика уходит В ТЕЛЕ ЗАПРОСА, никогда в argv (инвариант «промпт не в argv»).
+          input: [{ type: 'text', text }, { type: 'text', text: approvalContext('codex', flags.approval, l.spec.broker) }],
+          ...(flags.model ? { model: flags.model } : {}),
+          ...(flags.effort ? { effort: flags.effort } : {}),
+          // M8f: режим снимка отличается от действующего у треда — по схеме «для этого хода и следующих».
+          ...override,
+        }, controlMs)
+        l.threadPolicy = { ...target }
+        const turn = obj(res['turn'])
+        const providerTurnId = turn ? str(turn['id']) : null
+        if (providerTurnId && ctx.providerTurnId === null) ctx.providerTurnId = providerTurnId
+      } catch (e) {
+        const message = redactString((e as Error).message)
+        ctx.finish({
+          turnId, ok: false,
+          errorCode: c.alive() ? 'internal' : 'provider_unavailable',
+          message: `turn/start не удался: ${message}`,
+        })
+        return
+      }
+      // Стоп ИЛИ снятие сессии могли прийти между `turn/start` и ответом на него: тогда ход уже
+      // живой, и снять его надо здесь — `interrupt`/`close` его ещё не видели (у `close` на этот
+      // миг не было даже `providerTurnId`, чтобы позвать `turn/interrupt`).
+      if (abandoned() && !ctx.settled) {
+        l.stopRequested = false
+        void interruptTurn(l, ctx)
+      }
     }
-    // Стоп ИЛИ снятие сессии могли прийти между `turn/start` и ответом на него: тогда ход уже
-    // живой, и снять его надо здесь — `interrupt`/`close` его ещё не видели (у `close` на этот
-    // миг не было даже `providerTurnId`, чтобы позвать `turn/interrupt`).
-    if (abandoned() && !ctx.settled) {
-      l.stopRequested = false
-      void interruptTurn(l, ctx)
-    }
+    await sendAttempt()
     return { turnId, done }
   }
 
   const interruptTurn = async (l: Live, ctx: TurnCtx): Promise<void> => {
+    if (ctx.retryTimer) {
+      ctx.finish({ turnId: ctx.turnId, ok: false, errorCode: 'interrupted', message: 'повтор отменён пользователем' })
+      return
+    }
     const c = client
     if (c && c.alive() && l.threadId && ctx.providerTurnId) {
       try {

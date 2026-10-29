@@ -976,3 +976,10 @@ infrastructure) requires agreeing to our Commercial Terms of Service…». Эт�
 шрифты Geologica, Onest и JetBrains Mono — SIL OFL 1.1 (текст лицензии кладётся рядом с файлами шрифтов,
 источники — [`ui/fonts/LICENSES.md`](ui/fonts/LICENSES.md)); React, react-dom и scheduler — MIT (уведомления
 `@license` остаются в конце `dist/ui/app.js`, полные тексты лицензий сборка кладёт рядом — `dist/ui/<пакет>-LICENSE.txt`); Electron в `Pult.app` — MIT, лицензии Chromium electron-builder кладёт в пакет сам.
+
+### Перегрузка модели Codex
+
+На `Selected model is at capacity` Пульт делает до трёх попыток всего: паузы перед второй и третьей — 2 и 5 секунд.
+В разговоре виден номер повтора; «Стоп» отменяет ожидание. Повтор возможен только до текста ответа и запуска
+инструментов. Лимиты подписки, отказы доступа и неизвестные ошибки автоматически не повторяются. После третьей
+неудачи карточка объясняет перегрузку и предлагает подождать или выбрать другую модель.
