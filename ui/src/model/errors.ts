@@ -31,6 +31,9 @@ export function explainFailure(raw: string | undefined, context: FailureContext)
   if (tool && code === 1 && /^\s*(?:command\s+)?(?:rg|grep|git\s+grep)(?:\s|$)/.test(context.command ?? '') && !/[|;&\n]/.test(context.command ?? '')) {
     return { title: 'Поиск ничего не нашёл', explanation: 'Для этой команды код 1 означает, что совпадений нет. Это не означает, что агент сломался.', action: 'Агент может продолжить работу или изменить запрос поиска.', expected: true }
   }
+  if (/(?:selected model is at capacity|model[^\n]{0,60}(?:at capacity|overloaded))/i.test(output)) {
+    return { title: 'Выбранная модель перегружена', explanation: 'Сервис временно не может принять запрос к этой модели.', action: 'Попробуй позже или выбери другую модель в настройках сессии.' }
+  }
   if (/(?:not logged in|login required|authentication (?:failed|required)|unauthorized|invalid[_ ]api[_ ]key|please log in|please run [^\n]*\blogin\b|не авторизован|нужна авторизация)/i.test(output)) {
     return { title: 'Нужно проверить вход в аккаунт', explanation: 'В выводе программы есть сообщение об отказе авторизации.', action: tool ? 'Проверь вход в сервис, к которому обращалась команда, затем повтори действие.' : 'Открой «Диагностику»: там указана команда входа для Claude или Codex. После входа повтори реплику.' }
   }

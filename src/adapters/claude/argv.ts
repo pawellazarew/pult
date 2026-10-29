@@ -169,10 +169,10 @@ export function buildClaudeArgv(opts: ClaudeArgvOptions): string[] {
  * (`result.user_message_uuids`), и шлёт `command_lifecycle` (`queued` → `started` →
  * `completed`). ИЗМЕРЕНО 08.10.2026, CLI 2.1.294; без `uuid` ни того ни другого нет.
  */
-export function userTurnLine(text: string, uuid?: string): string {
+export function userTurnLine(text: string, uuid?: string, runtimeContext?: string): string {
   return JSON.stringify({
     type: 'user',
-    message: { role: 'user', content: [{ type: 'text', text }] },
+    message: { role: 'user', content: [{ type: 'text', text }, ...(runtimeContext ? [{ type: 'text', text: runtimeContext }] : [])] },
     ...(uuid ? { uuid } : {}),
   }) + '\n'
 }

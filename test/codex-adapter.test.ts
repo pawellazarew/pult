@@ -63,6 +63,7 @@ function rig(opts: {
   bin?: string
   permTimeoutMs?: number
   controlTimeoutMs?: number
+  capacityRetryDelaysMs?: readonly [number, number]
 } = {}): Rig {
   const dir = mkdtempSync(join(tmpdir(), 'pt-cx-'))
   const paths = layout(join(dir, 'h'))
@@ -80,6 +81,7 @@ function rig(opts: {
     ...(opts.permTimeoutMs !== undefined ? { timeoutMs: opts.permTimeoutMs } : {}),
   })
   const adapter = createCodexAdapter({
+    capacityRetryDelaysMs: opts.capacityRetryDelaysMs ?? [1, 1],
     paths,
     config: { ...defaultConfig(), ...(opts.config ?? {}) },
     logger: createLogger(paths.logFile),
@@ -136,6 +138,46 @@ after(() => {
 })
 
 describe('адаптер codex: один процесс на всех', () => {
+  it('перегрузка модели: третья попытка успешна, один логический ход и без промежуточной ошибки', async () => {
+    const r = rig({ fake: { capacityFailures: 2 } })
+    try {
+      await r.adapter.startSession(spec(r))
+      const turn = await r.adapter.send('w', 'проверь код')
+      const result = await turn.done
+      assert.equal(result.ok, true, result.message)
+      assert.equal(result.turnId, turn.turnId)
+      assert.equal(r.methods().filter((m) => m === 'turn/start').length, 3)
+      assert.equal(r.drafts.filter((d) => d.kind === 'session.configured').length, 2)
+      assert.equal(r.drafts.filter((d) => d.kind === 'status.changed' && d.data?.['status'] === 'failed').length, 0)
+    } finally { await r.adapter.shutdown(); r.remove() }
+  })
+
+  it('перегрузка не запускает четвёртую попытку и не повторяет уже начатый инструмент', async () => {
+    for (const afterTool of [false, true]) {
+      const r = rig({ fake: { capacityFailures: 5, capacityAfterTool: afterTool } })
+      try {
+        await r.adapter.startSession(spec(r))
+        const result = await (await r.adapter.send('w', 'проверь код')).done
+        assert.equal(result.ok, false)
+        assert.match(result.message ?? '', /at capacity/)
+        assert.equal(r.methods().filter((m) => m === 'turn/start').length, afterTool ? 1 : 3)
+      } finally { await r.adapter.shutdown(); r.remove() }
+    }
+  })
+
+  it('стоп во время паузы отменяет следующие попытки', async () => {
+    const r = rig({ fake: { capacityFailures: 5 }, capacityRetryDelaysMs: [100, 100] })
+    try {
+      await r.adapter.startSession(spec(r))
+      const turn = await r.adapter.send('w', 'проверь код')
+      assert.ok(await waitFor(() => r.drafts.some((d) => d.kind === 'session.configured'), 2000))
+      await r.adapter.interrupt('w')
+      assert.equal((await turn.done).errorCode, 'interrupted')
+      await sleep(150)
+      assert.equal(r.methods().filter((m) => m === 'turn/start').length, 1)
+    } finally { await r.adapter.shutdown(); r.remove() }
+  })
+
   it('две сессии идут параллельно в ОДНОМ процессе; спавн ровно один', async () => {
     const r = rig()
     try {
@@ -228,8 +270,25 @@ describe('адаптер codex: один процесс на всех', () => {
       const turn = r.client().find((c) => c.msg.method === 'turn/start')
       const input = (turn?.msg.params as { input: Array<{ text: string }> }).input
       assert.equal(input[0]?.text, 'СЕКРЕТНАЯ РЕПЛИКА про деньги')
+      assert.match(input[1]?.text ?? '', /«Спрашивать»/)
       assert.equal((turn?.msg.params as { effort: string }).effort, 'low')
       assert.equal((turn?.msg.params as { model: string }).model, 'gpt-6-astra')
+    } finally { await r.adapter.shutdown(); r.remove() }
+  })
+
+  it('пояснение Codex берётся из снимка каждого хода, включая смену workspace → ask', async () => {
+    const r = rig()
+    try {
+      await r.adapter.startSession(spec(r))
+      for (const approval of ['workspace', 'ask'] as const) {
+        assert.equal((await (await r.adapter.send('w', `запрос ${approval}`, { approval, browser: null })).done).ok, true)
+      }
+      const turns = r.client().filter((c) => c.msg.method === 'turn/start')
+      const texts = turns.map((t) => (t.msg.params?.['input'] as Array<{ text: string }>)[1]!.text)
+      assert.match(texts[0]!, /approval_policy=never/)
+      assert.match(texts[0]!, /Правки в папке без вопросов/)
+      assert.match(texts[1]!, /approval_policy=on-request/)
+      assert.doesNotMatch(texts[1]!, /approval_policy=never/)
     } finally { await r.adapter.shutdown(); r.remove() }
   })
 })

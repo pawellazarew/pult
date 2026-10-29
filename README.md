@@ -259,6 +259,11 @@ update) for cards and memory-backed files. Each Claude session receives only its
 | `workspace` ("Правки в папке без вопросов") | `acceptEdits` | `workspace-write`, no questions |
 | `full` ("Полный доступ") | `bypassPermissions` | `danger-full-access`, no questions |
 
+Every turn includes an explanation of the selected mode, including after a live mode change. For Codex,
+`workspace` rejects requests to leave the sandbox; switch the session to `ask` and repeat the request when that access
+is needed. Nested CLIs inherit the sandbox, so `Not logged in` there alone does not establish that the terminal login
+has expired. Claude's `acceptEdits` follows its own permission rules for other tools.
+
 `full` means no sandbox and no questions: the agent can do anything your user can. It needs an explicit confirmation
 (`--yes` in the CLI).
 
@@ -618,3 +623,10 @@ ChatGPT Terms of Use apply to your login.
 Pult is [MIT](LICENSE)-licensed. The window bundles third-party parts under their own MIT-compatible licenses: the
 Geologica, Onest and JetBrains Mono fonts (SIL OFL 1.1, see [`ui/fonts/LICENSES.md`](ui/fonts/LICENSES.md)); React,
 react-dom and scheduler (MIT); Electron (MIT, with the Chromium licenses that electron-builder ships inside the app).
+
+### Codex model capacity
+
+For `Selected model is at capacity`, Pult makes at most three attempts in total, waiting 2 and 5 seconds before
+retries. The conversation shows the attempt number; Stop cancels the wait. Automatic replay is limited to turns
+with no response text or tool activity. Subscription limits, permission failures and unknown errors are not retried.
+After exhaustion, the error card explains model capacity and suggests waiting or choosing another model.

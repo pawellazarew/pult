@@ -113,6 +113,26 @@ const spec = (r: Rig, over: Record<string, unknown> = {}) => ({
 })
 
 describe('адаптер claude: контракт запуска', () => {
+  it('пояснение режима доходит по stdin и обновляется у тёплой сессии по снимку хода', async () => {
+    const r = rig({ scenario: 'simple' })
+    const inputFile = join(r.cwd, 'input.jsonl')
+    r.retune({ scenario: 'simple', stdinOut: inputFile })
+    try {
+      await r.adapter.startSession(spec(r, { mode: 'warm', broker: true }))
+      for (const approval of ['workspace', 'ask'] as const) {
+        const turn = await r.adapter.send('w', `запрос ${approval}`, { approval, browser: null })
+        assert.equal((await turn.done).ok, true)
+      }
+      const messages = readFileSync(inputFile, 'utf8').trim().split('\n').map((s) => JSON.parse(s))
+      assert.equal(messages.length, 2)
+      assert.equal(messages[0].message.content[0].text, 'запрос workspace')
+      assert.match(messages[0].message.content[1].text, /acceptEdits/)
+      assert.match(messages[1].message.content[1].text, /«Спрашивать»/)
+      assert.doesNotMatch(messages[1].message.content[1].text, /acceptEdits/)
+      assert.ok(r.runs().every((run) => !run.argv.some((arg) => arg.includes('pult_runtime_context'))))
+    } finally { await r.adapter.shutdown(); r.remove() }
+  })
+
   it('argv ребёнка — измеренный набор; реплики в argv НЕТ; без брокера --permission-prompts none', async () => {
     const r = rig({ scenario: 'simple' })
     try {

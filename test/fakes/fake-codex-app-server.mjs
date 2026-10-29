@@ -269,6 +269,17 @@ async function onRequest(id, method, params) {
       t.turn = { id: turnId, state, scenario }
       turnCounter++
       replyOk(id, { turn: { id: turnId, items: [], itemsView: 'notLoaded', status: 'inProgress', error: null, startedAt: 1, completedAt: null, durationMs: null } })
+      t.capacityCalls = (t.capacityCalls ?? 0) + 1
+      if (t.capacityCalls <= (cfg.capacityFailures ?? 0)) {
+        const error = { message: 'Selected model is at capacity. Please try a different model.', codexErrorInfo: 'other' }
+        out({ jsonrpc: '2.0', method: 'turn/started', params: { threadId: params.threadId, turn: { id: turnId, status: 'inProgress' } } })
+        if (cfg.capacityAfterTool) out({ jsonrpc: '2.0', method: 'item/started', params: { threadId: params.threadId, turnId,
+          item: { id: 'cmd-before-capacity', type: 'commandExecution', command: 'side-effect', status: 'inProgress' } } })
+        out({ jsonrpc: '2.0', method: 'error', params: { threadId: params.threadId, turnId, error, willRetry: false } })
+        out({ jsonrpc: '2.0', method: 'turn/completed', params: { threadId: params.threadId, turn: { id: turnId, status: 'failed', error } } })
+        t.turn = null
+        return
+      }
       void playTurn(scenario, params.threadId, turnId, state).then(() => {
         if (t.turn && t.turn.id === turnId) t.turn = null
       })
