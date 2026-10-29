@@ -61,6 +61,7 @@ function makeSvc(platform: Platform, extra: Record<string, string> = {}): Svc {
   const log = join(dir, 'fake.jsonl')
   const state = join(dir, 'fake-state.json')
   const env: Record<string, string> = {
+    PULT_LANG: 'ru',
     PATH: process.env['PATH'] ?? '/usr/bin:/bin',
     HOME: fakeHome,
     USER,
