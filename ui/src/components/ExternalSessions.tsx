@@ -1,3 +1,4 @@
+import { t } from '../lib/i18n.js'
 import { useEffect, useState } from 'react'
 import type { ReactElement } from 'react'
 import type { PultBridge } from '../../../shell/src/contract.js'
@@ -58,43 +59,43 @@ export function ExternalSessions({ bridge, taken, onImported, onClose }: {
   }
   const sessions = page.sessions.filter((s) => `${s.title} ${s.cwd}`.toLowerCase().includes(filter.toLowerCase()))
   return (
-    <Dialog title="Существующие чаты" size="wide" testId="external-sessions" onClose={onClose}
+    <Dialog title={t("Существующие чаты")} size="wide" testId="external-sessions" onClose={onClose}
       footer={<>
         {error && <span className="err" role="alert">{error}</span>}
         <span className="grow" />
-        <button type="button" className="btn" onClick={onClose}>Закрыть</button>
+        <button type="button" className="btn" onClick={onClose}>{t("Закрыть")}</button>
         <button type="button" className="btn btn-primary" disabled={!conversation || importing} onClick={() => void importSession()} data-testid="import-session">
-          <Icon name="plus" />{importing ? 'Копирую…' : 'Продолжить копию в Пульте'}
+          <Icon name="plus" />{importing ? t('Копирую…') : t('Продолжить копию в Пульте')}
         </button>
       </>}>
       <div className="external-toolbar">
-        <div className="seg prov" role="group" aria-label="Провайдер чатов">
+        <div className="seg prov" role="group" aria-label={t("Провайдер чатов")}>
           {(['claude', 'codex'] as const).map((p) => <button key={p} type="button" data-v={p} aria-pressed={provider === p}
             disabled={loading || importing} onClick={() => setProvider(p)}>{p}</button>)}
         </div>
-        <input type="search" aria-label="Поиск чатов" placeholder="Найти чат или папку" value={filter} onChange={(e) => setFilter(e.target.value)} />
-        <button type="button" className="btn btn-ghost" title="Обновить список" aria-label="Обновить список" disabled={loading || importing} onClick={() => setRevision((n) => n + 1)}><Icon name="refresh" /></button>
+        <input type="search" aria-label={t("Поиск чатов")} placeholder={t("Найти чат или папку")} value={filter} onChange={(e) => setFilter(e.target.value)} />
+        <button type="button" className="btn btn-ghost" title={t("Обновить список")} aria-label={t("Обновить список")} disabled={loading || importing} onClick={() => setRevision((n) => n + 1)}><Icon name="refresh" /></button>
       </div>
       <div className="external-grid">
-        <div className="external-list" aria-label="Существующие разговоры">
-          {loading && !page.sessions.length && <p className="mut">Загружаю чаты…</p>}
-          {!loading && !sessions.length && <p className="mut">Чатов не найдено</p>}
+        <div className="external-list" aria-label={t("Существующие разговоры")}>
+          {loading && !page.sessions.length && <p className="mut">{t("Загружаю чаты…")}</p>}
+          {!loading && !sessions.length && <p className="mut">{t("Чатов не найдено")}</p>}
           {sessions.map((s) => <button key={s.id} type="button" className="external-row" aria-pressed={selected?.id === s.id} disabled={importing}
             onClick={() => setSelected(s)} data-testid="external-session-row">
             <strong>{s.title}</strong><span className="mono mut" title={s.cwd}>{shortPath(s.cwd, 50)}</span>
             <time className="mut">{new Date(s.updatedAt).toLocaleString('ru-RU')}</time>
           </button>)}
-          {page.nextCursor && <button type="button" className="btn" disabled={loading || importing} onClick={() => void more()}>{loading ? 'Загружаю…' : 'Ещё чаты'}</button>}
+          {page.nextCursor && <button type="button" className="btn" disabled={loading || importing} onClick={() => void more()}>{loading ? t('Загружаю…') : t('Ещё чаты')}</button>}
         </div>
         <div className="external-transcript" data-testid="external-transcript">
-          {reading ? <p className="mut">Загружаю разговор…</p> : conversation ? <>
+          {reading ? <p className="mut">{t("Загружаю разговор…")}</p> : conversation ? <>
             <div className="external-meta"><strong>{conversation.session.title}</strong><span className="mono mut">{conversation.session.cwd}</span></div>
-            {conversation.truncated && <p className="mut">Показана последняя часть разговора. Копия сохранит полный контекст.</p>}
+            {conversation.truncated && <p className="mut">{t("Показана последняя часть разговора. Копия сохранит полный контекст.")}</p>}
             {conversation.messages.map((m, i) => <div key={i} className={`external-message external-${m.role}`}>
-              <span className="lbl">{m.role === 'user' ? 'ты' : provider}</span><Markdown text={m.text} />
+              <span className="lbl">{m.role === 'user' ? t('ты') : provider}</span><Markdown text={m.text} />
             </div>)}
-            {!conversation.messages.length && <p className="mut">В этом разговоре нет текстовых сообщений</p>}
-          </> : <p className="mut">Выбери разговор</p>}
+            {!conversation.messages.length && <p className="mut">{t("В этом разговоре нет текстовых сообщений")}</p>}
+          </> : <p className="mut">{t("Выбери разговор")}</p>}
         </div>
       </div>
     </Dialog>

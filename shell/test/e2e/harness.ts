@@ -114,6 +114,7 @@ export async function launch(opts: {
     HOME: process.env['HOME'] ?? home,
     TMPDIR: process.env['TMPDIR'] ?? '/tmp',
     LANG: 'ru_RU.UTF-8',
+    PULT_LANG: 'ru',
     PULT_TEST: '1',
     PULT_HOME: home,
     PULT_UI_ROOT: REPO,

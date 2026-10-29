@@ -1,3 +1,5 @@
+import { getLanguage } from '../../../src/i18n/core.js'
+import { t as tr } from '../lib/i18n.js'
 // 0.3.6: «Настройки» → «Страж сети». Чистые функции: имена стран, поиск, черновик правила, выходы провайдеров
 // под черновиком и предупреждение «с этими правилами сейчас ходы не пойдут». Проверка правила — та же, что у демона
 // (`parseGuardStrict`, src/core/guard.ts): окно лишь говорит заранее то, что `settings.set` и так скажет.
@@ -16,13 +18,15 @@ export const NET_CHECK_COOLDOWN_MS = 15_000
 const SHOWN: readonly string[] = ['claude', 'codex']
 const ORDER: readonly string[] = ['claude', 'codex', 'opencode']
 
-let names: { of(code: string): string | undefined } | null | undefined
+const namesByLanguage = new Map<string, { of(code: string): string | undefined } | null>()
 
 /** Имя страны по-русски (`Intl.DisplayNames`); нет ICU или имени — сам код. */
 export function countryName(code: string): string {
-  if (names === undefined) {
-    try { names = new Intl.DisplayNames(['ru'], { type: 'region' }) } catch { names = null }
+  const language = getLanguage()
+  if (!namesByLanguage.has(language)) {
+    try { namesByLanguage.set(language, new Intl.DisplayNames([language], { type: 'region' })) } catch { namesByLanguage.set(language, null) }
   }
+  const names = namesByLanguage.get(language)
   let n: string | undefined
   try { n = names?.of(code) } catch { n = undefined }
   return n && n !== code ? n : code
@@ -34,7 +38,7 @@ export function countryLabel(code: string): string {
   return n === code ? code : `${n} (${code})`
 }
 
-const norm = (s: string): string => s.toLocaleLowerCase('ru').replace(/ё/g, 'е').trim()
+const norm = (s: string): string => s.toLocaleLowerCase(getLanguage()).replace(/ё/g, 'е').trim()
 
 /**
  * Поиск страны по имени (начало слова и подстрока, «ё» = «е») или по коду. Выбранные не предлагаются. Порядок:
@@ -43,7 +47,7 @@ const norm = (s: string): string => s.toLocaleLowerCase('ru').replace(/ё/g, 'е
 export function searchCountries(query: string, selected: readonly string[], limit = 40): string[] {
   const q = norm(query)
   const pool = COUNTRY_CODES.filter((c) => !selected.includes(c))
-  const byName = (a: string, b: string): number => countryName(a).localeCompare(countryName(b), 'ru')
+  const byName = (a: string, b: string): number => countryName(a).localeCompare(countryName(b), getLanguage())
   if (!q) return [...pool].sort(byName).slice(0, limit)
   const up = q.toUpperCase()
   const ranked: Array<[number, string]> = []
@@ -81,12 +85,12 @@ export function removeCountry(rule: GuardRule, code: string): GuardRule {
 
 /** Ошибка черновика словами; `null` — можно сохранять. */
 export function guardDraftError(rule: GuardRule): string | null {
-  if (rule.mode === 'allow' && !rule.countries.length) return 'Страж сети: в режиме «Разрешать только» нужна хотя бы одна страна'
+  if (rule.mode === 'allow' && !rule.countries.length) return tr('Страж сети: в режиме «Разрешать только» нужна хотя бы одна страна')
   try {
     parseGuardStrict(rule)
     return null
   } catch (e) {
-    return e instanceof GuardError ? `Страж сети: ${e.message.replace(/^network\.guard[.:]?\s*/, '')}` : String(e)
+    return e instanceof GuardError ? tr`Страж сети: ${e.message.replace(/^network\.guard[.:]?\s*/, '')}` : String(e)
   }
 }
 
@@ -111,9 +115,9 @@ export interface ExitRow {
 }
 
 const PATH_REASON: Record<string, string> = {
-  proxy_dead: 'прокси не отвечает',
-  no_proxy: 'режим required без прокси',
-  unknown_location: 'страну определить не удалось',
+  proxy_dead: tr('прокси не отвечает'),
+  no_proxy: tr('режим required без прокси'),
+  unknown_location: tr('страну определить не удалось'),
 }
 
 /** Строки «claude: выход Германия (DE) — проходит» под черновиком правила; свежайшая проверка на провайдера. */
@@ -126,12 +130,12 @@ export function exitRows(rule: GuardRule, checks: readonly GuardCheck[]): ExitRo
   const providers = ORDER.filter((p) => SHOWN.includes(p) || latest.has(p))
   return providers.map((p): ExitRow => {
     const c = latest.get(p)
-    if (!c) return { provider: p, loc: null, ok: null, text: `${p}: выход не проверялся`, checkedAt: null }
+    if (!c) return { provider: p, loc: null, ok: null, text: tr`${p}: выход не проверялся`, checkedAt: null }
     if (!c.loc) {
-      return { provider: p, loc: null, ok: false, text: `${p}: выход неизвестен (${PATH_REASON[c.reason] ?? c.reason}) — не проходит`, checkedAt: c.checkedAt }
+      return { provider: p, loc: null, ok: false, text: tr`${p}: выход неизвестен (${PATH_REASON[c.reason] ?? c.reason}) — не проходит`, checkedAt: c.checkedAt }
     }
     const v = guardVerdict(rule, c.loc)
-    return { provider: p, loc: c.loc, ok: v.ok, text: `${p}: выход ${countryLabel(c.loc)} — ${v.ok ? 'проходит' : 'не проходит'}`, checkedAt: c.checkedAt }
+    return { provider: p, loc: c.loc, ok: v.ok, text: tr`${p}: выход ${countryLabel(c.loc)} — ${v.ok ? tr('проходит') : tr('не проходит')}`, checkedAt: c.checkedAt }
   })
 }
 
@@ -139,7 +143,7 @@ export function exitRows(rule: GuardRule, checks: readonly GuardCheck[]): ExitRo
 export function refusedWarning(rows: readonly ExitRow[]): string | null {
   const bad = rows.filter((r) => r.loc && r.ok === false)
   if (!bad.length) return null
-  return `С этими правилами сейчас ходы не пойдут: ${bad.map((r) => `${r.provider} (выход ${r.loc})`).join(', ')}`
+  return tr`С этими правилами сейчас ходы не пойдут: ${bad.map((r) => tr`${r.provider} (выход ${r.loc})`).join(', ')}`
 }
 
 /** «Проверить сеть» доступна: проверка не идёт и прошлая была раньше паузы. */

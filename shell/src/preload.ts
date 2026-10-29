@@ -1,3 +1,5 @@
+import { t as tr } from './i18n.js'
+import { getLanguage, setLanguage } from '../../src/i18n/core.js'
 // preload окна Пульта: мост `window.pult` (docs/12 §2). Работает в песочнице (sandbox: true),
 // поэтому этот файл собирается ОДНИМ бандлом без внешних require, кроме `electron`.
 // В окно уходят только функции ниже; ipcRenderer и сам Electron окну не видны.
@@ -7,6 +9,8 @@ import type { IpcRendererEvent } from 'electron'
 import { BRIDGE_VERSION, IPC } from './contract.js'
 import type { AllowedMethod, CallReply, ClipboardImageResult, ConnState, NavTarget, NotifyKind, NotifyTarget, PultBridge, PultEvent } from './contract.js'
 
+const locale = ipcRenderer.sendSync(IPC.languageGet) as { language?: unknown; override?: unknown } | null
+setLanguage(locale?.language === 'ru' ? 'ru' : 'en')
 const testMode = ipcRenderer.sendSync(IPC.testMode) === true
 
 let subSeq = 0
@@ -19,7 +23,7 @@ let navListener: ((t: NavTarget) => void) | null = null
 ipcRenderer.on(IPC.navigate, (_e: IpcRendererEvent, t: NavTarget) => {
   if (navListener) { navListener(t); return }
   // Два перехода до подписки интерфейса: побеждает последний, о вытесненном — строка в консоль окна.
-  if (navPending) console.warn('pult: переход вытеснен следующим до готовности окна', { link: navPending.link === true })
+  if (navPending) console.warn(tr('pult: переход вытеснен следующим до готовности окна'), { link: navPending.link === true })
   navPending = t
 })
 
@@ -32,6 +36,9 @@ function unwrap(r: CallReply): unknown {
 const bridge: PultBridge = {
   version: BRIDGE_VERSION,
   testMode,
+  language: getLanguage(),
+  languageOverride: locale?.override === 'auto' || locale?.override === 'ru' || locale?.override === 'en' ? locale.override : null,
+  reloadWindow(): void { ipcRenderer.send(IPC.reloadWindow) },
 
   async call(method: AllowedMethod, params?: Record<string, unknown>): Promise<unknown> {
     return unwrap((await ipcRenderer.invoke(IPC.call, method, params)) as CallReply)
@@ -110,7 +117,7 @@ const bridge: PultBridge = {
         }
         if (typeof o['error'] === 'string') return { error: o['error'] }
       }
-      return { error: 'картинка не сохранилась' }
+      return { error: tr('картинка не сохранилась') }
     },
   },
 
@@ -119,7 +126,7 @@ const bridge: PultBridge = {
       return await ipcRenderer.invoke(IPC.attachmentImport, session, item) as import('./contract.js').AttachmentResult
     },
     async files(session, files) {
-      if (!Array.isArray(files) || files.length > 20) return [{ error: 'Можно добавить не больше 20 файлов за один раз.' }]
+      if (!Array.isArray(files) || files.length > 20) return [{ error: tr('Можно добавить не больше 20 файлов за один раз.') }]
       const results: import('./contract.js').AttachmentResult[] = []
       for (const file of files) {
         try {
@@ -128,12 +135,12 @@ const bridge: PultBridge = {
           let item: import('./contract.js').AttachmentInput
           if (source) item = { name: file.name, path: source }
           else {
-            if (file.size > 25 * 1024 * 1024) { results.push({ error: `${file.name}: файл больше 25 МБ.` }); continue }
+            if (file.size > 25 * 1024 * 1024) { results.push({ error: tr`${file.name}: файл больше 25 МБ.` }); continue }
             item = { name: file.name, bytes: new Uint8Array(await file.arrayBuffer()) }
           }
           const reply = await ipcRenderer.invoke(IPC.attachmentFiles, session, item) as import('./contract.js').AttachmentResult
           results.push(reply)
-        } catch { results.push({ error: 'Не удалось прочитать перетащенный файл. Перетащи его ещё раз.' }) }
+        } catch { results.push({ error: tr('Не удалось прочитать перетащенный файл. Перетащи его ещё раз.') }) }
       }
       return results
     },

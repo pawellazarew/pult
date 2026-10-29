@@ -1,3 +1,4 @@
+import { t } from '../cli/i18n.js'
 // `pult daemon install [--dev] [--print]` и `pult daemon uninstall` — docs/08-PLAN-F1-M4.md §2.
 //
 // Порядок install (каждый шаг — ответ на измеренную или предсказуемую поломку):
@@ -86,9 +87,9 @@ export function tccWarning(platform: string, home: string, pathsToCheck: string[
     }
   }
   if (!hits.length) return null
-  return `внимание: ${hits.join(', ')} внутри ~/Desktop, ~/Documents или ~/Downloads. Служба запускает node, и macOS `
-    + 'покажет системный диалог «“node” would like to access files in your … folder» — нажми «Разрешить», '
-    + 'иначе демон под службой не прочитает свою точку входа. Без диалога — ставь из тарбола: pult update --from <tgz>'
+  return t`внимание: ${hits.join(', ')} внутри ~/Desktop, ~/Documents или ~/Downloads. Служба запускает node, и macOS `
+    + t('покажет системный диалог «“node” would like to access files in your … folder» — нажми «Разрешить», ')
+    + t('иначе демон под службой не прочитает свою точку входа. Без диалога — ставь из тарбола: pult update --from <tgz>')
 }
 
 function sleep(ms: number): Promise<void> {
@@ -118,7 +119,7 @@ export async function stopRunningDaemon(paths: PultPaths, waitMs = 10_000): Prom
   const deadline = Date.now() + waitMs
   while (existsSync(paths.lock) && Date.now() < deadline) await sleep(50)
   if (existsSync(paths.lock)) {
-    throw new ServiceError(`работающий демон (pid ${pid}) не остановился за ${waitMs} мс: lock ${paths.lock} на месте. Останови его: pult daemon stop`)
+    throw new ServiceError(t`работающий демон (pid ${pid}) не остановился за ${waitMs} мс: lock ${paths.lock} на месте. Останови его: pult daemon stop`)
   }
   return { stopped: true, pid }
 }
@@ -128,12 +129,12 @@ function tailFile(file: string, lines: number): string {
     const text = readFileSync(file, 'utf8')
     return text.split('\n').filter((l) => l.trim()).slice(-lines).join('\n')
   } catch {
-    return `(${file} не читается)`
+    return t`(${file} не читается)`
   }
 }
 
 function printSteps(io: Io, steps: Step[]): void {
-  for (const s of steps) io.err(`  ${s.ok ? 'ok ' : 'ОШИБКА'} ${s.cmd}${s.detail ? ` — ${s.detail}` : ''}`)
+  for (const s of steps) io.err(`  ${s.ok ? 'ok ' : t('ОШИБКА')} ${s.cmd}${s.detail ? ` — ${s.detail}` : ''}`)
 }
 
 export interface InstallOptions {
@@ -161,7 +162,7 @@ function renderFor(ctx: ServiceContext, nodeExec: string): string {
 }
 
 const fileLabel = (ctx: ServiceContext): string =>
-  ctx.file ?? `<каталог служб>/${ctx.platform === 'darwin' ? `${ctx.name}.plist` : ctx.name}`
+  ctx.file ?? t`<каталог служб>/${ctx.platform === 'darwin' ? `${ctx.name}.plist` : ctx.name}`
 
 export async function installService(paths: PultPaths, io: Io, opts: InstallOptions = {}): Promise<number> {
   const env = opts.env ?? process.env
@@ -176,19 +177,19 @@ export async function installService(paths: PultPaths, io: Io, opts: InstallOpti
     if (opts.json) {
       io.out(JSON.stringify({ platform: ctx.platform, name: ctx.name, file: ctx.file, content, commands }))
     } else {
-      io.out(`# ${fileLabel(ctx)}\n${content}\n# команды загрузки:\n${commands.map((c) => `#   ${c}`).join('\n')}`)
+      io.out(t`# ${fileLabel(ctx)}\n${content}\n# команды загрузки:\n${commands.map((c) => `#   ${c}`).join('\n')}`)
     }
     return 0
   }
 
   if (!ctx.file) {
-    throw new ServiceError('PULT_TEST=1 без PULT_SERVICE_DIR: файл службы некуда класть (настоящий каталог служб в тестах не трогается)')
+    throw new ServiceError(t('PULT_TEST=1 без PULT_SERVICE_DIR: файл службы некуда класть (настоящий каталог служб в тестах не трогается)'))
   }
   const existing = readServiceFile(ctx)
   if (existing.installed && !existing.ours) {
-    io.err(`pult daemon install: ${ctx.file} уже обслуживает другой PULT_HOME (${existing.fileHome ?? 'не указан'}).`)
-    io.err(`  снять ту службу: PULT_HOME=${existing.fileHome ?? '<её дом>'} pult daemon uninstall`)
-    io.err('  или поставить вторую рядом под другим именем: PULT_SERVICE_NAME=<имя> pult daemon install')
+    io.err(t`pult daemon install: ${ctx.file} уже обслуживает другой PULT_HOME (${existing.fileHome ?? t('не указан')}).`)
+    io.err(t`  снять ту службу: PULT_HOME=${existing.fileHome ?? t('<её дом>')} pult daemon uninstall`)
+    io.err(t('  или поставить вторую рядом под другим именем: PULT_SERVICE_NAME=<имя> pult daemon install'))
     return 1
   }
 
@@ -213,9 +214,9 @@ export async function installService(paths: PultPaths, io: Io, opts: InstallOpti
   }
   const active = activeVersion(paths)
   if (!active) {
-    io.err(`pult daemon install: активной версии нет (${paths.current} не существует или не указывает на пакет pult).`)
-    io.err('  поставь версию из тарбола:        pult update --from <pult-x.y.z.tgz>')
-    io.err('  или свяжи эту рабочую копию:      pult daemon install --dev')
+    io.err(t`pult daemon install: активной версии нет (${paths.current} не существует или не указывает на пакет pult).`)
+    io.err(t('  поставь версию из тарбола:        pult update --from <pult-x.y.z.tgz>'))
+    io.err(t('  или свяжи эту рабочую копию:      pult daemon install --dev'))
     return 1
   }
   // Для --dev проверяем путь рабочей копии КАК ЕГО ДАЛИ (и его realpath внутри tccWarning):
@@ -229,7 +230,7 @@ export async function installService(paths: PultPaths, io: Io, opts: InstallOpti
   try {
     launcherBody = readFileSync(launcherSrc)
   } catch {
-    io.err(`pult daemon install: в активной версии ${active.version} нет лаунчера ${launcherSrc} — версия старше В4? Поставь новую: pult update --from <tgz>`)
+    io.err(t`pult daemon install: в активной версии ${active.version} нет лаунчера ${launcherSrc} — версия старше В4? Поставь новую: pult update --from <tgz>`)
     return 1
   }
   atomicWrite(paths.launcher, launcherBody, 0o755)
@@ -245,7 +246,7 @@ export async function installService(paths: PultPaths, io: Io, opts: InstallOpti
 
   // --- 3. демон «по требованию» -----------------------------------------------------
   const stopped = await stopRunningDaemon(paths)
-  if (stopped.stopped) io.out(`работающий демон (pid ${stopped.pid}) остановлен — дальше его держит служба`)
+  if (stopped.stopped) io.out(t`работающий демон (pid ${stopped.pid}) остановлен — дальше его держит служба`)
 
   // --- 4. файл службы ---------------------------------------------------------------
   // 0644: launchd отвергает plist, доступный на запись группе или всем.
@@ -255,9 +256,9 @@ export async function installService(paths: PultPaths, io: Io, opts: InstallOpti
   const loaded = load(ctx, ctx.file)
   warnings.push(...loaded.warnings)
   if (!loaded.ok) {
-    io.err(`pult daemon install: менеджер служб не загрузил ${ctx.file}:`)
+    io.err(t`pult daemon install: менеджер служб не загрузил ${ctx.file}:`)
     printSteps(io, loaded.steps)
-    io.err(`  файл службы оставлен на месте; снять: pult daemon uninstall`)
+    io.err(t`  файл службы оставлен на месте; снять: pult daemon uninstall`)
     for (const w of warnings) io.err(w)
     return 1
   }
@@ -278,8 +279,8 @@ export async function installService(paths: PultPaths, io: Io, opts: InstallOpti
         if (st.version === active.version && st.mode === 'service') {
           client.close()
           for (const w of warnings) io.err(w)
-          io.out(`служба установлена: ${ctx.file}`)
-          io.out(`демон ${st.version} отвечает: pid ${st.pid}, режим ${st.mode ?? '?'}; журнал службы ${paths.serviceLog}`)
+          io.out(t`служба установлена: ${ctx.file}`)
+          io.out(t`демон ${st.version} отвечает: pid ${st.pid}, режим ${st.mode ?? '?'}; журнал службы ${paths.serviceLog}`)
           return 0
         }
       } catch { /* демон ещё поднимается */ }
@@ -288,21 +289,21 @@ export async function installService(paths: PultPaths, io: Io, opts: InstallOpti
     await sleep(200)
   }
 
-  io.err(`pult daemon install: демон не ответил hello_ok с версией ${active.version} за ${Math.round(waitMs / 1000)} с`
-    + (seen ? ` (отвечал демон версии ${seen.version}, pid ${seen.pid}, режим ${seen.mode})` : ''))
+  io.err(t`pult daemon install: демон не ответил hello_ok с версией ${active.version} за ${Math.round(waitMs / 1000)} с`
+    + (seen ? t` (отвечал демон версии ${seen.version}, pid ${seen.pid}, режим ${seen.mode})` : ''))
   if (seen && seen.mode !== 'service') {
-    io.err(`  lock держит демон «по требованию» (pid ${seen.pid}) — служебный экземпляр выходит с кодом 3. `
-      + 'Останови его (pult daemon stop) — служба подхватит сама, или повтори pult daemon install')
+    io.err(t`  lock держит демон «по требованию» (pid ${seen.pid}) — служебный экземпляр выходит с кодом 3. `
+      + t('Останови его (pult daemon stop) — служба подхватит сама, или повтори pult daemon install'))
   }
-  io.err(`--- хвост ${paths.serviceLog} ---`)
+  io.err(t`--- хвост ${paths.serviceLog} ---`)
   io.err(tailFile(paths.serviceLog, 20))
   try {
     const st = queryState(ctx)
-    io.err(`--- менеджер служб --- загружена: ${st.loaded}, pid ${st.pid ?? '—'}, последний выход: ${formatLastExit(st)}${st.error ? `, ${st.error}` : ''}`)
+    io.err(t`--- менеджер служб --- загружена: ${st.loaded}, pid ${st.pid ?? '—'}, последний выход: ${formatLastExit(st)}${st.error ? `, ${st.error}` : ''}`)
   } catch (e) {
-    io.err(`--- менеджер служб --- ${(e as Error).message}`)
+    io.err(t`--- менеджер служб --- ${(e as Error).message}`)
   }
-  io.err(`служба оставлена установленной; снять: pult daemon uninstall`)
+  io.err(t`служба оставлена установленной; снять: pult daemon uninstall`)
   for (const w of warnings) io.err(w)
   return 1
 }
@@ -311,26 +312,26 @@ export async function uninstallService(paths: PultPaths, io: Io, opts: { env?: N
   const env = opts.env ?? process.env
   const ctx = serviceContext(paths, env)
   if (!ctx.file) {
-    throw new ServiceError('PULT_TEST=1 без PULT_SERVICE_DIR: снимать нечего (настоящий каталог служб в тестах не трогается)')
+    throw new ServiceError(t('PULT_TEST=1 без PULT_SERVICE_DIR: снимать нечего (настоящий каталог служб в тестах не трогается)'))
   }
   const f = readServiceFile(ctx)
   if (f.installed && !f.ours) {
-    io.err(`pult daemon uninstall: ${ctx.file} обслуживает другой PULT_HOME (${f.fileHome ?? 'не указан'}) — не трогаю.`)
-    io.err(`  снять её: PULT_HOME=${f.fileHome ?? '<её дом>'} pult daemon uninstall`)
+    io.err(t`pult daemon uninstall: ${ctx.file} обслуживает другой PULT_HOME (${f.fileHome ?? t('не указан')}) — не трогаю.`)
+    io.err(t`  снять её: PULT_HOME=${f.fileHome ?? t('<её дом>')} pult daemon uninstall`)
     return 1
   }
   if (!f.installed) {
     // Файла нет, но служба могла остаться загруженной (файл удалили руками) — снимаем и её.
     const u = unload(ctx)
     if (!u.ok) printSteps(io, u.steps)
-    io.out('службы нет — снимать нечего')
+    io.out(t('службы нет — снимать нечего'))
     return 0
   }
   const u = unload(ctx)
   if (!u.ok) {
-    io.err(`pult daemon uninstall: менеджер служб не снял ${ctx.name}:`)
+    io.err(t`pult daemon uninstall: менеджер служб не снял ${ctx.name}:`)
     printSteps(io, u.steps)
-    io.err('  файл службы оставлен на месте, чтобы повторить: pult daemon uninstall')
+    io.err(t('  файл службы оставлен на месте, чтобы повторить: pult daemon uninstall'))
     return 1
   }
   try { unlinkSync(ctx.file) } catch (e) {
@@ -339,9 +340,9 @@ export async function uninstallService(paths: PultPaths, io: Io, opts: { env?: N
   if (ctx.platform === 'linux') {
     const r = daemonReload(ctx)
     if (!r.ok) io.err(`  ${r.cmd} — ${r.detail}`)
-    io.out(`linger не трогаю (на нём могут жить другие службы); выключить, если не нужен: sudo loginctl disable-linger ${ctx.user}`)
+    io.out(t`linger не трогаю (на нём могут жить другие службы); выключить, если не нужен: sudo loginctl disable-linger ${ctx.user}`)
   }
-  io.out(`служба снята: ${ctx.file} удалён; PULT_HOME (${paths.home}) не тронут`)
+  io.out(t`служба снята: ${ctx.file} удалён; PULT_HOME (${paths.home}) не тронут`)
   return 0
 }
 

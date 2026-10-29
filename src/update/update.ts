@@ -1,3 +1,4 @@
+import { t } from '../cli/i18n.js'
 // `pult update --from <tgz> [--reinstall] | --to <версия> | --list` — docs/08-PLAN-F1-M4.md §4.
 // Голый `pult update` и `--check` — канал обновлений (channel.ts, M8c): скачивает тарбол и идёт сюда же.
 //
@@ -98,15 +99,15 @@ export async function withUpdateLock(paths: PultPaths, io: Io, fn: () => Promise
   let said = false
   let got = acquireLock(paths.updateLock)
   while (!got.ok && !opts.stage && got.holderPid !== null && stageHolder(paths) === got.holderPid && Date.now() < deadline) {
-    if (!said) { io.err(`pult update: демон готовит обновление в фоне (pid ${got.holderPid}) — жду конца подготовки, потом продолжу`); said = true }
+    if (!said) { io.err(t`pult update: демон готовит обновление в фоне (pid ${got.holderPid}) — жду конца подготовки, потом продолжу`); said = true }
     await new Promise((r) => { setTimeout(r, 500) })
     got = acquireLock(paths.updateLock)
   }
   if (!got.ok) {
     const bg = got.holderPid !== null && stageHolder(paths) === got.holderPid
     io.err(bg
-      ? `pult update: фоновая подготовка обновления (pid ${got.holderPid}) идёт дольше ${Math.round((opts.stageWaitMs ?? STAGE_WAIT_MS) / 60_000)} мин — повтори позже; журнал: ${paths.updateLog}`
-      : `pult update: уже идёт другое обновление (pid ${got.holderPid ?? '?'}${got.holderCmd ? `, ${got.holderCmd}` : ''}) — дождись его конца`)
+      ? t`pult update: фоновая подготовка обновления (pid ${got.holderPid}) идёт дольше ${Math.round((opts.stageWaitMs ?? STAGE_WAIT_MS) / 60_000)} мин — повтори позже; журнал: ${paths.updateLog}`
+      : t`pult update: уже идёт другое обновление (pid ${got.holderPid ?? '?'}${got.holderCmd ? `, ${got.holderCmd}` : ''}) — дождись его конца`)
     return 1
   }
   if (opts.stage) { try { atomicWrite(stageMark(paths), `${process.pid}\n`, 0o600) } catch { /* без метки — просто отказ другим */ } }
@@ -136,7 +137,7 @@ const readService = (pkgRoot: string, name: string): Buffer | null => {
 function refreshLauncher(paths: PultPaths, pkgRoot: string, io: Io): void {
   const daemon = readService(pkgRoot, 'pultd-launch')
   if (daemon) atomicWrite(paths.launcher, daemon, 0o755)
-  else io.err(`внимание: в пакете ${pkgRoot} нет service/pultd-launch — лаунчер службы оставлен прежним`)
+  else io.err(t`внимание: в пакете ${pkgRoot} нет service/pultd-launch — лаунчер службы оставлен прежним`)
   const cli = readService(pkgRoot, 'pult')
   if (cli) atomicWrite(paths.cliLauncher, cli, 0o755)
 }
@@ -162,10 +163,10 @@ function prepareRuntime(paths: PultPaths, pkgRoot: string, io: Io, env: NodeJS.P
     const pin = readPin(pkgRoot)
     if (!pin) return // версия старше 0.2.18: пина нет, указатель не трогаем
     const r = ensureRuntime(paths, pin, { env, progress: (s) => io.err(s) })
-    if (r.fetched) io.out(`свой node ${r.version} поставлен: ${r.node}`)
+    if (r.fetched) io.out(t`свой node ${r.version} поставлен: ${r.node}`)
   } catch (e) {
-    io.err(`внимание: свой node не поставлен — ${(e as Error).message}`)
-    io.err('  демон пойдёт на системном node, и brew upgrade node снова уронит его доступ к ~/Desktop; повторить: pult runtime install')
+    io.err(t`внимание: свой node не поставлен — ${(e as Error).message}`)
+    io.err(t('  демон пойдёт на системном node, и brew upgrade node снова уронит его доступ к ~/Desktop; повторить: pult runtime install'))
   }
 }
 
@@ -179,7 +180,7 @@ function serviceNotes(svc: ServiceContext | null, mode: string | undefined, io: 
   if (!svc) return
   if (mode !== 'service') { for (const l of bypassNotice(svc)) io.err(l); return }
   const stale = readServiceFile(svc).stale
-  if (stale) io.err(`внимание: файл службы ${svc.file} записан прежней версией — ${stale}. Обнови: ${REINSTALL_CMD}`)
+  if (stale) io.err(t`внимание: файл службы ${svc.file} записан прежней версией — ${stale}. Обнови: ${REINSTALL_CMD}`)
 }
 
 /**
@@ -190,7 +191,7 @@ async function switchAndProbe(paths: PultPaths, io: Io, v: string, action: Updat
   const env = opts.env ?? process.env
   const target = packageIn(join(paths.versions, v))
   if (!target) {
-    io.err(`pult update: в ${join(paths.versions, v)} нет пакета pult`)
+    io.err(t`pult update: в ${join(paths.versions, v)} нет пакета pult`)
     return 1
   }
   const st = readState(paths)
@@ -217,7 +218,7 @@ async function switchAndProbe(paths: PultPaths, io: Io, v: string, action: Updat
   if (hadDaemon) {
     const t0 = Date.now()
     const s = await stopRunningDaemon(paths)
-    if (s.stopped) io.err(`остановлен прежний демон (pid ${s.pid ?? '?'}) — ${((Date.now() - t0) / 1000).toFixed(1)} с`)
+    if (s.stopped) io.err(t`остановлен прежний демон (pid ${s.pid ?? '?'}) — ${((Date.now() - t0) / 1000).toFixed(1)} с`)
   }
   const logFile = outputFile(ctx)
   const logFrom = fileSize(logFile)
@@ -236,7 +237,7 @@ async function switchAndProbe(paths: PultPaths, io: Io, v: string, action: Updat
   if (probe.ok) {
     // Демона до обновления не было и службы нет — состояние как было: проверенный демон гасим.
     if (!hadDaemon && !svc) {
-      try { await stopRunningDaemon(paths) } catch (e) { io.err(`внимание: ${(e as Error).message}`) }
+      try { await stopRunningDaemon(paths) } catch (e) { io.err(t`внимание: ${(e as Error).message}`) }
     }
     st.bad = st.bad.filter((b) => b !== v)
     const removed = pruneVersions(paths, st)
@@ -244,11 +245,11 @@ async function switchAndProbe(paths: PultPaths, io: Io, v: string, action: Updat
     const removedRuntimes = pruneRuntimes(paths, pinnedRuntimes(paths))
     delete st.runtimeBefore
     recordLast(paths, st, { at: now(), action, version: v, was, result: 'ok' }, opts)
-    io.out(previous !== null ? `pult обновлён: ${previous} → ${v}` : `pult ${v} установлен`)
-    io.out(`демон ${target.version} прошёл пробу: pid ${probe.status?.pid ?? '?'}, режим ${probe.status?.mode ?? '?'}`
-      + `${!hadDaemon && !svc ? ' — и остановлен: до обновления демона не было' : ''}`)
-    if (removed.length) io.out(`убраны старые версии: ${removed.join(', ')}`)
-    if (removedRuntimes.length) io.out(`убраны старые node: ${removedRuntimes.join(', ')}`)
+    io.out(previous !== null ? t`pult обновлён: ${previous} → ${v}` : t`pult ${v} установлен`)
+    io.out(t`демон ${target.version} прошёл пробу: pid ${probe.status?.pid ?? '?'}, режим ${probe.status?.mode ?? '?'}`
+      + `${!hadDaemon && !svc ? t(' — и остановлен: до обновления демона не было') : ''}`)
+    if (removed.length) io.out(t`убраны старые версии: ${removed.join(', ')}`)
+    if (removedRuntimes.length) io.out(t`убраны старые node: ${removedRuntimes.join(', ')}`)
     serviceNotes(svc, probe.status?.mode, io)
     return 0
   }
@@ -266,11 +267,11 @@ async function switchAndProbe(paths: PultPaths, io: Io, v: string, action: Updat
     try { await stopRunningDaemon(paths) } catch { /* ниже всё равно код 1 */ }
     st.current = null
     st.previous = previousBefore
-    const msg = `${v} не прошла пробу: ${probe.reason}`
+    const msg = t`${v} не прошла пробу: ${probe.reason}`
     recordLast(paths, st, { at: now(), action, version: v, was, result: 'failed', message: msg }, opts)
     io.err(`pult update: ${msg}`)
-    io.err(`откатываться некуда (первая установка): current снят, ${join(paths.versions, v)} оставлена для разбора`)
-    if (tail) io.err(`--- хвост ${logFile} (вывод ${v}) ---\n${tail}`)
+    io.err(t`откатываться некуда (первая установка): current снят, ${join(paths.versions, v)} оставлена для разбора`)
+    if (tail) io.err(t`--- хвост ${logFile} (вывод ${v}) ---\n${tail}`)
     return 1
   }
 
@@ -279,21 +280,21 @@ async function switchAndProbe(paths: PultPaths, io: Io, v: string, action: Updat
   if (prevPkg) refreshLauncher(paths, prevPkg.root, io)
   st.current = previous
   st.previous = previousBefore
-  const msg = `${v} не прошла пробу: ${probe.reason}; откат на ${previous}`
+  const msg = t`${v} не прошла пробу: ${probe.reason}; откат на ${previous}`
   recordLast(paths, st, { at: now(), action, version: v, was, result: 'rolled_back', message: msg }, opts)
   io.err(`pult update: ${msg}`)
-  io.err(`${v} помечена bad и оставлена на диске: ${join(paths.versions, v)}`)
-  if (tail) io.err(`--- хвост ${logFile} (вывод ${v}) ---\n${tail}`)
+  io.err(t`${v} помечена bad и оставлена на диске: ${join(paths.versions, v)}`)
+  if (tail) io.err(t`--- хвост ${logFile} (вывод ${v}) ---\n${tail}`)
 
   // Старый демон — снова, если он был или его держит служба. Одна попытка без проверки «жив
   // через 2 с»: эта версия уже работала, и её падение здесь — отдельная беда, о которой скажем.
   if (hadDaemon || svc) {
-    const back = await restartAndProbe(ctx, prevPkg?.version ?? previous, { ...opts.probe, attempts: 1, aliveAfterMs: 0, label: 'откат' })
+    const back = await restartAndProbe(ctx, prevPkg?.version ?? previous, { ...opts.probe, attempts: 1, aliveAfterMs: 0, label: t('откат') })
     if (back.ok) {
-      io.err(`демон ${prevPkg?.version ?? previous} снова отвечает: pid ${back.status?.pid ?? '?'}, режим ${back.status?.mode ?? '?'}`)
+      io.err(t`демон ${prevPkg?.version ?? previous} снова отвечает: pid ${back.status?.pid ?? '?'}, режим ${back.status?.mode ?? '?'}`)
       serviceNotes(svc, back.status?.mode, io)
     } else {
-      io.err(`ВНИМАНИЕ: демон ${previous} после отката не поднялся: ${back.reason}. Смотри pult doctor`)
+      io.err(t`ВНИМАНИЕ: демон ${previous} после отката не поднялся: ${back.reason}. Смотри pult doctor`)
     }
   } else {
     try { await stopRunningDaemon(paths) } catch { /* и так код 1 */ }
@@ -313,7 +314,7 @@ export async function refuseRunningTurns(paths: PultPaths, io: Io, opts: { force
   const st = await (opts.status ?? (() => daemonStatusOnce(paths)))()
   const turns = typeof st?.turns === 'number' ? st.turns : 0
   if (turns <= 0) return false
-  io.err(`pult update: идут ходы: ${turns} — обновление перезапустит демона и оборвёт их; дождись или --force`)
+  io.err(t`pult update: идут ходы: ${turns} — обновление перезапустит демона и оборвёт их; дождись или --force`)
   return true
 }
 
@@ -327,7 +328,7 @@ export async function installTarball(paths: PultPaths, io: Io, tgzArg: string, o
   const tgz = resolve(tgzArg)
   const action = opts.action ?? 'from'
   const cleaned = cleanLeftovers(paths)
-  if (cleaned.length) io.out(`убраны следы прерванных установок: ${cleaned.join(', ')}`)
+  if (cleaned.length) io.out(t`убраны следы прерванных установок: ${cleaned.join(', ')}`)
 
   let v: string
   try {
@@ -337,7 +338,7 @@ export async function installTarball(paths: PultPaths, io: Io, tgzArg: string, o
     throw e
   }
   if (opts.expectVersion !== undefined && v !== opts.expectVersion) {
-    io.err(`pult update: в тарболе версия ${v}, а подписанный манифест обещал ${opts.expectVersion} — релиз собран криво, не ставлю`)
+    io.err(t`pult update: в тарболе версия ${v}, а подписанный манифест обещал ${opts.expectVersion} — релиз собран криво, не ставлю`)
     return 1
   }
   const st = readState(paths)
@@ -348,27 +349,27 @@ export async function installTarball(paths: PultPaths, io: Io, tgzArg: string, o
   // пробы `pult update` отвечал кодом 0, хотя версия ни разу не ответила hello_ok.
   const interrupted = probeInterrupted(st, currentName(paths))
   if (valid && currentName(paths) === v && existsSync(paths.current) && interrupted) {
-    io.out(`${v} активна, но её проба была прервана — проверяю заново`)
+    io.out(t`${v} активна, но её проба была прервана — проверяю заново`)
     return switchAndProbe(paths, io, v, action, opts)
   }
   if (valid && currentName(paths) === v && existsSync(paths.current)) {
     if (opts.reinstall) {
       // Переставить папку, из которой прямо сейчас работает демон и служба, — значит подменить
       // код под живым процессом. Путь честный: переключиться на другую версию и повторить.
-      io.err(`pult update: ${v} активна — её не переставляю. Переключись на другую (pult update --to <версия>) и повтори --reinstall`)
+      io.err(t`pult update: ${v} активна — её не переставляю. Переключись на другую (pult update --to <версия>) и повтори --reinstall`)
       return 1
     }
     recordLast(paths, st, { at: now(), action, version: v, was: v, result: 'already' }, opts)
     ensureCliLauncher(paths, onDisk.root)
-    io.out(`уже стоит: ${v} активна`)
+    io.out(t`уже стоит: ${v} активна`)
     return 0
   }
   const trusted = opts.channelSha === undefined || channelMark(dir) === opts.channelSha
   if (valid && !opts.reinstall && trusted) {
-    io.out(`${v} уже лежит в ${dir} — переключаюсь без переустановки (--reinstall переставит)`)
+    io.out(t`${v} уже лежит в ${dir} — переключаюсь без переустановки (--reinstall переставит)`)
     return switchAndProbe(paths, io, v, action, opts)
   }
-  if (valid && !trusted) io.out(`${v} уже лежит в ${dir}, но не из этого подписанного тарбола — переставляю`)
+  if (valid && !trusted) io.out(t`${v} уже лежит в ${dir}, но не из этого подписанного тарбола — переставляю`)
 
   if (!installDir(paths, io, tgz, v, st, opts, true)) return 1
   return switchAndProbe(paths, io, v, action, opts)
@@ -393,7 +394,7 @@ function installDir(paths: PultPaths, io: Io, tgz: string, v: string, st: Update
     const msg = (e as Error).message
     if (record) recordLast(paths, st, { at: now(), action, version: v, was: currentName(paths), result: 'failed', message: msg }, opts)
     io.err(`pult update: ${msg}`)
-    io.err('ничего не переключено: current и работающий демон прежние')
+    io.err(t('ничего не переключено: current и работающий демон прежние'))
     return false
   }
   if (existsSync(dir) || scanVersions(paths).versions.some((x) => x.name === v)) {
@@ -409,7 +410,7 @@ function installDir(paths: PultPaths, io: Io, tgz: string, v: string, st: Update
   if (opts.channelSha !== undefined) atomicWrite(join(dir, CHANNEL_MARK), `${opts.channelSha}\n`, 0o600)
   st.installed[v] = now()
   writeState(paths, st)
-  io.out(`${v} поставлена в ${dir}`)
+  io.out(t`${v} поставлена в ${dir}`)
   return true
 }
 
@@ -462,37 +463,37 @@ export function stageTarball(paths: PultPaths, io: Io, tgzArg: string, opts: Upd
     throw e
   }
   if (opts.expectVersion !== undefined && v !== opts.expectVersion) {
-    io.err(`pult update: в тарболе версия ${v}, а подписанный манифест обещал ${opts.expectVersion} — релиз собран криво, не ставлю`)
+    io.err(t`pult update: в тарболе версия ${v}, а подписанный манифест обещал ${opts.expectVersion} — релиз собран криво, не ставлю`)
     return 1
   }
-  if (currentName(paths) === v) { io.out(`${v} активна — готовить нечего`); return 0 }
-  if (stagedReady(paths, v, opts.channelSha)) { io.out(`${v} уже подготовлена: ${join(paths.versions, v)}`); return 0 }
+  if (currentName(paths) === v) { io.out(t`${v} активна — готовить нечего`); return 0 }
+  if (stagedReady(paths, v, opts.channelSha)) { io.out(t`${v} уже подготовлена: ${join(paths.versions, v)}`); return 0 }
   return installDir(paths, io, tgz, v, readState(paths), opts, false) ? 0 : 1
 }
 
 /** 0.3.16: переключиться на подготовленную заранее версию — тот же путь, что у установки (проба, автооткат). */
 export async function switchStaged(paths: PultPaths, io: Io, v: string, opts: UpdateOptions = {}): Promise<number> {
-  io.out(`${v} подготовлена заранее — переключаюсь`)
+  io.out(t`${v} подготовлена заранее — переключаюсь`)
   return switchAndProbe(paths, io, v, opts.action ?? 'channel', opts)
 }
 
 export async function updateTo(paths: PultPaths, io: Io, v: string, opts: UpdateOptions = {}): Promise<number> {
   if (!isVersionName(v)) {
-    io.err(`pult update --to: «${v}» — не имя версии (ожидается вида 1.2.3 или 1.2.3-dev)`)
+    io.err(t`pult update --to: «${v}» — не имя версии (ожидается вида 1.2.3 или 1.2.3-dev)`)
     return 1
   }
   return withUpdateLock(paths, io, async () => {
     const pkg = packageIn(join(paths.versions, v))
     if (!pkg) {
-      io.err(`pult update --to: версии ${v} на диске нет — что есть: pult update --list`)
+      io.err(t`pult update --to: версии ${v} на диске нет — что есть: pult update --list`)
       return 1
     }
     if (currentName(paths) === v && existsSync(paths.current)) {
       if (probeInterrupted(readState(paths), v)) {
-        io.out(`${v} активна, но её проба была прервана — проверяю заново`)
+        io.out(t`${v} активна, но её проба была прервана — проверяю заново`)
         return switchAndProbe(paths, io, v, 'to', opts)
       }
-      io.out(`уже активна: ${v}`)
+      io.out(t`уже активна: ${v}`)
       return 0
     }
     return switchAndProbe(paths, io, v, 'to', opts)
@@ -533,22 +534,22 @@ export function updateList(paths: PultPaths, io: Io, opts: UpdateOptions = {}): 
   const l = listVersions(paths)
   if (opts.json) { io.out(JSON.stringify(l)); return 0 }
   if (!l.versions.length) {
-    io.out(`версий нет (${paths.versions}); поставить: pult update --from <pult-x.y.z.tgz>`)
+    io.out(t`версий нет (${paths.versions}); поставить: pult update --from <pult-x.y.z.tgz>`)
   } else {
-    io.out(`версии в ${paths.versions}:`)
+    io.out(t`версии в ${paths.versions}:`)
     for (const v of l.versions) {
       const marks = [
         v.current ? 'current' : '',
         v.previous ? 'previous' : '',
         v.bad ? 'bad' : '',
         v.dev ? `dev → ${v.target ?? '?'}` : '',
-        v.version === null ? 'пакета нет' : '',
+        v.version === null ? t('пакета нет') : '',
       ].filter(Boolean)
       io.out(`  ${v.current ? '*' : ' '} ${v.name.padEnd(16)} ${marks.join(' · ')}`)
     }
   }
-  if (l.current !== null && !l.versions.some((v) => v.current)) io.out(`current → ${l.current}, но такой версии на диске нет — pult update --to <версия>`)
-  if (l.leftovers.length) io.out(`следы прерванных установок (уберёт следующий pult update): ${l.leftovers.join(', ')}`)
-  if (l.last) io.out(`последняя попытка: ${l.last.at} ${l.last.action} ${l.last.version} — ${l.last.result}${l.last.message ? ` (${l.last.message})` : ''}`)
+  if (l.current !== null && !l.versions.some((v) => v.current)) io.out(t`current → ${l.current}, но такой версии на диске нет — pult update --to <версия>`)
+  if (l.leftovers.length) io.out(t`следы прерванных установок (уберёт следующий pult update): ${l.leftovers.join(', ')}`)
+  if (l.last) io.out(t`последняя попытка: ${l.last.at} ${l.last.action} ${l.last.version} — ${l.last.result}${l.last.message ? ` (${l.last.message})` : ''}`)
   return 0
 }

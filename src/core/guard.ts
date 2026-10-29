@@ -1,3 +1,4 @@
+import { tr } from '../i18n/shared.js'
 // Правило стража страны выхода (`network.guard` в config.json, 0.3.6). Чистые функции без зависимостей:
 // их берут демон (config.ts, env/net.ts, settings.set), CLI и окно (ui/src/model/netGuard.ts).
 //
@@ -80,8 +81,8 @@ export function sameGuard(a: GuardRule, b: GuardRule): boolean {
 
 /** Правило одной строкой: `запрещать: RU, BY` / `разрешать только: DE, FI`. */
 export function guardLine(rule: GuardRule): string {
-  const list = rule.countries.length ? rule.countries.join(', ') : '(пусто)'
-  return rule.mode === 'allow' ? `разрешать только: ${list}` : `запрещать: ${list}`
+  const list = rule.countries.length ? rule.countries.join(', ') : tr('(пусто)')
+  return rule.mode === 'allow' ? tr`разрешать только: ${list}` : tr`запрещать: ${list}`
 }
 
 export class GuardError extends Error {
@@ -102,21 +103,21 @@ export function closedGuard(): GuardRule {
  * `settings.set` читает `expect` — правило, которое окно видело (оно может быть и закрытым).
  */
 export function parseGuardShape(x: unknown, what = 'network.guard'): GuardRule {
-  if (x === null || typeof x !== 'object' || Array.isArray(x)) throw new GuardError(`${what} — объект {mode, countries}`)
+  if (x === null || typeof x !== 'object' || Array.isArray(x)) throw new GuardError(tr`${what} — объект {mode, countries}`)
   const o = x as Record<string, unknown>
   const extra = Object.keys(o).filter((k) => k !== 'mode' && k !== 'countries')
-  if (extra.length) throw new GuardError(`${what}: лишние поля ${extra.join(', ')} — только mode и countries`)
+  if (extra.length) throw new GuardError(tr`${what}: лишние поля ${extra.join(', ')} — только mode и countries`)
   if (!Object.prototype.hasOwnProperty.call(o, 'mode') || !Object.prototype.hasOwnProperty.call(o, 'countries')) {
-    throw new GuardError(`${what} — нужны оба поля: mode и countries`)
+    throw new GuardError(tr`${what} — нужны оба поля: mode и countries`)
   }
   const mode = o['mode']
   if (mode !== 'deny' && mode !== 'allow') throw new GuardError(`${what}.mode — deny | allow`)
   const list = o['countries']
-  if (!Array.isArray(list)) throw new GuardError(`${what}.countries — список кодов стран ISO 3166-1 (DE, FI, …)`)
-  if (list.length > COUNTRY_CODES.length) throw new GuardError(`${what}.countries — слишком длинный список`)
+  if (!Array.isArray(list)) throw new GuardError(tr`${what}.countries — список кодов стран ISO 3166-1 (DE, FI, …)`)
+  if (list.length > COUNTRY_CODES.length) throw new GuardError(tr`${what}.countries — слишком длинный список`)
   const countries: string[] = []
   for (const c of list) {
-    if (!isCountryCode(c)) throw new GuardError(`${what}.countries: ${JSON.stringify(c)} — не код страны ISO 3166-1 alpha-2 (заглавными, например DE)`)
+    if (!isCountryCode(c)) throw new GuardError(tr`${what}.countries: ${JSON.stringify(c)} — не код страны ISO 3166-1 alpha-2 (заглавными, например DE)`)
     if (!countries.includes(c)) countries.push(c)
   }
   return { mode, countries }
@@ -128,7 +129,7 @@ export function parseGuardShape(x: unknown, what = 'network.guard'): GuardRule {
  */
 export function parseGuardStrict(x: unknown): GuardRule {
   const rule = parseGuardShape(x)
-  if (rule.mode === 'allow' && !rule.countries.length) throw new GuardError('network.guard: в режиме allow нужна хотя бы одна страна — иначе ходы не пойдут никогда')
+  if (rule.mode === 'allow' && !rule.countries.length) throw new GuardError(tr('network.guard: в режиме allow нужна хотя бы одна страна — иначе ходы не пойдут никогда'))
   return rule
 }
 
@@ -146,22 +147,22 @@ export function guardOff(rule: GuardRule): boolean {
  */
 export function parseGuardLenient(x: unknown): { rule: GuardRule; warnings: string[] } {
   const closed = (why: string): { rule: GuardRule; warnings: string[] } =>
-    ({ rule: closedGuard(), warnings: [`config.json: network.guard ${why} — страж закрыт, все ходы запрещены, пока правило не поправят («Настройки» → «Страж сети» или pult net guard)`] })
-  if (x === null || typeof x !== 'object' || Array.isArray(x)) return closed('не объект {mode, countries}')
+    ({ rule: closedGuard(), warnings: [tr`config.json: network.guard ${why} — страж закрыт, все ходы запрещены, пока правило не поправят («Настройки» → «Страж сети» или pult net guard)`] })
+  if (x === null || typeof x !== 'object' || Array.isArray(x)) return closed(tr('не объект {mode, countries}'))
   const o = x as Record<string, unknown>
   const rawMode = typeof o['mode'] === 'string' ? (o['mode'] as string).trim().toLowerCase() : o['mode']
-  if (rawMode !== 'deny' && rawMode !== 'allow') return closed(`: mode = ${JSON.stringify(o['mode'])} — не deny|allow`)
+  if (rawMode !== 'deny' && rawMode !== 'allow') return closed(tr`: mode = ${JSON.stringify(o['mode'])} — не deny|allow`)
   const raw = o['countries']
-  if (!Array.isArray(raw)) return closed(': countries не список')
+  if (!Array.isArray(raw)) return closed(tr(': countries не список'))
   const warnings: string[] = []
   const countries: string[] = []
   for (const c of raw) {
     const code = typeof c === 'string' ? c.trim().toUpperCase() : ''
-    if (!isCountryCode(code)) { warnings.push(`config.json: network.guard.countries: ${JSON.stringify(c)} — не код страны ISO 3166-1, пропущено`); continue }
+    if (!isCountryCode(code)) { warnings.push(tr`config.json: network.guard.countries: ${JSON.stringify(c)} — не код страны ISO 3166-1, пропущено`); continue }
     if (!countries.includes(code)) countries.push(code)
   }
   if (rawMode === 'allow' && !countries.length) {
-    warnings.push('config.json: network.guard — режим allow без стран: все ходы запрещены, пока не добавишь страну («Настройки» → «Страж сети»)')
+    warnings.push(tr('config.json: network.guard — режим allow без стран: все ходы запрещены, пока не добавишь страну («Настройки» → «Страж сети»)'))
   }
   return { rule: { mode: rawMode, countries }, warnings }
 }

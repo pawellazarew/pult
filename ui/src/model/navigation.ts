@@ -1,3 +1,4 @@
+import { t as tr } from '../lib/i18n.js'
 // Поиск, фильтры состояния и стабильное дерево проектов; недавние служат ярлыками к тем же чатам.
 import type { AgentView } from './agents.js'
 import { agentLabel, agentRank, byLastTurn, sortAgents, statusView } from './agents.js'
@@ -15,25 +16,25 @@ export function chatSections(groups: readonly ProjectGroup[], query = ''): ChatS
   const byName = new Map(rows.map((r) => [r.agent.name, r]))
   const ordered = sortAgents(rows.map((r) => r.agent)).map((a) => byName.get(a.name)!)
   return [
-    { key: 'waiting', label: 'Ждут ответа', rows: ordered.filter((r) => agentRank(r.agent) === 0) },
-    { key: 'working', label: 'Работают', rows: ordered.filter((r) => agentRank(r.agent) === 1) },
-    { key: 'recent', label: 'Недавние', rows: ordered.filter((r) => agentRank(r.agent) === 2) },
+    { key: 'waiting', label: tr('Ждут ответа'), rows: ordered.filter((r) => agentRank(r.agent) === 0) },
+    { key: 'working', label: tr('Работают'), rows: ordered.filter((r) => agentRank(r.agent) === 1) },
+    { key: 'recent', label: tr('Недавние'), rows: ordered.filter((r) => agentRank(r.agent) === 2) },
   ]
 }
 
 /** Слова для человека. Техническое «cold» означает лишь отсутствие запущенного процесса. */
 export function chatStatus(a: AgentView): { label: string; tone: string; detail: string } {
-  if (a.pending > 0 || statusView(a.status).needsYou) return { label: 'Ждёт ответа', tone: 'wait', detail: a.status === 'blocked_question' ? 'Нужен твой ответ' : 'Нужно разрешение' }
+  if (a.pending > 0 || statusView(a.status).needsYou) return { label: tr('Ждёт ответа'), tone: 'wait', detail: a.status === 'blocked_question' ? tr('Нужен твой ответ') : tr('Нужно разрешение') }
   if (a.status === 'working') {
     const phase = treePhaseLabel(a.phase)
-    return { label: 'Работает', tone: 'run', detail: phase && phase !== 'идёт' ? phase : 'Выполняет задачу' }
+    return { label: tr('Работает'), tone: 'run', detail: phase && phase !== tr('идёт') ? phase : tr('Выполняет задачу') }
   }
   // Ответ готов, а субагенты или команды ещё доделывают работу: поле ввода открыто, но строка — среди «Работают».
   // Ошибка и лимит важнее: их подпись остаётся, фон виден значком «фон · N».
-  if (a.background?.count && a.status !== 'failed' && a.status !== 'limited') return { label: 'В фоне', tone: 'run', detail: `Фоновые задачи: ${a.background.count}` }
+  if (a.background?.count && a.status !== 'failed' && a.status !== 'limited') return { label: tr('В фоне'), tone: 'run', detail: tr`Фоновые задачи: ${a.background.count}` }
   const sv = statusView(a.status)
-  if (a.status === 'cold') return { label: 'История', tone: 'queued', detail: 'Можно продолжить' }
-  if (a.status === 'idle' || a.status === 'done') return { label: 'Готово', tone: 'ok', detail: 'Можно продолжить' }
+  if (a.status === 'cold') return { label: tr('История'), tone: 'queued', detail: tr('Можно продолжить') }
+  if (a.status === 'idle' || a.status === 'done') return { label: tr('Готово'), tone: 'ok', detail: tr('Можно продолжить') }
   return { label: sv.label, tone: sv.tone, detail: sv.label }
 }
 

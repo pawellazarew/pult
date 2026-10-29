@@ -46,7 +46,7 @@ describe('окно: мост, подписка, переподключение',
     assert.equal(probe.process, 'undefined')
     assert.equal(probe.version, 1)
     assert.deepEqual(probe.bridgeKeys, [
-      'attachments', 'call', 'clipboardFilePaths', 'clipboardImage', 'copyText', 'listFiles', 'notify', 'onConnection', 'onNavigate', 'openExternal', 'openFile', 'openImage', 'pathsForFiles', 'pickFolder', 'previewFile', 'readImage', 'revealPath', 'saveImage',
+      'attachments', 'call', 'clipboardFilePaths', 'clipboardImage', 'copyText', 'language', 'languageOverride', 'listFiles', 'notify', 'onConnection', 'onNavigate', 'openExternal', 'openFile', 'openImage', 'pathsForFiles', 'pickFolder', 'previewFile', 'readImage', 'reloadWindow', 'revealPath', 'saveImage',
       'startDaemon', 'stopDaemon', 'subscribe', 'testMode', 'version',
     ])
   })

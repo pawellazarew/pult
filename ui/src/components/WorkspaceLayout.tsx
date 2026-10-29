@@ -1,3 +1,4 @@
+import { t } from '../lib/i18n.js'
 import { useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, ReactElement, ReactNode, RefObject } from 'react'
 import { clampSize, savedSize, workspaceSizes } from '../model/panelSizes.js'
@@ -38,9 +39,9 @@ export function WorkspaceLayout({ children, ...flags }: WorkspaceFlags & { child
   return <main ref={root} className={`grid resizable-workspace${flags.sidebarHidden ? ' sidebar-hidden' : ''}${flags.inboxOpen ? ' with-inbox' : ''}${flags.filesOpen ? ` with-files${flags.filesExpanded ? ' files-focused' : ''}` : ''}`}
     style={{ gridTemplateColumns: columns }}>
     {children}
-    {!flags.sidebarHidden && <ResizeHandle label="Ширина списка проектов" value={s.sidebar} min={s.sidebarMin} max={s.sidebarMax}
+    {!flags.sidebarHidden && <ResizeHandle label={t("Ширина списка проектов")} value={s.sidebar} min={s.sidebarMin} max={s.sidebarMax}
       onChange={setSidebar} onReset={() => setSidebar(null)} testId="sidebar-resize" className="workspace-boundary" style={{ left: s.sidebar }} />}
-    {s.rightShown && <ResizeHandle label={flags.filesOpen ? 'Ширина просмотра файлов' : 'Ширина списка ответов'} direction={-1}
+    {s.rightShown && <ResizeHandle label={flags.filesOpen ? t('Ширина просмотра файлов') : t('Ширина списка ответов')} direction={-1}
       value={s.right} min={s.rightMin} max={s.rightMax} onChange={flags.filesOpen ? setFiles : setInbox}
       onReset={() => (flags.filesOpen ? setFiles : setInbox)(null)} testId="right-panel-resize" className="workspace-boundary" style={{ right: s.right, transform: 'translateX(50%)' }} />}
   </main>
@@ -89,7 +90,7 @@ export function ResizableComposer({ children }: { children: ReactNode }): ReactE
   const actual = clampSize(size ?? measuredInput, 78, max)
   return <div ref={root} className="composer resizable-composer" data-input-resized={automatic ? undefined : '1'}
     style={{ '--composer-input-max': `${max}px`, ...(!automatic ? { '--composer-input-size': `${actual}px` } : {}) } as CSSProperties}>
-    <ResizeHandle label="Высота поля ввода" axis="y" direction={-1} value={actual} min={78} max={max} onChange={setSize}
+    <ResizeHandle label={t("Высота поля ввода")} axis="y" direction={-1} value={actual} min={78} max={max} onChange={setSize}
       onReset={() => setSize(null)} testId="composer-resize" className="composer-boundary" />
     {children}
   </div>

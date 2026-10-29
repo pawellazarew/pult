@@ -1,3 +1,4 @@
+import { t as tr } from './i18n.js'
 // `pult ui` — открыть окно Пульта (docs/12 §4, О3).
 //
 // Порядок: поставленное приложение `Pult.app` (/Applications, затем ~/Applications) → оболочка
@@ -60,10 +61,10 @@ function devReady(root: string, fs: UiProbe): boolean {
     && fs.isFile(path.join(root, 'shell', 'dist', 'main.js'))
 }
 
-const HOW_TO = [
-  'окно не найдено. Как получить:',
-  '  поставить Pult.app: cd shell && npm ci && npm run dist:mac → shell/out/mac-arm64/Pult.app в /Applications',
-  '  или из рабочей копии: npm run build && (cd shell && npm ci && npm run build), затем PULT_UI_ROOT=<копия> pult ui --dev',
+const howTo = (): string => [
+  tr('окно не найдено. Как получить:'),
+  tr('  поставить Pult.app: cd shell && npm ci && npm run dist:mac → shell/out/mac-arm64/Pult.app в /Applications'),
+  tr('  или из рабочей копии: npm run build && (cd shell && npm ci && npm run build), затем PULT_UI_ROOT=<копия> pult ui --dev'),
 ].join('\n')
 
 export function planUi(input: PlanInput): UiPlan {
@@ -72,6 +73,7 @@ export function planUi(input: PlanInput): UiPlan {
   const passEnv: Record<string, string> = { PULT_NODE: env['PULT_NODE']?.trim() || input.nodePath }
   if (env['PULT_HOME']?.trim()) passEnv['PULT_HOME'] = path.resolve(env['PULT_HOME'].trim())
   if (env['PULT_TEST'] === '1') passEnv['PULT_TEST'] = '1'
+  if (env['PULT_LANG']) passEnv['PULT_LANG'] = env['PULT_LANG']
 
   if (!input.dev && input.platform === 'darwin') {
     for (const dir of appDirs(env)) {
@@ -100,15 +102,15 @@ export function planUi(input: PlanInput): UiPlan {
   }
 
   const why = explicit
-    ? `PULT_UI_ROOT=${path.resolve(explicit)}: нет собранного окна (dist/ui, dist/cli, shell/dist, shell/node_modules/electron)`
-    : input.dev ? 'рабочая копия без собранного окна (shell/dist, shell/node_modules/electron)' : ''
-  return { kind: 'none', hint: why ? `${why}\n${HOW_TO}` : HOW_TO }
+    ? tr`PULT_UI_ROOT=${path.resolve(explicit)}: нет собранного окна (dist/ui, dist/cli, shell/dist, shell/node_modules/electron)`
+    : input.dev ? tr('рабочая копия без собранного окна (shell/dist, shell/node_modules/electron)') : ''
+  return { kind: 'none', hint: why ? `${why}\n${howTo()}` : howTo() }
 }
 
 export function describePlan(plan: UiPlan): string {
   switch (plan.kind) {
-    case 'app': return `окно: ${plan.app}\n  ${[plan.command, ...plan.args].join(' ')}`
-    case 'dev': return `окно из рабочей копии: ${plan.root}\n  ${[plan.command, ...plan.args].join(' ')}`
+    case 'app': return tr`окно: ${plan.app}\n  ${[plan.command, ...plan.args].join(' ')}`
+    case 'dev': return tr`окно из рабочей копии: ${plan.root}\n  ${[plan.command, ...plan.args].join(' ')}`
     case 'none': return plan.hint
   }
 }
@@ -129,7 +131,7 @@ export function launchUi(plan: Extract<UiPlan, { kind: 'app' | 'dev' }>, baseEnv
       child.once('error', reject)
       child.once('close', (code) => {
         if (code === 0) resolve()
-        else reject(new Error(`open ${plan.app}: код ${String(code)}${stderr.trim() ? ` — ${stderr.trim()}` : ''}`))
+        else reject(new Error(tr`open ${plan.app}: код ${String(code)}${stderr.trim() ? ` — ${stderr.trim()}` : ''}`))
       })
       return
     }

@@ -1,3 +1,4 @@
+import { t as tr } from '../lib/i18n.js'
 import type { ConvItem, ToolItem } from './conversation.js'
 
 export type ActivityEntry = { type: 'item'; item: ConvItem } | { type: 'tools'; key: string; items: ToolItem[] }
@@ -20,11 +21,11 @@ export function groupActivity(items: readonly ConvItem[]): ActivityEntry[] {
 }
 
 export function friendlyTool(name: string): string {
-  if (/commandExecution|^Bash$|exec_command|write_stdin/.test(name)) return 'Команда'
-  if (/fileChange|^Edit$|^Write$|apply_patch/.test(name)) return 'Правка файлов'
-  if (/^Read$|read_file/.test(name)) return 'Чтение файла'
-  if (/webSearch|web.*run/.test(name)) return 'Поиск в интернете'
-  if (name === 'imageView') return 'Просмотр изображения'
-  if (/imageGeneration|imagegen/.test(name)) return 'Создание изображения'
+  if (/commandExecution|^Bash$|exec_command|write_stdin/.test(name)) return tr('Команда')
+  if (/fileChange|^Edit$|^Write$|apply_patch/.test(name)) return tr('Правка файлов')
+  if (/^Read$|read_file/.test(name)) return tr('Чтение файла')
+  if (/webSearch|web.*run/.test(name)) return tr('Поиск в интернете')
+  if (name === 'imageView') return tr('Просмотр изображения')
+  if (/imageGeneration|imagegen/.test(name)) return tr('Создание изображения')
   return name
 }

@@ -1,3 +1,4 @@
+import { t } from '../cli/i18n.js'
 // Браузер для агента (О3, docs/14): Playwright MCP (`@playwright/mcp`) в MCP-конфиге сессии.
 //
 // УСТАНОВКА. Пакет ставится по требованию в `PULT_HOME/mcp/playwright-mcp-<версия>/` npm-ом своего node
@@ -267,6 +268,11 @@ export function claudeDefaultMode(files: readonly string[]): string | null {
   return mode
 }
 
+export function bypassRefusal(): string {
+  return t('в настройках Claude стоит permissions.defaultMode = "bypassPermissions": вызовы браузера могли бы идти без вопроса — ')
+  + t('браузер для агента не включается. Поменяй режим (например, на "auto") в ~/.claude/settings.json')
+}
+/** Legacy Russian source retained for callers that imported the old constant. */
 export const BYPASS_REFUSAL = 'в настройках Claude стоит permissions.defaultMode = "bypassPermissions": вызовы браузера могли бы идти без вопроса — '
   + 'браузер для агента не включается. Поменяй режим (например, на "auto") в ~/.claude/settings.json'
 
@@ -280,11 +286,11 @@ export const BYPASS_REFUSAL = 'в настройках Claude стоит permiss
  */
 export function approvalBrowserRefusal(provider: string, approval: string | undefined): string | null {
   if (provider === 'claude' && approval === 'full') {
-    return 'сессия в режиме «полный доступ» (bypassPermissions): вызовы браузера шли бы без вопроса — браузер для агента не включается'
+    return t('сессия в режиме «полный доступ» (bypassPermissions): вызовы браузера шли бы без вопроса — браузер для агента не включается')
   }
   if (provider === 'codex' && (approval === 'workspace' || approval === 'full')) {
-    return `у Codex в режиме «${approval === 'full' ? 'полный доступ' : 'правки в папке без вопросов'}» спрашивать некого (approvalPolicy never): `
-      + 'вызов браузера не дошёл бы до Inbox — браузер для агента не включается. Нужен браузер — режим «спрашивать» или «только чтение»'
+    return t`у Codex в режиме «${approval === 'full' ? t('полный доступ') : t('правки в папке без вопросов')}» спрашивать некого (approvalPolicy never): `
+      + t('вызов браузера не дошёл бы до Inbox — браузер для агента не включается. Нужен браузер — режим «спрашивать» или «только чтение»')
   }
   return null
 }
@@ -317,7 +323,7 @@ export function npmFor(paths: PultPaths): { npm: string; nodeDir: string } {
   }
   const found = locateToolPath('npm').path
   if (found) return { npm: found, nodeDir: dirname(process.execPath) }
-  throw new BrowserInstallError('npm не найден ни у своего node Пульта, ни рядом с node демона — поставь свой node: pult runtime install')
+  throw new BrowserInstallError(t('npm не найден ни у своего node Пульта, ни рядом с node демона — поставь свой node: pult runtime install'))
 }
 
 /** Следы прерванных установок в `mcp/` — убирать только под lock: иначе можно снести чужую идущую. */
@@ -341,18 +347,18 @@ export async function installBrowser(paths: PultPaths, opts: InstallOptions = {}
   let lockDir = opts.lockDir ?? PACKAGED_LOCK_DIR
   if (test && !opts.lockDir) {
     const fake = env['PULT_TEST_PLAYWRIGHT_MCP_LOCKDIR']
-    if (!fake) throw new BrowserInstallError('PULT_TEST=1: сеть в тестах не трогается — нужен PULT_TEST_PLAYWRIGHT_MCP_LOCKDIR')
+    if (!fake) throw new BrowserInstallError(t('PULT_TEST=1: сеть в тестах не трогается — нужен PULT_TEST_PLAYWRIGHT_MCP_LOCKDIR'))
     lockDir = fake
   }
   for (const f of ['package.json', 'package-lock.json']) {
-    if (!existsSync(join(lockDir, f))) throw new BrowserInstallError(`нет ${join(lockDir, f)} — пакет Пульта собран без lock-файла браузера`)
+    if (!existsSync(join(lockDir, f))) throw new BrowserInstallError(t`нет ${join(lockDir, f)} — пакет Пульта собран без lock-файла браузера`)
   }
   mkdirSync(paths.run, { recursive: true, mode: 0o700 })
   mkdirSync(paths.mcp, { recursive: true, mode: 0o700 })
   chmodSync(paths.mcp, 0o700)
   const got = acquireLock(paths.mcpInstallLock)
   if (!got.ok) {
-    throw new BrowserInstallError(`уже идёт другая установка (pid ${got.holderPid ?? '?'}${got.holderCmd ? `, ${got.holderCmd}` : ''}) — дождись её конца`, 'busy')
+    throw new BrowserInstallError(t`уже идёт другая установка (pid ${got.holderPid ?? '?'}${got.holderCmd ? `, ${got.holderCmd}` : ''}) — дождись её конца`, 'busy')
   }
   const work = `${prefix}${PARTIAL}${process.pid}`
   try {
@@ -366,7 +372,7 @@ export async function installBrowser(paths: PultPaths, opts: InstallOptions = {}
     const userrc = join(work, '.npmrc-user')
     writeFileSync(userrc, '', { mode: 0o600 })
     const { npm, nodeDir } = opts.npm ? { npm: opts.npm, nodeDir: dirname(process.execPath) } : npmFor(paths)
-    opts.progress?.(`ставлю ${PLAYWRIGHT_MCP_PACKAGE}@${PLAYWRIGHT_MCP_VERSION} по lock-файлу в ${prefix}`)
+    opts.progress?.(t`ставлю ${PLAYWRIGHT_MCP_PACKAGE}@${PLAYWRIGHT_MCP_VERSION} по lock-файлу в ${prefix}`)
     const args = ['ci', '--ignore-scripts', '--omit=dev', '--no-audit', '--no-fund', '--loglevel', 'warn', `--registry=${NPM_REGISTRY}`,
       ...(test ? ['--offline'] : [])]
     const r = await execAsync(npm, args, {
@@ -388,11 +394,11 @@ export async function installBrowser(paths: PultPaths, opts: InstallOptions = {}
     })
     if (r.status !== 0) {
       const tail = `${r.stderr}\n${r.stdout}`.trim().split('\n').filter(Boolean).slice(-6).join('\n')
-      throw new BrowserInstallError(`npm ci не удался (${r.error ?? `код ${r.status}`})${tail ? `:\n${redactString(tail)}` : ''}`)
+      throw new BrowserInstallError(t`npm ci не удался (${r.error ?? t`код ${r.status}`})${tail ? `:\n${redactString(tail)}` : ''}`)
     }
     const v = installedVersionIn(work)
     if (v !== PLAYWRIGHT_MCP_VERSION) {
-      throw new BrowserInstallError(`после npm ci нет ${PLAYWRIGHT_MCP_PACKAGE} ${PLAYWRIGHT_MCP_VERSION} (нашлось: ${v ?? 'ничего'})`)
+      throw new BrowserInstallError(t`после npm ci нет ${PLAYWRIGHT_MCP_PACKAGE} ${PLAYWRIGHT_MCP_VERSION} (нашлось: ${v ?? t('ничего')})`)
     }
     if (existsSync(prefix)) {
       // Каталог есть, а годной версии в нём нет (раз мы здесь): отодвигаем и удаляем после подмены.
@@ -451,7 +457,7 @@ export function createBrowserInstaller(o: InstallerOptions): BrowserInstaller {
     try {
       o.emit({ sessionId: DAEMON_SESSION, provider: 'pult', kind: 'browser.install', data: { version: PLAYWRIGHT_MCP_VERSION, ...data } })
     } catch (e) {
-      o.logger.warn('событие browser.install не записалось', { error: (e as Error).message })
+      o.logger.warn(t('событие browser.install не записалось'), { error: (e as Error).message })
     }
   }
   /**
@@ -463,7 +469,7 @@ export function createBrowserInstaller(o: InstallerOptions): BrowserInstaller {
       return await install(o.paths)
     } catch (e) {
       if (!(e instanceof BrowserInstallError) || e.code !== 'busy') throw e
-      o.logger.info('браузер агента: идёт чужая установка — жду её', {})
+      o.logger.info(t('браузер агента: идёт чужая установка — жду её'), {})
       const deadline = Date.now() + busyWaitMs
       while (existsSync(o.paths.mcpInstallLock) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 250))
       if (browserInstalled(o.paths)) return { installed: false, version: PLAYWRIGHT_MCP_VERSION, path: browserPrefix(o.paths) }
@@ -481,19 +487,19 @@ export function createBrowserInstaller(o: InstallerOptions): BrowserInstaller {
       if (browserInstalled(o.paths)) return Promise.resolve(true)
       if (inflight) return inflight
       since = new Date().toISOString()
-      o.logger.info('браузер агента: ставлю Playwright MCP', { why, version: PLAYWRIGHT_MCP_VERSION })
+      o.logger.info(t('браузер агента: ставлю Playwright MCP'), { why, version: PLAYWRIGHT_MCP_VERSION })
       emit({ state: 'started', why })
       inflight = installOnceMore().then(
         () => {
           failed = null
-          o.logger.info('браузер агента: Playwright MCP поставлен', { version: PLAYWRIGHT_MCP_VERSION })
+          o.logger.info(t('браузер агента: Playwright MCP поставлен'), { version: PLAYWRIGHT_MCP_VERSION })
           emit({ state: 'done' })
           return true
         },
         (e: unknown) => {
           const error = redactString((e as Error).message).slice(0, 2000)
           failed = { at: new Date().toISOString(), error }
-          o.logger.warn('браузер агента: Playwright MCP не поставился', { error })
+          o.logger.warn(t('браузер агента: Playwright MCP не поставился'), { error })
           emit({ state: 'failed', error })
           return false
         },

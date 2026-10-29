@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { t as tr } from './i18n.js'
+import { isLanguageSetting, resolveLanguage, setLanguage } from '../i18n/core.js'
 // `pult` — CLI. Разбор argv руками: зависимостей у пакета ноль, а нужных нам форм флагов
 // ровно две (`--флаг` и `--флаг значение`).
 //
@@ -30,7 +32,7 @@ import { testLocate } from '../env/locate.js'
 import { contextShare, parseSessionContext } from '../sessions/context.js'
 import { isUnread, parseAttention } from '../sessions/attention.js'
 import { isApprovalMode } from '../adapters/types.js'
-import { APPROVAL_WORDS, describeChanges, HOME_CWD_WARNING, modeBlocksBrowser, parseNewSession } from '../sessions/settings.js'
+import { APPROVAL_WORDS, describeChanges, homeCwdWarning, modeBlocksBrowser, parseNewSession } from '../sessions/settings.js'
 import type { ConfigureChanges, ConfigureWhen, NewSessionSettings } from '../sessions/settings.js'
 import type { PermissionOffers } from '../adapters/types.js'
 import { connectClient } from './client.js'
@@ -44,6 +46,13 @@ import type { GuardRule } from '../core/guard.js'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
+// Initialize before constructing help and other module-level display text.
+let configuredLanguage: unknown
+try { configuredLanguage = (JSON.parse(readFileSync(resolvePaths(process.env).config, 'utf8')) as { language?: unknown }).language } catch { /* auto on missing or malformed config */ }
+const languageOverride = process.env['PULT_LANG']
+setLanguage(resolveLanguage(isLanguageSetting(languageOverride) ? languageOverride : isLanguageSetting(configuredLanguage) ? configuredLanguage : 'auto',
+  process.env['LC_ALL'] || process.env['LC_MESSAGES'] || process.env['LANG'] || Intl.DateTimeFormat().resolvedOptions().locale))
+
 export const EXIT = {
   ok: 0,
   error: 1,
@@ -54,7 +63,7 @@ export const EXIT = {
   updateAvailable: EXIT_UPDATE_AVAILABLE,
 } as const
 
-const HELP = `pult ${VERSION} — диспетчерская над claude, codex и opencode (веха В4)
+const HELP = tr`pult ${VERSION} — диспетчерская над claude, codex и opencode (веха В4)
 
   pult daemon start                 поднять демона (отсоединённым, переживает терминал)
   pult daemon status [--json]       состояние демона
@@ -178,10 +187,10 @@ function contextColumn(raw: unknown): string {
 function approvalLabel(raw: unknown): string {
   const mode = isApprovalMode(raw) ? raw : 'ask'
   return {
-    'read-only': 'read-only (только чтение)',
-    ask: 'ask (шире рабочей папки — через Inbox)',
-    workspace: 'workspace (правки в папке без вопросов)',
-    full: 'full (без вопросов и без песочницы)',
+    'read-only': tr('read-only (только чтение)'),
+    ask: tr('ask (шире рабочей папки — через Inbox)'),
+    workspace: tr('workspace (правки в папке без вопросов)'),
+    full: tr('full (без вопросов и без песочницы)'),
   }[mode]
 }
 
@@ -252,7 +261,7 @@ async function cmdDaemonStart(paths: PultPaths, args: ParsedArgs): Promise<numbe
   if (before) {
     out(args.flags.has('json')
       ? JSON.stringify({ started: false, alreadyRunning: true, status: before })
-      : `демон уже работает: pid ${before.pid}, версия ${before.version}`)
+      : tr`демон уже работает: pid ${before.pid}, версия ${before.version}`)
     return EXIT.ok
   }
   const { client, spawned } = await ensureDaemon(paths)
@@ -260,7 +269,7 @@ async function cmdDaemonStart(paths: PultPaths, args: ParsedArgs): Promise<numbe
   client.close()
   out(args.flags.has('json')
     ? JSON.stringify({ started: spawned, alreadyRunning: !spawned, status })
-    : `демон запущен: pid ${status.pid}, режим ${status.mode ?? 'on-demand'}, сокет ${status.sock}`)
+    : tr`демон запущен: pid ${status.pid}, режим ${status.mode ?? 'on-demand'}, сокет ${status.sock}`)
   return EXIT.ok
 }
 
@@ -283,13 +292,13 @@ async function cmdDaemonStatus(paths: PultPaths, args: ParsedArgs): Promise<numb
   if (!status) {
     out(args.flags.has('json')
       ? JSON.stringify({ running: false, home: paths.home, service: svc.report })
-      : `демон не запущен\n${svc.line}`)
+      : tr`демон не запущен\n${svc.line}`)
     return EXIT.error
   }
   out(args.flags.has('json')
     ? JSON.stringify({ running: true, ...status, service: svc.report })
-    : `pultd ${status.version} · pid ${status.pid} · протокол ${status.protocol} · аптайм ${Math.round(status.uptimeMs / 1000)} с\n`
-      + `режим ${status.mode ?? 'on-demand'} · дом ${status.home}\nклиентов ${status.clients}, подписок ${status.subscriptions}, событий до #${status.lastEventId}\n`
+    : tr`pultd ${status.version} · pid ${status.pid} · протокол ${status.protocol} · аптайм ${Math.round(status.uptimeMs / 1000)} с\n`
+      + tr`режим ${status.mode ?? 'on-demand'} · дом ${status.home}\nклиентов ${status.clients}, подписок ${status.subscriptions}, событий до #${status.lastEventId}\n`
       + svc.line)
   return EXIT.ok
 }
@@ -315,7 +324,7 @@ async function cmdDaemonStop(paths: PultPaths, args: ParsedArgs): Promise<number
   const r = await stopDaemon(paths, { env: process.env })
   const json = args.flags.has('json')
   if (r.result === 'none') {
-    out(json ? JSON.stringify({ stopped: false, running: false }) : 'демон не запущен — останавливать нечего')
+    out(json ? JSON.stringify({ stopped: false, running: false }) : tr('демон не запущен — останавливать нечего'))
     return EXIT.ok
   }
   if (r.result === 'failed') {
@@ -323,9 +332,9 @@ async function cmdDaemonStop(paths: PultPaths, args: ParsedArgs): Promise<number
     err(`pult daemon stop: ${r.message}`)
     return EXIT.error
   }
-  const how = r.via === 'service' ? ' (через менеджер служб: демон ещё стартовал)'
-    : r.via === 'signal' ? ' (SIGTERM: демон ещё стартовал)' : ''
-  out(json ? JSON.stringify({ stopped: true, via: r.via, pid: r.pid }) : `демон остановлен${how}`)
+  const how = r.via === 'service' ? tr(' (через менеджер служб: демон ещё стартовал)')
+    : r.via === 'signal' ? tr(' (SIGTERM: демон ещё стартовал)') : ''
+  out(json ? JSON.stringify({ stopped: true, via: r.via, pid: r.pid }) : tr`демон остановлен${how}`)
   return EXIT.ok
 }
 
@@ -335,7 +344,7 @@ function cmdDaemonLogs(paths: PultPaths, args: ParsedArgs): number {
   try {
     text = readFileSync(paths.logFile, 'utf8')
   } catch {
-    err(`журнал ${paths.logFile} не читается — демон ещё ни разу не стартовал?`)
+    err(tr`журнал ${paths.logFile} не читается — демон ещё ни разу не стартовал?`)
     return EXIT.error
   }
   const lines = text.split('\n').filter((l) => l.trim())
@@ -421,7 +430,7 @@ async function cmdAgent(paths: PultPaths, args: ParsedArgs): Promise<number> {
   try {
     switch (sub) {
       case 'start': {
-        if (!name) { err('pult agent start: нужно имя агента'); return done(EXIT.error) }
+        if (!name) { err(tr('pult agent start: нужно имя агента')); return done(EXIT.error) }
         // `--worktree` без значения (или со значением на `-`, которое разбор не берёт) — это
         // не «без worktree», а ошибка: молча завести агента в общей папке — ровно то, от чего
         // человек хотел уйти флагом.
@@ -440,13 +449,13 @@ async function cmdAgent(paths: PultPaths, args: ParsedArgs): Promise<number> {
           return v === true && next !== undefined && !isOwnFlag(next) ? next : null
         }
         const wtDash = dashValue('worktree')
-        if (wtDash !== null) { err(`pult agent start: ветка не может начинаться с «-»: ${wtDash}`); return done(EXIT.error) }
+        if (wtDash !== null) { err(tr`pult agent start: ветка не может начинаться с «-»: ${wtDash}`); return done(EXIT.error) }
         const baseDash = dashValue('base')
-        if (baseDash !== null) { err(`pult agent start: --base: ревизия не может начинаться с «-»: ${baseDash}`); return done(EXIT.error) }
-        if (emptyFlag('worktree')) { err('pult agent start: --worktree требует имя ветки'); return done(EXIT.error) }
+        if (baseDash !== null) { err(tr`pult agent start: --base: ревизия не может начинаться с «-»: ${baseDash}`); return done(EXIT.error) }
+        if (emptyFlag('worktree')) { err(tr('pult agent start: --worktree требует имя ветки')); return done(EXIT.error) }
         // `--title -важное-`: разбор слово на «-» значением не берёт — агент завёлся бы без названия и без слова об этом.
-        if (emptyFlag('title')) { err('pult agent start: --title требует название (начинается с «-» — пиши --title="-…")'); return done(EXIT.error) }
-        if (emptyFlag('base')) { err('pult agent start: --base требует ревизию'); return done(EXIT.error) }
+        if (emptyFlag('title')) { err(tr('pult agent start: --title требует название (начинается с «-» — пиши --title="-…")')); return done(EXIT.error) }
+        if (emptyFlag('base')) { err(tr('pult agent start: --base требует ревизию')); return done(EXIT.error) }
         if (args.flags.has('approval') && (flagStr(args, 'approval') === undefined || !isApprovalMode(flagStr(args, 'approval')))) {
           err('pult agent start: --approval — read-only | ask | workspace | full'); return done(EXIT.error)
         }
@@ -462,15 +471,15 @@ async function cmdAgent(paths: PultPaths, args: ParsedArgs): Promise<number> {
         const d = defaults ? (kind === 'codex' ? defaults.codex : defaults.claude) : {}
         const approval = flagStr(args, 'approval') ?? d.approval
         const used: string[] = []
-        if (!args.flags.has('model') && d.model) used.push(`модель ${d.model}`)
-        if (!args.flags.has('effort') && d.effort) used.push(`усилие ${d.effort}`)
-        if (!args.flags.has('approval') && d.approval) used.push(`режим ${d.approval}`)
+        if (!args.flags.has('model') && d.model) used.push(tr`модель ${d.model}`)
+        if (!args.flags.has('effort') && d.effort) used.push(tr`усилие ${d.effort}`)
+        if (!args.flags.has('approval') && d.approval) used.push(tr`режим ${d.approval}`)
         const browserDefault = !args.flags.has('browser') && d.browser === true && !modeBlocksBrowser(kind === 'codex' ? 'codex' : 'claude', isApprovalMode(approval) ? approval : undefined)
-        if (browserDefault) used.push('браузер')
-        if (used.length && !asJson) err(`pult agent start: из настроек (newSession.defaults): ${used.join(', ')}`)
+        if (browserDefault) used.push(tr('браузер'))
+        if (used.length && !asJson) err(tr`pult agent start: из настроек (newSession.defaults): ${used.join(', ')}`)
         // Ревью M8d: `full` — только с `--yes`, отказ до заведения чего-либо.
         if (approval === 'full' && !args.flags.has('yes')) {
-          err('pult agent start: --approval full — агент делает что угодно без вопросов, песочницы нет; повтори с --yes'); return done(EXIT.error)
+          err(tr('pult agent start: --approval full — агент делает что угодно без вопросов, песочницы нет; повтори с --yes')); return done(EXIT.error)
         }
         const rec = await call('agent.start', {
           name,
@@ -489,37 +498,37 @@ async function cmdAgent(paths: PultPaths, args: ParsedArgs): Promise<number> {
         })
         const r = rec as Record<string, unknown>
         if (asJson) { out(JSON.stringify(r)); return done(EXIT.ok) }
-        out(`агент ${String(r['name'])} заведён: ${String(r['provider'])}, режим ${String(r['mode'])}, cwd ${String(r['cwd'])}`
-          + `, подтверждения: ${approvalLabel(r['approval'])}`)
-        if (r['approval'] === 'full') err('pult agent start: режим full — агент делает что угодно без вопросов, песочницы нет')
+        out(tr`агент ${String(r['name'])} заведён: ${String(r['provider'])}, режим ${String(r['mode'])}, cwd ${String(r['cwd'])}`
+          + tr`, подтверждения: ${approvalLabel(r['approval'])}`)
+        if (r['approval'] === 'full') err(tr('pult agent start: режим full — агент делает что угодно без вопросов, песочницы нет'))
         // Не отказ — предупреждение: дом агенту можно дать сознательно, но он должен знать, что под ним лежит.
         if (r['approval'] !== 'read-only' && typeof r['cwd'] === 'string' && coversDir(r['cwd'], homedir())) {
-          err(`pult agent start: внимание — ${HOME_CWD_WARNING}`)
+          err(tr`pult agent start: внимание — ${homeCwdWarning()}`)
         }
         const wt = r['worktree'] as { path: string; branch: string } | undefined
         if (wt) {
-          const how = r['worktreeAction'] === 'created' ? 'новая ветка'
-            : r['worktreeAction'] === 'reused' ? 'папка переиспользована' : 'выписана существующая ветка'
-          out(`worktree ${wt.path} · ветка ${wt.branch} (${how})`)
-          if (r['baseIgnored']) err('pult agent start: ветка уже была — --base ни на что не повлиял')
+          const how = r['worktreeAction'] === 'created' ? tr('новая ветка')
+            : r['worktreeAction'] === 'reused' ? tr('папка переиспользована') : tr('выписана существующая ветка')
+          out(tr`worktree ${wt.path} · ветка ${wt.branch} (${how})`)
+          if (r['baseIgnored']) err(tr('pult agent start: ветка уже была — --base ни на что не повлиял'))
         }
-        if (typeof r['browserDownloads'] === 'string') out(`браузер для агента: скачивания — ${r['browserDownloads']}`)
+        if (typeof r['browserDownloads'] === 'string') out(tr`браузер для агента: скачивания — ${r['browserDownloads']}`)
         return done(EXIT.ok)
       }
 
       case 'set': {
         // M8f: модель, усилие, режим подтверждений живой сессии — со следующего хода.
-        if (!name) { err('pult agent set: нужно имя сессии'); return done(EXIT.error) }
+        if (!name) { err(tr('pult agent set: нужно имя сессии')); return done(EXIT.error) }
         for (const f of ['model', 'effort', 'approval']) {
-          if (args.flags.has(f) && flagStr(args, f) === undefined) { err(`pult agent set: --${f} требует значение`); return done(EXIT.error) }
+          if (args.flags.has(f) && flagStr(args, f) === undefined) { err(tr`pult agent set: --${f} требует значение`); return done(EXIT.error) }
         }
         const approval = flagStr(args, 'approval')
         if (approval !== undefined && !isApprovalMode(approval)) { err('pult agent set: --approval — read-only | ask | workspace | full'); return done(EXIT.error) }
         if (approval === 'full' && !args.flags.has('yes')) {
-          err('pult agent set: --approval full — агент делает что угодно без вопросов, песочницы нет; повтори с --yes'); return done(EXIT.error)
+          err(tr('pult agent set: --approval full — агент делает что угодно без вопросов, песочницы нет; повтори с --yes')); return done(EXIT.error)
         }
         if (flagStr(args, 'model') === undefined && flagStr(args, 'effort') === undefined && approval === undefined) {
-          err('pult agent set <имя> [--model M] [--effort E] [--approval read-only|ask|workspace|full] [--yes]'); return done(EXIT.error)
+          err(tr('pult agent set <имя> [--model M] [--effort E] [--approval read-only|ask|workspace|full] [--yes]')); return done(EXIT.error)
         }
         let r: Record<string, unknown>
         try {
@@ -532,7 +541,7 @@ async function cmdAgent(paths: PultPaths, args: ParsedArgs): Promise<number> {
           })) as Record<string, unknown>
         } catch (e) {
           if (e instanceof ClientError && e.code === 'needs_confirm') {
-            err(`pult agent set: ${e.message} (повтори с --yes)`)
+            err(tr`pult agent set: ${e.message} (повтори с --yes)`)
             return done(EXIT.error)
           }
           throw e
@@ -540,67 +549,67 @@ async function cmdAgent(paths: PultPaths, args: ParsedArgs): Promise<number> {
         if (asJson) { out(JSON.stringify(r)); return done(EXIT.ok) }
         const changes = (r['changes'] ?? {}) as ConfigureChanges
         const line = describeChanges(changes, (r['when'] as ConfigureWhen | undefined) ?? 'next_turn')
-        out(line ? `${name}: ${line}` : `${name}: ничего не поменялось`)
-        if (changes.browser === 'off') err(`pult agent set: браузер для агента выключен — в режиме «${APPROVAL_WORDS[changes.approval?.to ?? 'ask']}» его вызовы шли бы без вопроса`)
-        if (changes.browser === 'on') out('браузер для агента снова включён — как было до смены режима')
-        if (changes.model) err('pult agent set: первый ход после смены модели дороже — кэш промпта у каждой модели свой')
-        if (changes.approval?.to === 'full') err('pult agent set: режим full — агент делает что угодно без вопросов, песочницы нет')
+        out(line ? `${name}: ${line}` : tr`${name}: ничего не поменялось`)
+        if (changes.browser === 'off') err(tr`pult agent set: браузер для агента выключен — в режиме «${APPROVAL_WORDS[changes.approval?.to ?? 'ask']}» его вызовы шли бы без вопроса`)
+        if (changes.browser === 'on') out(tr('браузер для агента снова включён — как было до смены режима'))
+        if (changes.model) err(tr('pult agent set: первый ход после смены модели дороже — кэш промпта у каждой модели свой'))
+        if (changes.approval?.to === 'full') err(tr('pult agent set: режим full — агент делает что угодно без вопросов, песочницы нет'))
         return done(EXIT.ok)
       }
 
       case 'browser': {
-        if (!name) { err('pult agent browser: нужно имя сессии'); return done(EXIT.error) }
+        if (!name) { err(tr('pult agent browser: нужно имя сессии')); return done(EXIT.error) }
         const what = args.positional[3]
-        if (what !== 'on' && what !== 'off') { err('pult agent browser <имя> on|off [--headed]'); return done(EXIT.error) }
+        if (what !== 'on' && what !== 'off') { err(tr('pult agent browser <имя> on|off [--headed]')); return done(EXIT.error) }
         const r = (await call('agent.browser', { name, on: what === 'on', ...(args.flags.has('headed') ? { headed: true } : {}) })) as Record<string, unknown>
         if (asJson) { out(JSON.stringify(r)); return done(EXIT.ok) }
         out(what === 'on'
-          ? `браузер для ${name} включён${args.flags.has('headed') ? ' (окно видно)' : ''} — со следующего хода; скачивания — ${String(r['browserDownloads'] ?? '')}`
-          : `браузер для ${name} выключен — со следующего хода`)
+          ? tr`браузер для ${name} включён${args.flags.has('headed') ? tr(' (окно видно)') : ''} — со следующего хода; скачивания — ${String(r['browserDownloads'] ?? '')}`
+          : tr`браузер для ${name} выключен — со следующего хода`)
         return done(EXIT.ok)
       }
 
       case 'rename': {
-        if (!name) { err('pult agent rename: нужно имя агента'); return done(EXIT.error) }
+        if (!name) { err(tr('pult agent rename: нужно имя агента')); return done(EXIT.error) }
         // Название — словами после имени ИЛИ флагом `--title`, как у `start`. Без второго
         // `rename w --title "x"` читался как «слов нет» и молча СНИМАЛ название.
         const words = args.positional.slice(3).join(' ')
         const flag = args.flags.get('title')
         if (flag !== undefined && (typeof flag !== 'string' || words)) {
-          err('pult agent rename: название — либо словами после имени, либо --title "…" (одним значением)')
+          err(tr('pult agent rename: название — либо словами после имени, либо --title "…" (одним значением)'))
           return done(EXIT.error)
         }
         const r = (await call('agent.rename', { name, title: typeof flag === 'string' ? flag : words })) as Record<string, unknown>
         if (asJson) { out(JSON.stringify(r)); return done(EXIT.ok) }
-        out(r['title'] !== undefined ? `агент ${name} теперь «${String(r['title'])}»` : `агент ${name}: название снято`)
+        out(r['title'] !== undefined ? tr`агент ${name} теперь «${String(r['title'])}»` : tr`агент ${name}: название снято`)
         return done(EXIT.ok)
       }
 
       case 'archive':
       case 'unarchive': {
-        if (!name) { err(`pult session ${args.sub}: нужно имя сессии`); return done(EXIT.error) }
+        if (!name) { err(tr`pult session ${args.sub}: нужно имя сессии`); return done(EXIT.error) }
         const r = (await call('agent.archive', { name, archived: args.sub === 'archive' })) as Record<string, unknown>
         if (asJson) { out(JSON.stringify(r)); return done(EXIT.ok) }
-        out(args.sub === 'archive' ? `сессия ${name} в архиве (реплика вернёт её)` : `сессия ${name} возвращена из архива`)
+        out(args.sub === 'archive' ? tr`сессия ${name} в архиве (реплика вернёт её)` : tr`сессия ${name} возвращена из архива`)
         return done(EXIT.ok)
       }
 
       case 'prompt': {
-        if (!name) { err('pult agent prompt: нужно имя агента'); return done(EXIT.error) }
+        if (!name) { err(tr('pult agent prompt: нужно имя агента')); return done(EXIT.error) }
         const text = args.positional.slice(3).join(' ')
-        if (!text.trim()) { err('pult agent prompt: нужна реплика'); return done(EXIT.error) }
+        if (!text.trim()) { err(tr('pult agent prompt: нужна реплика')); return done(EXIT.error) }
         const queue = args.flags.has('queue')
         const interrupt = args.flags.has('interrupt')
-        if (queue && interrupt) { err('pult agent prompt: --queue и --interrupt вместе не бывают'); return done(EXIT.error) }
+        if (queue && interrupt) { err(tr('pult agent prompt: --queue и --interrupt вместе не бывают')); return done(EXIT.error) }
         const started = (await call('agent.prompt', { name, text, ...(queue ? { queue: true } : {}), ...(interrupt ? { interrupt: true } : {}) })) as
           { turnId: string } | { queued: true; id: string }
         // В очереди — ход ещё не начат: ждать нечего, `--wait` дождался бы ЧУЖОГО (идущего) хода.
         if ('queued' in started) {
-          out(asJson ? JSON.stringify(started) : `реплика в очереди (${started.id}): уйдёт, когда ход ${name} кончится`)
+          out(asJson ? JSON.stringify(started) : tr`реплика в очереди (${started.id}): уйдёт, когда ход ${name} кончится`)
           return done(EXIT.ok)
         }
         if (!args.flags.has('wait')) {
-          out(asJson ? JSON.stringify({ turnId: started.turnId, waiting: false }) : `ход ${started.turnId} запущен`)
+          out(asJson ? JSON.stringify({ turnId: started.turnId, waiting: false }) : tr`ход ${started.turnId} запущен`)
           return done(EXIT.ok)
         }
         const until = (flagStr(args, 'until') ?? '').split(',').map((s) => s.trim()).filter(Boolean)
@@ -613,7 +622,7 @@ async function cmdAgent(paths: PultPaths, args: ParsedArgs): Promise<number> {
       }
 
       case 'wait': {
-        if (!name) { err('pult agent wait: нужно имя агента'); return done(EXIT.error) }
+        if (!name) { err(tr('pult agent wait: нужно имя агента')); return done(EXIT.error) }
         const until = (flagStr(args, 'until') ?? '').split(',').map((s) => s.trim()).filter(Boolean)
         const result = (await call('agent.wait', {
           name,
@@ -624,13 +633,13 @@ async function cmdAgent(paths: PultPaths, args: ParsedArgs): Promise<number> {
       }
 
       case 'read': {
-        if (!name) { err('pult agent read: нужно имя агента'); return done(EXIT.error) }
+        if (!name) { err(tr('pult agent read: нужно имя агента')); return done(EXIT.error) }
         const format = flagStr(args, 'format') === 'json' ? 'json' : 'text'
         const r = (await call('agent.read', { name, since: num(args.flags.get('since'), 0), format })) as Record<string, unknown>
         // Worktree — в stderr: stdout у `read` — это текст модели или NDJSON событий, и скрипт,
         // который их читает, не должен спотыкаться о служебную строку.
         const wt = r['worktree'] as { path: string; branch: string } | undefined
-        if (wt) err(`worktree ${wt.path} · ветка ${wt.branch}`)
+        if (wt) err(tr`worktree ${wt.path} · ветка ${wt.branch}`)
         if (format === 'json') {
           for (const ev of (r['events'] as PultEvent[])) out(JSON.stringify(ev))
         } else {
@@ -643,7 +652,7 @@ async function cmdAgent(paths: PultPaths, args: ParsedArgs): Promise<number> {
       case 'list': {
         const r = (await call('agent.list')) as { sessions: Array<Record<string, unknown>> }
         if (asJson) { out(JSON.stringify(r)); return done(EXIT.ok) }
-        if (!r.sessions.length) { out('агентов нет'); return done(EXIT.ok) }
+        if (!r.sessions.length) { out(tr('агентов нет')); return done(EXIT.ok) }
         for (const sn of r.sessions) {
           const wt = sn['worktree'] as { path: string; branch: string } | undefined
           const ctx = contextColumn(sn['context'])
@@ -655,7 +664,7 @@ async function cmdAgent(paths: PultPaths, args: ParsedArgs): Promise<number> {
             ...(sn['markedUnread'] === true ? { markedUnread: true } : {}),
           })
           out(`${String(sn['name']).padEnd(16)} ${unread ? '●' : '·'} ${String(sn['provider']).padEnd(7)} ${String(sn['lastStatus']).padEnd(19)} `
-            + `${String(sn['mode'])}${isApprovalMode(sn['approval']) && sn['approval'] !== 'ask' ? ` · ${String(sn['approval'])}` : ''}${ctx ? ` · ${ctx}` : ''}${Number(sn['pendingPermissions']) > 0 ? ` · ждёт решения: ${String(sn['pendingPermissions'])}` : ''}`
+            + `${String(sn['mode'])}${isApprovalMode(sn['approval']) && sn['approval'] !== 'ask' ? ` · ${String(sn['approval'])}` : ''}${ctx ? ` · ${ctx}` : ''}${Number(sn['pendingPermissions']) > 0 ? tr` · ждёт решения: ${String(sn['pendingPermissions'])}` : ''}`
             + `${wt ? ` · worktree ${wt.path} (${wt.branch})` : ''}`
             + `${typeof sn['title'] === 'string' ? ` · «${sn['title']}»` : ''}`)
         }
@@ -663,18 +672,18 @@ async function cmdAgent(paths: PultPaths, args: ParsedArgs): Promise<number> {
       }
 
       case 'seen': {
-        if (!name) { err('pult agent seen: нужно имя сессии'); return done(EXIT.error) }
+        if (!name) { err(tr('pult agent seen: нужно имя сессии')); return done(EXIT.error) }
         const unread = args.flags.has('unread')
         const r = (await call('agent.seen', { name, unread })) as Record<string, unknown>
         if (asJson) { out(JSON.stringify(r)); return done(EXIT.ok) }
-        out(unread ? `сессия ${name} помечена непрочитанной` : `сессия ${name} прочитана`)
+        out(unread ? tr`сессия ${name} помечена непрочитанной` : tr`сессия ${name} прочитана`)
         return done(EXIT.ok)
       }
 
       case 'stop': {
-        if (!name) { err('pult agent stop: нужно имя агента'); return done(EXIT.error) }
+        if (!name) { err(tr('pult agent stop: нужно имя агента')); return done(EXIT.error) }
         await call('agent.stop', { name })
-        out(asJson ? JSON.stringify({ stopped: true }) : `агент ${name} остановлен`)
+        out(asJson ? JSON.stringify({ stopped: true }) : tr`агент ${name} остановлен`)
         return done(EXIT.ok)
       }
 
@@ -683,27 +692,27 @@ async function cmdAgent(paths: PultPaths, args: ParsedArgs): Promise<number> {
         // (у `start`): `rm --worktree w` кладёт имя во флаг. Принимаем обе формы.
         const wtFlag = args.flags.get('worktree')
         const rmName = name ?? (typeof wtFlag === 'string' ? wtFlag : undefined)
-        if (!rmName) { err('pult agent rm: нужно имя агента'); return done(EXIT.error) }
+        if (!rmName) { err(tr('pult agent rm: нужно имя агента')); return done(EXIT.error) }
         if (typeof wtFlag === 'string' && name) {
-          err('pult agent rm: --worktree не принимает значения — ветка не удаляется никогда'); return done(EXIT.error)
+          err(tr('pult agent rm: --worktree не принимает значения — ветка не удаляется никогда')); return done(EXIT.error)
         }
         const r = (await call('agent.rm', { name: rmName, worktree: wtFlag !== undefined })) as Record<string, unknown>
         if (asJson) { out(JSON.stringify(r)); return done(EXIT.ok) }
-        out(`агент ${rmName} удалён`)
+        out(tr`агент ${rmName} удалён`)
         const wt = r['worktree'] as { path: string; branch: string; repo: string } | undefined
         if (wt && r['worktreeRemoved']) {
-          out(`worktree ${wt.path} убран; ветка ${wt.branch} осталась`)
+          out(tr`worktree ${wt.path} убран; ветка ${wt.branch} осталась`)
         } else if (wt) {
-          out(`worktree оставлен: ${wt.path} (ветка ${wt.branch})`)
-          out(`убрать: git -C ${shellQuote(wt.repo)} worktree remove ${shellQuote(wt.path)}`)
+          out(tr`worktree оставлен: ${wt.path} (ветка ${wt.branch})`)
+          out(tr`убрать: git -C ${shellQuote(wt.repo)} worktree remove ${shellQuote(wt.path)}`)
         }
         return done(EXIT.ok)
       }
 
       case 'export': {
-        if (!name) { err('pult agent export: нужно имя сессии'); return done(EXIT.error) }
+        if (!name) { err(tr('pult agent export: нужно имя сессии')); return done(EXIT.error) }
         const toStdout = args.flags.has('stdout')
-        if (toStdout && asJson) { err('pult agent export: --stdout и --json вместе не бывают — выбери одно'); return done(EXIT.error) }
+        if (toStdout && asJson) { err(tr('pult agent export: --stdout и --json вместе не бывают — выбери одно')); return done(EXIT.error) }
         // Демон пишет файл и отвечает путём (текст разговора больше строки NDJSON, которую читает клиент).
         // `--stdout` дочитывает этот файл и удаляет его: просили текст, а не ещё один файл в exports/ —
         // демон и CLI на одной машине под одним пользователем.
@@ -719,14 +728,14 @@ async function cmdAgent(paths: PultPaths, args: ParsedArgs): Promise<number> {
       }
 
       case 'tree': {
-        if (!name) { err('pult agent tree: нужно имя агента'); return done(EXIT.error) }
+        if (!name) { err(tr('pult agent tree: нужно имя агента')); return done(EXIT.error) }
         const r = (await call('agent.tree', { name })) as Record<string, unknown>
-        out(asJson ? JSON.stringify(r) : (String(r['text'] ?? '') || 'дерево пустое: ни одного инструмента и субагента'))
+        out(asJson ? JSON.stringify(r) : (String(r['text'] ?? '') || tr('дерево пустое: ни одного инструмента и субагента')))
         return done(EXIT.ok)
       }
 
       default:
-        err('pult agent: нужен один из start|set|rename|prompt|read|wait|list|seen|stop|rm|tree|browser')
+        err(tr('pult agent: нужен один из start|set|rename|prompt|read|wait|list|seen|stop|rm|tree|browser'))
         return done(EXIT.error)
     }
   } catch (e) {
@@ -747,11 +756,11 @@ function printWait(result: Record<string, unknown>, asJson: boolean): number {
   if (asJson) out(JSON.stringify(result))
   const status = String(result['status'] ?? '?')
   if (result['reason'] === 'timeout') {
-    if (!asJson) err(`таймаут: агент в состоянии ${status}`)
+    if (!asJson) err(tr`таймаут: агент в состоянии ${status}`)
     return EXIT.timeout
   }
   if (status === 'blocked_permission' || status === 'blocked_question') {
-    if (!asJson) err(`ждёт человека: ${status} — смотри pult perm list`)
+    if (!asJson) err(tr`ждёт человека: ${status} — смотри pult perm list`)
     return EXIT.needsHuman
   }
   const code = result['errorCode']
@@ -759,8 +768,8 @@ function printWait(result: Record<string, unknown>, asJson: boolean): number {
     // Человеку нужен ТЕКСТ ПРИЧИНЫ, а он живёт в `message`: `text` у проваленного хода почти
     // всегда пуст. Пока печатался только `text`, строка выглядела как «ход не удался:
     // limited — » и не отличала исчерпанный лимит от мёртвого прокси (ревью В3).
-    const why = String(result['message'] ?? result['text'] ?? '') || 'провайдер не объяснил причину'
-    if (!asJson) err(`ход не удался: ${String(result['errorCode'] ?? status)} — ${why}`)
+    const why = String(result['message'] ?? result['text'] ?? '') || tr('провайдер не объяснил причину')
+    if (!asJson) err(tr`ход не удался: ${String(result['errorCode'] ?? status)} — ${why}`)
     return exitForError(typeof code === 'string' ? code : undefined)
   }
   if (!asJson) {
@@ -772,7 +781,7 @@ function printWait(result: Record<string, unknown>, asJson: boolean): number {
 
 /** Правило «Всегда» строкой — как кнопка карточки. */
 function ruleText(x: Record<string, unknown>): string {
-  return x['kind'] === 'network' ? `пускать в сеть к ${String(x['label'])}` : `команды, начинающиеся с «${String(x['label'])}»`
+  return x['kind'] === 'network' ? tr`пускать в сеть к ${String(x['label'])}` : tr`команды, начинающиеся с «${String(x['label'])}»`
 }
 
 async function cmdPerm(paths: PultPaths, args: ParsedArgs): Promise<number> {
@@ -785,15 +794,15 @@ async function cmdPerm(paths: PultPaths, args: ParsedArgs): Promise<number> {
       case 'list': {
         const r = (await client.request('perm.list')) as { pending: Array<Record<string, unknown>> }
         if (asJson) { out(JSON.stringify(r)); return done(EXIT.ok) }
-        if (!r.pending.length) { out('очередь разрешений пуста'); return done(EXIT.ok) }
+        if (!r.pending.length) { out(tr('очередь разрешений пуста')); return done(EXIT.ok) }
         for (const p of r.pending) {
-          out(`${String(p['id'])}  ${String(p['sessionId'])}  ${String(p['toolName'])}  ждёт ${Math.round(Number(p['waitingMs']) / 1000)} с`)
+          out(tr`${String(p['id'])}  ${String(p['sessionId'])}  ${String(p['toolName'])}  ждёт ${Math.round(Number(p['waitingMs']) / 1000)} с`)
           out(`    ${JSON.stringify(p['input'])}`)
-          if (p['concealed'] === true) out('    ВНИМАНИЕ: показано не всё — фильтр секретов скрыл часть входа или длинное поле обрезано; исполнится исходный вход')
+          if (p['concealed'] === true) out(tr('    ВНИМАНИЕ: показано не всё — фильтр секретов скрыл часть входа или длинное поле обрезано; исполнится исходный вход'))
           // M8d: что ещё можно, кроме «один раз», — ровно то, что провайдер предложил на этот запрос.
           const offers = p['offers'] as PermissionOffers | undefined
-          if (offers?.session) out('    --session: разрешить в этой сессии (и такие же до её конца)')
-          if (offers?.rule) out(`    --rule: всегда — ${offers.rule.kind === 'network' ? `пускать в сеть к ${offers.rule.label}` : `команды, начинающиеся с «${offers.rule.label}»`} ${offers.rule.note}`)
+          if (offers?.session) out(tr('    --session: разрешить в этой сессии (и такие же до её конца)'))
+          if (offers?.rule) out(tr`    --rule: всегда — ${offers.rule.kind === 'network' ? tr`пускать в сеть к ${offers.rule.label}` : tr`команды, начинающиеся с «${offers.rule.label}»`} ${offers.rule.note}`)
         }
         return done(EXIT.ok)
       }
@@ -803,12 +812,12 @@ async function cmdPerm(paths: PultPaths, args: ParsedArgs): Promise<number> {
         // Тогда id — это значение флага, а scope — «в сессии».
         const sessionFlag = args.flags.get('session')
         const permId = id ?? (typeof sessionFlag === 'string' ? sessionFlag : undefined)
-        if (!permId) { err(`pult perm ${args.sub}: нужен id из pult perm list`); return done(EXIT.error) }
-        if (typeof sessionFlag === 'string' && id) { err(`pult perm ${args.sub}: --session без значения — id уже ${id}`); return done(EXIT.error) }
+        if (!permId) { err(tr`pult perm ${args.sub}: нужен id из pult perm list`); return done(EXIT.error) }
+        if (typeof sessionFlag === 'string' && id) { err(tr`pult perm ${args.sub}: --session без значения — id уже ${id}`); return done(EXIT.error) }
         const wantSession = sessionFlag !== undefined
         const wantRule = args.flags.has('rule')
-        if (wantSession && wantRule) { err('pult perm approve: --session или --rule, не оба'); return done(EXIT.error) }
-        if ((wantSession || wantRule) && args.sub !== 'approve') { err('pult perm deny: --session и --rule бывают только у approve'); return done(EXIT.error) }
+        if (wantSession && wantRule) { err(tr('pult perm approve: --session или --rule, не оба')); return done(EXIT.error) }
+        if ((wantSession || wantRule) && args.sub !== 'approve') { err(tr('pult perm deny: --session и --rule бывают только у approve')); return done(EXIT.error) }
         const scope = wantSession ? 'session' : wantRule ? 'rule' : undefined
         const r = await client.request('perm.resolve', {
           id: permId,
@@ -816,40 +825,40 @@ async function cmdPerm(paths: PultPaths, args: ParsedArgs): Promise<number> {
           ...(scope ? { scope } : {}),
           ...(flagStr(args, 'reason') !== undefined ? { message: flagStr(args, 'reason') } : {}),
         })
-        const how = scope === 'session' ? 'разрешено в этой сессии' : scope === 'rule' ? 'разрешено всегда (правило провайдера)' : 'разрешено'
-        out(asJson ? JSON.stringify(r) : `${permId}: ${args.sub === 'approve' ? how : 'отказано'}`)
+        const how = scope === 'session' ? tr('разрешено в этой сессии') : scope === 'rule' ? tr('разрешено всегда (правило провайдера)') : tr('разрешено')
+        out(asJson ? JSON.stringify(r) : `${permId}: ${args.sub === 'approve' ? how : tr('отказано')}`)
         return done(EXIT.ok)
       }
       case 'rules': {
         // План 16, № 11: правила «Всегда» Codex с меткой Пульта; без метки — только счётчиком, их Пульт не трогает.
         if (id === 'revoke') {
           const ruleId = args.positional[3]
-          if (!ruleId) { err('pult perm rules revoke: нужен id из pult perm rules'); return done(EXIT.error) }
+          if (!ruleId) { err(tr('pult perm rules revoke: нужен id из pult perm rules')); return done(EXIT.error) }
           const r = (await client.request('perm.rules.revoke', { id: ruleId })) as { revoked: Record<string, unknown>; text?: string }
-          out(asJson ? JSON.stringify(r) : `${ruleId}: ${r.text ?? `отозвано (${ruleText(r.revoked)})`}`)
+          out(asJson ? JSON.stringify(r) : `${ruleId}: ${r.text ?? tr`отозвано (${ruleText(r.revoked)})`}`)
           return done(EXIT.ok)
         }
-        if (id !== undefined) { err(`pult perm rules: неизвестное «${id}» — revoke <id> или ничего`); return done(EXIT.error) }
+        if (id !== undefined) { err(tr`pult perm rules: неизвестное «${id}» — revoke <id> или ничего`); return done(EXIT.error) }
         const r = (await client.request('perm.rules')) as { path: string; exists: boolean; rules: Array<Record<string, unknown>>; unmarked: number; backup?: string; error?: string }
         if (asJson) { out(JSON.stringify(r)); return done(EXIT.ok) }
-        out(`файл правил Codex: ${r.path}${r.exists ? '' : ' (ещё нет)'}`)
-        if (r.error) err(`не прочитан: ${r.error}`)
+        out(tr`файл правил Codex: ${r.path}${r.exists ? '' : tr(' (ещё нет)')}`)
+        if (r.error) err(tr`не прочитан: ${r.error}`)
         if (r.backup) {
           const file = r.backup.replace(/\.pult\.bak$/, '')
-          err(`ВНИМАНИЕ: осталась копия прерванной записи ${r.backup}; до её удаления Пульт файл не правит.`)
-          err(`  если ${file} пуст или обрезан — mv ${r.backup} ${file}, затем проверь последние строки; иначе удали копию`)
+          err(tr`ВНИМАНИЕ: осталась копия прерванной записи ${r.backup}; до её удаления Пульт файл не правит.`)
+          err(tr`  если ${file} пуст или обрезан — mv ${r.backup} ${file}, затем проверь последние строки; иначе удали копию`)
         }
-        if (!r.rules.length) out('правил «Всегда», записанных Пультом, нет')
+        if (!r.rules.length) out(tr('правил «Всегда», записанных Пультом, нет'))
         for (const x of r.rules) {
-          out(`${String(x['id'])}  ${String(x['at'])}  сессия ${String(x['session'])}${x['cwd'] ? ` · ${String(x['cwd'])}` : ''}`)
+          out(tr`${String(x['id'])}  ${String(x['at'])}  сессия ${String(x['session'])}${x['cwd'] ? ` · ${String(x['cwd'])}` : ''}`)
           out(`    ${ruleText(x)}`)
         }
-        if (r.unmarked > 0) out(`ещё строк правил без метки Пульта: ${r.unmarked} — их Пульт не показывает и не отзывает`)
-        if (r.rules.length) out('отозвать: pult perm rules revoke <id>')
+        if (r.unmarked > 0) out(tr`ещё строк правил без метки Пульта: ${r.unmarked} — их Пульт не показывает и не отзывает`)
+        if (r.rules.length) out(tr('отозвать: pult perm rules revoke <id>'))
         return done(EXIT.ok)
       }
       default:
-        err('pult perm: нужен один из list|approve|deny|rules')
+        err(tr('pult perm: нужен один из list|approve|deny|rules'))
         return done(EXIT.error)
     }
   } catch (e) {
@@ -866,13 +875,13 @@ async function cmdUsage(paths: PultPaths, args: ParsedArgs): Promise<number> {
   try {
     const r = (await client.request('usage.get')) as { usage: Array<Record<string, unknown>> }
     if (args.flags.has('json')) { out(JSON.stringify(r)); return EXIT.ok }
-    if (!r.usage.length) { out('расхода пока нет'); return EXIT.ok }
+    if (!r.usage.length) { out(tr('расхода пока нет')); return EXIT.ok }
     for (const u of r.usage) {
       const rl = u['rateLimit'] as { windows?: { five_hour?: { utilization?: number }; seven_day?: { utilization?: number } } } | null
       const pct = (v: number | undefined): string => (typeof v === 'number' ? `${Math.round(v * 100)} %` : '—')
-      out(`${String(u['session']).padEnd(16)} ходов ${String(u['turns']).padStart(3)} · $${Number(u['totalCostUsd']).toFixed(4)} · `
-        + `вход ${String(u['inputTokens'])} / выход ${String(u['outputTokens'])} / кэш ${String(u['cacheReadTokens'])}`)
-      out(`    окна лимита: 5 часов ${pct(rl?.windows?.five_hour?.utilization)} · 7 дней ${pct(rl?.windows?.seven_day?.utilization)}`)
+      out(tr`${String(u['session']).padEnd(16)} ходов ${String(u['turns']).padStart(3)} · $${Number(u['totalCostUsd']).toFixed(4)} · `
+        + tr`вход ${String(u['inputTokens'])} / выход ${String(u['outputTokens'])} / кэш ${String(u['cacheReadTokens'])}`)
+      out(tr`    окна лимита: 5 часов ${pct(rl?.windows?.five_hour?.utilization)} · 7 дней ${pct(rl?.windows?.seven_day?.utilization)}`)
     }
     return EXIT.ok
   } finally {
@@ -881,13 +890,13 @@ async function cmdUsage(paths: PultPaths, args: ParsedArgs): Promise<number> {
 }
 
 async function cmdProvider(paths: PultPaths, args: ParsedArgs): Promise<number> {
-  if (args.sub !== 'reset') { err('pult provider: в Ф1 есть только reset'); return EXIT.error }
+  if (args.sub !== 'reset') { err(tr('pult provider: в Ф1 есть только reset')); return EXIT.error }
   const { client } = await ensureDaemon(paths)
   try {
     const r = (await client.request('provider.reset', { provider: args.positional[2] ?? 'claude' })) as Record<string, unknown>
     out(args.flags.has('json')
       ? JSON.stringify(r)
-      : r['was'] ? `остановка провайдера ${String(r['provider'])} снята` : `провайдер ${String(r['provider'])} и так не был остановлен`)
+      : r['was'] ? tr`остановка провайдера ${String(r['provider'])} снята` : tr`провайдер ${String(r['provider'])} и так не был остановлен`)
     return EXIT.ok
   } finally {
     client.close()
@@ -955,10 +964,10 @@ async function cmdUi(paths: PultPaths, args: ParsedArgs): Promise<number> {
   try {
     await launchUi(plan, process.env)
   } catch (e) {
-    err(`pult ui: окно не запустилось — ${(e as Error).message}`)
+    err(tr`pult ui: окно не запустилось — ${(e as Error).message}`)
     return EXIT.error
   }
-  out(plan.kind === 'app' ? `окно открыто: ${plan.app}` : `окно открыто из рабочей копии: ${plan.root}`)
+  out(plan.kind === 'app' ? tr`окно открыто: ${plan.app}` : tr`окно открыто из рабочей копии: ${plan.root}`)
   return EXIT.ok
 }
 
@@ -973,11 +982,11 @@ async function cmdUpdate(paths: PultPaths, args: ParsedArgs): Promise<number> {
   const app = args.flags.has('app')
   const stage = args.flags.has('stage')
   const modes = [from !== undefined, to !== undefined, args.flags.has('list'), args.flags.has('check') && !app, app, stage].filter(Boolean).length
-  if (modes > 1) { err('pult update: --from, --to, --list, --check, --stage и --app — по одному за раз'); return EXIT.error }
+  if (modes > 1) { err(tr('pult update: --from, --to, --list, --check, --stage и --app — по одному за раз')); return EXIT.error }
   // `--force`: у окна — ставить и «плохую» версию; у пакета (канал, --from, --to) — не ждать конца идущих ходов.
-  if (args.flags.has('force') && (args.flags.has('list') || args.flags.has('check'))) { err('pult update: --force — не с --list и --check'); return EXIT.error }
-  if (args.flags.has('rollback') && !app) { err('pult update: --rollback — только вместе с --app'); return EXIT.error }
-  if (app && args.flags.has('check')) { err('pult update --app: проверить окно — pult update --check (строка «окно: …»)'); return EXIT.error }
+  if (args.flags.has('force') && (args.flags.has('list') || args.flags.has('check'))) { err(tr('pult update: --force — не с --list и --check')); return EXIT.error }
+  if (args.flags.has('rollback') && !app) { err(tr('pult update: --rollback — только вместе с --app')); return EXIT.error }
+  if (app && args.flags.has('check')) { err(tr('pult update --app: проверить окно — pult update --check (строка «окно: …»)')); return EXIT.error }
   // 0.3.4: окно — через демона (он закрывает окно, меняет Pult.app и ждёт hello нового), сессии не трогаются.
   if (app) return updateAppCli(cliIo, { force: args.flags.has('force'), rollback: args.flags.has('rollback'), connect: async () => (await ensureDaemon(paths)).client })
   if (args.flags.has('list')) return updateList(paths, cliIo, opts)
@@ -987,17 +996,17 @@ async function cmdUpdate(paths: PultPaths, args: ParsedArgs): Promise<number> {
   // Как «Обновить» в окне: идущий ход не обрывается молча. `--expect` зовёт сам демон — он уже дождался ходов.
   if (args.flags.get('expect') === undefined && await refuseRunningTurns(paths, cliIo, { force: args.flags.has('force') })) return EXIT.error
   if (from !== undefined) {
-    if (typeof from !== 'string' || !from) { err('pult update --from: нужен путь к тарболу pult-x.y.z.tgz'); return EXIT.error }
+    if (typeof from !== 'string' || !from) { err(tr('pult update --from: нужен путь к тарболу pult-x.y.z.tgz')); return EXIT.error }
     return updateFrom(paths, cliIo, from, opts)
   }
   if (to !== undefined) {
-    if (typeof to !== 'string' || !to) { err('pult update --to: нужна версия (что есть на диске — pult update --list)'); return EXIT.error }
+    if (typeof to !== 'string' || !to) { err(tr('pult update --to: нужна версия (что есть на диске — pult update --list)')); return EXIT.error }
     return updateTo(paths, cliIo, to, opts)
   }
-  if (opts.reinstall) { err('pult update: --reinstall — только вместе с --from'); return EXIT.error }
+  if (opts.reinstall) { err(tr('pult update: --reinstall — только вместе с --from')); return EXIT.error }
   // `--expect <версия>` ставит «Обновить» из окна: ребёнок ставит ровно то, что видел человек.
   const expect = args.flags.get('expect')
-  if (expect !== undefined && (typeof expect !== 'string' || !expect)) { err('pult update --expect: нужна версия'); return EXIT.error }
+  if (expect !== undefined && (typeof expect !== 'string' || !expect)) { err(tr('pult update --expect: нужна версия')); return EXIT.error }
   return updateLatest(paths, cliIo, typeof expect === 'string' ? { expect } : {})
 }
 
@@ -1010,8 +1019,8 @@ async function cmdBrowser(paths: PultPaths, args: ParsedArgs): Promise<number> {
   if (args.sub === 'install') {
     try {
       const r = await installBrowser(paths, { progress: (s) => err(s) })
-      out(r.installed ? `${PLAYWRIGHT_MCP_PACKAGE} ${r.version} поставлен: ${r.path}` : `${PLAYWRIGHT_MCP_PACKAGE} ${r.version} уже стоит: ${r.path}`)
-      if (!findChrome()) err('Google Chrome не найден — браузер агента работает на системном Chrome: поставь его в /Applications')
+      out(r.installed ? tr`${PLAYWRIGHT_MCP_PACKAGE} ${r.version} поставлен: ${r.path}` : tr`${PLAYWRIGHT_MCP_PACKAGE} ${r.version} уже стоит: ${r.path}`)
+      if (!findChrome()) err(tr('Google Chrome не найден — браузер агента работает на системном Chrome: поставь его в /Applications'))
       return EXIT.ok
     } catch (e) {
       if (!(e instanceof BrowserInstallError)) throw e
@@ -1019,7 +1028,7 @@ async function cmdBrowser(paths: PultPaths, args: ParsedArgs): Promise<number> {
       return EXIT.error
     }
   }
-  if (args.sub !== null && args.sub !== 'status') { err('pult browser: нужен один из status|install'); return EXIT.error }
+  if (args.sub !== null && args.sub !== 'status') { err(tr('pult browser: нужен один из status|install')); return EXIT.error }
   const st = await tryStatus(paths)
   const chrome = findChrome()
   const report = {
@@ -1042,12 +1051,12 @@ async function cmdBrowser(paths: PultPaths, args: ParsedArgs): Promise<number> {
  * демона — тот же строгий разбор, что у окна, запись только `network.guard`, действует со следующего хода.
  */
 async function cmdNet(paths: PultPaths, args: ParsedArgs): Promise<number> {
-  if (args.sub !== 'guard') { err('pult net: есть только guard — pult net guard [--deny RU,BY | --allow DE,FI] [--json]'); return EXIT.error }
+  if (args.sub !== 'guard') { err(tr('pult net: есть только guard — pult net guard [--deny RU,BY | --allow DE,FI] [--json]')); return EXIT.error }
   const deny = args.flags.get('deny')
   const allow = args.flags.get('allow')
-  if (deny !== undefined && allow !== undefined) { err('pult net guard: либо --deny, либо --allow'); return EXIT.error }
+  if (deny !== undefined && allow !== undefined) { err(tr('pult net guard: либо --deny, либо --allow')); return EXIT.error }
   const raw = deny ?? allow
-  if (raw === true) { err(`pult net guard: --${deny !== undefined ? 'deny' : 'allow'} — список кодов стран через запятую, например DE,FI`); return EXIT.error }
+  if (raw === true) { err(tr`pult net guard: --${deny !== undefined ? 'deny' : 'allow'} — список кодов стран через запятую, например DE,FI`); return EXIT.error }
   let next: GuardRule | null = null
   if (typeof raw === 'string') {
     const countries = raw.split(',').map((c) => c.trim().toUpperCase()).filter(Boolean)
@@ -1062,16 +1071,16 @@ async function cmdNet(paths: PultPaths, args: ParsedArgs): Promise<number> {
       ? await client.request('settings.set', { network: { guard: next } })
       : await client.request('settings.get')) as { network?: { guard?: GuardRule; exits?: Record<string, { loc?: string | null; reason?: string } | undefined> } }
     const rule = r.network?.guard
-    if (!rule) { err('pult net guard: демон старше 0.3.6 не знает правила стража — перезапусти его новой версией'); return EXIT.error }
+    if (!rule) { err(tr('pult net guard: демон старше 0.3.6 не знает правила стража — перезапусти его новой версией')); return EXIT.error }
     const exits = r.network?.exits ?? {}
     if (args.flags.has('json')) { out(JSON.stringify({ guard: rule, exits })); return EXIT.ok }
-    out(`страж сети: ${guardLine(rule)}${next ? ' — со следующего хода' : ''}`)
+    out(tr`страж сети: ${guardLine(rule)}${next ? tr(' — со следующего хода') : ''}`)
     // Последний известный выход провайдеров (из уже сделанных проверок, без новой пробы) — под этим правилом.
     for (const [provider, e] of Object.entries(exits)) {
       if (!e) continue
       out(e.loc
-        ? `  ${provider}: выход ${e.loc} — ${guardVerdict(rule, e.loc).ok ? 'проходит' : 'не проходит'}`
-        : `  ${provider}: выход неизвестен (${e.reason ?? 'нет ответа'}) — не проходит`)
+        ? tr`  ${provider}: выход ${e.loc} — ${guardVerdict(rule, e.loc).ok ? tr('проходит') : tr('не проходит')}`
+        : tr`  ${provider}: выход неизвестен (${e.reason ?? tr('нет ответа')}) — не проходит`)
     }
     return EXIT.ok
   } catch (e) {
@@ -1084,24 +1093,24 @@ async function cmdNet(paths: PultPaths, args: ParsedArgs): Promise<number> {
 
 async function cmdMcp(paths: PultPaths, args: ParsedArgs): Promise<number> {
   const asJson = args.flags.has('json')
-  if (args.sub !== 'list' && args.sub !== 'select') { err('pult mcp: нужен один из list|select'); return EXIT.error }
+  if (args.sub !== 'list' && args.sub !== 'select') { err(tr('pult mcp: нужен один из list|select')); return EXIT.error }
   const { client } = await ensureDaemon(paths)
   try {
     if (args.sub === 'list') {
       const r = (await client.request('mcp.list')) as { servers: Array<{ name: string; transport: string; detail: string }>; selected: string[]; missing: string[]; warnings: string[] }
       if (asJson) { out(JSON.stringify(r)); return EXIT.ok }
       for (const w of r.warnings) err(w)
-      if (!r.servers.length) out('в ~/.claude.json своих MCP-серверов нет (серверы проекта .mcp.json — позже)')
+      if (!r.servers.length) out(tr('в ~/.claude.json своих MCP-серверов нет (серверы проекта .mcp.json — позже)'))
       for (const sv of r.servers) out(`${r.selected.includes(sv.name) ? '●' : '·'} ${sv.name.padEnd(24)} ${sv.transport.padEnd(5)} ${sv.detail}`)
-      if (r.missing.length) out(`выбраны, но в ~/.claude.json их нет — не подключаются: ${r.missing.join(', ')}`)
+      if (r.missing.length) out(tr`выбраны, но в ~/.claude.json их нет — не подключаются: ${r.missing.join(', ')}`)
       return EXIT.ok
     }
     const names = args.positional.slice(2)
-    if (!names.length && !args.flags.has('none')) { err('pult mcp select <имя> [<имя>…] — или --none, чтобы не подключать ни одного'); return EXIT.error }
-    if (names.length && args.flags.has('none')) { err('pult mcp select: либо имена, либо --none'); return EXIT.error }
+    if (!names.length && !args.flags.has('none')) { err(tr('pult mcp select <имя> [<имя>…] — или --none, чтобы не подключать ни одного')); return EXIT.error }
+    if (names.length && args.flags.has('none')) { err(tr('pult mcp select: либо имена, либо --none')); return EXIT.error }
     const r = (await client.request('mcp.select', { names })) as { selected: string[] }
     if (asJson) { out(JSON.stringify(r)); return EXIT.ok }
-    out(r.selected.length ? `к сессиям Claude подключаются: ${r.selected.join(', ')} — со следующего хода` : 'свои MCP-серверы не подключаются')
+    out(r.selected.length ? tr`к сессиям Claude подключаются: ${r.selected.join(', ')} — со следующего хода` : tr('свои MCP-серверы не подключаются'))
     return EXIT.ok
   } catch (e) {
     if (e instanceof ClientError) { err(`pult mcp: ${e.code} — ${e.message}`); return exitForError(e.code) }
@@ -1119,10 +1128,10 @@ async function cmdRuntime(paths: PultPaths, args: ParsedArgs): Promise<number> {
   }
   if (args.sub === 'install') {
     const from = args.flags.get('from')
-    if (from !== undefined && (typeof from !== 'string' || !from)) { err('pult runtime install --from: нужен путь к тарболу node'); return EXIT.error }
+    if (from !== undefined && (typeof from !== 'string' || !from)) { err(tr('pult runtime install --from: нужен путь к тарболу node')); return EXIT.error }
     return runtimeInstall(paths, cliIo, { pkgRoot, ...(typeof from === 'string' ? { from } : {}) })
   }
-  err('pult runtime: нужен один из status|install')
+  err(tr('pult runtime: нужен один из status|install'))
   return EXIT.error
 }
 
@@ -1155,13 +1164,13 @@ export async function run(argv: string[]): Promise<number> {
         case 'install': return cmdDaemonInstall(paths, args)
         case 'uninstall': return cmdDaemonUninstall(paths)
         default:
-          err('pult daemon: нужен один из start|status|stop|logs|install|uninstall')
+          err(tr('pult daemon: нужен один из start|status|stop|logs|install|uninstall'))
           return EXIT.error
       }
     }
     case 'events': {
       if (args.sub !== 'tail') {
-        err('pult events: в В1 есть только tail')
+        err(tr('pult events: в В1 есть только tail'))
         return EXIT.error
       }
       return cmdEventsTail(paths, args)
@@ -1194,7 +1203,7 @@ export async function run(argv: string[]): Promise<number> {
     case 'net':
       return cmdNet(paths, args)
     default:
-      err(`неизвестная команда: ${args.verb}\n\n${HELP}`)
+      err(tr`неизвестная команда: ${args.verb}\n\n${HELP}`)
       return EXIT.error
   }
 }

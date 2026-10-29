@@ -1,3 +1,5 @@
+import { getLanguage } from '../../../src/i18n/core.js'
+import { t as tr } from '../lib/i18n.js'
 // Свёртка потока событий одной сессии в ленту разговора. ЧИСТАЯ: вход — лента и событие, выход —
 // новая лента (или та же, если событие ничего не меняет — React не перерисует).
 //
@@ -181,12 +183,12 @@ const push = (conv: Conversation, ev: PultEvent, item: ConvItem, parentId?: stri
 // --- причины провала ------------------------------------------------------------
 
 const NET_REASON: Record<string, string> = {
-  blocked_country: 'страна выхода в списке-страже',
-  not_allowed_country: 'страны выхода нет в списке разрешённых',
-  unknown_location: 'страну выхода определить не удалось',
-  proxy_dead: 'прокси не отвечает',
-  no_proxy: 'режим required, а прокси не задан',
-  api_retry_storm: 'провайдер не отвечает: повторы подряд',
+  blocked_country: tr('страна выхода в списке-страже'),
+  not_allowed_country: tr('страны выхода нет в списке разрешённых'),
+  unknown_location: tr('страну выхода определить не удалось'),
+  proxy_dead: tr('прокси не отвечает'),
+  no_proxy: tr('режим required, а прокси не задан'),
+  api_retry_storm: tr('провайдер не отвечает: повторы подряд'),
 }
 
 export function netBlockedText(data: Record<string, unknown>): { title: string; text: string } {
@@ -196,15 +198,15 @@ export function netBlockedText(data: Record<string, unknown>): { title: string; 
   const retries = num(data['retries'])
   const why = NET_REASON[reason] ?? reason
   const parts = [
-    loc ? `выход: ${loc}` : null,
-    guard ? `${data['guardMode'] === 'allow' ? 'разрешены' : 'страж'}: ${guard}` : null,
-    retries !== undefined ? `повторов: ${retries}` : null,
+    loc ? tr`выход: ${loc}` : null,
+    guard ? `${data['guardMode'] === 'allow' ? tr('разрешены') : tr('страж')}: ${guard}` : null,
+    retries !== undefined ? tr`повторов: ${retries}` : null,
   ].filter(Boolean)
-  const todo = reason === 'proxy_dead' ? 'подними прокси или переключи профиль сети'
-    : reason === 'no_proxy' ? 'укажи network.<провайдер>.proxy или mode "off" в config.json'
-    : reason === 'not_allowed_country' ? 'смени выход VPN на страну из списка или поправь «Настройки» → «Страж сети» и повтори реплику'
-    : 'подними VPN и повтори реплику'
-  return { title: `Сеть заблокирована стражем — ${why}`, text: `${parts.length ? parts.join(' · ') + ' — ' : ''}${todo}` }
+  const todo = reason === 'proxy_dead' ? tr('подними прокси или переключи профиль сети')
+    : reason === 'no_proxy' ? tr('укажи network.<провайдер>.proxy или mode "off" в config.json')
+    : reason === 'not_allowed_country' ? tr('смени выход VPN на страну из списка или поправь «Настройки» → «Страж сети» и повтори реплику')
+    : tr('подними VPN и повтори реплику')
+  return { title: tr`Сеть заблокирована стражем — ${why}`, text: `${parts.length ? parts.join(' · ') + ' — ' : ''}${todo}` }
 }
 
 // --- свёртка ---------------------------------------------------------------------
@@ -386,7 +388,7 @@ export function applyConversation(conv: Conversation, ev: PultEvent): Conversati
       const text = str(d['text'])
       return push(conv, ev, {
         ...base, type: 'notice', tone: 'fail',
-        title: `Провайдер ${provider} остановлен целиком`,
+        title: tr`Провайдер ${provider} остановлен целиком`,
         ...(text ? { text } : {}),
       })
     }
@@ -401,13 +403,13 @@ export function applyConversation(conv: Conversation, ev: PultEvent): Conversati
         const u = w ? num(w['utilization']) : undefined
         return push(conv, ev, {
           ...base, type: 'notice', tone: 'wait',
-          title: `Лимит ${ev.provider}${type === 'seven_day' ? ' на неделю' : type === 'five_hour' ? ' на 5 ч' : ''} израсходован${u !== undefined ? ` на ${Math.round(u * 100)}%` : ''} — работать можно`,
+          title: tr`Лимит ${ev.provider}${type === 'seven_day' ? tr(' на неделю') : type === 'five_hour' ? tr(' на 5 ч') : ''} израсходован${u !== undefined ? tr` на ${Math.round(u * 100)}%` : ''} — работать можно`,
           ...(resetsAt !== undefined ? { resetsAt } : {}),
         })
       }
       return push(conv, ev, {
         ...base, type: 'notice', tone: 'wait',
-        title: `Лимит ${ev.provider} исчерпан${type ? ` (${type})` : ''}`,
+        title: tr`Лимит ${ev.provider} исчерпан${type ? ` (${type})` : ''}`,
         ...(resetsAt !== undefined ? { resetsAt } : {}),
       })
     }
@@ -419,7 +421,7 @@ export function applyConversation(conv: Conversation, ev: PultEvent): Conversati
       if (state !== 'skipped' && state !== 'pending') return { ...conv, lastId: ev.id }
       return push(conv, ev, {
         ...base, type: 'notice', tone: 'wait',
-        title: state === 'skipped' ? 'Ход без браузера' : 'Браузер — после перезапуска демона',
+        title: state === 'skipped' ? tr('Ход без браузера') : tr('Браузер — после перезапуска демона'),
         text: str(d['reason']) ?? '',
       })
     }
@@ -441,15 +443,15 @@ export function applyConversation(conv: Conversation, ev: PultEvent): Conversati
       // Сторож тишины демона (О2): ход давно молчит. Ход не обрывается — решает человек: «Стоп» или ждать.
       const ms = num(d['silentForMs'])
       return push(conv, ev, {
-        ...base, type: 'notice', tone: 'wait', title: 'Похоже, завис',
-        text: `${ms !== undefined ? `ход молчит ${Math.max(1, Math.round(ms / 60_000))} мин` : 'ход давно молчит'} — останови его «Стоп» или подожди`,
+        ...base, type: 'notice', tone: 'wait', title: tr('Похоже, завис'),
+        text: tr`${ms !== undefined ? tr`ход молчит ${Math.max(1, Math.round(ms / 60_000))} мин` : tr('ход давно молчит')} — останови его «Стоп» или подожди`,
       })
     }
 
     case 'status.changed': {
       const status = str(d['status'])
       if (status === 'interrupted') {
-        return settle(push(conv, ev, { ...base, type: 'notice', tone: 'info', title: 'Ход остановлен' }), ev.id, ev.ts)
+        return settle(push(conv, ev, { ...base, type: 'notice', tone: 'info', title: tr('Ход остановлен') }), ev.id, ev.ts)
       }
       if (status === 'failed') {
         // Провал, о котором уже сказала строка стража или остановки провайдера, второй раз не пишем.
@@ -457,7 +459,7 @@ export function applyConversation(conv: Conversation, ev: PultEvent): Conversati
         const last = conv.items[conv.items.length - 1]
         if (last && last.type === 'notice' && last.tone === 'fail' && ev.id - last.id <= 5) return settle(conv, ev.id, ev.ts)
         const text = str(d['message']) ?? str(d['error']) ?? str(d['errorCode'])
-        return settle(push(conv, ev, { ...base, type: 'notice', tone: 'fail', title: 'Ход не удался', ...(text ? { text } : {}) }), ev.id, ev.ts)
+        return settle(push(conv, ev, { ...base, type: 'notice', tone: 'fail', title: tr('Ход не удался'), ...(text ? { text } : {}) }), ev.id, ev.ts)
       }
       // Ход закончился — все «идущие» реплики и инструменты этого хода больше не идут.
       if (status === 'idle' || status === 'done') return settle(conv, ev.id)
@@ -524,7 +526,7 @@ export { toolSummary } from '../../../src/sessions/turnPhase.js'
 
 /** Длительность в секундах по-русски: «0,3 с», а не «0.3 с» (`toFixed` всегда пишет точку). */
 export function formatSeconds(ms: number): string {
-  return `${(ms / 1000).toLocaleString('ru-RU', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} с`
+  return tr`${(ms / 1000).toLocaleString(getLanguage() === 'ru' ? 'ru-RU' : 'en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} с`
 }
 
 /**

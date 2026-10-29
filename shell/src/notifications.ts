@@ -1,3 +1,4 @@
+import { t as tr } from './i18n.js'
 import { randomUUID } from 'node:crypto'
 import type { NotificationConstructorOptions } from 'electron'
 import type { NotifyTarget } from './contract.js'
@@ -47,7 +48,7 @@ export function createNotificationRouter(d: {
     const release = (): void => { if (active.get(n.id) === n) active.delete(n.id) }
     n.once('click', () => { try { d.open(target) } finally { release() } })
     n.once('close', release)
-    n.once('failed', () => { release(); d.warn?.('системное уведомление не показано') })
+    n.once('failed', () => { release(); d.warn?.(tr('системное уведомление не показано')) })
   }
   return {
     show(options: Options, raw: unknown): string {
@@ -65,7 +66,7 @@ export function createNotificationRouter(d: {
           const target = notificationTarget(n.id)
           if (target && !active.has(n.id)) retain(n, target)
         }
-      } catch { d.warn?.('история системных уведомлений недоступна') }
+      } catch { d.warn?.(tr('история системных уведомлений недоступна')) }
     },
     size: (): number => active.size,
   }

@@ -26,7 +26,7 @@ function runCli(paths: PultPaths, args: string[], timeoutMs = 25_000, extraEnv: 
     const child = spawn(process.execPath, [CLI, ...args], {
       // PULT_TEST_NET делает прогон герметичным: без неё демон звал настоящий `curl`
       // и результат зависел от страны выхода машины (ревью В3 — течёт и В2).
-      env: { ...process.env, PULT_HOME: paths.home, PULT_TEST: '1', PULT_TEST_NET: netMode, PULT_CLAUDE_BIN: FAKE_CLAUDE, ...extraEnv },
+      env: { ...process.env, PULT_LANG: 'ru', PULT_HOME: paths.home, PULT_TEST: '1', PULT_TEST_NET: netMode, PULT_CLAUDE_BIN: FAKE_CLAUDE, ...extraEnv },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     let stdout = ''

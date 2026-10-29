@@ -641,13 +641,18 @@ describe('M8f: демон — settings.get|set и последний выбор'
     const c = await connectClient(home.paths)
     try {
       const got = (await c.request('settings.get')) as Record<string, unknown>
-      const { network, codexRules, ...rest } = got
+      const { network, codexRules, language, ...rest } = got
+      assert.equal(language, 'auto')
       assert.deepEqual(rest, { newSession: { rememberLast: true, defaults: { claude: {}, codex: {} } }, lastUsed: {}, updates: { check: true } })
       // План 16, № 11: правила «Всегда» Codex — из файла временного дома, не из настоящего ~/.codex.
       assert.deepEqual(codexRules, { path: join(home.paths.home, 'codex-rules', 'default.rules'), exists: false, rules: [], unmarked: 0 })
       // 0.3.6: правило стража и последние выходы; прокси и профили провайдеров окну не отдаются.
       assert.deepEqual((network as Record<string, unknown>)['guard'], { mode: 'deny', countries: ['RU', 'BY', 'CN', 'IR', 'KP', 'SY', 'CU'] })
       assert.deepEqual(Object.keys(network as Record<string, unknown>).sort(), ['exits', 'guard'])
+      await assert.rejects(c.request('settings.set', { language: 'de' }), code('invalid_params'))
+      await c.request('settings.set', { language: 'en' })
+      assert.equal(((await c.request('settings.get')) as Record<string, unknown>)['language'], 'en')
+      assert.equal(JSON.parse(readFileSync(home.paths.config, 'utf8')).custom, 42)
       await assert.rejects(c.request('settings.set', { network: { claude: { mode: 'off' } } }), code('invalid_params'))
       await assert.rejects(c.request('settings.set', { newSession: { rememberLast: true }, notifyCommand: 'curl x' }), code('invalid_params'))
       await assert.rejects(c.request('settings.set', { newSession: { defaults: { claude: { approval: 'full' } } } }), code('invalid_params'))

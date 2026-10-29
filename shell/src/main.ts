@@ -1,3 +1,6 @@
+import { t as tr } from './i18n.js'
+import { refreshLanguage } from './language.js'
+import { getLanguage, isLanguageSetting } from '../../src/i18n/core.js'
 // main-процесс окна Пульта (docs/12 §2). Тонкая оболочка: находит пакет pult, поднимает демона
 // тем же кодом, что и CLI (`ensureDaemon` пакета), держит одно соединение клиента `shell`, отдаёт
 // интерфейс из `<пакет>/dist/ui` по `app://pult/` и пропускает к демону только белый список методов.
@@ -68,6 +71,7 @@ let link: DaemonLink | null = null
 let uiRoot = ''
 /** PULT_HOME — из paths() пакета, как у демона; пусто до boot. */
 let pultHome = ''
+let setPackageLanguage: ((value: 'ru' | 'en') => void) | null = null
 let tray: Tray | null = null
 
 type TestNotice = { id: string; title?: string; body?: string; target: NotifyTarget; kind?: string; sound?: string; silent?: boolean }
@@ -144,7 +148,7 @@ function createWindow(): BrowserWindow {
     minWidth: 900,
     minHeight: 560,
     show: false,
-    title: 'Пульт',
+    title: tr('Пульт'),
     backgroundColor: '#0E141B',
     webPreferences: {
       preload: path.join(HERE, 'preload.cjs'),
@@ -216,7 +220,7 @@ const linkGate = new LinkGate<NavTarget>((t) => {
     openAt(v)
   })
 }, (why) => {
-  log(why === 'overwritten' ? 'ссылка pult:// вытеснена следующей до старта окна' : 'ссылка pult:// потеряна: окно не поднялось')
+  log(why === 'overwritten' ? tr('ссылка pult:// вытеснена следующей до старта окна') : tr('ссылка pult:// потеряна: окно не поднялось'))
 })
 
 const realpathOrNull = (p: string): string | null => { try { return realpathSync(p) } catch { return null } }
@@ -247,7 +251,7 @@ async function vetLinkPath(t: NavTarget): Promise<NavTarget> {
   const { path: p, ...rest } = ns
   const known = await knownFolders()
   const hit = known ? matchKnownPath(p, known, realpathOrNull) : null
-  if (!hit) log('ссылка pult://: папка не из проектов и сессий — выбирает человек', { checked: known !== null })
+  if (!hit) log(tr('ссылка pult://: папка не из проектов и сессий — выбирает человек'), { checked: known !== null })
   return { ...t, newSession: hit ? { ...rest, path: hit } : { ...rest, pathRejected: true } }
 }
 
@@ -260,16 +264,16 @@ function openLink(raw: unknown, via: 'open-url' | 'argv'): boolean {
   if (!r.ok) {
     rec({ via, ok: false, reason: r.reason })
     // Саму ссылку не пишем: в реплике может быть личное. Длины хватит, чтобы узнать свою.
-    log('ссылка pult:// отвергнута', { via, reason: r.reason, length: typeof raw === 'string' ? raw.length : null })
+    log(tr('ссылка pult:// отвергнута'), { via, reason: r.reason, length: typeof raw === 'string' ? raw.length : null })
     return false
   }
   if (!linkRate.allow(Date.now())) {
-    rec({ via, ok: false, reason: 'частая ссылка' })
-    log('ссылка pult:// отброшена: предыдущая пришла только что', { via, type: r.link.type })
+    rec({ via, ok: false, reason: tr('частая ссылка') })
+    log(tr('ссылка pult:// отброшена: предыдущая пришла только что'), { via, type: r.link.type })
     return false
   }
   rec({ via, ok: true, target: linkTarget(r.link) })
-  log('ссылка pult://', { via, type: r.link.type })
+  log(tr('ссылка pult://'), { via, type: r.link.type })
   linkGate.offer(linkTarget(r.link))
   return true
 }
@@ -318,9 +322,9 @@ function trayIcon(): NativeImage {
 function createTray(): void {
   const icon = trayIcon()
   const info = { empty: icon.isEmpty(), template: icon.isTemplateImage(), ...icon.getSize(), scales: icon.getScaleFactors() }
-  if (info.empty) log('трей: значок не загрузился', { dir: path.join(HERE, '..', 'build') })
+  if (info.empty) log(tr('трей: значок не загрузился'), { dir: path.join(HERE, '..', 'build') })
   tray = new Tray(icon)
-  log('трей поднят', info)
+  log(tr('трей поднят'), info)
   if (TEST_MODE) {
     const g = globalThis as TrayTestGlobals
     g.__pultTestTrayIcon = info
@@ -378,6 +382,8 @@ function scheduleTray(): void {
 }
 
 async function refreshTray(): Promise<void> {
+  refreshLanguage(pultHome, app.getLocale())
+  setPackageLanguage?.(getLanguage())
   if (!tray || !link) return
   if (trayBusy) { trayAgain = true; return }
   trayBusy = true
@@ -423,56 +429,59 @@ function hardenWebContents(): void {
 
 /** cwd берём у демона, не от renderer. Даже знакомый sessionId не даёт доступ к чужому media. */
 async function imageForSession(sessionId: unknown, source: unknown) {
-  if (!link || !pultHome || typeof sessionId !== 'string' || typeof source !== 'string') throw new Error('Изображение недоступно')
+  if (!link || !pultHome || typeof sessionId !== 'string' || typeof source !== 'string') throw new Error(tr('Изображение недоступно'))
   const result = await link.call('agent.list', {}) as { sessions?: Array<{ name?: unknown; cwd?: unknown }> }
   const rec = result.sessions?.find((s) => s.name === sessionId)
-  if (!rec || typeof rec.cwd !== 'string') throw new Error('Сессия недоступна')
+  if (!rec || typeof rec.cwd !== 'string') throw new Error(tr('Сессия недоступна'))
   return readScopedImage({ home: pultHome, sessionId, cwd: rec.cwd, codexHome: process.env['CODEX_HOME'] }, source)
 }
 
 function registerIpc(): void {
+  ipcMain.on(IPC.reloadWindow, (e) => { if (trusted(e)) e.sender.reload() })
+  ipcMain.on(IPC.languageGet, (e) => { e.returnValue = trusted(e) ? { language: getLanguage(), override: isLanguageSetting(process.env['PULT_LANG']) ? process.env['PULT_LANG'] : null } : { language: 'en', override: null } })
   ipcMain.on(IPC.testMode, (e) => { e.returnValue = trusted(e) ? TEST_MODE : false })
   ipcMain.on(IPC.connectionGet, (e) => { e.returnValue = trusted(e) && link ? link.current : null })
 
   const workspace = async (sessionId: unknown): Promise<{ cwd: string }> => {
-    if (!link || typeof sessionId !== 'string') throw new Error('Сессия недоступна')
+    if (!link || typeof sessionId !== 'string') throw new Error(tr('Сессия недоступна'))
     const result = await link.call('agent.list', {}) as { sessions?: Array<{ name?: unknown; cwd?: unknown }> }
     const rec = result.sessions?.find((s) => s.name === sessionId)
-    if (!rec || typeof rec.cwd !== 'string') throw new Error('Сессия недоступна')
+    if (!rec || typeof rec.cwd !== 'string') throw new Error(tr('Сессия недоступна'))
     return { cwd: rec.cwd }
   }
   ipcMain.handle(IPC.listFiles, async (e, sessionId: unknown, source: unknown = '.', hidden: unknown = false): Promise<CallReply> => {
-    if (!trusted(e)) return fail('forbidden', 'Вызов не из окна Пульта')
+    if (!trusted(e)) return fail('forbidden', tr('Вызов не из окна Пульта'))
     try {
-      if (typeof source !== 'string' || typeof hidden !== 'boolean') throw new Error('Неверная папка')
+      if (typeof source !== 'string' || typeof hidden !== 'boolean') throw new Error(tr('Неверная папка'))
       return { ok: true, result: await listWorkspaceFiles(await workspace(sessionId), source, hidden) }
-    } catch { return fail('files_unavailable', 'Не удалось прочитать папку проекта') }
+    } catch { return fail('files_unavailable', tr('Не удалось прочитать папку проекта')) }
   })
   ipcMain.handle(IPC.previewFile, async (e, sessionId: unknown, source: unknown): Promise<CallReply> => {
-    if (!trusted(e)) return fail('forbidden', 'Вызов не из окна Пульта')
+    if (!trusted(e)) return fail('forbidden', tr('Вызов не из окна Пульта'))
     try {
-      if (typeof source !== 'string' || typeof sessionId !== 'string' || !link) throw new Error('Неверный файл')
+      if (typeof source !== 'string' || typeof sessionId !== 'string' || !link) throw new Error(tr('Неверный файл'))
       const scope = await workspace(sessionId)
       try { return { ok: true, result: await readWorkspaceFile(scope, source) } } catch {
         // Files outside the workspace are only previewed when the conversation actually linked them.
         const history = await link.call('agent.read', { name: sessionId, format: 'json' }) as { events?: Array<{ kind?: string; data?: Record<string, unknown> }> }
-        if (!referencesFile(history.events ?? [], source)) throw new Error('Файл вне проекта')
+        if (!referencesFile(history.events ?? [], source)) throw new Error(tr('Файл вне проекта'))
         return { ok: true, result: await readWorkspaceFile({ ...scope, allowedFiles: [source] }, source) }
       }
-    } catch { return fail('file_unavailable', 'Файл недоступен: он перемещён, вне проекта или доступ к нему закрыт') }
+    } catch { return fail('file_unavailable', tr('Файл недоступен: он перемещён, вне проекта или доступ к нему закрыт')) }
   })
 
   ipcMain.handle(IPC.call, async (e, method: unknown, params: unknown): Promise<CallReply> => {
-    if (!trusted(e)) return fail('forbidden', 'вызов не из окна Пульта')
-    if (!isAllowedMethod(method)) return fail('method_not_allowed', `метод ${String(method)} окну не разрешён`)
-    if (SUBSCRIBE_VIA_BRIDGE.has(method)) return fail('use_subscribe', `${method} — только через window.pult.subscribe`)
+    if (!trusted(e)) return fail('forbidden', tr('вызов не из окна Пульта'))
+    if (!isAllowedMethod(method)) return fail('method_not_allowed', tr`метод ${String(method)} окну не разрешён`)
+    if (SUBSCRIBE_VIA_BRIDGE.has(method)) return fail('use_subscribe', tr`${method} — только через window.pult.subscribe`)
     if (params !== undefined && (typeof params !== 'object' || params === null || Array.isArray(params))) {
-      return fail('invalid_params', 'params — объект')
+      return fail('invalid_params', tr('params — объект'))
     }
-    if (!link) return fail('no_daemon', 'демон недоступен')
+    if (!link) return fail('no_daemon', tr('демон недоступен'))
     try {
       const result = await link.call(method, sanitizeParams(method, params as Record<string, unknown> | undefined))
-      if (TRAY_METHODS.has(method)) scheduleTray()
+      if (method === 'settings.set') { refreshLanguage(pultHome, app.getLocale()); setPackageLanguage?.(getLanguage()) }
+      if (TRAY_METHODS.has(method) || method === 'settings.set') scheduleTray()
       return { ok: true, result }
     } catch (err) {
       return toReply(err)
@@ -495,22 +504,22 @@ function registerIpc(): void {
   })
 
   ipcMain.handle(IPC.startDaemon, async (e): Promise<CallReply> => {
-    if (!trusted(e) || !link) return fail('forbidden', 'вызов не из окна Пульта')
+    if (!trusted(e) || !link) return fail('forbidden', tr('вызов не из окна Пульта'))
     try { await link.startDaemon(); return { ok: true, result: null } } catch (err) { return toReply(err) }
   })
 
   ipcMain.handle(IPC.stopDaemon, async (e): Promise<CallReply> => {
-    if (!trusted(e) || !link) return fail('forbidden', 'вызов не из окна Пульта')
+    if (!trusted(e) || !link) return fail('forbidden', tr('вызов не из окна Пульта'))
     const win = BrowserWindow.fromWebContents(e.sender)
     // Подтверждение — системным диалогом в main, а не только в интерфейсе: код страницы сам
     // остановить демона не может, нужен клик человека.
     const opts = {
       type: 'warning' as const,
-      buttons: ['Остановить', 'Отмена'],
+      buttons: [tr('Остановить'), tr('Отмена')],
       defaultId: 1,
       cancelId: 1,
-      message: 'Остановить демона Пульта?',
-      detail: 'Все агенты остановятся, текущие ходы прервутся. Окно останется открытым — запустить демона можно кнопкой.',
+      message: tr('Остановить демона Пульта?'),
+      detail: tr('Все агенты остановятся, текущие ходы прервутся. Окно останется открытым — запустить демона можно кнопкой.'),
     }
     const { response } = win ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts)
     if (response !== 0) return { ok: true, result: false }
@@ -520,7 +529,7 @@ function registerIpc(): void {
   ipcMain.handle(IPC.pickFolder, async (e): Promise<string | null> => {
     if (!trusted(e)) return null
     const win = BrowserWindow.fromWebContents(e.sender)
-    const opts = { properties: ['openDirectory' as const, 'createDirectory' as const], title: 'Папка агента' }
+    const opts = { properties: ['openDirectory' as const, 'createDirectory' as const], title: tr('Папка агента') }
     const r = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts)
     return r.canceled ? null : (r.filePaths[0] ?? null)
   })
@@ -531,45 +540,45 @@ function registerIpc(): void {
   })
 
   ipcMain.handle(IPC.readImage, async (e, sessionId: unknown, source: unknown): Promise<CallReply> => {
-    if (!trusted(e)) return fail('forbidden', 'вызов не из окна Пульта')
+    if (!trusted(e)) return fail('forbidden', tr('вызов не из окна Пульта'))
     try {
       const image = await imageForSession(sessionId, source)
       return { ok: true, result: { dataUrl: `data:${image.mimeType};base64,${image.bytes.toString('base64')}`, name: image.name } }
-    } catch { return fail('image_unavailable', 'Изображение недоступно: файл отсутствует, вне папки проекта или формат не поддерживается') }
+    } catch { return fail('image_unavailable', tr('Изображение недоступно: файл отсутствует, вне папки проекта или формат не поддерживается')) }
   })
 
   ipcMain.handle(IPC.openFile, async (e, raw: unknown): Promise<CallReply> => {
-    if (!trusted(e)) return fail('forbidden', 'вызов не из окна Пульта')
+    if (!trusted(e)) return fail('forbidden', tr('вызов не из окна Пульта'))
     try {
       const file = localFile(raw)
       if (TEST_MODE) ((globalThis as { __pultTestFiles?: unknown[] }).__pultTestFiles ??= []).push(file)
       else if (file.action === 'reveal') shell.showItemInFolder(file.path)
       else { const error = await shell.openPath(file.path); if (error) throw new Error(error) }
       return { ok: true, result: file.action === 'open' ? 'opened' : 'revealed' }
-    } catch { return fail('file_unavailable', 'Файл недоступен: он удалён, перемещён или нет доступа') }
+    } catch { return fail('file_unavailable', tr('Файл недоступен: он удалён, перемещён или нет доступа')) }
   })
 
   ipcMain.handle(IPC.saveImage, async (e, sessionId: unknown, source: unknown): Promise<CallReply> => {
-    if (!trusted(e)) return fail('forbidden', 'вызов не из окна Пульта')
+    if (!trusted(e)) return fail('forbidden', tr('вызов не из окна Пульта'))
     try {
       const image = await imageForSession(sessionId, source)
       const win = BrowserWindow.fromWebContents(e.sender)
-      const opts = { title: 'Сохранить изображение', defaultPath: image.name }
+      const opts = { title: tr('Сохранить изображение'), defaultPath: image.name }
       const selected = win ? await dialog.showSaveDialog(win, opts) : await dialog.showSaveDialog(opts)
       if (selected.canceled || !selected.filePath) return { ok: true, result: false }
       writeFileSync(selected.filePath, image.bytes)
       return { ok: true, result: true }
-    } catch { return fail('image_unavailable', 'Не удалось сохранить изображение') }
+    } catch { return fail('image_unavailable', tr('Не удалось сохранить изображение')) }
   })
 
   ipcMain.handle(IPC.openImage, async (e, sessionId: unknown, source: unknown): Promise<CallReply> => {
-    if (!trusted(e)) return fail('forbidden', 'вызов не из окна Пульта')
+    if (!trusted(e)) return fail('forbidden', tr('вызов не из окна Пульта'))
     try {
       const image = await imageForSession(sessionId, source)
       if (TEST_MODE) ((globalThis as { __pultTestOpened?: string[] }).__pultTestOpened ??= []).push(image.path)
       else { const error = await shell.openPath(image.path); if (error) throw new Error(error) }
       return { ok: true, result: null }
-    } catch { return fail('image_unavailable', 'Не удалось открыть изображение') }
+    } catch { return fail('image_unavailable', tr('Не удалось открыть изображение')) }
   })
 
   ipcMain.handle(IPC.copyText, (e, text: unknown): void => {
@@ -608,9 +617,9 @@ function registerIpc(): void {
   // Окно 0.1.16: картинка из буфера → PNG в PULT_HOME/attachments/<сессия> (clipboardImage.ts). От окна — только имя
   // сессии (проверяется по правилу имён демона); путь решает main, байты — из системного буфера.
   ipcMain.handle(IPC.clipboardImage, async (e, session: unknown): Promise<SaveImageResult> => {
-    if (!trusted(e)) return { error: 'вызов не из окна Пульта' }
-    if (!pultHome) return { error: 'Пульт ещё не готов' }
-    if (!saveRate.take(Date.now())) return { error: 'не чаще одной картинки в секунду' }
+    if (!trusted(e)) return { error: tr('вызов не из окна Пульта') }
+    if (!pultHome) return { error: tr('Пульт ещё не готов') }
+    if (!saveRate.take(Date.now())) return { error: tr('не чаще одной картинки в секунду') }
     // Тестовый прогон системный буфер не читает и не пишет: e2e кладёт байты картинки в main, дальше — тот же путь
     // (ClipboardItem → заголовок → nativeImage → PNG → файл).
     const testBytes = (globalThis as { __pultTestClipboardImage?: Uint8Array }).__pultTestClipboardImage
@@ -625,30 +634,30 @@ function registerIpc(): void {
       bytes: await readClipboardImageBytes(board),
       decode: (b) => nativeImage.createFromBuffer(b),
     })
-    if ('error' in r) log('картинка из буфера не сохранена', { error: r.error })
+    if ('error' in r) log(tr('картинка из буфера не сохранена'), { error: r.error })
     return r
   })
 
   ipcMain.handle(IPC.attachmentImport, (e, session: unknown, item: unknown) => {
-    if (!trusted(e)) return { error: 'Вызов не из окна Пульта.' }
+    if (!trusted(e)) return { error: tr('Вызов не из окна Пульта.') }
     return importStoredAttachment({ home: pultHome, session, item })
   })
 
   // Не exposed строковым методом рендерера: preload получает path у настоящего File через webUtils.
   ipcMain.handle(IPC.attachmentFiles, (e, session: unknown, item: unknown) => {
-    if (!trusted(e)) return { error: 'Вызов не из окна Пульта.' }
+    if (!trusted(e)) return { error: tr('Вызов не из окна Пульта.') }
     return importAttachment({ home: pultHome, session, item })
   })
   // Источник выбирается системой, а не строкой из страницы.
   ipcMain.handle(IPC.attachmentClipboard, async (e, session: unknown) => {
-    if (!trusted(e)) return [{ error: 'Вызов не из окна Пульта.' }]
+    if (!trusted(e)) return [{ error: tr('Вызов не из окна Пульта.') }]
     const sources = await clipboardPathsForAttachments()
-    if (sources.length > 20) return [{ error: 'Можно добавить не больше 20 файлов за один раз.' }]
+    if (sources.length > 20) return [{ error: tr('Можно добавить не больше 20 файлов за один раз.') }]
     return sources.map((source) => importAttachment({ home: pultHome, session, item: { path: source } }))
   })
 
   ipcMain.handle(IPC.attachmentPreview, (e, session: unknown, source: unknown) => {
-    if (!trusted(e)) return { error: 'Вызов не из окна Пульта.' }
+    if (!trusted(e)) return { error: tr('Вызов не из окна Пульта.') }
     return previewAttachment({ home: pultHome, session, source, decode: (bytes) => nativeImage.createFromBuffer(bytes) })
   })
 
@@ -666,18 +675,19 @@ function registerIpc(): void {
 }
 
 async function boot(): Promise<void> {
+  refreshLanguage(process.env['PULT_HOME'] || path.join(app.getPath('home'), '.pult'), app.getLocale())
   const located = locatePackage(process.env, realFs, { packaged: app.isPackaged })
   if ('error' in located) {
     // В лог тоже: диалог в безголовом прогоне (check-app) никто не видит, а причина нужна.
-    log('пакет не найден', { error: located.error })
+    log(tr('пакет не найден'), { error: located.error })
     linkGate.drop()
-    dialog.showErrorBox('Пульт не найден', located.error)
+    dialog.showErrorBox(tr('Пульт не найден'), located.error)
     app.exit(1)
     return
   }
   const pkg = located.root
   uiRoot = realpathSync(path.join(pkg, 'dist', 'ui'))
-  log('пакет найден', { root: pkg, via: located.via, bridge: BRIDGE_VERSION })
+  log(tr('пакет найден'), { root: pkg, via: located.via, bridge: BRIDGE_VERSION })
 
   // Код протокола — из самого пакета (один источник правды), а не копия в оболочке.
   const load = async <T>(rel: string): Promise<T> => (await import(pathToFileURL(path.join(pkg, 'dist', rel)).href)) as T
@@ -687,6 +697,13 @@ async function boot(): Promise<void> {
   const paths = pathsMod.paths(process.env)
   // Не `paths.attachments`: окно 0.1.16 может стоять при пакете старше, чей layout этого поля не знает.
   pultHome = paths.home
+  refreshLanguage(pultHome, app.getLocale())
+  // Dynamically loaded package helpers have their own module instance of the locale.
+  try {
+    const locale = await load<typeof import('../../src/i18n/core.js')>('i18n/core.js')
+    setPackageLanguage = locale.setLanguage
+    setPackageLanguage(getLanguage())
+  } catch { /* older packages predate localization */ }
   const nodePath = resolveNode(process.env, paths.nodePath, realFs)
 
   link = new DaemonLink({
@@ -696,7 +713,7 @@ async function boot(): Promise<void> {
         return await clientMod.connectClient(paths, { client: 'shell' })
       } catch { /* демона нет — поднимаем */ }
       if (!nodePath) {
-        throw Object.assign(new Error('node >= 22 не найден: задай PULT_NODE или поставь службу (pult daemon install)'), { code: 'no_node' })
+        throw Object.assign(new Error(tr('node >= 22 не найден: задай PULT_NODE или поставь службу (pult daemon install)')), { code: 'no_node' })
       }
       const r = await startMod.ensureDaemon(paths, {
         client: 'shell',
@@ -752,9 +769,9 @@ if (!app.requestSingleInstanceLock()) {
   if (TEST_MODE) (globalThis as LinkTestGlobals).__pultTestProtocolClient = registerScheme
   hardenWebContents()
   app.whenReady().then(boot).catch((e: unknown) => {
-    log('старт оболочки провалился', { error: (e as Error).message })
+    log(tr('старт оболочки провалился'), { error: (e as Error).message })
     linkGate.drop()
-    dialog.showErrorBox('Пульт не запустился', (e as Error).message)
+    dialog.showErrorBox(tr('Пульт не запустился'), (e as Error).message)
     app.exit(1)
   })
   // Закрыть окно ≠ остановить сессии: демон живёт отдельно, приложение остаётся в доке и в строке

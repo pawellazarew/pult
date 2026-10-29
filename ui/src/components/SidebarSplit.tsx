@@ -1,3 +1,4 @@
+import { t } from '../lib/i18n.js'
 import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties, ReactElement, ReactNode } from 'react'
 const MIN = .18, MAX = .55, DEFAULT = .30
@@ -26,9 +27,9 @@ export function SidebarSplit({ projects, recent }: { projects: ReactNode; recent
   const save = (): void => { try { window.localStorage.setItem(key, String(value.current)) } catch { /* private storage may be disabled */ } }
   return <div className="tree project-sidebar" ref={root} data-testid="agent-list" style={{ '--recent-share': `${actual * 100}%` } as CSSProperties}>
     {projects}
-    <div className="sidebar-splitter" role="separator" tabIndex={0} aria-label="Высота списка недавних" aria-orientation="horizontal"
+    <div className="sidebar-splitter" role="separator" tabIndex={0} aria-label={t("Высота списка недавних")} aria-orientation="horizontal"
       aria-valuemin={Math.round(minimum * 100)} aria-valuemax={MAX * 100} aria-valuenow={Math.round(actual * 100)} data-testid="recent-resize"
-      title="Потяни, чтобы изменить высоту недавних. Двойной клик — сбросить."
+      title={t("Потяни, чтобы изменить высоту недавних. Двойной клик — сбросить.")}
       onPointerDown={(e) => { if (e.button !== 0) return; e.preventDefault(); dragging.current = true; e.currentTarget.setPointerCapture(e.pointerId) }}
       onPointerMove={(e) => { if (!dragging.current || !root.current) return; const box = root.current.getBoundingClientRect(); if (box.height) update((box.bottom - e.clientY) / box.height) }}
       onPointerUp={(e) => { if (!dragging.current) return; dragging.current = false; save(); e.currentTarget.releasePointerCapture(e.pointerId) }}

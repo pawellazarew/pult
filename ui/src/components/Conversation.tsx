@@ -1,3 +1,4 @@
+import { t } from '../lib/i18n.js'
 // Центр окна: разговор с выбранным агентом (docs/12 §3 п.2). Вся логика ленты — в model/conversation.ts;
 // здесь только отрисовка, прокрутка «прилипает» к низу, пока человек сам не отлистал вверх.
 
@@ -235,13 +236,13 @@ export function Conversation(p: ConversationProps): ReactElement {
 
   return (
     <ImageContext.Provider value={imageBridge ? { bridge: imageBridge, sessionId: agent.name } : null}>
-    <section className="conv" aria-label={`Разговор с ${agentLabel(agent)}`} data-testid="conversation" data-agent={agent.name}>
+    <section className="conv" aria-label={t`Разговор с ${agentLabel(agent)}`} data-testid="conversation" data-agent={agent.name}>
       <header className="conv-head">
         <div className="conv-title">
           <div className="top">
             <Title agent={agent} onRename={p.onRename} />
             <ProviderTag provider={agent.provider} />
-            <Chip tone={sv.tone} label={agent.status === 'cold' ? 'Можно продолжить' : sv.label} testId="conv-status" />
+            <Chip tone={sv.tone} label={agent.status === 'cold' ? t('Можно продолжить') : sv.label} testId="conv-status" />
           </div>
           <div className="conv-location" data-testid="conv-location" title={agent.cwd}><Icon name="folder" />{agent.cwd.split('/').filter(Boolean).pop() ?? agent.cwd}{agent.branch ? ` / ${agent.branch}` : ''}</div>
         </div>
@@ -252,8 +253,8 @@ export function Conversation(p: ConversationProps): ReactElement {
         <div className="strip strip-wait" data-testid="limit-strip">
           <Icon name="clock" />
           <span>{holds
-            ? `Лимит ${agent.provider} исчерпан · сброс в ${formatClock((resetsAt as number) * 1000, p.now)} (${formatResetIn(resetsAt, p.now)}) — новая реплика до сброса не пойдёт.`
-            : `Лимит ${agent.provider} упирался${resetsAt ? ` — сброс был в ${formatClock(resetsAt * 1000, p.now)}` : ''}. Можно пробовать снова: если лимит ещё держит, демон скажет.`}</span>
+            ? t`Лимит ${agent.provider} исчерпан · сброс в ${formatClock((resetsAt as number) * 1000, p.now)} (${formatResetIn(resetsAt, p.now)}) — новая реплика до сброса не пойдёт.`
+            : t`Лимит ${agent.provider} упирался${resetsAt ? t` — сброс был в ${formatClock(resetsAt * 1000, p.now)}` : ''}. Можно пробовать снова: если лимит ещё держит, демон скажет.`}</span>
         </div>
       )}
 
@@ -262,18 +263,18 @@ export function Conversation(p: ConversationProps): ReactElement {
       <div className="feed" ref={feed} onScroll={onScroll} onLoadCapture={() => { const el = feed.current; if (el && stick.current) el.scrollTop = el.scrollHeight }} data-testid="feed">
         {p.items.length === 0 && !p.pending && p.historyLoading ? (
           <div className="conv-empty" data-testid="history-loading">
-            <h3>Загружаю историю…</h3>
+            <h3>{t("Загружаю историю…")}</h3>
           </div>
         ) : p.items.length === 0 && !p.pending ? (
           <div className="conv-empty">
-            <h3>Разговор пуст</h3>
-            <div>Напиши первую реплику внизу — сессия начнёт работу в <span className="mono">{shortPath(agent.cwd)}</span>.</div>
+            <h3>{t("Разговор пуст")}</h3>
+            <div>{t("Напиши первую реплику внизу — сессия начнёт работу в ")}<span className="mono">{shortPath(agent.cwd)}</span>.</div>
           </div>
         ) : (
           <div className="feed-inner">
             {p.earlier?.more && (
               <button type="button" className="btn earlier" data-testid="load-earlier" disabled={p.earlier.loading} onClick={() => p.onLoadEarlier?.()}>
-                {p.earlier.loading ? 'Загружаю…' : 'Показать раньше'}
+                {p.earlier.loading ? t('Загружаю…') : t('Показать раньше')}
               </button>
             )}
             <ActivityItems items={p.items} props={p} />
@@ -281,10 +282,10 @@ export function Conversation(p: ConversationProps): ReactElement {
               // M8e: реплика в пути. Тот же вид, что у реплики человека, но бледнее и без «копировать»;
               // настоящая придёт событием `message.user` и встанет на это место.
               <div className="it it-user it-pending" data-testid="msg-user-pending" aria-busy="true">
-                <Gutter who="ты" cls="who-you" ts={p.pending.ts} />
+                <Gutter who={t("ты")} cls="who-you" ts={p.pending.ts} />
                 <div className="body">
                   <Markdown text={p.pending.text} human />
-                  <div className="pending-note" role="status">отправляется…</div>
+                  <div className="pending-note" role="status">{t("отправляется…")}</div>
                 </div>
               </div>
             )}
@@ -294,7 +295,7 @@ export function Conversation(p: ConversationProps): ReactElement {
       </div>
       {away && <button type="button" className="jump-latest btn" data-testid="jump-latest" onClick={() => {
         const el = feed.current; if (el) { stick.current = true; setAway(false); el.scrollTop = el.scrollHeight }
-      }}>К последним ↓</button>}
+      }}>{t("К последним ↓")}</button>}
       </div>
 
       {p.onQueueRemove && (agent.queue?.length || agent.queuePaused || qe.edit || qe.notice) ? (
@@ -322,20 +323,19 @@ function ConversationMenu({ agent, menu, busy, onRemove }: { agent: AgentView; m
   if (!menu) {
     return (
       <details className="conv-actions">
-        <summary aria-label="Действия с беседой">···</summary>
-        <button type="button" className="btn btn-ghost btn-sm" onClick={onRemove} data-testid="remove-agent" title="Удалить сессию">
-          <Icon name="trash" />Удалить беседу
-        </button>
+        <summary aria-label={t("Действия с беседой")}>···</summary>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={onRemove} data-testid="remove-agent" title={t("Удалить сессию")}>
+          <Icon name="trash" />{t("Удалить беседу")}</button>
       </details>
     )
   }
   return (
     <>
-      <button type="button" className="conv-menu" data-testid="conv-menu" aria-label="Действия с беседой" title="Действия с беседой"
+      <button type="button" className="conv-menu" data-testid="conv-menu" aria-label={t("Действия с беседой")} title={t("Действия с беседой")}
         onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); setAt({ x: r.left, y: r.bottom + 2 }) }}>
         <span className="dots" aria-hidden="true">⋯</span>
       </button>
-      {at && <ContextMenu at={at} items={sessionMenuItems(agent, menu)} onClose={() => setAt(null)} testId="session-menu-list" label={`Действия с беседой ${agentLabel(agent)}`} />}
+      {at && <ContextMenu at={at} items={sessionMenuItems(agent, menu)} onClose={() => setAt(null)} testId="session-menu-list" label={t`Действия с беседой ${agentLabel(agent)}`} />}
     </>
   )
 }
@@ -387,7 +387,7 @@ function Title({ agent, onRename }: { agent: AgentView; onRename(title: string):
       <>
         <h2 onDoubleClick={open} data-testid="conv-title">{agentLabel(agent)}</h2>
         <button type="button" className="btn btn-ghost btn-sm title-btn" onClick={open}
-          data-testid="rename-agent" title="Переименовать" aria-label="Переименовать сессию"><Icon name="edit" /></button>
+          data-testid="rename-agent" title={t("Переименовать")} aria-label={t("Переименовать сессию")}><Icon name="edit" /></button>
       </>
     )
   }
@@ -396,7 +396,7 @@ function Title({ agent, onRename }: { agent: AgentView; onRename(title: string):
     // Esc уходил бы мимо него — в горячие клавиши окна («Остановить ход?»).
     // Уход фокуса сохраняет, но не когда ушло всё окно (⌘Tab за текстом для названия).
     <input ref={input} className="title-edit" value={draft} maxLength={AGENT_TITLE_MAX} readOnly={saving}
-      placeholder={agent.name} aria-label="Название сессии" data-testid="rename-input"
+      placeholder={agent.name} aria-label={t("Название сессии")} data-testid="rename-input"
       onChange={(e) => setDraft(e.target.value)} onKeyDown={onKey}
       onBlur={() => { if (!leaving.current && document.hasFocus()) void save(false) }} />
   )
@@ -421,12 +421,12 @@ function ChatFooter({ agent, usage, now, onReveal, onHelp, onConfigure, catalog,
   const provider = agent.provider
   const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null)
   const closeMenu = useCallback(() => setMenuAt(null), [])
-  const approvalTitle = `Подтверждения: ${approvalHint(agent.provider, agent.approval ?? 'ask')}${agent.approval === 'full' ? ` — ${APPROVAL_FULL_WARNING}` : ''}`
+  const approvalTitle = t`Подтверждения: ${approvalHint(agent.provider, agent.approval ?? 'ask')}${agent.approval === 'full' ? ` — ${APPROVAL_FULL_WARNING}` : ''}`
   const modelSpan = (agent.model || agent.effort)
-    ? <span title="модель · усилие" data-testid="conv-model">{[agent.model, agent.effort].filter(Boolean).join(' · ')}</span> : null
+    ? <span title={t("модель · усилие")} data-testid="conv-model">{[agent.model, agent.effort].filter(Boolean).join(' · ')}</span> : null
   const approvalSpan = (
     <span className={`approval${agent.approval === 'full' ? ' t-fail' : ''}`} data-testid="conv-approval" data-approval={agent.approval ?? 'ask'} title={approvalTitle}>
-      {agent.provider === 'claude' && !agent.approval && agent.claudeMode ? `по настройкам: ${agent.claudeMode}` : approvalFooter(agent.provider, agent.approval ?? 'ask', agent.claudeMode)}
+      {agent.provider === 'claude' && !agent.approval && agent.claudeMode ? t`по настройкам: ${agent.claudeMode}` : approvalFooter(agent.provider, agent.approval ?? 'ask', agent.claudeMode)}
     </span>
   )
   const menuItems = (): MenuEntry[] => settingsMenu(agent, catalog, ctxWindows).map((r): MenuEntry => {
@@ -441,27 +441,27 @@ function ChatFooter({ agent, usage, now, onReveal, onHelp, onConfigure, catalog,
       <span className="composer-preferences">
         {onConfigure ? (
           <button type="button" className="settings" data-testid="conv-settings" aria-haspopup="menu" aria-expanded={menuAt !== null}
-            title="Модель, усилие и подтверждения — со следующего хода"
+            title={t("Модель, усилие и подтверждения — со следующего хода")}
             onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); setMenuAt(menuAt ? null : { x: r.left, y: r.top - 6 }) }}>
             {modelSpan ?? <span>{provider === 'claude' ? 'Claude' : 'Codex'}</span>}{approvalSpan}<Icon name="chev" />
           </button>
         ) : <>{modelSpan}{approvalSpan}</>}
-        {agent.background && <span className="bg" data-testid="conv-background" title={agent.background.tasks.join('\n')}>в фоне · {agent.background.count}</span>}
+        {agent.background && <span className="bg" data-testid="conv-background" title={agent.background.tasks.join('\n')}>{t("в фоне · ")}{agent.background.count}</span>}
       </span>
       <details className="chat-info" data-testid="chat-info" onKeyDown={(e) => {
         if (e.key === 'Escape' && e.currentTarget.open) { e.preventDefault(); e.stopPropagation(); e.currentTarget.open = false; e.currentTarget.querySelector('summary')?.focus() }
       }}>
-        <summary title={context?.title ?? 'Папка, контекст и лимиты сессии'}>
-          <Icon name="info" />{context ? <span className={`t-${context.tone}`}>Контекст {context.short}</span> : 'Сведения'}
+        <summary title={context?.title ?? t('Папка, контекст и лимиты сессии')}>
+          <Icon name="info" />{context ? <span className={`t-${context.tone}`}>{t("Контекст ")}{context.short}</span> : t('Сведения')}
         </summary>
         <div className="chat-info-panel">
           <div className="chat-meta">
-            <button type="button" className="path" title={`Показать в Finder: ${agent.cwd}`} onClick={() => onReveal(agent.cwd)} data-testid="conv-path">{shortPath(agent.cwd, 40)}</button>
-            {agent.branch && <span className="br" title="ветка worktree" data-testid="conv-branch"><Icon name="branch" />{agent.branch}</span>}
-            {agent.title && <span title="имя сессии для CLI" data-testid="conv-name">{agent.name}</span>}
+            <button type="button" className="path" title={t`Показать в Finder: ${agent.cwd}`} onClick={() => onReveal(agent.cwd)} data-testid="conv-path">{shortPath(agent.cwd, 40)}</button>
+            {agent.branch && <span className="br" title={t("ветка worktree")} data-testid="conv-branch"><Icon name="branch" />{agent.branch}</span>}
+            {agent.title && <span title={t("имя сессии для CLI")} data-testid="conv-name">{agent.name}</span>}
             {agent.browser && <button type="button" className="browser" data-testid="conv-browser" disabled={!agent.browserDownloads}
-              title={`Браузер для агента: свой профиль, каждый вызов через Inbox.${agent.browserDownloads ? `\nСкачивания: ${agent.browserDownloads}` : ''}`}
-              onClick={() => { if (agent.browserDownloads) onReveal(agent.browserDownloads) }}>браузер{agent.browser.headed ? ' (окно)' : ''} · скачивания</button>}
+              title={t`Браузер для агента: свой профиль, каждый вызов через Inbox.${agent.browserDownloads ? t`\nСкачивания: ${agent.browserDownloads}` : ''}`}
+              onClick={() => { if (agent.browserDownloads) onReveal(agent.browserDownloads) }}>{t("браузер")}{agent.browser.headed ? t(' (окно)') : ''}{t(" · скачивания")}</button>}
           </div>
           <ContextMeter ctx={agent.context} />
           {windows.length > 0 && <span className="chat-limits" data-testid="chat-limits">
@@ -470,10 +470,10 @@ function ChatFooter({ agent, usage, now, onReveal, onHelp, onConfigure, catalog,
               <span className="k">{w.key}</span> {w.pct}{w.reset && <span className="reset"> · {w.reset}</span>}
             </span>)}
           </span>}
-          {onHelp && <button type="button" className="help-btn" onClick={(e) => { const info = e.currentTarget.closest('details'); if (info) { info.open = false; info.querySelector('summary')?.focus() }; onHelp() }} title={`Горячие клавиши (${CMD}/)`} aria-label="Горячие клавиши" data-testid="hotkeys-open">?</button>}
+          {onHelp && <button type="button" className="help-btn" onClick={(e) => { const info = e.currentTarget.closest('details'); if (info) { info.open = false; info.querySelector('summary')?.focus() }; onHelp() }} title={t`Горячие клавиши (${CMD}/)`} aria-label={t("Горячие клавиши")} data-testid="hotkeys-open">?</button>}
         </div>
       </details>
-      {menuAt && <ContextMenu at={menuAt} items={menuItems()} onClose={closeMenu} testId="settings-menu" label="Настройки сессии" above />}
+      {menuAt && <ContextMenu at={menuAt} items={menuItems()} onClose={closeMenu} testId="settings-menu" label={t("Настройки сессии")} above />}
     </div>
   )
 }
@@ -511,12 +511,12 @@ export function UserRail({ marks, items, feed, onJump }: {
   }, [items, marks.length, feed])
   const keys = searchKeys(IS_MAC)
   return (
-    <div className="user-rail" aria-label="Реплики человека" data-testid="user-rail">
+    <div className="user-rail" aria-label={t("Реплики человека")} data-testid="user-rail">
       {marks.map((m, i) => (
         <button key={m.key} type="button" className="user-mark" data-testid="user-mark" data-event-id={m.id}
           style={{ top: `${pos[m.id] ?? ((i + 0.5) / marks.length) * 100}%` }}
-          title={`${hhmm(m.ts)} · ${m.text.replace(/\s+/g, ' ').slice(0, 80)}${m.text.length > 80 ? '…' : ''}\n${keys.prevUser} / ${keys.nextUser} — соседние реплики`}
-          aria-label={`Реплика ${i + 1}: ${m.text.slice(0, 40)}`} onClick={() => onJump(m.id)} />
+          title={t`${hhmm(m.ts)} · ${m.text.replace(/\s+/g, ' ').slice(0, 80)}${m.text.length > 80 ? '…' : ''}\n${keys.prevUser} / ${keys.nextUser} — соседние реплики`}
+          aria-label={t`Реплика ${i + 1}: ${m.text.slice(0, 40)}`} onClick={() => onJump(m.id)} />
       ))}
     </div>
   )
@@ -558,10 +558,10 @@ function Gutter({ who, cls, ts, copy }: { who: string; cls: string; ts: string; 
 export function MsgCopy({ text, what }: { text: string; what: string }): ReactElement {
   const bridge = useContext(MdBridgeContext)
   const [flash, show] = useFlash()
-  const copy = (): void => { void copyToClipboard(bridge, text).then((ok) => { if (ok) show('Скопировано') }) }
+  const copy = (): void => { void copyToClipboard(bridge, text).then((ok) => { if (ok) show(t('Скопировано')) }) }
   return (
     <button type="button" className={`msg-copy${flash ? ' done md-flash' : ''}`} onClick={copy} data-testid="msg-copy"
-      aria-label={flash ? 'Скопировано' : `Копировать ${what}`} title={`Копировать ${what} (исходный Markdown)`}
+      aria-label={flash ? t('Скопировано') : t`Копировать ${what}`} title={t`Копировать ${what} (исходный Markdown)`}
       {...(flash ? { 'data-flash': flash } : {})}>
       <Icon name={flash ? 'check' : 'copy'} />
     </button>
@@ -573,7 +573,7 @@ function ActivityItems({ items, props }: { items: readonly ConvItem[]; props: Co
     if (entry.type === 'item') return <Item key={entry.item.key} it={entry.item} {...props} />
     const running = entry.items.findLast((it) => it.state === 'running')
     return <details className="activity-group" key={entry.key} data-testid="activity-group">
-      <summary>{entry.items.length} {plural(entry.items.length, 'действие', 'действия', 'действий')}<span className="activity-live">{running ? `· ${friendlyTool(running.name)} ${toolSummary(running.name, running.input)}` : '· выполнено'}</span></summary>
+      <summary>{entry.items.length} {plural(entry.items.length, t('действие'), t('действия'), t('действий'))}<span className="activity-live">{running ? `· ${friendlyTool(running.name)} ${toolSummary(running.name, running.input)}` : t('· выполнено')}</span></summary>
       {entry.items.map((it) => <Item key={it.key} it={it} {...props} />)}
     </details>
   })}</>
@@ -586,7 +586,7 @@ function Item({ it, ...p }: { it: ConvItem } & ConversationProps): ReactElement 
     case 'user':
       return (
         <div className="it it-user" data-testid="msg-user" data-event-id={it.id}>
-          <Gutter who="ты" cls="who-you" ts={it.ts} {...(src !== null ? { copy: { text: src, what: 'реплику' } } : {})} />
+          <Gutter who={t("ты")} cls="who-you" ts={it.ts} {...(src !== null ? { copy: { text: src, what: t('реплику') } } : {})} />
           {/* M8e: реплика человека — тот же безопасный Markdown, что у модели (ссылки, код, переносы строк). */}
           <div className="body"><Markdown text={it.text} human /></div>
         </div>
@@ -594,7 +594,7 @@ function Item({ it, ...p }: { it: ConvItem } & ConversationProps): ReactElement 
     case 'model':
       return (
         <div className="it it-model" data-testid="msg-model" data-streaming={it.streaming ? '1' : '0'} data-event-id={it.id}>
-          <Gutter who={prov} cls={`who-${prov}`} ts={it.ts} {...(src !== null ? { copy: { text: src, what: 'ответ' } } : {})} />
+          <Gutter who={prov} cls={`who-${prov}`} ts={it.ts} {...(src !== null ? { copy: { text: src, what: t('ответ') } } : {})} />
           <div className={`body${it.error ? ' err' : ''}`}><Markdown text={it.text} streaming={it.streaming} /></div>
         </div>
       )
@@ -605,7 +605,7 @@ function Item({ it, ...p }: { it: ConvItem } & ConversationProps): ReactElement 
     case 'perm':
       return (
         <div className="it it-perm" data-event-id={it.id}>
-          <Gutter who="запрос" cls="t-wait" ts={it.ts} />
+          <Gutter who={t("запрос")} cls="t-wait" ts={it.ts} />
           <PermCard permId={it.permId} toolName={it.toolName} input={it.input} state={it.state} createdAt={it.ts} now={p.now}
             focused={p.focusedPerm === it.permId} {...(it.message ? { message: it.message } : {})} {...(it.by ? { by: it.by } : {})}
             {...(it.offers ? { offers: it.offers } : {})} {...(it.concealed ? { concealed: true } : {})} {...(it.scope ? { scope: it.scope } : {})} {...(it.rule ? { rule: it.rule } : {})}
@@ -623,7 +623,7 @@ const stateTone = (s: ItemState): string => (s === 'running' ? 'run' : s === 'ok
 /** Значок состояния строки инструмента и субагента. `stopped` — ход прервали, конца не будет: не спиннер. */
 function StateMark({ state }: { state: ItemState }): ReactElement {
   if (state === 'running') return <span className="spin" />
-  if (state === 'stopped') return <><Icon name="stop" />прерван</>
+  if (state === 'stopped') return <><Icon name="stop" />{t("прерван")}</>
   return <Icon name={state === 'ok' ? 'check' : 'x'} />
 }
 
@@ -673,7 +673,7 @@ function ToolRow({ it, loadEvents }: { it: ToolItem; loadEvents?: (ids: number[]
           <span className={`st t-${failure?.expected ? 'mut' : stateTone(it.state)}`} title={failure ? `${failure.explanation} ${failure.action}` : undefined}>
             {failure?.expected ? <Icon name="info" /> : <StateMark state={it.state} />}
             {it.state !== 'stopped' && dur !== null && dur >= 100 ? formatSeconds(dur) : ''}
-            {failure?.expected ? ' нет совпадений' : failure ? ' не выполнено' : ''}
+            {failure?.expected ? t(' нет совпадений') : failure ? t(' не выполнено') : ''}
           </span>
         </button>
         <ImageGallery sources={it.images ?? []} />
@@ -683,16 +683,16 @@ function ToolRow({ it, loadEvents }: { it: ToolItem; loadEvents?: (ids: number[]
               <strong>{failure.title}</strong>
               <span>{failure.explanation}</span>
               <span>{failure.action}</span>
-              {shown.result ? <pre>{shown.result.split('\n').filter((line) => line.trim()).slice(-6).join('\n').slice(-1600)}</pre> : <span>Подробности доступны в полном выводе.</span>}
+              {shown.result ? <pre>{shown.result.split('\n').filter((line) => line.trim()).slice(-6).join('\n').slice(-1600)}</pre> : <span>{t("Подробности доступны в полном выводе.")}</span>}
             </div>}
             <details className="tool-raw" open={!failure}>
-              <summary>Полный ввод и вывод</summary>
-              {it.exitCode !== undefined && <div className="k">Код завершения: {it.exitCode}</div>}
-              <div className="k">вход</div><pre>{JSON.stringify(shown.input, null, 2)}</pre>
-              {shown.result !== undefined && <><div className="k">результат</div><pre>{shown.result}</pre></>}
+              <summary>{t("Полный ввод и вывод")}</summary>
+              {it.exitCode !== undefined && <div className="k">{t("Код завершения: ")}{it.exitCode}</div>}
+              <div className="k">{t("вход")}</div><pre>{JSON.stringify(shown.input, null, 2)}</pre>
+              {shown.result !== undefined && <><div className="k">{t("результат")}</div><pre>{shown.result}</pre></>}
             </details>
-            {detail === 'loading' && <div className="k" data-testid="tool-detail-loading">загружаю полный вход и вывод…</div>}
-            {detail === 'error' && <div className="k t-fail">полный вход и вывод не загрузились — показан урезанный</div>}
+            {detail === 'loading' && <div className="k" data-testid="tool-detail-loading">{t("загружаю полный вход и вывод…")}</div>}
+            {detail === 'error' && <div className="k t-fail">{t("полный вход и вывод не загрузились — показан урезанный")}</div>}
           </div>
         )}
       </div>
@@ -703,10 +703,10 @@ function ToolRow({ it, loadEvents }: { it: ToolItem; loadEvents?: (ids: number[]
 function SubAgent({ it, ...p }: { it: AgentItem } & ConversationProps): ReactElement {
   return (
     <div className="it it-agent" data-provider={p.agent.provider} data-testid="subagent" data-event-id={it.id}>
-      <Gutter who="суб" cls={`who-${p.agent.provider}`} ts={it.ts} />
+      <Gutter who={t("суб")} cls={`who-${p.agent.provider}`} ts={it.ts} />
       <div className="body">
         <div className="sub-head">
-          <span className="lbl">субагент</span>
+          <span className="lbl">{t("субагент")}</span>
           <strong>{it.subagentType ?? 'agent'}</strong>
           <span className="desc">{it.description ?? ''}</span>
           <span className={`st t-${stateTone(it.state)}`} data-testid="subagent-state" data-state={it.state}><StateMark state={it.state} /></span>
@@ -723,7 +723,7 @@ function SubAgent({ it, ...p }: { it: AgentItem } & ConversationProps): ReactEle
 
 function Notice({ it, now }: { it: NoticeItem; now: number }): ReactElement {
   const icon = it.tone === 'info' ? 'info' : it.tone === 'wait' ? 'clock' : 'alert'
-  const failure = it.tone === 'fail' && it.title === 'Ход не удался' ? explainFailure(it.text, { scope: 'agent' }) : null
+  const failure = it.tone === 'fail' && it.title === t('Ход не удался') ? explainFailure(it.text, { scope: 'agent' }) : null
   return (
     <div className={`it it-notice n-${it.tone}`} data-testid="notice" data-event-id={it.id}>
       <Gutter who="" cls="" ts={it.ts} />
@@ -731,10 +731,10 @@ function Notice({ it, now }: { it: NoticeItem; now: number }): ReactElement {
         <Icon name={icon} />
         <div>
           <b>{failure?.title ?? it.title}</b>
-          {it.resetsAt && <div className="txt">сброс в {formatClock(it.resetsAt * 1000, now)} · {formatResetIn(it.resetsAt, now)}</div>}
+          {it.resetsAt && <div className="txt">{t("сброс в ")}{formatClock(it.resetsAt * 1000, now)} · {formatResetIn(it.resetsAt, now)}</div>}
           {failure ? <div className="failure-message" data-testid="failure-explanation">
             <p>{failure.explanation}</p><p>{failure.action}</p>
-            {it.text && <details className="error-details"><summary>Технические подробности</summary><pre>{it.text}</pre></details>}
+            {it.text && <details className="error-details"><summary>{t("Технические подробности")}</summary><pre>{it.text}</pre></details>}
           </div> : it.text && <div className="txt">{it.text}</div>}
         </div>
       </div>
@@ -750,12 +750,12 @@ function Notice({ it, now }: { it: NoticeItem; now: number }): ReactElement {
 function placeholderFor(p: { link: ConnState['state']; needsYou: boolean; busy: boolean; disabled: boolean; label: string; queueable: boolean }): string {
   // 'connecting' — первый вход и ручной запуск/перезапуск: баннера с кнопкой в этот момент нет
   // (connView → banner:null), и «запусти кнопкой сверху» сразу после нажатия этой кнопки врало бы.
-  if (p.link === 'connecting') return 'подключаюсь к демону…'
-  if (p.link === 'down') return 'демон недоступен — запусти его кнопкой сверху'
-  if (p.needsYou) return p.queueable ? 'сессия ждёт твоего решения по запросу выше — реплика встанет в очередь' : 'сессия ждёт твоего решения по запросу выше'
-  if (p.busy) return p.queueable ? `идёт ход — Enter поставит реплику в очередь, ${CMD}Enter прервёт ход и скажет` : 'сессия делает ход — дождись конца или нажми «Стоп»'
-  if (p.disabled) return 'лимит исчерпан — дождись сброса'
-  return `реплика для ${p.label}`
+  if (p.link === 'connecting') return t('подключаюсь к демону…')
+  if (p.link === 'down') return t('демон недоступен — запусти его кнопкой сверху')
+  if (p.needsYou) return p.queueable ? t('сессия ждёт твоего решения по запросу выше — реплика встанет в очередь') : t('сессия ждёт твоего решения по запросу выше')
+  if (p.busy) return p.queueable ? t`идёт ход — Enter поставит реплику в очередь, ${CMD}Enter прервёт ход и скажет` : t('сессия делает ход — дождись конца или нажми «Стоп»')
+  if (p.disabled) return t('лимит исчерпан — дождись сброса')
+  return t`реплика для ${p.label}`
 }
 
 /** Что видит список очереди о правке: состояние и действия. */
@@ -818,7 +818,7 @@ function useQueueEdit(api: QueueEditApi | undefined): { view: QueueEditView; not
       api.hold(id).then((r) => { if (alive.current) setState(startQueueEdit(id, r)); else api.release(id) }, (e: unknown) => {
         // «Изменить» опоздало: реплика ушла или убрана — править нечего, текст человека ещё не тронут.
         const err = errorOf(e)
-        setNotice(err.code === 'queue_item_sent' ? 'Реплика уже ушла' : err.code === 'queue_item_removed' ? 'Реплика уже удалена' : err.text)
+        setNotice(err.code === 'queue_item_sent' ? t('Реплика уже ушла') : err.code === 'queue_item_removed' ? t('Реплика уже удалена') : err.text)
       }).finally(() => setOpening(null))
     },
     onChange: (text) => setState((st) => (st ? { ...st, text, error: null } : st)),
@@ -925,7 +925,7 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
       try {
         const snapshot = await attached.finalize(agentName, original)
         ok = await onSend(attachmentPrompt(draft, snapshot), mode === 'now' ? undefined : mode)
-      } catch (e) { attached.report(e instanceof Error ? e.message : 'Сообщение не отправлено. Попробуй ещё раз.') }
+      } catch (e) { attached.report(e instanceof Error ? e.message : t('Сообщение не отправлено. Попробуй ещё раз.')) }
       finally { sendLock.current = false }
       if (!ok) {
         attached.restore(original)
@@ -973,15 +973,15 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
         <textarea ref={ta} rows={3} value={text} onChange={(e) => setText(e.target.value)} onKeyDown={onKey}
           onPaste={onPaste} onDragOver={onDragOver} onDragEnter={attached.onDragEnter} onDragLeave={attached.onDragLeave} onDrop={onDrop}
           placeholder={placeholderFor({ link, needsYou, busy, disabled, label, queueable })}
-          data-testid="composer" aria-label="Реплика в сессию" />
+          data-testid="composer" aria-label={t("Реплика в сессию")} />
         <div className="composer-toolbar">
           {footer}
           <div className="composer-actions">
-        {attached.enabled && <><input ref={picker} className="attach-picker-input" type="file" multiple data-testid="attachment-picker" onChange={(e) => { attached.addFiles(Array.from(e.target.files ?? [])); e.target.value = '' }} /><button type="button" className="btn attach-picker" title="Прикрепить файлы" aria-label="Прикрепить файлы" onClick={() => picker.current?.click()} disabled={blocked}>＋</button></>}
-        {busy && <button type="button" className="btn btn-danger composer-stop" onClick={onStop} data-testid="stop-turn" title="Остановить ход (Esc)"><Icon name="stop" />Стоп</button>}
+        {attached.enabled && <><input ref={picker} className="attach-picker-input" type="file" multiple data-testid="attachment-picker" onChange={(e) => { attached.addFiles(Array.from(e.target.files ?? [])); e.target.value = '' }} /><button type="button" className="btn attach-picker" title={t("Прикрепить файлы")} aria-label={t("Прикрепить файлы")} onClick={() => picker.current?.click()} disabled={blocked}>＋</button></>}
+        {busy && <button type="button" className="btn btn-danger composer-stop" onClick={onStop} data-testid="stop-turn" title={t("Остановить ход (Esc)")}><Icon name="stop" />{t("Стоп")}</button>}
         <button type="button" className="btn btn-primary" onClick={() => void send()} disabled={blocked || (!text.trim() && !attached.items.length)} data-testid="send"
-          title={busy && queueable ? `Идёт ход: реплика уйдёт, когда он кончится. ${CMD}Enter — прервать и сказать` : undefined}>
-          <Icon name="send" />{busy && queueable ? 'В очередь' : 'Отправить'}
+          title={busy && queueable ? t`Идёт ход: реплика уйдёт, когда он кончится. ${CMD}Enter — прервать и сказать` : undefined}>
+          <Icon name="send" />{busy && queueable ? t('В очередь') : t('Отправить')}
         </button>
           </div>
         </div>
@@ -1016,27 +1016,27 @@ export function QueueList({ queue, paused, onRemove, onMove, onResume, edit, not
       {paused && (
         <div className="queue-paused" role="status" data-testid="queue-paused">
           <Icon name="alert" />
-          <span className="grow">Очередь стоит: ход не удался. Реплики ниже не уйдут, пока не скажешь.</span>
-          {queue.length > 0 && <button type="button" className="btn btn-sm" onClick={onResume} data-testid="queue-resume">Продолжить</button>}
+          <span className="grow">{t("Очередь стоит: ход не удался. Реплики ниже не уйдут, пока не скажешь.")}</span>
+          {queue.length > 0 && <button type="button" className="btn btn-sm" onClick={onResume} data-testid="queue-resume">{t("Продолжить")}</button>}
         </div>
       )}
       {notice ? <div className="queue-notice" role="status" data-testid="queue-notice">{notice}</div> : null}
       {(queue.length > 0 || orphan) && (
-        <ol className="queue-list" aria-label="Очередь реплик">
+        <ol className="queue-list" aria-label={t("Очередь реплик")}>
           {queue.map((it, i) => (st && st.id === it.id && edit ? <QueueEditor key={it.id} n={i + 1} st={st} edit={edit} /> : (
             <li key={it.id} className="queue-item" data-testid="queue-item" data-id={it.id}>
               <span className="n mono">{i + 1}</span>
               <span className="txt" title={it.text}>{it.text}</span>
               {edit && (
-                <button type="button" className="btn btn-ghost btn-sm" aria-label="Изменить реплику" title="Изменить: очередь подождёт, пока правишь"
+                <button type="button" className="btn btn-ghost btn-sm" aria-label={t("Изменить реплику")} title={t("Изменить: очередь подождёт, пока правишь")}
                   disabled={st !== null || edit.opening !== null} aria-busy={edit.opening === it.id ? true : undefined}
-                  onClick={() => edit.onStart(it.id)} data-testid="queue-edit">Изменить</button>
+                  onClick={() => edit.onStart(it.id)} data-testid="queue-edit">{t("Изменить")}</button>
               )}
-              <button type="button" className="btn btn-ghost btn-sm" aria-label="Выше" title="Выше" disabled={i === 0}
+              <button type="button" className="btn btn-ghost btn-sm" aria-label={t("Выше")} title={t("Выше")} disabled={i === 0}
                 onClick={() => onMove(it.id, i - 1)} data-testid="queue-up">↑</button>
-              <button type="button" className="btn btn-ghost btn-sm" aria-label="Ниже" title="Ниже" disabled={i === queue.length - 1}
+              <button type="button" className="btn btn-ghost btn-sm" aria-label={t("Ниже")} title={t("Ниже")} disabled={i === queue.length - 1}
                 onClick={() => onMove(it.id, i + 1)} data-testid="queue-down">↓</button>
-              <button type="button" className="btn btn-ghost btn-sm" aria-label="Убрать из очереди" title="Убрать из очереди"
+              <button type="button" className="btn btn-ghost btn-sm" aria-label={t("Убрать из очереди")} title={t("Убрать из очереди")}
                 onClick={() => onRemove(it.id)} data-testid="queue-remove"><Icon name="x" /></button>
             </li>
           )))}
@@ -1081,12 +1081,12 @@ function QueueEditor({ n, st, edit }: { n: number | null; st: QueueEditState; ed
       <div className="queue-edit-body">
         {/* `readOnly`, а не `disabled`, пока сохраняется: выключенное поле теряет фокус, и Esc ушёл бы в «Стоп». */}
         <textarea ref={ta} rows={3} value={st.text} readOnly={st.saving} onChange={(e) => edit.onChange(e.target.value)} onKeyDown={onKey}
-          aria-label="Изменить реплику в очереди" data-testid="queue-edit-text" />
-        {n === null && <div className="queue-edit-note">реплики уже нет в очереди — сохранение вернёт текст в поле ввода</div>}
+          aria-label={t("Изменить реплику в очереди")} data-testid="queue-edit-text" />
+        {n === null && <div className="queue-edit-note">{t("реплики уже нет в очереди — сохранение вернёт текст в поле ввода")}</div>}
         {st.error && <div className="queue-edit-err" role="alert" data-testid="queue-edit-error">{st.error}</div>}
       </div>
-      <button type="button" className="btn btn-sm btn-primary" onClick={edit.onSave} disabled={st.saving} data-testid="queue-edit-save">Сохранить</button>
-      <button type="button" className="btn btn-sm btn-ghost" onClick={edit.onCancel} disabled={st.saving} data-testid="queue-edit-cancel">Отмена</button>
+      <button type="button" className="btn btn-sm btn-primary" onClick={edit.onSave} disabled={st.saving} data-testid="queue-edit-save">{t("Сохранить")}</button>
+      <button type="button" className="btn btn-sm btn-ghost" onClick={edit.onCancel} disabled={st.saving} data-testid="queue-edit-cancel">{t("Отмена")}</button>
     </li>
   )
 }
@@ -1114,14 +1114,13 @@ export function PhaseLine({ phase, onOpenInbox, now: fixedNow }: { phase: TurnPh
         <span className="phase-time mono" data-testid="turn-phase-time" aria-hidden="true">{phaseElapsed(phase, now)}</span>
         {waiting && onOpenInbox && (
           <button type="button" className="btn btn-ghost btn-sm phase-inbox" data-testid="turn-phase-inbox" onClick={() => onOpenInbox(waiting.permId)}>
-            открыть в Inbox
-          </button>
+            {t("открыть в Inbox")}</button>
         )}
         <span className="sr-only" role="status" aria-live="polite" data-testid="turn-phase-live">{phaseAnnouncement(phase)}</span>
       </div>
       {phase.reasoning && (
         <details className="phase-reasoning" data-testid="turn-phase-reasoning">
-          <summary>Размышления</summary>
+          <summary>{t("Размышления")}</summary>
           <pre className="mono">{phase.reasoning}</pre>
         </details>
       )}

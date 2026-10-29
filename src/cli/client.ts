@@ -1,3 +1,6 @@
+import { getLanguage } from '../i18n/core.js'
+import type { Language } from '../i18n/core.js'
+import { t as tr } from './i18n.js'
 // Клиент сокета демона: рукопожатие, сопоставление запросов и ответов, поток подписки.
 
 import { readFileSync } from 'node:fs'
@@ -45,6 +48,8 @@ export interface Client {
 }
 
 export interface ConnectOptions {
+  /** Display language of this caller, sampled for each request; never a daemon-wide override. */
+  locale?: () => Language
   client?: ClientKind
   timeoutMs?: number
 }
@@ -88,13 +93,13 @@ const shellApp = (): typeof SHELL_APP => SHELL_APP
 export async function connectClient(paths: PultPaths, opts: ConnectOptions = {}): Promise<Client> {
   const timeoutMs = opts.timeoutMs ?? 10_000
   const token = readToken(paths.token)
-  if (!token) throw new ClientError('no_daemon', `нет файла токена ${paths.token} — демон не запущен`)
+  if (!token) throw new ClientError('no_daemon', tr`нет файла токена ${paths.token} — демон не запущен`)
 
   const socket = await new Promise<net.Socket>((resolve, reject) => {
     const s = net.connect(paths.sock)
     const onError = (e: NodeJS.ErrnoException): void => {
       s.destroy()
-      reject(new ClientError('no_daemon', `сокет ${paths.sock} не отвечает (${e.code ?? e.message})`))
+      reject(new ClientError('no_daemon', tr`сокет ${paths.sock} не отвечает (${e.code ?? e.message})`))
     }
     s.once('error', onError)
     s.once('connect', () => { s.removeListener('error', onError); resolve(s) })
@@ -174,7 +179,7 @@ export async function connectClient(paths: PultPaths, opts: ConnectOptions = {})
 
   socket.on('close', () => {
     closed = true
-    for (const p of pending.values()) p.reject(new ClientError('connection_closed', 'соединение с демоном закрыто'))
+    for (const p of pending.values()) p.reject(new ClientError('connection_closed', tr('соединение с демоном закрыто')))
     pending.clear()
     for (const fn of closeHandlers) { try { fn() } catch { /* неважно */ } }
   })
@@ -182,7 +187,7 @@ export async function connectClient(paths: PultPaths, opts: ConnectOptions = {})
 
   const daemon = await new Promise<DaemonInfo>((resolve, reject) => {
     const timer = setTimeout(
-      () => reject(new ClientError('timeout', 'демон не ответил на hello')),
+      () => reject(new ClientError('timeout', tr('демон не ответил на hello'))),
       timeoutMs,
     )
     // Оба исхода снимают таймер: висящий таймер держал бы процесс CLI живым после ответа.
@@ -190,7 +195,7 @@ export async function connectClient(paths: PultPaths, opts: ConnectOptions = {})
     helloReject = (e) => { clearTimeout(timer); reject(e) }
     socket.once('close', () => {
       clearTimeout(timer)
-      reject(new ClientError('connection_closed', 'демон закрыл соединение на рукопожатии'))
+      reject(new ClientError('connection_closed', tr('демон закрыл соединение на рукопожатии')))
     })
     const client = opts.client ?? 'cli'
     const app = client === 'shell' ? shellApp() : null
@@ -202,14 +207,14 @@ export async function connectClient(paths: PultPaths, opts: ConnectOptions = {})
     params?: Record<string, unknown>,
     subWaiter?: SubHandler,
   ): Promise<unknown> => {
-    if (closed) return Promise.reject(new ClientError('connection_closed', 'соединение закрыто'))
+    if (closed) return Promise.reject(new ClientError('connection_closed', tr('соединение закрыто')))
     const id = ++seq
-    const line = encodeLine({ id, method, ...(params ? { params } : {}) })
+    const line = encodeLine({ id, method, locale: opts.locale?.() ?? getLanguage(), ...(params ? { params } : {}) })
     // Строку длиннее предела демон не читает, а РВЁТ соединение целиком — и с ним все прочие
     // вызовы и подписки на нём (у окна оно одно на всё). Отказываем здесь, ничего не отправляя.
     const bytes = Buffer.byteLength(line)
     if (bytes > MAX_LINE_BYTES) {
-      return Promise.reject(new ClientError('payload_too_large', `запрос ${method} — ${bytes} байт, больше предела строки ${MAX_LINE_BYTES}: не отправлен`))
+      return Promise.reject(new ClientError('payload_too_large', tr`запрос ${method} — ${bytes} байт, больше предела строки ${MAX_LINE_BYTES}: не отправлен`))
     }
     return new Promise<unknown>((resolve, reject) => {
       pending.set(id, { resolve, reject })
@@ -224,7 +229,7 @@ export async function connectClient(paths: PultPaths, opts: ConnectOptions = {})
     if (ms === undefined) return p
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
-        reject(new ClientError('timeout', `демон не ответил на ${method} за ${ms} мс`))
+        reject(new ClientError('timeout', tr`демон не ответил на ${method} за ${ms} мс`))
         // Соединение закрывается: ответ, пришедший позже, уже никому не нужен, а висящий сокет
         // держал бы процесс CLI. Промис `p` отвергнется по close — его отказ поглощён ниже.
         socket.destroy()

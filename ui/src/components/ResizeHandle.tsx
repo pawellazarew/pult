@@ -1,3 +1,4 @@
+import { t } from '../lib/i18n.js'
 import { useRef, useState } from 'react'
 import type { CSSProperties, ReactElement } from 'react'
 import { clampSize } from '../model/panelSizes.js'
@@ -12,9 +13,9 @@ export function ResizeHandle({ label, axis = 'x', direction = 1, value, min, max
   const reset = (): void => { drag.current = null; setDragging(false) }
   return <div className={`panel-resize panel-resize-${axis} ${className}`} role="separator" tabIndex={0}
     aria-label={label} aria-orientation={axis === 'x' ? 'vertical' : 'horizontal'}
-    aria-valuemin={Math.round(min)} aria-valuemax={Math.round(max)} aria-valuenow={Math.round(value)} aria-valuetext={`${Math.round(value)} пикселей`}
+    aria-valuemin={Math.round(min)} aria-valuemax={Math.round(max)} aria-valuenow={Math.round(value)} aria-valuetext={t`${Math.round(value)} пикселей`}
     data-testid={testId} data-dragging={dragging ? '1' : undefined} style={style}
-    title={`${label}. Потяни или используй стрелки. Двойной клик — сбросить.`}
+    title={t`${label}. Потяни или используй стрелки. Двойной клик — сбросить.`}
     onPointerDown={(e) => {
       if (e.button !== 0 || drag.current) return
       e.preventDefault(); e.stopPropagation()

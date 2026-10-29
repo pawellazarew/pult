@@ -1,3 +1,4 @@
+import { t as tr } from './i18n.js'
 // Ссылки `pult://` (docs/14 О3): Raycast, заметки и сообщения открывают окно на сессии или диалог
 // новой сессии с заполненными полями. Ссылка приходит снаружи — это недоверенный ввод: всё, что не
 // подходит под формат дословно, отвергается целиком, а ссылка `new` только ЗАПОЛНЯЕТ диалог —
@@ -50,37 +51,37 @@ const PROMPT_BAD_RE = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\p{Cf}\u2028\u202
 /** Ссылка → цель или причина отказа. Отказ: не строка, длинно, NUL, не `pult:`, логин/порт/якорь, чужой вид, плохой параметр. */
 export function checkPultUrl(raw: unknown): PultUrlCheck {
   const no = (reason: string): PultUrlCheck => ({ ok: false, reason })
-  if (typeof raw !== 'string' || !raw) return no('не строка')
-  if (raw.length > MAX_URL_LEN) return no('ссылка длиннее предела')
-  if (raw.includes('\0')) return no('NUL в ссылке')
-  if (RAW_CONTROL_RE.test(raw)) return no('управляющий символ в ссылке')
+  if (typeof raw !== 'string' || !raw) return no(tr('не строка'))
+  if (raw.length > MAX_URL_LEN) return no(tr('ссылка длиннее предела'))
+  if (raw.includes('\0')) return no(tr('NUL в ссылке'))
+  if (RAW_CONTROL_RE.test(raw)) return no(tr('управляющий символ в ссылке'))
   let u: URL
-  try { u = new URL(raw) } catch { return no('не разбирается как URL') }
-  if (u.protocol !== `${PULT_SCHEME}:`) return no(`схема ${u.protocol}`)
-  if (u.hash || raw.includes('#')) return no('якорь в ссылке')
+  try { u = new URL(raw) } catch { return no(tr('не разбирается как URL')) }
+  if (u.protocol !== `${PULT_SCHEME}:`) return no(tr`схема ${u.protocol}`)
+  if (u.hash || raw.includes('#')) return no(tr('якорь в ссылке'))
   // `pult:session/x` и `pult:///session/x` — не наш вид: только `pult://<вид>/…`.
-  if (!raw.slice(PULT_SCHEME.length + 1).startsWith('//')) return no('нет // после схемы')
+  if (!raw.slice(PULT_SCHEME.length + 1).startsWith('//')) return no(tr('нет // после схемы'))
   // Дальше — только сырая строка: URL сворачивает точки (`session/../x` → `/x`), прощает пустой порт
   // (`session:`) и раскодирует `+` в пробел.
   const m = /^([^/?#]*)([^?#]*)(?:\?([^#]*))?$/.exec(raw.slice(PULT_SCHEME.length + 3))
-  if (!m) return no('не разбирается как URL')
+  if (!m) return no(tr('не разбирается как URL'))
   const [, authority = '', rawPath = '', rawQuery = ''] = m
-  if (/[:@]/.test(authority)) return no('логин, пароль или порт в ссылке')
+  if (/[:@]/.test(authority)) return no(tr('логин, пароль или порт в ссылке'))
   const kind = authority.toLowerCase()
 
   if (kind === 'session') {
     // Имя — без процентной записи и без раскодирования: правило имени её и не пропустит.
     const s = /^\/([^/]*)\/?$/.exec(rawPath)
-    if (!s || !SESSION_NAME_RE.test(s[1] ?? '')) return no('имя сессии не по правилу')
+    if (!s || !SESSION_NAME_RE.test(s[1] ?? '')) return no(tr('имя сессии не по правилу'))
     // Параметры у `session` не определены — неизвестное молча пропускаем.
     return { ok: true, link: { type: 'session', name: s[1] as string } }
   }
 
   if (kind === 'new') {
-    if (rawPath !== '' && rawPath !== '/') return no('у new нет пути')
+    if (rawPath !== '' && rawPath !== '/') return no(tr('у new нет пути'))
     const q = parseQuery(rawQuery)
-    if (!q) return no('битая процентная запись в параметрах')
-    for (const k of KNOWN_NEW) if ((q.get(k)?.length ?? 0) > 1) return no(`параметр ${k} повторён`)
+    if (!q) return no(tr('битая процентная запись в параметрах'))
+    for (const k of KNOWN_NEW) if ((q.get(k)?.length ?? 0) > 1) return no(tr`параметр ${k} повторён`)
     const one = (k: string): string | null => q.get(k)?.[0] ?? null
     const link: PultLink = { type: 'new' }
     const p = one('path')
@@ -91,20 +92,20 @@ export function checkPultUrl(raw: unknown): PultUrlCheck {
     }
     const t = one('prompt')
     if (t !== null && t !== '') {
-      if (PROMPT_BAD_RE.test(t)) return no('управляющий или невидимый символ в prompt')
-      if ([...t].length > MAX_PROMPT) return no(`prompt длиннее ${MAX_PROMPT} знаков`)
-      if (t.split('\n').length > MAX_PROMPT_LINES) return no(`prompt длиннее ${MAX_PROMPT_LINES} строк`)
+      if (PROMPT_BAD_RE.test(t)) return no(tr('управляющий или невидимый символ в prompt'))
+      if ([...t].length > MAX_PROMPT) return no(tr`prompt длиннее ${MAX_PROMPT} знаков`)
+      if (t.split('\n').length > MAX_PROMPT_LINES) return no(tr`prompt длиннее ${MAX_PROMPT_LINES} строк`)
       link.prompt = t
     }
     const v = one('provider')
     if (v !== null && v !== '') {
-      if (!(PROVIDERS as readonly string[]).includes(v)) return no('provider не claude и не codex')
+      if (!(PROVIDERS as readonly string[]).includes(v)) return no(tr('provider не claude и не codex'))
       link.provider = v as NewSessionPrefill['provider']
     }
     return { ok: true, link }
   }
 
-  return no('неизвестный вид ссылки')
+  return no(tr('неизвестный вид ссылки'))
 }
 
 /** Цель или `null` (причина — в `checkPultUrl`). */
@@ -137,10 +138,10 @@ function parseQuery(raw: string): Map<string, string[]> | null {
 }
 
 function badPath(p: string): string | null {
-  if (p.length > MAX_PATH) return 'path длиннее PATH_MAX'
-  if (PATH_BAD_RE.test(p)) return 'управляющий или невидимый символ в path'
-  if (!p.startsWith('/')) return 'path не абсолютный'
-  if (p.split('/').includes('..')) return 'path с ..'
+  if (p.length > MAX_PATH) return tr('path длиннее PATH_MAX')
+  if (PATH_BAD_RE.test(p)) return tr('управляющий или невидимый символ в path')
+  if (!p.startsWith('/')) return tr('path не абсолютный')
+  if (p.split('/').includes('..')) return tr('path с ..')
   return null
 }
 

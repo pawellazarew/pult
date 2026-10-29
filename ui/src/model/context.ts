@@ -1,3 +1,5 @@
+import { getLanguage } from '../../../src/i18n/core.js'
+import { t as tr } from '../lib/i18n.js'
 // Контекстное окно сессии в окне Пульта: «контекст 48k / 200k · 24%», тон полоски, подсказка.
 // Чистые функции. Разбор и слияние события — те же, что у демона (src/sessions/context.ts):
 // окно и `agent list` обязаны показывать одно и то же.
@@ -27,7 +29,10 @@ export function contextTone(share: number | null): Tone {
 }
 
 /** Десятичная запятая и без лишнего нуля: 1.25 → «1,3», 4 → «4». */
-const short = (x: number): string => (Math.round(x * 10) / 10).toString().replace('.', ',')
+const short = (x: number): string => {
+  const number = (Math.round(x * 10) / 10).toString()
+  return getLanguage() === 'ru' ? number.replace('.', ',') : number
+}
 
 /** Токены коротко: 950 · 4,2k · 48k · 200k · 1M · 1,2M. */
 export function formatTokens(n: number): string {
@@ -40,7 +45,7 @@ export function formatTokens(n: number): string {
 
 /** Точное число с разбивкой по три (неразрывный пробел): 48213 → «48 213». */
 export function formatExact(n: number): string {
-  return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ')
+  return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, getLanguage() === 'ru' ? ' ' : ',')
 }
 
 /** 0.2412 → «24%». */
@@ -66,15 +71,15 @@ export function contextView(c: SessionContext | null | undefined): ContextView |
   const share = contextShare(c)
   const sizes = c.window !== null ? `${formatTokens(c.used)} / ${formatTokens(c.window)}` : formatTokens(c.used)
   const exact = c.window !== null
-    ? `${formatExact(c.used)} из ${formatExact(c.window)} токенов (${formatShare(share)})`
-    : `${formatExact(c.used)} токенов, размер окна станет известен в конце хода`
+    ? tr`${formatExact(c.used)} из ${formatExact(c.window)} токенов (${formatShare(share)})`
+    : tr`${formatExact(c.used)} токенов, размер окна станет известен в конце хода`
   return {
-    label: `контекст ${sizes}${share !== null ? ` · ${formatShare(share)}` : ''}`,
+    label: tr`контекст ${sizes}${share !== null ? ` · ${formatShare(share)}` : ''}`,
     short: share !== null ? formatShare(share) : formatTokens(c.used),
     share,
     tone: contextTone(share),
     barPct: share === null ? 0 : Math.min(100, Math.max(0, Math.round(share * 100))),
-    title: `Контекстное окно: ${exact}${c.model ? ` · ${c.model}` : ''}`,
+    title: tr`Контекстное окно: ${exact}${c.model ? ` · ${c.model}` : ''}`,
   }
 }
 

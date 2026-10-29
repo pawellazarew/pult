@@ -1,3 +1,4 @@
+import { t as tr } from '../lib/i18n.js'
 // Список агентов слева: подпись статуса, сортировка, строка «папка · ветка». Чистые функции.
 //
 // ПОРЯДОК (docs/12 §3 п.1): сначала те, кто ждёт человека, потом работающие, потом остальные. Внутри
@@ -20,15 +21,15 @@ export interface StatusView {
 }
 
 const VIEWS: Record<SessionStatus, StatusView> = {
-  cold: { label: 'холодный', tone: 'queued', needsYou: false, busy: false },
-  idle: { label: 'готов', tone: 'ok', needsYou: false, busy: false },
-  working: { label: 'идёт', tone: 'run', needsYou: false, busy: true },
-  blocked_permission: { label: 'ждёт тебя', tone: 'wait', needsYou: true, busy: true },
-  blocked_question: { label: 'ждёт ответа', tone: 'wait', needsYou: true, busy: true },
-  limited: { label: 'лимит', tone: 'fail', needsYou: false, busy: false },
-  interrupted: { label: 'остановлен', tone: 'queued', needsYou: false, busy: false },
-  failed: { label: 'ошибка', tone: 'fail', needsYou: false, busy: false },
-  done: { label: 'завершён', tone: 'queued', needsYou: false, busy: false },
+  cold: { label: tr('холодный'), tone: 'queued', needsYou: false, busy: false },
+  idle: { label: tr('готов'), tone: 'ok', needsYou: false, busy: false },
+  working: { label: tr('идёт'), tone: 'run', needsYou: false, busy: true },
+  blocked_permission: { label: tr('ждёт тебя'), tone: 'wait', needsYou: true, busy: true },
+  blocked_question: { label: tr('ждёт ответа'), tone: 'wait', needsYou: true, busy: true },
+  limited: { label: tr('лимит'), tone: 'fail', needsYou: false, busy: false },
+  interrupted: { label: tr('остановлен'), tone: 'queued', needsYou: false, busy: false },
+  failed: { label: tr('ошибка'), tone: 'fail', needsYou: false, busy: false },
+  done: { label: tr('завершён'), tone: 'queued', needsYou: false, busy: false },
 }
 
 export function statusView(s: SessionStatus | string | undefined): StatusView {
@@ -188,12 +189,12 @@ export function ago(iso: string, now: number): string {
   const t = Date.parse(iso)
   if (!Number.isFinite(t)) return '—'
   const s = Math.max(0, Math.round((now - t) / 1000))
-  if (s < 45) return 'только что'
+  if (s < 45) return tr('только что')
   const m = Math.round(s / 60)
-  if (m < 60) return `${m} мин`
+  if (m < 60) return tr`${m} мин`
   const h = Math.floor(m / 60)
-  if (h < 24) return `${h} ч`
-  return `${Math.floor(h / 24)} дн`
+  if (h < 24) return tr`${h} ч`
+  return tr`${Math.floor(h / 24)} дн`
 }
 
 /** Сколько агентов ждёт человека — для бейджа и заголовка окна. */
