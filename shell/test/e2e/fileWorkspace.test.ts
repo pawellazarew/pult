@@ -6,6 +6,8 @@ import { launch, waitFor } from './harness.js'
 import type { Harness } from './harness.js'
 import { pdfFixture } from './pdfFixture.js'
 
+const codeSample = ['#!/usr/bin/env python3', '', 'def greet():', '\treturn "Привет"', `    # ${'x'.repeat(240)}`, 'greet()', ''].join('\n')
+
 describe('файлы проекта рядом с беседой', () => {
   let h: Harness
   let cwd: string
@@ -15,6 +17,7 @@ describe('файлы проекта рядом с беседой', () => {
     assert.ok(await waitFor(async () => await h.win.getAttribute('.app', 'data-conn') === 'up', 20_000))
     cwd = h.workDir('project')
     mkdirSync(path.join(cwd, 'src'))
+    writeFileSync(path.join(cwd, 'layout.py'), codeSample)
     writeFileSync(path.join(cwd, 'src/main.ts'), 'export function preview() {\n  return "Hello Pult"\n}\n')
     writeFileSync(path.join(cwd, 'README.md'), '# План релиза\n\nФайлы рядом с разговором.\n\n- Проверить интерфейс\n- Сохранить черновик\n\n[Исходный код](src/main.ts)\n')
     writeFileSync(path.join(cwd, 'demo.html'), '<script>window.__pultViewerPwned = 1</script>')
@@ -39,9 +42,44 @@ describe('файлы проекта рядом с беседой', () => {
     await h.win.getByTestId('file-source-toggle').click()
     await h.win.getByTestId('file-markdown').getByTestId('file-link').click()
     assert.ok(await waitFor(async () => (await h.win.getByTestId('file-source').textContent())?.includes('Hello Pult') === true))
+    const rows = await h.win.getByTestId('file-source').locator('.file-code-line').evaluateAll((lines) =>
+      lines.map((line) => ({ top: line.getBoundingClientRect().top, number: line.querySelector('.file-line-number')?.textContent })))
+    assert.deepEqual(rows.map((row) => row.number), ['1', '2', '3', '4'])
+    for (let i = 1; i < rows.length; i++) {
+      assert.ok(rows[i]!.top > rows[i - 1]!.top + 1, `Строки ${i} и ${i + 1} должны идти друг под другом: ${JSON.stringify(rows)}`)
+    }
+
     await h.win.locator('[data-testid="workspace-file"][data-path="demo.html"]').click()
     assert.ok(await waitFor(async () => (await h.win.getByTestId('file-source').textContent())?.includes('<script>') === true))
     assert.equal(await h.win.evaluate(() => (window as unknown as { __pultViewerPwned?: number }).__pultViewerPwned), undefined)
+    await h.win.keyboard.press('Escape')
+    assert.equal(await h.win.getByTestId('composer').inputValue(), 'Этот черновик должен сохраниться')
+  })
+
+  it('код сохраняет пустые строки, отступы и нумерацию при горизонтальной прокрутке', async () => {
+    await h.win.keyboard.press('Meta+P')
+    await h.win.locator('[data-testid="workspace-file"][data-path="layout.py"]').click()
+    const source = h.win.getByTestId('file-source')
+    assert.ok(await waitFor(async () => (await source.textContent())?.includes('#!/usr/bin/env python3') === true))
+    const lines = source.locator('.file-code-line')
+    assert.deepEqual(await lines.locator(':scope > span:last-of-type').allTextContents(), codeSample.split('\n').map((line) => line || ' '))
+    const geometry = await lines.evaluateAll((items) => items.map((line) => {
+      const r = line.getBoundingClientRect()
+      return { top: r.top, height: r.height, gutter: line.querySelector('.file-line-number')!.getBoundingClientRect().left }
+    }))
+    for (let i = 1; i < geometry.length; i++) {
+      assert.ok(Math.abs(geometry[i]!.top - geometry[i - 1]!.top - geometry[i - 1]!.height) < 1, 'каждая строка начинается сразу под предыдущей')
+      assert.ok(Math.abs(geometry[i]!.height - geometry[0]!.height) < 1, 'длинные строки не переносятся, пустые не схлопываются')
+    }
+    assert.deepEqual(await source.locator('.file-line-number').allTextContents(), ['1', '2', '3', '4', '5', '6', '7'])
+    await source.evaluate((el) => { el.scrollLeft = el.scrollWidth - el.clientWidth })
+    assert.ok(await source.evaluate((el) => el.scrollLeft > 100), 'длинный код прокручивается внутри просмотра')
+    const gutters = await source.locator('.file-line-number').evaluateAll((items) => items.map((item) => item.getBoundingClientRect().left))
+    gutters.forEach((left, i) => assert.ok(Math.abs(left - geometry[i]!.gutter) < 1, `номер строки ${i + 1} остаётся у левого края`))
+    assert.ok(await h.win.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'код не растягивает окно')
+    await source.evaluate((el) => { el.scrollLeft = 0 })
+    await h.scheme('light'); await h.screen('workspace-code-lines-light')
+    await h.scheme('dark'); await h.screen('workspace-code-lines-dark')
     await h.win.keyboard.press('Escape')
     assert.equal(await h.win.getByTestId('composer').inputValue(), 'Этот черновик должен сохраниться')
   })
