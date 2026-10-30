@@ -731,8 +731,8 @@ async function boot(): Promise<void> {
 
   runtimeWeb = new RuntimeWeb({
     window: () => mainWindow,
-    createView: (id) => new WebContentsView({ webPreferences: {
-      partition: runtimeWebPartition(id), contextIsolation: true, sandbox: true,
+    createView: (id, instanceId) => new WebContentsView({ webPreferences: {
+      partition: runtimeWebPartition(id, instanceId), contextIsolation: true, sandbox: true,
       nodeIntegration: false, nodeIntegrationInWorker: false, nodeIntegrationInSubFrames: false,
       webSecurity: true, allowRunningInsecureContent: false, webviewTag: false,
       navigateOnDragDrop: false, backgroundThrottling: false, disableDialogs: true, spellcheck: false, devTools: !app.isPackaged || TEST_MODE,

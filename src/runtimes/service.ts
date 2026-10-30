@@ -10,7 +10,7 @@ export interface RuntimeDeps {
   mobile(): Promise<RuntimeDiscovery>
   performMobile(target: RuntimeTarget, action: string, input: Record<string, unknown>): Promise<RuntimeResult>
   install?(id: string): Promise<RuntimeResult>
-  session(id: string): { approval?: string; archived?: boolean } | null
+  session(id: string): { approval?: string; archived?: boolean; createdAt?: string } | null
   authorize(sessionId: string, targetId: string, action: string, input: Record<string, unknown>, signal?: AbortSignal): Promise<boolean>
   changed(sessionId: string, data: Record<string, unknown>): void
   now?: () => number
@@ -74,7 +74,7 @@ export function createRuntimeService(d: RuntimeDeps) {
     const jobId = randomUUID()
     const timer = setTimeout(() => { jobs.delete(jobId); reject(new RuntimeError('timeout', 'Браузер не ответил за 30 секунд')) }, 30_000)
     timer.unref?.()
-    jobs.set(jobId, { wire: { id: jobId, sessionId, action, input }, targetId: id, generation, timer, resolve, reject })
+    jobs.set(jobId, { wire: { id: jobId, sessionId, instanceId: d.session(sessionId)?.createdAt ?? sessionId, action, input }, targetId: id, generation, timer, resolve, reject })
   })
   const execute = async (p: RuntimeInput, actor: 'agent' | 'human'): Promise<RuntimeResult> => {
     p = { ...p, input: structuredClone(p.input ?? {}) }

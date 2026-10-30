@@ -53,7 +53,7 @@ export async function smokeProviders(targetId, out, options = {}) {
         writeFileSync(join(out, `${provider}-wait.json`), JSON.stringify(wait, null, 2))
         const events = daemon.store.readFrom(0, { sessionId: name, limit: 200 })
         writeFileSync(join(out, `${provider}-events.json`), JSON.stringify(events, null, 2))
-        const blocked = events.find(e => ['net.blocked', 'provider.blocked', 'error'].includes(e.kind))
+        const blocked = events.find(e => ['net.blocked', 'provider.blocked', 'limit.hit', 'error'].includes(e.kind))
         if (blocked) throw new Error(`${blocked.kind}: ${JSON.stringify(blocked.data).slice(0, 800)}`)
         const called = events.filter(e => e.kind === 'tool.called').map(e => JSON.stringify(e.data))
         const done = events.filter(e => e.kind === 'message.done').map(e => JSON.stringify(e.data)).join('\n')

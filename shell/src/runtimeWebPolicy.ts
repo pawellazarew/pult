@@ -14,8 +14,10 @@ export function runtimeWebUrl(raw: unknown): string {
   return url.href
 }
 
-export function runtimeWebPartition(sessionId: string): string {
-  return `persist:pult-runtime-web-${createHash('sha256').update(runtimeSessionId(sessionId)).digest('hex').slice(0, 32)}`
+export function runtimeWebPartition(sessionId: string, instanceId = ''): string {
+  if (typeof instanceId !== 'string' || instanceId.length > 256) throw new Error('Неверный экземпляр сессии')
+  // Session names can be reused after removal. The persisted creation identity must not be.
+  return `persist:pult-runtime-web-${createHash('sha256').update(JSON.stringify([runtimeSessionId(sessionId), instanceId])).digest('hex').slice(0, 32)}`
 }
 
 export function runtimeBounds(raw: unknown, viewport: { width: number; height: number }): RuntimeBounds | null {

@@ -96,4 +96,26 @@ describe('runtime web: user and agent share one isolated browser page', () => {
     await perform('detach')
   })
 
+  it('reusing a removed session name creates new browser contents and storage', async () => {
+    await perform('attach', { url })
+    const oldId = await h.app.evaluate(async ({ webContents }, base) => {
+      const wc = webContents.getAllWebContents().find((item) => item.getURL() === base)!
+      await wc.executeJavaScript('document.cookie="runtimeProof=old;path=/";localStorage.setItem("runtimeProof","old")')
+      return wc.id
+    }, url)
+    const c = await h.client()
+    await c.request('agent.rm', { name: 'web-test' })
+    await c.request('agent.start', { name: 'web-test', kind: 'claude', cwd: h.workDir('web-test') })
+    await perform('attach', { url })
+    const fresh = await h.app.evaluate(async ({ webContents }, base) => {
+      const wc = webContents.getAllWebContents().find((item) => item.getURL() === base)!
+      const storage = await wc.executeJavaScript('({cookie:document.cookie,local:localStorage.getItem("runtimeProof")})') as { cookie: string; local: string | null }
+      return { id: wc.id, ...storage }
+    }, url)
+    assert.notEqual(fresh.id, oldId)
+    assert.ok(!fresh.cookie.includes('runtimeProof'))
+    assert.equal(fresh.local, null)
+    await perform('detach')
+  })
+
 })

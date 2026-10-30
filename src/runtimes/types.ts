@@ -25,5 +25,5 @@ export interface RuntimeResult {
   /** Single bounded image; never stored in the event journal. */
   image?: { data: string; mimeType: 'image/jpeg' | 'image/png' }
 }
-export interface RuntimeHostJob { id: string; sessionId: string; action: string; input: Record<string, unknown> }
+export interface RuntimeHostJob { instanceId?: string; id: string; sessionId: string; action: string; input: Record<string, unknown> }
 export interface RuntimeBounds { x: number; y: number; width: number; height: number }

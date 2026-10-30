@@ -12,6 +12,7 @@ export function createRuntimeWebView(factory: () => WebContentsView): WebContent
 }
 
 type BrowserPage = {
+  instanceId: string
   view: WebContentsView
   window: BrowserWindow
   logs: Array<{ kind: string; text: string }>
@@ -28,7 +29,7 @@ interface AxNode {
 }
 export interface RuntimeWebOptions {
   window(): BrowserWindow | null
-  createView(sessionId: string): WebContentsView
+  createView(sessionId: string, instanceId: string): WebContentsView
   onAttach?(sessionId: string): void
 }
 
@@ -65,20 +66,25 @@ export class RuntimeWeb {
     }
   }
 
-  private get(sessionId: string): BrowserPage {
+  private get(sessionId: string, instanceId: string): BrowserPage {
     const page = this.pages.get(sessionId)
     if (!page || page.view.webContents.isDestroyed() || page.window.isDestroyed()) throw new Error('Сначала подключи встроенный браузер')
+    if (page.instanceId !== instanceId) throw new Error('Экземпляр сессии изменился; подключи браузер заново')
     return page
   }
 
-  private create(sessionId: string): BrowserPage {
+  private create(sessionId: string, instanceId: string): BrowserPage {
     const previous = this.pages.get(sessionId)
-    if (previous && !previous.view.webContents.isDestroyed() && !previous.window.isDestroyed()) return previous
+    if (previous?.instanceId === instanceId && !previous.view.webContents.isDestroyed() && !previous.window.isDestroyed()) return previous
     this.pages.delete(sessionId)
+    if (previous) {
+      if (!previous.window.isDestroyed()) previous.window.contentView.removeChildView(previous.view)
+      if (!previous.view.webContents.isDestroyed()) previous.view.webContents.close({ waitForBeforeUnload: false })
+    }
     const win = this.options.window()
     if (!win || win.isDestroyed()) throw new Error('Для встроенного браузера открой окно Пульта')
-    const view = createRuntimeWebView(() => this.options.createView(sessionId))
-    const page: BrowserPage = { view, window: win, logs: [], refs: new Map(), snapshot: 0, invalidation: 0 }
+    const view = createRuntimeWebView(() => this.options.createView(sessionId, instanceId))
+    const page: BrowserPage = { instanceId, view, window: win, logs: [], refs: new Map(), snapshot: 0, invalidation: 0 }
     const wc = view.webContents
     this.harden(wc, wc.session)
     const push = (kind: string, text: string): void => {
@@ -174,10 +180,13 @@ export class RuntimeWeb {
 
   async perform(job: RuntimeHostJob): Promise<RuntimeResult> {
     const id = runtimeSessionId(job.sessionId)
+    const instanceId = job.instanceId ?? ''
+    if (typeof instanceId !== 'string' || instanceId.length > 256) throw new Error('Неверный экземпляр сессии')
     const { action, input } = job
     if (action === 'detach') {
       const page = this.pages.get(id)
       if (page) {
+        if (page.instanceId !== instanceId) throw new Error('Экземпляр сессии изменился; устаревшее отключение отклонено')
         this.pages.delete(id)
         if (!page.window.isDestroyed()) page.window.contentView.removeChildView(page.view)
         if (!page.view.webContents.isDestroyed()) page.view.webContents.close({ waitForBeforeUnload: false })
@@ -186,14 +195,14 @@ export class RuntimeWeb {
     }
     if (action === 'attach') {
       const url = input['url'] === undefined ? undefined : runtimeWebUrl(input['url'])
-      const page = this.create(id)
+      const page = this.create(id, instanceId)
       // A newly created WebContentsView has no renderer until its first load.
       // Sending CDP before loadURL can wait forever on that missing renderer.
       if (!page.view.webContents.getURL() || url) await this.navigate(page, url ?? 'about:blank')
       await this.command(page, 'Network.enable')
       return this.status(page)
     }
-    const page = this.get(id)
+    const page = this.get(id, instanceId)
     const wc = page.view.webContents
     switch (action) {
       case 'navigate': await this.navigate(page, runtimeWebUrl(input['url'])); break
