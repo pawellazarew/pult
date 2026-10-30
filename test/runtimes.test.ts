@@ -174,6 +174,9 @@ test('daemon runtime credential cannot approve setup, read another session or su
       ['runtime.host.poll', {}],
       ['agent.list', {}],
     ] as Array<[string, Record<string, unknown>]>) await assert.rejects(agent.request(method, params), (e: unknown) => (e as { code: string }).code === 'forbidden')
+    assert.deepEqual(await owner.request('agent.stop', { name: 'one', turnId: 'old-turn' }), { stopped: false })
+    await assert.rejects(owner.request('agent.stop', { name: 'one', turnId: 42 }), (e: unknown) => (e as { code: string }).code === 'invalid_params')
+    assert.equal(d.runtimes.lookup(key), 'one', 'a stale/invalid Stop must not revoke the current session capability')
     await owner.request('agent.stop', { name: 'one' })
     await assert.rejects(agent.request('runtime.discover', { sessionId: 'one' }), (e: unknown) => (e as { code: string }).code === 'forbidden')
     assert.equal(d.runtimes.lookup(key), null)

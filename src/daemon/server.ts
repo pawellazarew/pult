@@ -1180,14 +1180,17 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
       case 'agent.retry':
         return await manager.retry(String(p['name'] ?? ''))
       case 'agent.stop': {
-        runtimes.revoke(String(p['name'] ?? ''))
         // `turnId` (О2, карточка «завис»): стоп только этого хода — кончился, стопа нет.
         if (p['turnId'] !== undefined && typeof p['turnId'] !== 'string') throw new ManagerError(ERROR_CODES.invalidParams, 'agent.stop: turnId — строка')
-        return { stopped: await manager.stop(String(p['name'] ?? ''), p['turnId'] as string | undefined) }
+        const name = String(p['name'] ?? '')
+        if (p['turnId'] === undefined) runtimes.revoke(name)
+        const stopped = await manager.stop(name, p['turnId'] as string | undefined)
+        if (stopped && p['turnId'] !== undefined) runtimes.revoke(name)
+        return { stopped }
       }
       case 'agent.rm': {
-        runtimes.revoke(String(p['name'] ?? ''))
         const r = await manager.rm(String(p['name'] ?? ''), { worktree: p['worktree'] === true })
+        runtimes.revoke(String(p['name'] ?? ''))
         return { removed: true, ...r }
       }
       case 'agent.export': {
