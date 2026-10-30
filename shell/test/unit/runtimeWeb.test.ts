@@ -6,7 +6,7 @@ describe('isolated runtime browser policy', () => {
   it('allows local and remote http(s), denies privileged schemes and credential URLs', () => {
     assert.equal(runtimeWebUrl('http://localhost:4173/test'), 'http://localhost:4173/test')
     assert.equal(runtimeWebUrl('https://example.com'), 'https://example.com/')
-    for (const input of ['file:///etc/passwd', 'app://pult/index.html', 'javascript:alert(1)', 'data:text/html,hello', 'https://user:pass@example.com', 'https://example.com@evil.com', '', null]) {
+    for (const input of ['file:///etc/passwd', 'app://pult/index.html', 'javascript:alert(1)', 'data:text/html,hello', 'https://user:pass@example.com', 'https://example.com@localhost', '', null]) {
       assert.throws(() => runtimeWebUrl(input), String(input))
     }
   })
