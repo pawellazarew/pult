@@ -45,6 +45,8 @@ export interface Client {
 }
 
 export interface ConnectOptions {
+  /** Session-scoped runtime MCP credential; never reads the owner token. */
+  runtimeKey?: string
   client?: ClientKind
   timeoutMs?: number
 }
@@ -87,8 +89,8 @@ const shellApp = (): typeof SHELL_APP => SHELL_APP
 
 export async function connectClient(paths: PultPaths, opts: ConnectOptions = {}): Promise<Client> {
   const timeoutMs = opts.timeoutMs ?? 10_000
-  const token = readToken(paths.token)
-  if (!token) throw new ClientError('no_daemon', `нет файла токена ${paths.token} — демон не запущен`)
+  const token = opts.runtimeKey ? undefined : readToken(paths.token)
+  if (!token && !opts.runtimeKey) throw new ClientError('no_daemon', `нет файла токена ${paths.token} — демон не запущен`)
 
   const socket = await new Promise<net.Socket>((resolve, reject) => {
     const s = net.connect(paths.sock)
@@ -194,7 +196,7 @@ export async function connectClient(paths: PultPaths, opts: ConnectOptions = {})
     })
     const client = opts.client ?? 'cli'
     const app = client === 'shell' ? shellApp() : null
-    socket.write(encodeLine({ type: 'hello', token, client, protocol: PROTOCOL_VERSION, ...(app ? { app } : {}) }))
+    socket.write(encodeLine({ type: 'hello', ...(opts.runtimeKey ? { runtime: opts.runtimeKey } : { token }), client, protocol: PROTOCOL_VERSION, ...(app ? { app } : {}) }))
   })
 
   const send = (

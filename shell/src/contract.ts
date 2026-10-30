@@ -1,3 +1,4 @@
+import type { RuntimeBounds } from '../../src/runtimes/types.js'
 import type { FileListing, FilePreview } from '../../src/core/fileBrowserTypes.js'
 export type { FileListing, FilePreview, FileEntry } from '../../src/core/fileBrowserTypes.js'
 // Контракт моста `window.pult` (docs/12 §2): то, что видит интерфейс, и белый список методов демона,
@@ -24,6 +25,8 @@ export const BRIDGE_VERSION = 1
  */
 export const ALLOWED_METHODS = [
   'daemon.status',
+  'runtime.discover', 'runtime.perform', 'runtime.takeover', 'runtime.release',
+  'runtime.setup.request', 'runtime.setup.resolve', 'runtime.setup.list',
   'doctor.run',
   'providers.check',
   'project.list',
@@ -162,6 +165,8 @@ export interface NewSessionPrefill {
  * смены версии моста: старая оболочка его просто не шлёт, старый интерфейс его не читает.
  */
 export interface NavTarget extends NotifyTarget {
+  /** Open the runtime pane after the agent attached a web target. */
+  runtime?: boolean
   newSession?: NewSessionPrefill
   /** Переход пришёл по ссылке `pult://`: окно не ставит фокус в поле ввода и глотает клавиши полсекунды. */
   link?: boolean
@@ -171,6 +176,8 @@ export interface PultBridge {
   readonly version: number
   /** PULT_TEST=1 у процесса оболочки: интерфейс включает отладочные крючки для e2e. */
   readonly testMode: boolean
+  /** Position the isolated native browser surface; null hides it. */
+  runtimeView?(sessionId: string, bounds: RuntimeBounds | null): Promise<void>
   /** Вызов метода демона из белого списка. Отказ — `BridgeError`. */
   call(method: AllowedMethod, params?: Record<string, unknown>): Promise<unknown>
   /**
@@ -256,6 +263,7 @@ export interface ClipboardImageBridge {
 /** Каналы IPC между preload и main. Имена в одном месте: опечатка в строке канала молчит. */
 export const IPC = {
   call: 'pult:call',
+  runtimeView: 'pult:runtime-view',
   subscribe: 'pult:subscribe',
   unsubscribe: 'pult:unsubscribe',
   event: 'pult:event',

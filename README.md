@@ -47,6 +47,16 @@ Everything it does is written to an event journal in `~/.pult`, so the CLI and t
 | **warm** | `--warm` keeps the `claude` process alive between messages (1–2 s faster per message). |
 | **worktree** | a separate git working copy on its own branch, so two agents don't edit the same files. |
 
+## Preview and devices
+
+In the development build after 0.3.17, **Preview** opens a shared browser page, iOS Simulator or Android Emulator beside the chat. The browser uses Electron's existing Chromium. Mobile SDKs and system images are not bundled.
+
+Connect an installed device, watch screen updates about once a second, and select **Take control** to cancel queued agent input. Return control when ready; an already-running operation may finish during takeover. Claude and Codex share the `pult_runtime` MCP tools, including in full-access sessions. This is separate from the existing external Playwright browser.
+
+Xcode and an iOS runtime are required for iOS; Android needs its SDK, Emulator and an AVD. iOS input also needs AXe, reused from an existing installation or Homebrew XcodeBuildMCP when available. Missing AXe can be installed from the displayed setup proposal. **Installing an add-on requires explicit consent even in full access.** Missing Xcode and Android SDK components use guided manual setup. This does not sandbox an agent with full shell access.
+
+The built-in browser requires an open Pult window. Only virtual devices are supported. Model-requested screenshots are sent to the selected provider. Text-only models can use UI trees but cannot visually evaluate screenshots. iOS text input uses the simulator clipboard and supports Unicode; Android input currently supports ASCII only.
+
 ## Requirements
 
 - **macOS on Apple Silicon** (daemon, CLI and window) **or Linux** (daemon and CLI; there is no window on Linux).
