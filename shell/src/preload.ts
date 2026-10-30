@@ -33,6 +33,10 @@ const bridge: PultBridge = {
   version: BRIDGE_VERSION,
   testMode,
 
+  async runtimeView(sessionId, bounds) {
+    unwrap(await ipcRenderer.invoke(IPC.runtimeView, sessionId, bounds) as CallReply)
+  },
+
   async call(method: AllowedMethod, params?: Record<string, unknown>): Promise<unknown> {
     return unwrap((await ipcRenderer.invoke(IPC.call, method, params)) as CallReply)
   },

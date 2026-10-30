@@ -12,7 +12,7 @@ import { realpathSync, readFileSync, writeFileSync, statSync, accessSync, consta
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
-  app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, Notification, powerMonitor, protocol, session, shell, Tray,
+  app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, Notification, powerMonitor, protocol, session, shell, Tray, WebContentsView,
 } from 'electron'
 import type { IpcMainEvent, IpcMainInvokeEvent, MenuItemConstructorOptions, NativeImage, WebContents } from 'electron'
 import { readScopedImage } from '../../src/core/images.js'
@@ -29,6 +29,9 @@ import { BRIDGE_VERSION, IPC, isAllowedMethod, sanitizeParams, SUBSCRIBE_VIA_BRI
 import type { CallReply, ConnState, DaemonStatus, NavTarget, NotifyTarget } from './contract.js'
 import { externalUrl } from './externalUrl.js'
 import { DaemonLink } from './link.js'
+import { RuntimeWeb, isCreatingRuntimeWeb } from './runtimeWeb.js'
+import { runtimeSessionId, runtimeWebPartition } from './runtimeWebPolicy.js'
+import { startRuntimeHost } from './runtimeHost.js'
 import { locatePackage, resolveNode } from './locate.js'
 import { isNotifyKind, notificationSound } from './notifySound.js'
 import { createNotificationRouter, sanitizeTarget } from './notifications.js'
@@ -69,6 +72,8 @@ let uiRoot = ''
 /** PULT_HOME — из paths() пакета, как у демона; пусто до boot. */
 let pultHome = ''
 let tray: Tray | null = null
+let runtimeWeb: RuntimeWeb | null = null
+let stopRuntimeHost: (() => void) | null = null
 
 type TestNotice = { id: string; title?: string; body?: string; target: NotifyTarget; kind?: string; sound?: string; silent?: boolean }
 type NotificationTestGlobals = {
@@ -414,6 +419,8 @@ function stopTray(): void {
 
 function hardenWebContents(): void {
   app.on('web-contents-created', (_e, contents: WebContents) => {
+    // RuntimeWeb installs its own navigation policy before the first URL is loaded.
+    if (isCreatingRuntimeWeb()) return
     contents.on('will-navigate', (ev) => ev.preventDefault())
     contents.on('will-redirect', (ev) => ev.preventDefault())
     contents.on('will-attach-webview', (ev) => ev.preventDefault())
@@ -431,6 +438,17 @@ async function imageForSession(sessionId: unknown, source: unknown) {
 }
 
 function registerIpc(): void {
+  ipcMain.handle(IPC.runtimeView, async (e, sessionId: unknown, bounds: unknown): Promise<CallReply> => {
+    if (!trusted(e)) return fail('forbidden', 'Вызов не из окна Пульта')
+    try {
+      const id = runtimeSessionId(sessionId)
+      if (!link || !runtimeWeb) throw new Error('Пульт ещё не готов')
+      const result = await link.call('agent.list', {}) as { sessions?: Array<{ name?: unknown }> }
+      if (!result.sessions?.some((s) => s.name === id)) throw new Error('Сессия недоступна')
+      runtimeWeb.setView(id, bounds)
+      return { ok: true, result: null }
+    } catch (err) { return toReply(err) }
+  })
   ipcMain.on(IPC.testMode, (e) => { e.returnValue = trusted(e) ? TEST_MODE : false })
   ipcMain.on(IPC.connectionGet, (e) => { e.returnValue = trusted(e) && link ? link.current : null })
 
@@ -711,6 +729,18 @@ async function boot(): Promise<void> {
     log,
   })
 
+  runtimeWeb = new RuntimeWeb({
+    window: () => mainWindow,
+    createView: (id) => new WebContentsView({ webPreferences: {
+      partition: runtimeWebPartition(id), contextIsolation: true, sandbox: true,
+      nodeIntegration: false, nodeIntegrationInWorker: false, nodeIntegrationInSubFrames: false,
+      webSecurity: true, allowRunningInsecureContent: false, webviewTag: false,
+      navigateOnDragDrop: false, backgroundThrottling: false, disableDialogs: true, spellcheck: false, devTools: !app.isPackaged || TEST_MODE,
+    } }),
+    onAttach: (sessionId) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(IPC.navigate, { sessionId, runtime: true }) },
+  })
+  stopRuntimeHost = startRuntimeHost({ link, web: runtimeWeb, log })
+
   registerAppProtocol()
   session.defaultSession.setPermissionRequestHandler((_wc, _perm, cb) => cb(false))
   session.defaultSession.setPermissionCheckHandler(() => false)
@@ -763,5 +793,5 @@ if (!app.requestSingleInstanceLock()) {
     if (process.platform !== 'darwin') app.quit()
   })
   app.on('activate', () => { if (link) showWindow() })
-  app.on('before-quit', () => { stopTray(); link?.close() })
+  app.on('before-quit', () => { stopRuntimeHost?.(); runtimeWeb?.close(); stopTray(); link?.close() })
 }

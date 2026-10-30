@@ -28,6 +28,9 @@ export function Header(p: {
   onToggleSidebar?(): void
   onDoctor(): void
   onInbox(): void
+  runtimeOpen?: boolean
+  runtimeAvailable?: boolean
+  onRuntime?(): void
   filesOpen?: boolean
   filesAvailable?: boolean
   onFiles?(): void
@@ -91,6 +94,7 @@ export function Header(p: {
       {up && p.guard.tone !== 'ok' && <span className={`header-guard-alert t-${p.guard.tone}`} title={guardTitle}>{p.guard.label}</span>}
       <div className="hdr-spacer" />
       <div className="hdr-actions">
+        {p.onRuntime && <button type="button" className="btn" aria-pressed={p.runtimeOpen} disabled={!p.runtimeAvailable} onClick={p.onRuntime} data-testid="toggle-runtime" title="Браузер и мобильные устройства">Превью</button>}
         {p.onFiles && <button type="button" className="btn" aria-pressed={p.filesOpen} disabled={!p.filesAvailable} onClick={p.onFiles} data-testid="toggle-files" title={`Файлы проекта (${CMD}P)`}>
           <Icon name="folder" />Файлы
         </button>}

@@ -8,7 +8,7 @@ import type { PultEvent } from './events.js'
 // полей, которые они и так пропускают мимо.
 export const PROTOCOL_VERSION = 1
 
-export type ClientKind = 'cli' | 'shell' | 'mcp-ask'
+export type ClientKind = 'cli' | 'shell' | 'mcp-ask' | 'mcp-runtime'
 
 /**
  * Рукопожатие. Ровно одно из двух: `token` — токен хозяина из PULT_HOME/run/token (окно, CLI: все методы, кроме
@@ -19,6 +19,7 @@ export interface HelloMessage {
   type: 'hello'
   token?: string
   ask?: string
+  runtime?: string
   client: ClientKind
   protocol: number
 }

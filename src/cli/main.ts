@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { runRuntimeMcp } from '../runtimes/mcp.js'
 // `pult` — CLI. Разбор argv руками: зависимостей у пакета ноль, а нужных нам форм флагов
 // ровно две (`--флаг` и `--флаг значение`).
 //
@@ -1177,6 +1178,8 @@ export async function run(argv: string[]): Promise<number> {
       return cmdUsage(paths, args)
     case 'provider':
       return cmdProvider(paths, args)
+    case 'mcp-runtime':
+      return runRuntimeMcp(paths)
     case 'mcp-ask':
       return cmdMcpAsk(paths)
     case 'doctor':

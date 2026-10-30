@@ -1,3 +1,6 @@
+import { fileURLToPath } from 'node:url'
+import { createRuntimeService, RuntimeError } from '../runtimes/service.js'
+import { discoverMobile, performMobile, installMobileSetup } from '../runtimes/mobile.js'
 // Сервер демона: unix-сокет, рукопожатие, диспетчер методов. Протокол — план Ф1 §3.
 // Основа перенесена из spike/env/sock-server.mjs (проверка S9f): каталог 0700 и файлы 0600
 // явным chmod, lock с проверкой живости pid, старый сокет удаляется ТОЛЬКО после взятия lock.
@@ -168,6 +171,7 @@ export interface DaemonHandle {
   readonly broker: PermBroker
   /** 0.3.7: ключи вопросов `pult mcp-ask` (в памяти демона; тесты выдают их сами). */
   readonly askKeys: AskKeys
+  readonly runtimes: ReturnType<typeof createRuntimeService>
   readonly manager: SessionManager
   readonly startedAt: string
   status(): DaemonStatus
@@ -189,7 +193,9 @@ interface Connection {
    * 0.3.7: право соединения — от того, ЧЕМ прошло рукопожатие, а не от самоназвания `client`. `owner` — токен хозяина
    * (всё, кроме `perm.request`); `ask` — ключ вопросов (только `perm.request` сессии `askSession`); `none` — до hello.
    */
-  role: 'none' | 'owner' | 'ask'
+  role: 'none' | 'owner' | 'ask' | 'runtime'
+  runtimeKey?: string
+  runtimeSession?: string
   /** Ключ вопросов соединения `ask`: сверяется на каждом `perm.request` — снятый ключ (процесс claude вышел) не спросит. */
   askKey?: string
   askSession?: string
@@ -382,7 +388,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     emit: (draft) => { manager.emit(draft) },
     ...(opts.browserInstall ? { install: opts.browserInstall } : {}),
   })
-  const mcpExtras = createMcpExtras({
+  const browserExtras = createMcpExtras({
     paths, logger, installer,
     record: (name) => manager.list().find((r) => r.name === name) ?? null,
     selected: () => config.mcp.servers,
@@ -391,6 +397,29 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     emit: (draft) => { manager.emit(draft) },
     chrome: chromeOf,
   })
+  const runtimes = createRuntimeService({
+    mobile: opts.testMode ? async () => ({ targets: [], setup: [] }) : discoverMobile,
+    performMobile,
+    install: installMobileSetup,
+    session: (id) => manager.list().find((r) => r.name === id) ?? null,
+    authorize: async (sessionId, targetId, action, input, signal) => (await broker.request({ sessionId, toolName: 'pult_runtime', input: { targetId, action, input } }, { signal, reason: 'Управление средой остановлено' })).behavior === 'allow',
+    changed: (sessionId, data) => { manager.emit({ sessionId, provider: 'pult', kind: 'runtime.changed', data }) },
+  })
+  const mcpExtras = async (name: string, nodeBin: string, at?: import('../adapters/types.js').TurnSettings): Promise<import('../adapters/types.js').SessionMcpExtras> => {
+    const rec = manager.list().find((r) => r.name === name)
+    const approval = at ? at.approval ?? 'ask' : rec?.approval ?? 'ask'
+    const key = rec ? runtimes.key(name, approval) : null
+    const extra = await browserExtras(name, nodeBin, at)
+    if (!rec || !key) return extra
+    const spec: Record<string, unknown> = {
+      command: nodeBin, args: [opts.cliEntry ?? fileURLToPath(new URL('../cli/main.js', import.meta.url)), 'mcp-runtime'],
+      env: { PULT_HOME: paths.home, PULT_RUNTIME_SESSION: name, PULT_RUNTIME_KEY: key },
+      ...(rec.provider === 'codex' ? { default_tools_approval_mode: 'approve' } : { type: 'stdio' }),
+    }
+    return { ...extra, servers: { ...extra.servers, pult_runtime: spec }, ...(rec.provider === 'claude' ? {
+      permissions: { allow: [...(extra.permissions?.allow ?? []), 'mcp__pult_runtime'], ask: extra.permissions?.ask ?? [], deny: extra.permissions?.deny ?? [] },
+    } : {}) }
+  }
   /** Браузер включили (старт или `agent.browser`): каталоги сразу, установка — в фоне, ход её дождётся. */
   const browserOn = (name: string): void => {
     try { ensureBrowserDirs(paths, name) } catch (e) { logger.warn('каталоги браузера не заведены', { session: name, error: (e as Error).message }) }
@@ -1077,6 +1106,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
       }
       case 'agent.archive':
         if (typeof p['archived'] !== 'boolean') throw new ManagerError(ERROR_CODES.invalidParams, 'agent.archive: нужен archived: true|false')
+        if (p['archived']) runtimes.revoke(String(p['name'] ?? ''))
         return publicRecord(manager.archive(String(p['name'] ?? ''), p['archived']))
       case 'agent.rename':
         // `title` обязателен и строка: снять название — это явное '', а не забытый параметр.
@@ -1150,11 +1180,13 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
       case 'agent.retry':
         return await manager.retry(String(p['name'] ?? ''))
       case 'agent.stop': {
+        runtimes.revoke(String(p['name'] ?? ''))
         // `turnId` (О2, карточка «завис»): стоп только этого хода — кончился, стопа нет.
         if (p['turnId'] !== undefined && typeof p['turnId'] !== 'string') throw new ManagerError(ERROR_CODES.invalidParams, 'agent.stop: turnId — строка')
         return { stopped: await manager.stop(String(p['name'] ?? ''), p['turnId'] as string | undefined) }
       }
       case 'agent.rm': {
+        runtimes.revoke(String(p['name'] ?? ''))
         const r = await manager.rm(String(p['name'] ?? ''), { worktree: p['worktree'] === true })
         return { removed: true, ...r }
       }
@@ -1262,6 +1294,43 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     // Параметры — объект БЕЗ прототипа, только собственные поля запроса (ревью #16): решения о правах (`approval ?? 'ask'`,
     // `confirm`, `'updatedInput' in p`, `scope`, `browser`) не должны зависеть от того, что лежит в Object.prototype.
     const params = ownParams(req.params)
+    if (req.method.startsWith('runtime.')) {
+      try {
+        const actor = conn.role === 'runtime' ? 'agent' as const : 'human' as const
+        if (conn.role !== 'owner' && conn.role !== 'runtime') throw new RuntimeError('forbidden', 'Нет доступа к средам')
+        if (conn.role === 'runtime') {
+          const bound = runtimes.lookup(conn.runtimeKey)
+          if (!bound || params['sessionId'] !== bound || !['runtime.discover', 'runtime.perform', 'runtime.setup.request', 'runtime.setup.list'].includes(req.method)) {
+            throw new RuntimeError('forbidden', 'Ключ среды ограничен своей сессией и не разрешает подтверждать установки')
+          }
+        }
+        const sessionId = typeof params['sessionId'] === 'string' ? params['sessionId'] : ''
+        let result: unknown
+        switch (req.method) {
+          case 'runtime.discover': result = await runtimes.discover(sessionId); break
+          case 'runtime.perform': {
+            if (typeof params['targetId'] !== 'string' || typeof params['action'] !== 'string') throw new RuntimeError('invalid_params', 'Нужны targetId и action')
+            result = await runtimes.perform({ sessionId, targetId: params['targetId'], action: params['action'], input: ownParams(params['input']) }, actor); break
+          }
+          case 'runtime.takeover': case 'runtime.release': result = runtimes.takeover(sessionId, String(params['targetId'] ?? ''), req.method === 'runtime.takeover' ? 'human' : 'agent'); break
+          case 'runtime.setup.request': result = await runtimes.requestSetup(sessionId, String(params['setupId'] ?? '')); break
+          case 'runtime.setup.list': result = runtimes.listSetup(sessionId); break
+          case 'runtime.setup.resolve': {
+            if (typeof params['approve'] !== 'boolean') throw new RuntimeError('invalid_params', 'approve — true/false')
+            result = await runtimes.resolveSetup(sessionId, String(params['id'] ?? ''), params['approve']); break
+          }
+          case 'runtime.host.poll': case 'runtime.host.begin': case 'runtime.host.complete': {
+            if (conn.role !== 'owner' || conn.client !== 'shell') throw new RuntimeError('forbidden', 'Только подключённое окно предоставляет браузер')
+            if (req.method === 'runtime.host.poll' && params['available'] === false) { runtimes.hostGone(conn.id); result = { jobs: [] } }
+            else if (req.method === 'runtime.host.begin') result = runtimes.begin(conn.id, String(params['id'] ?? ''))
+            else result = req.method === 'runtime.host.poll' ? runtimes.poll(conn.id) : runtimes.complete(conn.id, String(params['id'] ?? ''), params['result'], params['error']); break
+          }
+          default: throw new RuntimeError('not_found', 'Неизвестный метод среды')
+        }
+        send({ id: req.id, result })
+      } catch (e) { fail(e instanceof RuntimeError ? e.code : 'runtime_failed', (e as Error).message) }
+      return
+    }
     // 0.3.7: ключ вопросов — ничего, кроме `perm.request` (ни подписки, ни статуса, ни resolve).
     if (conn.role !== 'owner' && req.method !== 'perm.request') {
       fail(ERROR_CODES.forbidden, `${req.method}: ключ вопросов даёт только perm.request`)
@@ -1621,12 +1690,16 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
             // Наличие поля, а не его непустота: `{token: "", ask: …}` — тоже «оба сразу».
             const given = typeof msg['token'] === 'string' ? msg['token'] : ''
             const askGiven = typeof msg['ask'] === 'string' ? msg['ask'] : ''
-            let role: 'owner' | 'ask'
+            let role: 'owner' | 'ask' | 'runtime'
             let askSession: string | null = null
-            if (msg['token'] !== undefined && msg['ask'] !== undefined) {
+            if (['token', 'ask', 'runtime'].filter((k) => msg[k] !== undefined).length > 1) {
               logger.warn('рукопожатие с токеном и ключом вопросов сразу', { conn: id })
               bye('bad_token', 'токен или ключ вопросов — одно из двух')
               return
+            } else if (msg['runtime'] !== undefined) {
+              const bound = runtimes.lookup(msg['runtime'])
+              if (!bound) { bye('bad_token', 'ключ среды не подходит'); return }
+              role = 'runtime'; conn.runtimeKey = msg['runtime'] as string; conn.runtimeSession = bound
             } else if (msg['ask'] !== undefined) {
               askSession = askKeys.lookup(askGiven)
               if (askSession === null) {
@@ -1694,6 +1767,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
       connections.delete(id)
       // Окно, которое правило реплику очереди, ушло — очередь не ждёт его правки.
       manager.queueReleaseOwner(id)
+      runtimes.hostGone(id)
       // Заглушка `pult mcp-ask` умерла посреди вопроса — её вопросы уходят из Inbox отказом.
       conn.closed.abort()
     })
@@ -1735,6 +1809,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
   const stop = async (reason: string): Promise<void> => {
     if (stopping) return
     stopping = true
+    runtimes.stop()
     logger.info('остановка демона', { reason })
     clearInterval(attachmentsTimer)
     updater.stop()
@@ -1787,6 +1862,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
       store,
       broker,
       askKeys,
+      runtimes,
       manager,
       startedAt,
       status,

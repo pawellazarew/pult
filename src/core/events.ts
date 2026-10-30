@@ -60,6 +60,8 @@ export const EVENT_KINDS = [
    * (не поставился или нет node), лента показывает это заметкой.
    */
   'browser.install',
+  /** Attached target, control transfer or setup request; never screen frames or typed text. */
+  'runtime.changed',
   /**
    * M8f: модель, усилие или режим подтверждений сессии сменили (`agent.configure`) — `{changes: {model?: {from,
    * to}, effort?, approval?, browser?: 'off'|'on'}, when: 'next_turn'|'after_background'}`. Действует со

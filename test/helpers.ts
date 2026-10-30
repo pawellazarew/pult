@@ -83,6 +83,15 @@ export async function startTestDaemon(
     config: home.config,
     logger: home.logger,
     testMode: opts.testMode ?? true,
+    // Fake CLI tests must not depend on internet access or country-lookup availability.
+    // Explicit PULT_TEST_NET fixtures still exercise blocked/delayed guard paths unchanged.
+    ...((opts.testMode ?? true) && process.env['PULT_TEST_NET'] === undefined ? {
+      netCheck: async (provider: import('../dist/core/config.js').ProviderName) => ({
+        provider, mode: 'off' as const, path: 'direct' as const, proxy: null, loc: 'XX', ok: true,
+        reason: 'ok' as const, fellBack: false, guard: [...home.config.guard.countries],
+        guardMode: home.config.guard.mode, attempts: [], ms: 0, checkedAt: new Date().toISOString(), cached: false,
+      }),
+    } : {}),
     claudeBin: opts.claudeBin ?? FAKE_CLAUDE,
     codexBin: opts.codexBin ?? FAKE_CODEX,
     cliEntry: opts.cliEntry ?? CLI_ENTRY,
