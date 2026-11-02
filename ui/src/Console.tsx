@@ -11,6 +11,7 @@ import { Conversation } from './components/Conversation.js'
 import type { SendMode } from './components/Conversation.js'
 import { Header } from './components/Header.js'
 import { FileWorkspace } from './components/FileWorkspace.js'
+import { RuntimePanel } from './components/RuntimePanel.js'
 import { WorkspaceLayout } from './components/WorkspaceLayout.js'
 import type { FileRequest } from './components/FileWorkspace.js'
 import { FilePreviewContext } from './model/filePreviewContext.js'
@@ -121,9 +122,12 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   useEffect(() => { store.set('pult.sidebarHidden', sidebarHidden ? '1' : '0') }, [sidebarHidden])
   const [inboxOpen, setInboxOpen] = useState<boolean>(() => store.get('pult.inbox') === '1')
   const [filesOpen, setFilesOpen] = useState(false)
+  const [runtimeOpen, setRuntimeOpen] = useState(false)
+  const [runtimeNavigate, setRuntimeNavigate] = useState<string | null>(null)
   const [filesExpanded, setFilesExpanded] = useState(false)
   const [fileRequest, setFileRequest] = useState<FileRequest | null>(null)
-  useEffect(() => { if (inboxOpen) setFilesOpen(false) }, [inboxOpen])
+  useEffect(() => { if (inboxOpen) { setFilesOpen(false); setRuntimeOpen(false) } }, [inboxOpen])
+  useEffect(() => { if (filesOpen) setRuntimeOpen(false) }, [filesOpen])
   useEffect(() => {
     const resize = (): void => { if (window.innerWidth < 1200) setFilesExpanded(true) }
     window.addEventListener('resize', resize)
@@ -403,6 +407,10 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     }
     const off = bridge.subscribe(bootSince, (ev) => {
       debug.current.ids.push(ev.id)
+      if (ev.kind === 'runtime.changed' && ev.sessionId === store.get('pult.selected')) {
+        const state = (ev.data as Record<string, unknown>)['state']
+        if (state === 'attached' || state === 'setup') { setRuntimeOpen(true); setFilesOpen(false); setInboxOpen(false) }
+      }
       queue.push(ev)
       // Пачкой: доигрывание истории — сотни кадров, перерисовка на каждый — лишняя работа.
       if (timer === null) timer = window.setTimeout(flush, 24)
@@ -428,7 +436,19 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   const modalRef = useRef<Modal>(null)
   useEffect(() => { modalRef.current = modal }, [modal])
   const linkSeq = useRef(0)
+  // A simulator/browser attach can arrive before the periodic agent.list snapshot.
+  // Wait for that session instead of interpreting an internal navigation as a stale link.
+  useEffect(() => {
+    if (!runtimeNavigate || !records.some((record) => record.name === runtimeNavigate)) return
+    select(runtimeNavigate); setRuntimeOpen(true); setFilesOpen(false); setInboxOpen(false)
+    setRuntimeNavigate(null)
+  }, [runtimeNavigate, records, select])
   useEffect(() => bridge.onNavigate((t) => {
+    if (t.runtime && t.sessionId) {
+      setRuntimeNavigate(t.sessionId)
+      void refreshAgents()
+      return
+    }
     if (t.link) {
       // Окно всплыло по чужой ссылке, а человек, возможно, печатал в другом приложении: фокус —
       // ни в одно поле, клавиши полсекунды глотаются, поле ввода сессии из ссылки фокус не берёт.
@@ -453,7 +473,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     }
     if (t.permId || t.inbox) setInboxOpen(true)
     if (t.permId) setFocusChosen(t.permId)
-  }), [bridge, select])
+  }), [bridge, select, refreshAgents])
   // Окно защиты после ссылки: Enter, ⌘Enter и буквы не доходят ни до горячих клавиш, ни до полей.
   // Ловим на window в фазе захвата — раньше любых обработчиков React и поля ввода.
   useEffect(() => {
@@ -1047,6 +1067,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         const info = document.querySelector<HTMLDetailsElement>('.chat-info[open], .health-menu[open]')
         if (!modal && info) { e.preventDefault(); const fromInfo = info.contains(document.activeElement); info.open = false; if (fromInfo) info.querySelector('summary')?.focus(); return }
         if (modal) { e.preventDefault(); setModal(null); return }
+        if (runtimeOpen) { e.preventDefault(); setRuntimeOpen(false); return }
         if (filesOpen) { e.preventDefault(); closeFiles(); return }
         if (current && statusView(current.status).busy) { e.preventDefault(); setModal({ type: 'stop', name: current.name }) }
         return
@@ -1071,9 +1092,10 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         providers={providers} providersChecking={providersChecking} onProvidersCheck={() => void checkProviders()}
         doctorTone={doctorTone(doctor.report)} inboxCount={inboxNums.all} inboxOpen={inboxOpen}
         sidebarHidden={sidebarHidden} onToggleSidebar={() => setSidebarHidden((v) => !v)}
+        runtimeOpen={runtimeOpen} runtimeAvailable={!!current && conn.state === 'up'} onRuntime={() => { setRuntimeOpen((v) => !v); setFilesOpen(false); setInboxOpen(false) }}
         filesOpen={filesOpen} filesAvailable={!!current && !!bridge.listFiles && !!bridge.previewFile} onFiles={() => filesOpen ? closeFiles() : showFiles()}
         onDoctor={() => { setModal({ type: 'doctor' }); if (!doctor.loading) void runDoctor() }}
-        onInbox={() => { setFilesOpen(false); setInboxOpen((v) => !v) }} />
+        onInbox={() => { setFilesOpen(false); setRuntimeOpen(false); setInboxOpen((v) => !v) }} />
 
       {view.banner && (
         <div className="banner banner-fail" role="alert" data-testid="conn-banner">
@@ -1122,7 +1144,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         </div>
       )}
 
-      <WorkspaceLayout sidebarHidden={sidebarHidden} inboxOpen={inboxOpen} filesOpen={filesOpen} filesExpanded={filesExpanded}>
+      <WorkspaceLayout sidebarHidden={sidebarHidden} inboxOpen={inboxOpen} filesOpen={filesOpen || (!!current && runtimeOpen)} filesExpanded={filesOpen && filesExpanded}>
         <div className="agents-col">
           <ProjectTree groups={groups} selected={current?.name ?? null} revealSend={revealSend} now={now} collapsed={collapsed}
             onSelect={select} onNew={(cwd) => setModal({ type: 'new', cwd })} onToggle={toggleProject}
@@ -1181,6 +1203,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         {current && bridge.previewFile && bridge.listFiles && <FileWorkspace bridge={bridge} sessionId={current.name} cwd={current.cwd}
           open={filesOpen} expanded={filesExpanded} request={fileRequest} onClose={closeFiles}
           onExpand={() => setFilesExpanded((v) => window.innerWidth < 1200 ? true : !v)} />}
+        {current && runtimeOpen && <RuntimePanel key={current.name} bridge={bridge} sessionId={current.name} obstructed={modal !== null} onClose={() => setRuntimeOpen(false)} />}
         {inboxOpen && (
           <Inbox items={inboxShown.perms} cards={inboxShown.sessions} filter={inboxFilter} counts={inboxNums} onFilter={setInboxFilter}
             agents={agents} focused={focused?.id ?? null} busy={permBusy} retrying={retrying} now={now}

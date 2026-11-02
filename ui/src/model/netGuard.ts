@@ -13,8 +13,8 @@ export { guardOff, sameGuard }
 export const NET_CHECK_COOLDOWN_MS = 15_000
 
 /** Провайдеры, у которых строка выхода есть всегда (opencode — только если его уже проверяли). */
-const SHOWN: readonly string[] = ['claude', 'codex']
-const ORDER: readonly string[] = ['claude', 'codex', 'opencode']
+const SHOWN: readonly string[] = ['claude', 'codex', 'zcode']
+const ORDER: readonly string[] = ['claude', 'codex', 'zcode', 'opencode']
 
 let names: { of(code: string): string | undefined } | null | undefined
 

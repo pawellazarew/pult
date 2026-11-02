@@ -8,7 +8,7 @@ import type { PultEvent } from './events.js'
 // полей, которые они и так пропускают мимо.
 export const PROTOCOL_VERSION = 1
 
-export type ClientKind = 'cli' | 'shell' | 'mcp-ask'
+export type ClientKind = 'cli' | 'shell' | 'mcp-ask' | 'mcp-runtime'
 
 /**
  * Рукопожатие. Ровно одно из двух: `token` — токен хозяина из PULT_HOME/run/token (окно, CLI: все методы, кроме
@@ -19,6 +19,7 @@ export interface HelloMessage {
   type: 'hello'
   token?: string
   ask?: string
+  runtime?: string
   client: ClientKind
   protocol: number
 }
@@ -140,7 +141,7 @@ export interface DaemonStatus {
    * Появилось в Ф2: окну нужен ответ «сейчас», журнал его не даёт. Необязательное — у старого
    * демона поля нет.
    */
-  providers?: Record<'claude' | 'codex', { blocked: boolean; reason?: string }>
+  providers?: Record<'claude' | 'codex' | 'zcode', { blocked: boolean; reason?: string }>
   /**
    * Node, на котором работает демон (0.2.18). `alive: false` — бинарь удалён из-под живого
    * процесса (brew upgrade node): macOS не пускает его детей в ~/Desktop, ходы claude там падают

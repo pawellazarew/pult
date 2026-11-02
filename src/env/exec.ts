@@ -25,6 +25,8 @@ export interface ExecResult {
 
 export interface ExecOptions {
   timeoutMs: number
+  /** Optional UTF-8 stdin. It never becomes a command argument or shell source. */
+  input?: string
   env?: Record<string, string>
   /** Предел на каждый поток вывода; сверх него ребёнок добивается. По умолчанию 4 МБ. */
   maxBuffer?: number
@@ -40,7 +42,7 @@ export function execAsync(file: string, args: string[], opts: ExecOptions): Prom
   return new Promise<ExecResult>((resolve) => {
     let child
     try {
-      child = spawn(file, args, { ...(opts.env ? { env: opts.env } : {}), ...(opts.cwd ? { cwd: opts.cwd } : {}), stdio: ['ignore', 'pipe', 'pipe'] })
+      child = spawn(file, args, { ...(opts.env ? { env: opts.env } : {}), ...(opts.cwd ? { cwd: opts.cwd } : {}), stdio: [opts.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] })
     } catch (e) {
       resolve({ status: null, stdout: '', stderr: '', error: (e as Error).message })
       return
@@ -68,6 +70,10 @@ export function execAsync(file: string, args: string[], opts: ExecOptions): Prom
     child.stderr?.setEncoding('utf8')
     child.stderr?.on('data', (d: string) => { stderr += d; if (stderr.length > maxBuffer) kill('вывод больше предела') })
     child.on('error', (e) => { done(null, e.message) })
+    if (opts.input !== undefined) {
+      child.stdin?.on('error', () => { /* Early child exit is reported by its exit status. */ })
+      child.stdin?.end(opts.input, 'utf8')
+    }
     child.on('close', (code) => { done(code) })
     child.on('exit', (code) => {
       grace = setTimeout(() => {

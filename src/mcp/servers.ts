@@ -28,7 +28,7 @@ export type McpTransport = 'stdio' | 'http' | 'sse'
 export type McpServerSpec = Record<string, unknown>
 
 /** Имена, которые заняты Пультом: заглушка разрешений и браузер агента. */
-export const RESERVED_MCP_NAMES: ReadonlySet<string> = new Set(['pult', 'pult_browser'])
+export const RESERVED_MCP_NAMES: ReadonlySet<string> = new Set(['pult', 'pult_browser', 'pult_runtime'])
 
 export interface AvailableServer {
   name: string

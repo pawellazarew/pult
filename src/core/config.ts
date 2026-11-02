@@ -15,9 +15,9 @@ export { DEFAULT_GUARD_COUNTRIES }
 export type { GuardRule }
 
 export type NetMode = 'auto' | 'required' | 'off'
-export type ProviderName = 'claude' | 'codex' | 'opencode'
+export type ProviderName = 'claude' | 'codex' | 'opencode' | 'zcode'
 
-export const PROVIDERS: readonly ProviderName[] = ['claude', 'codex', 'opencode']
+export const PROVIDERS: readonly ProviderName[] = ['claude', 'codex', 'opencode', 'zcode']
 
 export interface NetworkProfile {
   mode: NetMode
@@ -135,6 +135,7 @@ export function defaultConfig(): PultConfig {
       claude: { ...DEFAULT_NETWORK_PROFILE },
       codex: { ...DEFAULT_NETWORK_PROFILE },
       opencode: { ...DEFAULT_NETWORK_PROFILE },
+      zcode: { ...DEFAULT_NETWORK_PROFILE },
     },
     guard: defaultGuard(),
     warmTtlMs: DEFAULT_WARM_TTL_MS,

@@ -432,7 +432,10 @@ describe('форма «+ Сессия»', () => {
       codex: { provider: 'codex', state: 'ready', detail: '', models: [
         { id: 'fast', label: 'Fast', efforts: ['low', 'high'], defaultEffort: 'low', isDefault: true },
       ] },
+      zcode: { provider: 'zcode', state: 'ready', detail: '', models: [] },
     }).efforts, ['low', 'high'])
+    // ZCode: пресет пуст — модель задаёт аккаунт Z.AI.
+    assert.deepEqual([PRESETS.zcode.models, PRESETS.zcode.defaultModel], [[], null])
     // Уровень, которого у другого провайдера нет, при переключении не протекает в `agent.start`.
     const back = switchProvider({ ...defaultForm('codex'), effort: 'ultra' }, 'claude')
     assert.deepEqual([back.model, back.effort], ['sonnet', 'medium'])

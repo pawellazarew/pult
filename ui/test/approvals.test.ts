@@ -233,7 +233,7 @@ describe('после #13: «показано не всё» словами кар
     for (const p of ['/', '/Users', '/Users/you', '/Users/you/', '/home', '/home/user']) assert.equal(cwdCoversHome(p), true, p)
     for (const p of ['/Users/you/proj', '/home/user/w/x', '/tmp', '/opt/pult']) assert.equal(cwdCoversHome(p), false, p)
     const f = { ...defaultForm('claude'), cwd: '/Users/you', name: 'w' }
-    assert.match(homeWarning(f) ?? '', /агент сможет менять ~\/\.claude, ~\/\.codex, ~\/\.zshrc и др\. без вопросов в режимах «Правки в папке без вопросов» и «Полный доступ»/)
+    assert.match(homeWarning(f) ?? '', /агент сможет менять ~\/\.claude, ~\/\.codex, ~\/\.zcode, ~\/\.zshrc и др\. без вопросов в режимах «Правки в папке без вопросов» и «Полный доступ»/)
     assert.equal(homeWarning({ ...f, approval: 'read-only' }), null)
     assert.equal(homeWarning({ ...f, worktree: 'feat/x' }), null)
     assert.equal(homeWarning({ ...f, cwd: '/Users/you/proj' }), null)

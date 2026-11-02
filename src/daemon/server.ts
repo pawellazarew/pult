@@ -1,3 +1,6 @@
+import { fileURLToPath } from 'node:url'
+import { createRuntimeService, RuntimeError } from '../runtimes/service.js'
+import { discoverMobile, performMobile, installMobileSetup } from '../runtimes/mobile.js'
 // Сервер демона: unix-сокет, рукопожатие, диспетчер методов. Протокол — план Ф1 §3.
 // Основа перенесена из spike/env/sock-server.mjs (проверка S9f): каталог 0700 и файлы 0600
 // явным chmod, lock с проверкой живости pid, старый сокет удаляется ТОЛЬКО после взятия lock.
@@ -31,6 +34,7 @@ import { rotateToken, tokenEquals } from '../core/token.js'
 import { VERSION } from '../core/version.js'
 import { createClaudeAdapter } from '../adapters/claude/adapter.js'
 import { codexNetworkEnv, createCodexAdapter, shellJoin } from '../adapters/codex/adapter.js'
+import { createZcodeAdapter } from '../adapters/zcode/adapter.js'
 import { claudeNetworkEnv } from '../adapters/claude/adapter.js'
 import type { ProviderAdapter } from '../adapters/types.js'
 import { runDoctor } from '../env/doctor.js'
@@ -122,6 +126,8 @@ export interface DaemonOptions {
   claudeBin?: string
   /** Путь к бинарю `codex`; тест подсовывает фальшивый app-server через PULT_CODEX_BIN. */
   codexBin?: string
+  /** Путь к бинарю `zcode`; тест подсовывает фальшивый CLI через PULT_ZCODE_BIN. */
+  zcodeBin?: string
   /** Путь к dist/cli/main.js для заглушки разрешений; тест ставит свой. */
   cliEntry?: string
   /**
@@ -168,6 +174,7 @@ export interface DaemonHandle {
   readonly broker: PermBroker
   /** 0.3.7: ключи вопросов `pult mcp-ask` (в памяти демона; тесты выдают их сами). */
   readonly askKeys: AskKeys
+  readonly runtimes: ReturnType<typeof createRuntimeService>
   readonly manager: SessionManager
   readonly startedAt: string
   status(): DaemonStatus
@@ -189,7 +196,9 @@ interface Connection {
    * 0.3.7: право соединения — от того, ЧЕМ прошло рукопожатие, а не от самоназвания `client`. `owner` — токен хозяина
    * (всё, кроме `perm.request`); `ask` — ключ вопросов (только `perm.request` сессии `askSession`); `none` — до hello.
    */
-  role: 'none' | 'owner' | 'ask'
+  role: 'none' | 'owner' | 'ask' | 'runtime'
+  runtimeKey?: string
+  runtimeSession?: string
   /** Ключ вопросов соединения `ask`: сверяется на каждом `perm.request` — снятый ключ (процесс claude вышел) не спросит. */
   askKey?: string
   askSession?: string
@@ -382,7 +391,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     emit: (draft) => { manager.emit(draft) },
     ...(opts.browserInstall ? { install: opts.browserInstall } : {}),
   })
-  const mcpExtras = createMcpExtras({
+  const browserExtras = createMcpExtras({
     paths, logger, installer,
     record: (name) => manager.list().find((r) => r.name === name) ?? null,
     selected: () => config.mcp.servers,
@@ -391,6 +400,29 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     emit: (draft) => { manager.emit(draft) },
     chrome: chromeOf,
   })
+  const runtimes = createRuntimeService({
+    mobile: opts.testMode ? async () => ({ targets: [], setup: [] }) : discoverMobile,
+    performMobile,
+    install: installMobileSetup,
+    session: (id) => manager.list().find((r) => r.name === id) ?? null,
+    authorize: async (sessionId, targetId, action, input, signal) => (await broker.request({ sessionId, toolName: 'pult_runtime', input: { targetId, action, input } }, { signal, reason: 'Управление средой остановлено' })).behavior === 'allow',
+    changed: (sessionId, data) => { manager.emit({ sessionId, provider: 'pult', kind: 'runtime.changed', data }) },
+  })
+  const mcpExtras = async (name: string, nodeBin: string, at?: import('../adapters/types.js').TurnSettings): Promise<import('../adapters/types.js').SessionMcpExtras> => {
+    const rec = manager.list().find((r) => r.name === name)
+    const approval = at ? at.approval ?? 'ask' : rec?.approval ?? 'ask'
+    const key = rec ? runtimes.key(name, approval) : null
+    const extra = await browserExtras(name, nodeBin, at)
+    if (!rec || !key) return extra
+    const spec: Record<string, unknown> = {
+      command: nodeBin, args: [opts.cliEntry ?? fileURLToPath(new URL('../cli/main.js', import.meta.url)), 'mcp-runtime'],
+      env: { PULT_HOME: paths.home, PULT_RUNTIME_SESSION: name, PULT_RUNTIME_KEY: key },
+      ...(rec.provider === 'codex' ? { default_tools_approval_mode: 'approve' } : { type: 'stdio' }),
+    }
+    return { ...extra, servers: { ...extra.servers, pult_runtime: spec }, ...(rec.provider === 'claude' ? {
+      permissions: { allow: [...(extra.permissions?.allow ?? []), 'mcp__pult_runtime'], ask: extra.permissions?.ask ?? [], deny: extra.permissions?.deny ?? [] },
+    } : {}) }
+  }
   /** Браузер включили (старт или `agent.browser`): каталоги сразу, установка — в фоне, ход её дождётся. */
   const browserOn = (name: string): void => {
     try { ensureBrowserDirs(paths, name) } catch (e) { logger.warn('каталоги браузера не заведены', { session: name, error: (e as Error).message }) }
@@ -414,6 +446,12 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     ?? process.env['PULT_CODEX_BIN']
     ?? locateToolPath('codex').path
     ?? 'codex'
+  // ZCode: node-скрипт с shebang внутри ZCode.app — путь плывёт за обновлениями приложения
+  // (грабля codex/ChatGPT.app), поиск кандидатов в env/locate.ts.
+  const zcodeBin = opts.zcodeBin
+    ?? process.env['PULT_ZCODE_BIN']
+    ?? locateToolPath('zcode').path
+    ?? 'zcode'
   // План 16, № 11: правила «Всегда» Codex — метка над строкой, которую codex допишет, список и «Отозвать». Файл — тот,
   // куда пишет НАШ app-server: его окружение без CODEX_HOME (белый список), значит `$HOME/.codex` ребёнка.
   const rulesPath = opts.codexRulesPath
@@ -465,6 +503,15 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     ...(netCheck ? { netCheck } : {}),
     mcpExtras: (name, nodeBin, at) => mcpExtras(name, nodeBin, at),
   })
+  // ZCode (маршрут A, docs/17-SPIKE-zcode.md): процесс на ход, без MCP-брокера и фоновой работы.
+  // askPermission обязательна контрактом AdapterDeps, но у маршрута A канала вопросов нет — не зовётся.
+  const zcode: ProviderAdapter = createZcodeAdapter({
+    config, logger, bin: zcodeBin,
+    emit: (draft) => { manager.emit(draft) },
+    live: (name, sig) => { manager.live(name, sig) },
+    askPermission: (req) => broker.request(req),
+    ...(netCheck ? { netCheck } : {}),
+  })
   // Автоназвание: одноразовый `claude -p` к haiku через тот же страж сети, что и ходы.
   const titler = opts.titler ?? (!opts.testMode && config.autoTitle ? createAutoTitler({
     bin: claudeBin,
@@ -489,7 +536,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     publish: emit,
     onPhase: (name) => { liveRef?.touch(name) },
     holdTurns: () => updaterRef?.applying() ?? false,
-    adapters: { claude, codex },
+    adapters: { claude, codex, zcode },
     broker,
     modelChoices: (provider) => (provider === 'codex' ? codexChoices() : Promise.resolve(null)),
     ...(opts.queueEditHoldMs !== undefined ? { queueEditHoldMs: opts.queueEditHoldMs } : {}),
@@ -669,7 +716,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
   const projects = createProjectStore(join(paths.home, 'projects.json'))
   // `PULT_TEST_PROVIDERS=run` (только вместе с PULT_TEST=1): проверка входа идёт по-настоящему — в фальшивые CLI
   // из PULT_CLAUDE_BIN / PULT_CODEX_BIN. Нужна кадрам README (shell/test/readme): шапка «готов», а не «ошибка».
-  const catalog = createProviderCatalog({ bins: { claude: claudeBin, codex: codexBin }, cwd: paths.home, env: childEnv, codexEnv,
+  const catalog = createProviderCatalog({ bins: { claude: claudeBin, codex: codexBin, zcode: zcodeBin }, cwd: paths.home, env: childEnv, codexEnv,
     testMode: opts.testMode && process.env['PULT_TEST_PROVIDERS'] !== 'run' })
   const external = createExternalSessions({
     claudeRoot: opts.testMode ? join(paths.home, 'claude-projects') : join(homedir(), '.claude', 'projects'),
@@ -699,6 +746,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     providers: {
       claude: providerState(claude),
       codex: providerState(codex),
+      zcode: providerState(zcode),
     },
     node: daemonNodeInfo(paths.runtime, process.execPath, process.version, nodeAtStart),
     // Правила уведомлений окна (О2): порог длительности хода и звук. Сама команда `notifyCommand` наружу не уходит.
@@ -990,7 +1038,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
           title: [...source.session.title].slice(0, 60).join('') }, providerId, source.messages, source.session.provider === 'claude'))
       }
       case 'agent.start': {
-        const kind = p['kind'] === 'codex' ? 'codex' : 'claude'
+        const kind = p['kind'] === 'codex' ? 'codex' : p['kind'] === 'zcode' ? 'zcode' : 'claude'
         // M8d: как подтверждать действия. Нет поля — `ask`; незнакомое значение — отказ, а не тихий `ask`:
         // человек, попросивший `full`, но опечатавшийся, иначе получил бы не то, что думает.
         if (p['approval'] !== undefined && !isApprovalMode(p['approval'])) {
@@ -1077,6 +1125,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
       }
       case 'agent.archive':
         if (typeof p['archived'] !== 'boolean') throw new ManagerError(ERROR_CODES.invalidParams, 'agent.archive: нужен archived: true|false')
+        if (p['archived']) runtimes.revoke(String(p['name'] ?? ''))
         return publicRecord(manager.archive(String(p['name'] ?? ''), p['archived']))
       case 'agent.rename':
         // `title` обязателен и строка: снять название — это явное '', а не забытый параметр.
@@ -1152,10 +1201,15 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
       case 'agent.stop': {
         // `turnId` (О2, карточка «завис»): стоп только этого хода — кончился, стопа нет.
         if (p['turnId'] !== undefined && typeof p['turnId'] !== 'string') throw new ManagerError(ERROR_CODES.invalidParams, 'agent.stop: turnId — строка')
-        return { stopped: await manager.stop(String(p['name'] ?? ''), p['turnId'] as string | undefined) }
+        const name = String(p['name'] ?? '')
+        if (p['turnId'] === undefined) runtimes.revoke(name)
+        const stopped = await manager.stop(name, p['turnId'] as string | undefined)
+        if (stopped && p['turnId'] !== undefined) runtimes.revoke(name)
+        return { stopped }
       }
       case 'agent.rm': {
         const r = await manager.rm(String(p['name'] ?? ''), { worktree: p['worktree'] === true })
+        runtimes.revoke(String(p['name'] ?? ''))
         return { removed: true, ...r }
       }
       case 'agent.export': {
@@ -1247,7 +1301,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
       case 'usage.get':
         return { usage: manager.usage() }
       case 'provider.reset': {
-        const kind = p['provider'] === 'codex' ? 'codex' : 'claude'
+        const kind = p['provider'] === 'codex' ? 'codex' : p['provider'] === 'zcode' ? 'zcode' : 'claude'
         return { provider: kind, ...manager.providerReset(kind) }
       }
       default:
@@ -1262,6 +1316,43 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     // Параметры — объект БЕЗ прототипа, только собственные поля запроса (ревью #16): решения о правах (`approval ?? 'ask'`,
     // `confirm`, `'updatedInput' in p`, `scope`, `browser`) не должны зависеть от того, что лежит в Object.prototype.
     const params = ownParams(req.params)
+    if (req.method.startsWith('runtime.')) {
+      try {
+        const actor = conn.role === 'runtime' ? 'agent' as const : 'human' as const
+        if (conn.role !== 'owner' && conn.role !== 'runtime') throw new RuntimeError('forbidden', 'Нет доступа к средам')
+        if (conn.role === 'runtime') {
+          const bound = runtimes.lookup(conn.runtimeKey)
+          if (!bound || params['sessionId'] !== bound || !['runtime.discover', 'runtime.perform', 'runtime.setup.request', 'runtime.setup.list'].includes(req.method)) {
+            throw new RuntimeError('forbidden', 'Ключ среды ограничен своей сессией и не разрешает подтверждать установки')
+          }
+        }
+        const sessionId = typeof params['sessionId'] === 'string' ? params['sessionId'] : ''
+        let result: unknown
+        switch (req.method) {
+          case 'runtime.discover': result = await runtimes.discover(sessionId); break
+          case 'runtime.perform': {
+            if (typeof params['targetId'] !== 'string' || typeof params['action'] !== 'string') throw new RuntimeError('invalid_params', 'Нужны targetId и action')
+            result = await runtimes.perform({ sessionId, targetId: params['targetId'], action: params['action'], input: ownParams(params['input']) }, actor); break
+          }
+          case 'runtime.takeover': case 'runtime.release': result = runtimes.takeover(sessionId, String(params['targetId'] ?? ''), req.method === 'runtime.takeover' ? 'human' : 'agent'); break
+          case 'runtime.setup.request': result = await runtimes.requestSetup(sessionId, String(params['setupId'] ?? '')); break
+          case 'runtime.setup.list': result = runtimes.listSetup(sessionId); break
+          case 'runtime.setup.resolve': {
+            if (typeof params['approve'] !== 'boolean') throw new RuntimeError('invalid_params', 'approve — true/false')
+            result = await runtimes.resolveSetup(sessionId, String(params['id'] ?? ''), params['approve']); break
+          }
+          case 'runtime.host.poll': case 'runtime.host.begin': case 'runtime.host.complete': {
+            if (conn.role !== 'owner' || conn.client !== 'shell') throw new RuntimeError('forbidden', 'Только подключённое окно предоставляет браузер')
+            if (req.method === 'runtime.host.poll' && params['available'] === false) { runtimes.hostGone(conn.id); result = { jobs: [] } }
+            else if (req.method === 'runtime.host.begin') result = runtimes.begin(conn.id, String(params['id'] ?? ''))
+            else result = req.method === 'runtime.host.poll' ? runtimes.poll(conn.id) : runtimes.complete(conn.id, String(params['id'] ?? ''), params['result'], params['error']); break
+          }
+          default: throw new RuntimeError('not_found', 'Неизвестный метод среды')
+        }
+        send({ id: req.id, result })
+      } catch (e) { fail(e instanceof RuntimeError ? e.code : 'runtime_failed', (e as Error).message) }
+      return
+    }
     // 0.3.7: ключ вопросов — ничего, кроме `perm.request` (ни подписки, ни статуса, ни resolve).
     if (conn.role !== 'owner' && req.method !== 'perm.request') {
       fail(ERROR_CODES.forbidden, `${req.method}: ключ вопросов даёт только perm.request`)
@@ -1621,12 +1712,16 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
             // Наличие поля, а не его непустота: `{token: "", ask: …}` — тоже «оба сразу».
             const given = typeof msg['token'] === 'string' ? msg['token'] : ''
             const askGiven = typeof msg['ask'] === 'string' ? msg['ask'] : ''
-            let role: 'owner' | 'ask'
+            let role: 'owner' | 'ask' | 'runtime'
             let askSession: string | null = null
-            if (msg['token'] !== undefined && msg['ask'] !== undefined) {
+            if (['token', 'ask', 'runtime'].filter((k) => msg[k] !== undefined).length > 1) {
               logger.warn('рукопожатие с токеном и ключом вопросов сразу', { conn: id })
               bye('bad_token', 'токен или ключ вопросов — одно из двух')
               return
+            } else if (msg['runtime'] !== undefined) {
+              const bound = runtimes.lookup(msg['runtime'])
+              if (!bound) { bye('bad_token', 'ключ среды не подходит'); return }
+              role = 'runtime'; conn.runtimeKey = msg['runtime'] as string; conn.runtimeSession = bound
             } else if (msg['ask'] !== undefined) {
               askSession = askKeys.lookup(askGiven)
               if (askSession === null) {
@@ -1694,6 +1789,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
       connections.delete(id)
       // Окно, которое правило реплику очереди, ушло — очередь не ждёт его правки.
       manager.queueReleaseOwner(id)
+      runtimes.hostGone(id)
       // Заглушка `pult mcp-ask` умерла посреди вопроса — её вопросы уходят из Inbox отказом.
       conn.closed.abort()
     })
@@ -1735,6 +1831,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
   const stop = async (reason: string): Promise<void> => {
     if (stopping) return
     stopping = true
+    runtimes.stop()
     logger.info('остановка демона', { reason })
     clearInterval(attachmentsTimer)
     updater.stop()
@@ -1787,6 +1884,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
       store,
       broker,
       askKeys,
+      runtimes,
       manager,
       startedAt,
       status,

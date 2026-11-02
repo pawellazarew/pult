@@ -73,8 +73,9 @@ describe('белый список моста', () => {
     assert.deepEqual([...ALLOWED_METHODS].sort(), [
       'agent.archive', 'agent.browser', 'agent.configure', 'agent.export', 'agent.import', 'agent.list', 'agent.prompt', 'agent.queue.move', 'agent.queue.remove', 'agent.queue.resume', 'agent.read', 'agent.rename', 'agent.retry', 'agent.rm', 'agent.seen', 'agent.start', 'agent.stop', 'agent.tree', 'agent.wait',
       'daemon.status', 'doctor.run', 'events.get', 'events.history', 'events.search', 'events.snapshot', 'events.subscribe', 'events.tail', 'events.unsubscribe',
-      'mcp.list', 'mcp.select', 'perm.list', 'perm.resolve', 'project.add', 'project.list', 'project.remove', 'provider.reset', 'providers.check', 'sessions.external.list', 'sessions.external.read',
-      'settings.get', 'settings.set',
+      'mcp.list', 'mcp.select', 'perm.list', 'perm.resolve', 'project.add', 'project.list', 'project.remove', 'provider.reset', 'providers.check',
+      'runtime.discover', 'runtime.perform', 'runtime.release', 'runtime.setup.list', 'runtime.setup.request', 'runtime.setup.resolve', 'runtime.takeover',
+      'sessions.external.list', 'sessions.external.read', 'settings.get', 'settings.set',
       'update.apply', 'update.check', 'update.status', 'usage.get',
     ])
   })

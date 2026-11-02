@@ -23,6 +23,8 @@ import type { DaemonHandle, DaemonOptions } from '../dist/daemon/server.js'
 export const FAKE_CLAUDE = fileURLToPath(new URL('../test/fakes/fake-claude.mjs', import.meta.url))
 /** Фальшивый `codex app-server`: тот же приём — записанный протокол вместо модели. */
 export const FAKE_CODEX = fileURLToPath(new URL('../test/fakes/fake-codex-app-server.mjs', import.meta.url))
+/** Фальшивый `zcode`: проигрывает записанные потоки маршрута A (процесс на ход). */
+export const FAKE_ZCODE = fileURLToPath(new URL('../test/fakes/fake-zcode.mjs', import.meta.url))
 /**
  * ПРОГРАММИРУЕМЫЙ фальшивый app-server: для случаев, которых в записи нет и быть не может
  * (повторный id запроса, запрос по чужому треду, запрос, которого Пульт не умеет).
@@ -67,7 +69,7 @@ export function workIn(home: TempHome, name = 'work'): string {
 export async function startTestDaemon(
   home: TempHome,
   opts: {
-    testMode?: boolean; writeBacklogLimit?: number; claudeBin?: string; codexBin?: string; cliEntry?: string
+    testMode?: boolean; writeBacklogLimit?: number; claudeBin?: string; codexBin?: string; zcodeBin?: string; cliEntry?: string
     doctor?: DaemonOptions['doctor']
     titler?: DaemonOptions['titler']
     browserInstall?: DaemonOptions['browserInstall']
@@ -83,8 +85,18 @@ export async function startTestDaemon(
     config: home.config,
     logger: home.logger,
     testMode: opts.testMode ?? true,
+    // Fake CLI tests must not depend on internet access or country-lookup availability.
+    // Explicit PULT_TEST_NET fixtures still exercise blocked/delayed guard paths unchanged.
+    ...((opts.testMode ?? true) && process.env['PULT_TEST_NET'] === undefined ? {
+      netCheck: async (provider: import('../dist/core/config.js').ProviderName) => ({
+        provider, mode: 'off' as const, path: 'direct' as const, proxy: null, loc: 'XX', ok: true,
+        reason: 'ok' as const, fellBack: false, guard: [...home.config.guard.countries],
+        guardMode: home.config.guard.mode, attempts: [], ms: 0, checkedAt: new Date().toISOString(), cached: false,
+      }),
+    } : {}),
     claudeBin: opts.claudeBin ?? FAKE_CLAUDE,
     codexBin: opts.codexBin ?? FAKE_CODEX,
+    zcodeBin: opts.zcodeBin ?? FAKE_ZCODE,
     cliEntry: opts.cliEntry ?? CLI_ENTRY,
     ...(opts.writeBacklogLimit !== undefined ? { writeBacklogLimit: opts.writeBacklogLimit } : {}),
     ...(opts.doctor !== undefined ? { doctor: opts.doctor } : {}),

@@ -619,7 +619,7 @@ describe('демон: agent.browser, mcp.list, mcp.select, ход с брауз�
       const argv = (JSON.parse(readFileSync(argvOut, 'utf8').trim().split('\n')[0] as string) as { argv: string[] }).argv
       const cfgPath = argv[argv.indexOf('--mcp-config') + 1] as string
       const cfg = JSON.parse(readFileSync(cfgPath, 'utf8')) as { mcpServers: Record<string, { command: string; args?: string[] }> }
-      assert.deepEqual(Object.keys(cfg.mcpServers).sort(), ['github', 'pult', B], 'db из .mcp.json — нет')
+      assert.deepEqual(Object.keys(cfg.mcpServers).sort(), ['github', 'pult', B, 'pult_runtime'], 'db из .mcp.json — нет')
       const ba = cfg.mcpServers[B]?.args ?? []
       assert.equal(ba[3], dirs.downloads, 'cwd сервера — папка скачиваний')
       assert.equal(ba[ba.indexOf('--user-data-dir') + 1], dirs.profile)
@@ -627,7 +627,7 @@ describe('демон: agent.browser, mcp.list, mcp.select, ход с брауз�
       const bp = browserPermissions(dirs)
       const run = realpathSync(home.paths.run)
       const runRules = [...new Set([home.paths.run, run])].flatMap((x) => [`Read(/${x}/**)`, `Edit(/${x}/**)`])
-      assert.deepEqual(JSON.parse(argv[argv.indexOf('--settings') + 1] as string), { permissions: { allow: bp.allow, ask: bp.ask, deny: [...runRules, ...bp.deny] } })
+      assert.deepEqual(JSON.parse(argv[argv.indexOf('--settings') + 1] as string), { permissions: { allow: [...bp.allow, 'mcp__pult_runtime'], ask: bp.ask, deny: [...runRules, ...bp.deny] } })
       // 0.3.8: --add-dir — только картинки из буфера окна этой сессии (PULT_HOME/attachments/w), скачивания браузера — нет.
       const added = argv.slice(argv.indexOf('--add-dir') + 1).filter((_a, i, all) => !all.slice(0, i + 1).some((x) => x.startsWith('--')))
       assert.ok(added.length > 0 && added.every((d) => d.endsWith('/attachments/w')), added.join(' '))

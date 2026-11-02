@@ -23,8 +23,9 @@ import { codexNetworkItems } from './codexConfig.js'
 import { execAsync } from './exec.js'
 import { cmd } from './fixCmd.js'
 import type { LocateDeps, LocatedTool, ToolName } from './locate.js'
-import { codexInsideChatGPTApp, locateAllAsync } from './locate.js'
+import { codexInsideChatGPTApp, locateAllAsync, zcodeInsideApp } from './locate.js'
 import { loginShellPath } from './loginShell.js'
+import { zcodeCredsFile, zcodeLoginState } from './zcodeLogin.js'
 import type { NetCheck } from './net.js'
 import { checkNetwork, netLine } from './net.js'
 import { guardLine, guardOff } from '../core/guard.js'
@@ -105,6 +106,8 @@ export interface DoctorDeps {
    * нет: тесты доктора не читают файл машины; CLI и демон передают путь.
    */
   codexConfig?: string
+  /** Файл кред zcode для пункта «Вход zcode». Тест подменяет; нет — настоящий `~/.zcode/v2/credentials.json`. */
+  zcodeCreds?: () => string
 }
 
 export type LinkState = 'symlink' | 'missing' | 'other'
@@ -286,18 +289,23 @@ function toolItem(tool: LocatedTool, required: boolean, home: string, linkState:
     }
   }
   const chatgpt = tool.name === 'codex' && codexInsideChatGPTApp(tool)
+  const zcodeApp = tool.name === 'zcode' && zcodeInsideApp(tool)
   // Версия — чужой текст: `--version` некоторых CLI печатает и путь, и учётку. Инвариант 7
   // требует фильтра на КАЖДОЙ границе, а не только на записи в журнал.
   const version = tool.version === null ? null : redactString(tool.version)
   return {
     id: `cli.${tool.name}`,
     title: `CLI ${tool.name}`,
-    status: chatgpt ? 'warn' : 'ok',
+    status: chatgpt || zcodeApp ? 'warn' : 'ok',
     detail: `${tool.path}${tool.realpath && tool.realpath !== tool.path ? ` → ${tool.realpath}` : ''}`
       + `, версия ${version ?? 'неизвестна'}`
       + (chatgpt ? ' — бинарь внутри ChatGPT.app: меняется с каждым обновлением приложения' : '')
+      + (zcodeApp ? ' — бинарь внутри ZCode.app: путь меняется с обновлением приложения' : '')
       + (tool.viaPath ? ' (найден через PATH логин-шелла, не по списку кандидатов)' : ''),
     ...(chatgpt ? chatgptCodexFix(tool, home, linkState) : {}),
+    ...(zcodeApp ? {
+      fix: `надёжнее симлинк: ln -sf ${tool.path} ~/.local/bin/zcode — Пульт найдёт бинарь и без него, но терминалу он нужен`,
+    } : {}),
     data: { path: tool.path, realpath: tool.realpath, version },
   }
 }
@@ -326,7 +334,7 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
   })
 
   // --- CLI -------------------------------------------------------------------
-  const requiredTools: ToolName[] = ['claude', 'codex', 'opencode', 'node']
+  const requiredTools: ToolName[] = ['claude', 'codex', 'opencode', 'zcode', 'node']
   for (const name of Object.keys(tools) as ToolName[]) {
     const t = tools[name]
     if (t) items.push(toolItem(t, requiredTools.includes(name), deps.home ?? homedir(), deps.linkState ?? defaultLinkState))
@@ -422,6 +430,26 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
       : 'CLI не найден — проверять нечего',
     ...(opencode?.path ? {} : cmd('brew install sst/tap/opencode')),
   })
+
+  // --- вход zcode ------------------------------------------------------------
+  // У zcode нет команды «статус входа»: вход меряется по файлу кред `~/.zcode/v2/credentials.json`
+  // (env/zcodeLoginState). Файла нет — входа нет; CLI при этом может отвечать `--version` честно.
+  const zcode = tools.zcode
+  if (zcode?.path) {
+    const login = zcodeLoginState((deps.zcodeCreds ?? zcodeCredsFile)())
+    items.push({
+      id: 'login.zcode',
+      title: 'Вход zcode',
+      status: login === 'yes' ? 'ok' : login === 'no' ? 'fail' : 'warn',
+      detail: login === 'yes'
+        ? 'креды на месте (файл кред есть, токен в нём)'
+        : login === 'no'
+          ? 'файла кред нет — терминальный zcode не входил (zcode login открывает браузер)'
+          : 'файл кред не разбирается — посмотри его сам',
+      ...(login === 'yes' ? {} : cmd('zcode login')),
+      data: { login },
+    })
+  }
 
   // --- сеть ------------------------------------------------------------------
   // Правило стража — из конфига, без сети: видно и при `--no-net`. allow без стран запрещает все ходы.

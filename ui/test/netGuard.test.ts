@@ -20,7 +20,7 @@ const html = (c: unknown, props: Record<string, unknown>): string =>
   renderToStaticMarkup(createElement(c as ComponentType<Record<string, unknown>>, props))
 const text = (s: string): string => s.replace(/<[^>]+>/g, ' ').replace(/&#x27;/g, "'").replace(/&quot;/g, '"').replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/\s+/g, ' ').trim()
 const noop = (): void => {}
-const NS = { rememberLast: true, defaults: { claude: {}, codex: {} } }
+const NS = { rememberLast: true, defaults: { claude: {}, codex: {}, zcode: {} } }
 const check = (provider: string, loc: string | null, at = '2026-10-26T10:00:00Z', reason = 'ok'): GuardCheck => ({ provider, loc, ok: reason === 'ok', reason, checkedAt: at })
 
 describe('страж сети: страны', () => {
@@ -73,10 +73,11 @@ describe('страж сети: выходы под черновиком прав
   it('свежайшая проверка на провайдера; проходит / не проходит по черновику; не проверялся; неизвестен', () => {
     const checks = [check('claude', 'RU', '2026-10-26T09:00:00Z'), check('claude', 'DE', '2026-10-26T10:00:00Z'), check('opencode', null, '2026-10-26T10:00:00Z', 'proxy_dead')]
     const rows = exitRows({ mode: 'allow', countries: ['DE'] }, checks)
-    assert.deepEqual(rows.map((r) => [r.provider, r.ok]), [['claude', true], ['codex', null], ['opencode', false]])
+    assert.deepEqual(rows.map((r) => [r.provider, r.ok]), [['claude', true], ['codex', null], ['zcode', null], ['opencode', false]])
     assert.equal(rows[0]!.text, 'claude: выход Германия (DE) — проходит')
     assert.equal(rows[1]!.text, 'codex: выход не проверялся')
-    assert.equal(rows[2]!.text, 'opencode: выход неизвестен (прокси не отвечает) — не проходит')
+    assert.equal(rows[2]!.text, 'zcode: выход не проверялся')
+    assert.equal(rows[3]!.text, 'opencode: выход неизвестен (прокси не отвечает) — не проходит')
     assert.equal(refusedWarning(rows), null, 'неизвестный выход — не про правило')
     const denyDe = exitRows({ mode: 'deny', countries: ['DE'] }, checks)
     assert.equal(denyDe[0]!.text, 'claude: выход Германия (DE) — не проходит')
