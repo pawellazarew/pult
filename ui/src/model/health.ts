@@ -84,7 +84,7 @@ export interface ProviderBlock { provider: AgentProvider; reason?: string }
 export function blockedProviders(providers: Record<string, { blocked: boolean; reason?: string }> | undefined): ProviderBlock[] {
   if (!providers) return []
   const out: ProviderBlock[] = []
-  for (const p of ['claude', 'codex'] as const) {
+  for (const p of ['claude', 'codex', 'zcode'] as const) {
     const s = providers[p]
     if (s?.blocked) out.push({ provider: p, ...(s.reason ? { reason: s.reason } : {}) })
   }

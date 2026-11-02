@@ -8,7 +8,7 @@ import { describe, it } from 'node:test'
 import { buildChildEnv, ENV_ALLOWLIST } from '../dist/env/allowlist.js'
 import { execAsync } from '../dist/env/exec.js'
 import { resolveChildNode, stableNodePath } from '../dist/env/nodeBin.js'
-import { locateAll, locateAllAsync, locateTool, locateToolAsync, locateToolPath, codexInsideChatGPTApp, TOOLS } from '../dist/env/locate.js'
+import { locateAll, locateAllAsync, locateTool, locateToolAsync, locateToolPath, codexInsideChatGPTApp, TOOLS , zcodeInsideApp } from '../dist/env/locate.js'
 import type { LocateDeps } from '../dist/env/locate.js'
 import {
   captureLoginEnv, parseNulEnv, readEnvCache, sanitizePathEntries, toCacheFile, writeEnvCache,
@@ -236,9 +236,19 @@ describe('поиск CLI', () => {
     assert.equal(t.viaPath, true)
   })
 
-  it('locateAll отвечает по всем семи инструментам', () => {
+  it('locateAll отвечает по всем восьми инструментам', () => {
     const all = locateAll(fakeFs(['/opt/homebrew/bin/claude']))
-    assert.deepEqual(Object.keys(all).sort(), ['claude', 'codex', 'gh', 'git', 'node', 'npm', 'opencode'])
+    assert.deepEqual(Object.keys(all).sort(), ['claude', 'codex', 'gh', 'git', 'node', 'npm', 'opencode', 'zcode'])
+  })
+
+  it('zcode: симлинк раньше пути внутри ZCode.app, app-путь — запасной; внутри .app распознаётся', () => {
+    const APP = '/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs'
+    const LINK = '/Users/user/.local/bin/zcode'
+    assert.equal(locateTool('zcode', fakeFs([LINK, APP])).path, LINK)
+    assert.equal(locateTool('zcode', fakeFs([APP])).path, APP)
+    const viaLink = locateTool('zcode', { ...fakeFs([LINK]), realpath: (p: string) => (p === LINK ? APP : p) })
+    assert.equal(zcodeInsideApp(viaLink), true)
+    assert.equal(zcodeInsideApp(locateTool('zcode', fakeFs(['/opt/homebrew/bin/zcode']))), false)
   })
 
   it('префикс npm добавляет кандидата, если он задан', () => {
@@ -258,7 +268,8 @@ describe('поиск CLI', () => {
 
   it('locateAllAsync: тот же ответ, что у locateAll, а версии спрашиваются разом', async () => {
     const present = ['/opt/homebrew/bin/claude', '/Users/user/.local/bin/codex', '/opt/homebrew/bin/opencode',
-      '/usr/bin/git', '/opt/homebrew/bin/gh', '/opt/homebrew/bin/node', '/opt/homebrew/bin/npm']
+      '/usr/bin/git', '/opt/homebrew/bin/gh', '/opt/homebrew/bin/node', '/opt/homebrew/bin/npm',
+      '/Users/user/.local/bin/zcode']
     const deps = fakeFs(present)
     assert.deepEqual(await locateAllAsync(deps), locateAll(deps), 'синхронная фальшивка run годится и асинхронному входу')
     let running = 0
@@ -274,8 +285,8 @@ describe('поиск CLI', () => {
     }
     const t0 = Date.now()
     const all = await locateAllAsync(slow)
-    assert.equal(peak, TOOLS.length, 'семь --version должны идти одновременно')
-    assert.ok(Date.now() - t0 < 500, `семь запусков по 100 мс заняли ${Date.now() - t0} мс — идут очередью?`)
+    assert.equal(peak, TOOLS.length, 'все --version должны идти одновременно')
+    assert.ok(Date.now() - t0 < 500, `восемь запусков по 100 мс заняли ${Date.now() - t0} мс — идут очередью?`)
     assert.equal(all.codex.version, 'версия для /Users/user/.local/bin/codex')
     assert.deepEqual(Object.keys(all), [...TOOLS], 'порядок инструментов — порядок строк доктора')
   })

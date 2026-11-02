@@ -29,11 +29,13 @@ export type MenuRow =
 
 /** Подпись кнопки подвала: «opus · high · спрашивать». */
 export function footerParts(agent: Pick<AgentView, 'provider' | 'model' | 'effort' | 'approval'>): string[] {
-  return [agent.model ?? (agent.provider === 'codex' ? 'модель codex' : 'модель по умолчанию'), ...(agent.effort ? [agent.effort] : []), APPROVAL_WORDS[agent.approval ?? 'ask']]
+  const model = agent.model ?? (agent.provider === 'zcode' ? 'GLM' : agent.provider === 'codex' ? 'модель codex' : 'модель по умолчанию')
+  return [model, ...(agent.effort ? [agent.effort] : []), APPROVAL_WORDS[agent.approval ?? 'ask']]
 }
 
-/** Модели провайдера для меню: id, подпись, усилия. Текущая модель вне списка — тоже в нём (отмеченной). */
+/** Модели провайдера для меню: id, подпись, усилия. Текущая модель вне списка — тоже в нём (отмеченной). ZCode — пусто: выбора нет. */
 export function modelOptions(provider: Provider, catalog: ProviderCatalog | null | undefined, current: string | undefined): Array<{ id: string; label: string; efforts: readonly string[]; isDefault: boolean }> {
+  if (provider === 'zcode') return []
   const out: Array<{ id: string; label: string; efforts: readonly string[]; isDefault: boolean }> = provider === 'claude'
     ? PRESETS.claude.models.map((id) => ({ id, label: id, efforts: CLAUDE_EFFORTS, isDefault: id === PRESETS.claude.defaultModel }))
     : (catalog?.codex.models ?? []).map((m) => ({ id: m.id, label: m.label, efforts: m.efforts, isDefault: m.isDefault }))
@@ -41,8 +43,9 @@ export function modelOptions(provider: Provider, catalog: ProviderCatalog | null
   return out
 }
 
-/** Усилия модели сессии (у Codex — по живому списку; модели в нём нет — общий набор). */
+/** Усилия модели сессии (у Codex — по живому списку; модели в нём нет — общий набор). ZCode — пусто. */
 export function effortOptions(provider: Provider, catalog: ProviderCatalog | null | undefined, model: string | undefined): readonly string[] {
+  if (provider === 'zcode') return []
   if (provider === 'claude') return CLAUDE_EFFORTS
   const list = catalog?.codex.models ?? []
   const m = model ? list.find((x) => x.id === model) : list.find((x) => x.isDefault)
@@ -54,6 +57,23 @@ export function effortOptions(provider: Provider, catalog: ProviderCatalog | nul
  * текущей модели, режимы подтверждений («Полный доступ» — красный, с вопросом), подсказки.
  */
 export function settingsMenu(agent: AgentView, catalog: ProviderCatalog | null | undefined, windows: ReadonlyMap<string, number>): MenuRow[] {
+  // ZCode: модели и усилия задаёт аккаунт Z.AI — разделов не будет, только режим подтверждений.
+  if (agent.provider === 'zcode') {
+    const rows: MenuRow[] = [
+      { type: 'heading', label: 'модель' },
+      { type: 'note', label: 'модель и уровень продуманности задаёт аккаунт Z.AI — переключения нет', testId: 'settings-menu-no-models' },
+      { type: 'sep' }, { type: 'heading', label: 'подтверждения' },
+    ]
+    const cur = agent.approval ?? 'ask'
+    for (const a of APPROVAL_ORDER) {
+      rows.push({
+        type: 'item', label: APPROVAL_LABEL[a], checked: a === cur, pick: { kind: 'approval', approval: a }, testId: `settings-approval-${a}`,
+        ...(a === 'full' ? { danger: true, title: APPROVAL_FULL_WARNING } : {}),
+      })
+    }
+    rows.push({ type: 'sep' }, { type: 'note', label: 'Действует со следующего хода: идущий ход не меняется.', testId: 'settings-menu-next-turn' })
+    return rows
+  }
   const rows: MenuRow[] = [{ type: 'heading', label: 'модель — со следующего хода', testId: 'settings-menu-models' }]
   const models = modelOptions(agent.provider, catalog, agent.model)
   const used = agent.context?.used ?? null
@@ -117,8 +137,8 @@ export const DEFAULT_APPROVALS: ReadonlyArray<Exclude<ApprovalMode, 'full'>> = [
 
 /** Черновик раздела: то, что редактирует экран, — копия, чтобы «Отмена» ничего не тронула. */
 export function settingsDraft(ns: NewSessionSettings | null | undefined): NewSessionSettings {
-  const base = ns ?? { rememberLast: true, defaults: { claude: {}, codex: {} } }
-  return { rememberLast: base.rememberLast, defaults: { ...(base.defaults.provider ? { provider: base.defaults.provider } : {}), claude: { ...base.defaults.claude }, codex: { ...base.defaults.codex } } }
+  const base = ns ?? { rememberLast: true, defaults: { claude: {}, codex: {}, zcode: {} } }
+  return { rememberLast: base.rememberLast, defaults: { ...(base.defaults.provider ? { provider: base.defaults.provider } : {}), claude: { ...base.defaults.claude }, codex: { ...base.defaults.codex }, zcode: { ...base.defaults.zcode } } }
 }
 
 /** Поле умолчания провайдера: `undefined` / пустая строка — снять (форма возьмёт своё). */

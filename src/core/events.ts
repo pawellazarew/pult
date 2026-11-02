@@ -2,7 +2,7 @@
 // Вид события — строковый союз, а не enum: он уезжает в JSON и обратно, и лишний слой
 // преобразования только мешает сверять поток глазами.
 
-export type Provider = 'claude' | 'codex' | 'pult'
+export type Provider = 'claude' | 'codex' | 'zcode' | 'pult'
 
 export const EVENT_KINDS = [
   'session.started',

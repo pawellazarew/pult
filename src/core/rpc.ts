@@ -141,7 +141,7 @@ export interface DaemonStatus {
    * Появилось в Ф2: окну нужен ответ «сейчас», журнал его не даёт. Необязательное — у старого
    * демона поля нет.
    */
-  providers?: Record<'claude' | 'codex', { blocked: boolean; reason?: string }>
+  providers?: Record<'claude' | 'codex' | 'zcode', { blocked: boolean; reason?: string }>
   /**
    * Node, на котором работает демон (0.2.18). `alive: false` — бинарь удалён из-под живого
    * процесса (brew upgrade node): macOS не пускает его детей в ~/Desktop, ходы claude там падают

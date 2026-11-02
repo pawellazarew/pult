@@ -157,7 +157,7 @@ export interface NewSessionPrefill {
   path?: string
   pathRejected?: boolean
   prompt?: string
-  provider?: 'claude' | 'codex'
+  provider?: 'claude' | 'codex' | 'zcode'
 }
 
 /**

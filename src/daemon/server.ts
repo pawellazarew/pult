@@ -34,6 +34,7 @@ import { rotateToken, tokenEquals } from '../core/token.js'
 import { VERSION } from '../core/version.js'
 import { createClaudeAdapter } from '../adapters/claude/adapter.js'
 import { codexNetworkEnv, createCodexAdapter, shellJoin } from '../adapters/codex/adapter.js'
+import { createZcodeAdapter } from '../adapters/zcode/adapter.js'
 import { claudeNetworkEnv } from '../adapters/claude/adapter.js'
 import type { ProviderAdapter } from '../adapters/types.js'
 import { runDoctor } from '../env/doctor.js'
@@ -125,6 +126,8 @@ export interface DaemonOptions {
   claudeBin?: string
   /** Путь к бинарю `codex`; тест подсовывает фальшивый app-server через PULT_CODEX_BIN. */
   codexBin?: string
+  /** Путь к бинарю `zcode`; тест подсовывает фальшивый CLI через PULT_ZCODE_BIN. */
+  zcodeBin?: string
   /** Путь к dist/cli/main.js для заглушки разрешений; тест ставит свой. */
   cliEntry?: string
   /**
@@ -443,6 +446,12 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     ?? process.env['PULT_CODEX_BIN']
     ?? locateToolPath('codex').path
     ?? 'codex'
+  // ZCode: node-скрипт с shebang внутри ZCode.app — путь плывёт за обновлениями приложения
+  // (грабля codex/ChatGPT.app), поиск кандидатов в env/locate.ts.
+  const zcodeBin = opts.zcodeBin
+    ?? process.env['PULT_ZCODE_BIN']
+    ?? locateToolPath('zcode').path
+    ?? 'zcode'
   // План 16, № 11: правила «Всегда» Codex — метка над строкой, которую codex допишет, список и «Отозвать». Файл — тот,
   // куда пишет НАШ app-server: его окружение без CODEX_HOME (белый список), значит `$HOME/.codex` ребёнка.
   const rulesPath = opts.codexRulesPath
@@ -494,6 +503,15 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     ...(netCheck ? { netCheck } : {}),
     mcpExtras: (name, nodeBin, at) => mcpExtras(name, nodeBin, at),
   })
+  // ZCode (маршрут A, docs/17-SPIKE-zcode.md): процесс на ход, без MCP-брокера и фоновой работы.
+  // askPermission обязательна контрактом AdapterDeps, но у маршрута A канала вопросов нет — не зовётся.
+  const zcode: ProviderAdapter = createZcodeAdapter({
+    config, logger, bin: zcodeBin,
+    emit: (draft) => { manager.emit(draft) },
+    live: (name, sig) => { manager.live(name, sig) },
+    askPermission: (req) => broker.request(req),
+    ...(netCheck ? { netCheck } : {}),
+  })
   // Автоназвание: одноразовый `claude -p` к haiku через тот же страж сети, что и ходы.
   const titler = opts.titler ?? (!opts.testMode && config.autoTitle ? createAutoTitler({
     bin: claudeBin,
@@ -518,7 +536,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     publish: emit,
     onPhase: (name) => { liveRef?.touch(name) },
     holdTurns: () => updaterRef?.applying() ?? false,
-    adapters: { claude, codex },
+    adapters: { claude, codex, zcode },
     broker,
     modelChoices: (provider) => (provider === 'codex' ? codexChoices() : Promise.resolve(null)),
     ...(opts.queueEditHoldMs !== undefined ? { queueEditHoldMs: opts.queueEditHoldMs } : {}),
@@ -698,7 +716,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
   const projects = createProjectStore(join(paths.home, 'projects.json'))
   // `PULT_TEST_PROVIDERS=run` (только вместе с PULT_TEST=1): проверка входа идёт по-настоящему — в фальшивые CLI
   // из PULT_CLAUDE_BIN / PULT_CODEX_BIN. Нужна кадрам README (shell/test/readme): шапка «готов», а не «ошибка».
-  const catalog = createProviderCatalog({ bins: { claude: claudeBin, codex: codexBin }, cwd: paths.home, env: childEnv, codexEnv,
+  const catalog = createProviderCatalog({ bins: { claude: claudeBin, codex: codexBin, zcode: zcodeBin }, cwd: paths.home, env: childEnv, codexEnv,
     testMode: opts.testMode && process.env['PULT_TEST_PROVIDERS'] !== 'run' })
   const external = createExternalSessions({
     claudeRoot: opts.testMode ? join(paths.home, 'claude-projects') : join(homedir(), '.claude', 'projects'),
@@ -728,6 +746,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     providers: {
       claude: providerState(claude),
       codex: providerState(codex),
+      zcode: providerState(zcode),
     },
     node: daemonNodeInfo(paths.runtime, process.execPath, process.version, nodeAtStart),
     // Правила уведомлений окна (О2): порог длительности хода и звук. Сама команда `notifyCommand` наружу не уходит.
@@ -1019,7 +1038,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
           title: [...source.session.title].slice(0, 60).join('') }, providerId, source.messages, source.session.provider === 'claude'))
       }
       case 'agent.start': {
-        const kind = p['kind'] === 'codex' ? 'codex' : 'claude'
+        const kind = p['kind'] === 'codex' ? 'codex' : p['kind'] === 'zcode' ? 'zcode' : 'claude'
         // M8d: как подтверждать действия. Нет поля — `ask`; незнакомое значение — отказ, а не тихий `ask`:
         // человек, попросивший `full`, но опечатавшийся, иначе получил бы не то, что думает.
         if (p['approval'] !== undefined && !isApprovalMode(p['approval'])) {
@@ -1282,7 +1301,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
       case 'usage.get':
         return { usage: manager.usage() }
       case 'provider.reset': {
-        const kind = p['provider'] === 'codex' ? 'codex' : 'claude'
+        const kind = p['provider'] === 'codex' ? 'codex' : p['provider'] === 'zcode' ? 'zcode' : 'claude'
         return { provider: kind, ...manager.providerReset(kind) }
       }
       default:
