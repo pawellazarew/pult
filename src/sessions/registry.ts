@@ -442,6 +442,10 @@ export function createRegistry(paths: PultPaths): SessionRegistry {
     if (n > 0) {
       try { save() } catch { /* не записалось — повторится на следующем старте: файл всё ещё версии 1 */ }
     }
+  } else if (raw !== null && !readMigrationMarker(paths.config, ACCESS_MIGRATION)) {
+    // Перепроверка ревью (M2): версия 2 без маркера — только у сборок 03e03e8 (не выпускались). Маркер ставится сейчас:
+    // записи, заведённые дальше, после отката не станут `inherit`.
+    try { writeMigrationMarker(paths.config, ACCESS_MIGRATION, new Date().toISOString()) } catch { /* следующий старт */ }
   }
   const find = (name: string): SessionRecord | undefined => list.find((s) => s.name === name)
 

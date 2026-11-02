@@ -460,7 +460,8 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
    * Нет — процесс с полными правами без дела не держится (адаптеры: `mayRunFull`, `retire`).
    */
   const mayRunFull = (name: string): boolean => {
-    const rec = manager.list().find((r) => r.name === name)
+    // Запись — без `list()`: тот спрашивает `activeAccess` адаптеров, а адаптер Codex сам зовёт эту функцию.
+    const rec = manager.record(name)
     if (!rec || (rec.provider !== 'claude' && rec.provider !== 'codex')) return false
     const a = rec.approval ?? 'ask'
     return isFullLevel(rec.provider, a, a === 'inherit' ? inheritFor(rec) : null) && fullAllowed(rec.provider, rec.grant)

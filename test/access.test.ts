@@ -153,6 +153,10 @@ describe('шаг A: миграция реестра (§5 п. 8)', () => {
       assert.equal(again.get('old')?.approval, 'inherit', 'запись до маркера — как раньше, без флага')
       assert.equal(again.get('fresh')?.approval, undefined, 'новый «Спрашивать» остаётся явным, а не молча шире')
       assert.equal(readFileSync(`${paths.sessions}.bak-v1`, 'utf8'), v1, 'копия первая и единственная')
+      // Версия 2 без маркера (сборки 03e03e8) — маркер ставится на старте.
+      writeFileSync(paths.config, '{}')
+      createRegistry(paths)
+      assert.ok((JSON.parse(readFileSync(paths.config, 'utf8')) as { migrations?: Record<string, { at: string }> }).migrations?.[ACCESS_MIGRATION]?.at)
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
   it('мигрированная сессия идёт без флага, как до обновления; новая «Спрашивать» — manual', async () => {
@@ -405,8 +409,8 @@ describe('ревью PR #39: сузили доступ — живые проце
       await assert.rejects(win.request('agent.configure', { name: 'f', approval: 'full', confirm: true, grant: 'cli-once' }), code('forbidden'))
       // Тот же уровень без разрешения — честный отказ, а не молчаливый no-op.
       await assert.rejects(win.request('agent.configure', { name: 'f', approval: 'full', confirm: true }), code('consent_required'))
-      // CLI `--yes` на заблокированной сессии — разовое разрешение записано.
-      const once = (await cli.request('agent.configure', { name: 'f', approval: 'full', confirm: true, grant: 'cli-once' })) as Row
+      // CLI `--yes` на заблокированной сессии вместе со сменой модели — разовое разрешение записано (перепроверка, Codex 7).
+      const once = (await cli.request('agent.configure', { name: 'f', approval: 'full', model: 'sonnet', confirm: true, grant: 'cli-once' })) as Row
       assert.equal(once.grant, 'cli-once')
       row = ((await cli.request('agent.list')) as { sessions: Row[] }).sessions.find((r) => r.name === 'f')
       assert.equal(row?.access?.blocked, false)
@@ -449,10 +453,63 @@ describe('ревью PR #39: сузили доступ — живые проце
     } finally { win.close(); await d.stop('конец теста'); home.remove(); rmSync(root, { recursive: true, force: true }) }
   })
 
-  it('блокер Codex 2: отзыв → ход, начатый сервером Codex на треде с полными правами, остановлен', async () => {
+  it('№ 11: снятый тёплый Claude, глухой к SIGTERM, — метка горит до выхода, SIGKILL добивает', async () => {
+    const home = tempHome()
+    const root = mkdtempSync(join(tmpdir(), 'pt-deaf-'))
+    const d = await startTestDaemon(home)
+    const win = await connectClient(home.paths, { client: 'shell' })
+    try {
+      const w = claudeWork(root, 'w', { scenario: 'warm', deaf: 1, keepAlive: 1 })
+      await win.request('access.grantFull', GRANT)
+      await win.request('agent.start', { name: 'w', kind: 'claude', cwd: w.cwd, approval: 'full', confirm: true, mode: 'warm' })
+      await win.request('agent.prompt', { name: 'w', text: 'раз' })
+      await win.request('agent.wait', { name: 'w', timeoutMs: 10_000 })
+      const pid = (JSON.parse(readFileSync(w.argvOut, 'utf8').trim().split('\n').at(-1) as string) as { pid: number }).pid
+      const alive = (): boolean => { try { process.kill(pid, 0); return true } catch { return false } }
+      await win.request('agent.configure', { name: 'w', approval: 'ask' })
+      const row = async (): Promise<Row | undefined> => ((await win.request('agent.list')) as { sessions: Row[] }).sessions.find((r) => r.name === 'w')
+      assert.ok(alive(), 'SIGTERM проглочен — процесс ещё жив')
+      assert.deepEqual([(await row())?.access?.live, (await row())?.access?.red], [true, true], 'пока жив — метка красная')
+      assert.ok(await waitFor(() => !alive(), 8000), 'SIGKILL добил процесс')
+      assert.ok(await waitFor(async () => (await row())?.access?.live === false, 3000), 'после выхода метка снята')
+    } finally { win.close(); await d.stop('конец теста'); home.remove(); rmSync(root, { recursive: true, force: true }) }
+  })
+
+  it('блокер Codex 2: отзыв выгружает тред с полными правами — ход сервера не начинается, следующий ход в workspace-write', async () => {
     const home = tempHome()
     const root = mkdtempSync(join(tmpdir(), 'pt-cx-srv-'))
     mkdirSync(join(root, 'x'), { recursive: true })
+    const logOut = join(root, 'server.jsonl')
+    writeFileSync(join(home.paths.home, '.pult-fake-scripted.json'), JSON.stringify({ logOut, bgPauseMs: 1500 }))
+    const d = await startTestDaemon(home, { codexBin: FAKE_CODEX_SCRIPTED })
+    const win = await connectClient(home.paths, { client: 'shell' })
+    const raw = (): Array<Record<string, unknown>> => (existsSync(logOut)
+      ? readFileSync(logOut, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>) : [])
+    const msg = (x: Record<string, unknown>): { method?: unknown; params?: Record<string, unknown> } => (x['msg'] ?? {}) as { method?: unknown; params?: Record<string, unknown> }
+    try {
+      await win.request('access.grantFull', GRANT)
+      await win.request('agent.start', { name: 'x', kind: 'codex', cwd: join(root, 'x'), approval: 'full', confirm: true })
+      await win.request('agent.prompt', { name: 'x', text: '[[server-turn]] начни' })
+      await win.request('agent.wait', { name: 'x', timeoutMs: 15_000 })
+      const boots = raw().filter((x) => x['ev'] === 'boot').length
+      await win.request('access.revokeFull')
+      const evs = async (): Promise<Ev[]> => ((await win.request('events.tail', { since: 0, sessionId: 'x' })) as { events: Ev[] }).events
+      assert.ok(await waitFor(async () => (await evs()).some((e) => /тред с полными правами выгружен/.test(String(e.data['notice'] ?? ''))), 5000), 'процесс Codex не перезапущен')
+      await new Promise((r) => setTimeout(r, 2000))
+      assert.ok(!(await evs()).some((e) => e.kind === 'status.changed' && e.data['reason'] === 'server_turn'), 'ход сервера не начался — тред выгружен до него')
+      // Следующий ход — новый процесс и тред в «Спрашивать» (полный доступ не разрешён).
+      await win.request('agent.prompt', { name: 'x', text: 'дальше' })
+      await win.request('agent.wait', { name: 'x', timeoutMs: 15_000 })
+      assert.ok(raw().filter((x) => x['ev'] === 'boot').length > boots, 'новый процесс app-server')
+      const resumed = raw().filter((x) => msg(x).method === 'thread/resume' || msg(x).method === 'thread/start').at(-1)
+      assert.equal(msg(resumed ?? {}).params?.['sandbox'], 'workspace-write')
+    } finally { win.close(); await d.stop('конец теста'); home.remove(); rmSync(root, { recursive: true, force: true }) }
+  })
+
+  it('блокер Codex 2: Codex занят — выгрузка ждёт, а ход сервера на треде с полными правами остановлен', async () => {
+    const home = tempHome()
+    const root = mkdtempSync(join(tmpdir(), 'pt-cx-busy-'))
+    for (const n of ['x', 'h']) mkdirSync(join(root, n), { recursive: true })
     const logOut = join(root, 'server.jsonl')
     writeFileSync(join(home.paths.home, '.pult-fake-scripted.json'), JSON.stringify({ logOut, bgPauseMs: 1500 }))
     const d = await startTestDaemon(home, { codexBin: FAKE_CODEX_SCRIPTED })
@@ -463,16 +520,17 @@ describe('ревью PR #39: сузили доступ — живые проце
     try {
       await win.request('access.grantFull', GRANT)
       await win.request('agent.start', { name: 'x', kind: 'codex', cwd: join(root, 'x'), approval: 'full', confirm: true })
+      await win.request('agent.start', { name: 'h', kind: 'codex', cwd: join(root, 'h') })
       await win.request('agent.prompt', { name: 'x', text: '[[server-turn]] начни' })
       await win.request('agent.wait', { name: 'x', timeoutMs: 15_000 })
+      await win.request('agent.prompt', { name: 'h', text: '[[hang]] держи процесс' })
       await win.request('access.revokeFull')
+      const row = ((await win.request('agent.list')) as { sessions: Row[] }).sessions.find((r) => r.name === 'x')
+      assert.equal(row?.access?.red, true, 'тред с полными правами загружен — метка красная')
       assert.ok(await waitFor(() => raw().some((x) => method(x) === 'turn/interrupt'), 6000), 'ход сервера не остановлен')
       const evs = ((await win.request('events.tail', { since: 0, sessionId: 'x' })) as { events: Ev[] }).events
       assert.match(String(evs.find((e) => e.data['access'] === 'downgraded')?.data['notice']), /Codex начал ход сам на треде с полными правами — это полный доступ, а он не разрешён/)
-      await new Promise((r) => setTimeout(r, 1800))
-      const after = ((await win.request('events.tail', { since: 0, sessionId: 'x' })) as { events: Ev[] }).events
-      assert.ok(after.some((e) => e.kind === 'status.changed' && e.data['status'] === 'interrupted'), 'ход сервера прерван')
-      assert.ok(!after.some((e) => e.kind === 'status.changed' && e.data['reason'] === 'server_turn_done'), 'ход сервера не дошёл до конца')
+      await win.request('agent.stop', { name: 'h' })
     } finally { win.close(); await d.stop('конец теста'); home.remove(); rmSync(root, { recursive: true, force: true }) }
   })
 
@@ -489,8 +547,13 @@ describe('ревью PR #39: сузили доступ — живые проце
       await win.request('agent.prompt', { name: 'b', text: '[[background]] начни' })
       await win.request('agent.wait', { name: 'b', timeoutMs: 15_000 })
       await win.request('agent.configure', { name: 'b', approval: 'ask' })
-      const row = ((await win.request('agent.list')) as { sessions: Row[] }).sessions.find((r) => r.name === 'b')
+      let row = ((await win.request('agent.list')) as { sessions: Row[] }).sessions.find((r) => r.name === 'b')
       assert.deepEqual([row?.access?.live, row?.access?.red, row?.access?.pending], [true, true, true], 'фон жив с полными правами — метка красная')
+      // Перепроверка ревью: ход «Спрашивать» поверх живого фона с полными правами — метка всё равно красная.
+      await win.request('agent.prompt', { name: 'b', text: '[[hang]] новый ход' })
+      row = ((await win.request('agent.list')) as { sessions: Row[] }).sessions.find((r) => r.name === 'b')
+      assert.deepEqual([row?.access?.live, row?.access?.red], [true, true], 'ход ask поверх full-фона')
+      await win.request('agent.stop', { name: 'b' })
     } finally { win.close(); await d.stop('конец теста'); home.remove(); rmSync(root, { recursive: true, force: true }) }
   })
 })

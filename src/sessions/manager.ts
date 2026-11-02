@@ -299,6 +299,8 @@ export interface SessionManager {
    * политики), строка — режим, который подтвердил сам провайдер. Расхождение с ожидаемым — заметка в ленте.
    */
   applied(name: string, info: AppliedInfo): void
+  /** Запись реестра как есть — без опроса адаптеров (его зовут сами адаптеры: `list` вызвал бы их по кругу). */
+  record(name: string): SessionRecord | null
   /**
    * Фаза хода сессии (0.3.5, src/sessions/phaseTracker.ts) — с текстом размышлений: её отдаёт живой канал окна.
    * `null` — хода нет.
@@ -1092,6 +1094,9 @@ export function createManager(opts: ManagerOptions): SessionManager {
       }
       // Шаг A: разовое разрешение CLI живёт ровно до смены режима: новый полный доступ — с новым `--yes` или на согласии.
       if (changes.approval) patch.grant = p.grant === 'cli-once' && (next.approval === 'full' || next.approval === 'inherit') ? 'cli-once' : undefined
+      // Перепроверка ревью (Codex 7): тот же полный уровень с `--yes` вместе со сменой модели или усилия — разрешение
+      // пишется так же, как без них.
+      else if (p.grant === 'cli-once' && p.approval !== undefined && (cur.approval === 'full' || cur.approval === 'inherit')) patch.grant = 'cli-once'
       // Ревью PR #39, M1: сказанный Claude режим `inherit` — до нового выбора уровня.
       if (changes.approval) patch.inheritSeen = undefined
       // Браузер — по правилу О3/M8d: в режиме без вопросов его вызовы шли бы мимо Inbox. Выключенный режимом
@@ -1560,6 +1565,8 @@ export function createManager(opts: ManagerOptions): SessionManager {
         }
       })
     },
+
+    record(name) { return registry.get(name) ?? null },
 
     applied(name, info) {
       const rec = registry.get(name)

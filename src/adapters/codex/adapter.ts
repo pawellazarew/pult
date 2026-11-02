@@ -557,6 +557,16 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
    * спавн не считается перезапуском в окне (иначе три отзыва за минуту остановили бы провайдера).
    */
   let reloadWanted: string | null = null
+  /**
+   * Ревью PR #39 (блокер Codex 2, перепроверка): перезапуск нужен ради доступа — тред с `danger-full-access` загружен, а
+   * полный доступ сессии больше не разрешён. ИЗМЕРЕНО 02.11.2026 на codex 0.166: `thread/resume` загруженного треда
+   * с другой `sandbox`/`approvalPolicy` политику не меняет (ответ — прежний `dangerFullAccess/never`), а
+   * `thread/unsubscribe` тред не выгружает (`thread/loaded/list` его видит). Выгрузить тред без хода может только
+   * перезапуск общего процесса; до него ход, начатый сервером, останавливает менеджер (`applied {full}`).
+   */
+  let reloadAccess = false
+  /** Перезапуска ждёт правило «Всегда» (`reloadPolicy`) — его заметки главнее. */
+  let reloadRule = false
   let reloadTimer: NodeJS.Timeout | null = null
   /** С какого момента перезапуск ждёт занятый Codex и напомнили ли уже (раз, через `RELOAD_REMIND_MS`). */
   let reloadSince = 0
@@ -849,6 +859,10 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
     })
   }
 
+  /** Загруженный тред сессии держит `danger-full-access`, а полный доступ ей сейчас не разрешён. */
+  const fullDisallowed = (l: Live): boolean =>
+    !l.closing && l.attached && l.threadPolicy?.sandbox === 'danger-full-access' && opts.mayRunFull?.(l.spec.name) === false
+  const anyFullDisallowed = (): boolean => [...live.values()].some(fullDisallowed)
   /** Заметка в ленту каждой живой сессии Codex (тихая строка, статус не двигает). */
   const noticeAll = (notice: string): void => {
     for (const l of live.values()) {
@@ -882,8 +896,16 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
   const tryReload = (): { codex: CodexReload; busy?: string } => {
     const why = reloadWanted
     if (why === null) return { codex: 'not_running' }
+    // Только ради доступа, а тредов с полными правами без разрешения уже нет (согласие вернули, тред выгружен) — не нужно.
+    if (!reloadRule && !anyFullDisallowed()) {
+      reloadWanted = null
+      reloadAccess = false
+      return { codex: 'not_running' }
+    }
     if (shuttingDown || ((!client || !client.alive()) && starting === null)) {
       reloadWanted = null
+      reloadAccess = false
+      reloadRule = false
       return { codex: 'not_running' }
     }
     const busy = client ? policyBusy() : 'поднимается процесс Codex'
@@ -900,7 +922,9 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
           // Ход бывает долгим: через 10 мин — одно напоминание, что правило в Codex всё ещё действует.
           if (!reloadReminded && now() - reloadSince >= RELOAD_REMIND_MS) {
             reloadReminded = true
-            noticeAll(`${why}: Codex всё ещё занят (${r.busy ?? 'идёт ход'}) — правило в нём пока действует; перезапуск — когда освободится.`)
+            noticeAll(reloadRule
+              ? `${why}: Codex всё ещё занят (${r.busy ?? 'идёт ход'}) — правило в нём пока действует; перезапуск — когда освободится.`
+              : `${why}: Codex всё ещё занят (${r.busy ?? 'идёт ход'}) — тред с полными правами пока загружен; ход, который он начнёт сам, Пульт остановит.`)
           }
         }, RELOAD_POLL_MS)
         reloadTimer.unref?.()
@@ -908,14 +932,19 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
       return { codex: 'deferred', busy }
     }
     reloadWanted = null
+    const forRule = reloadRule
+    reloadRule = false
+    reloadAccess = false
     const old = client as AppServerClient
     client = null
     retired.add(old)
     freeRespawn = true
     detachAll()
-    logger.info('перезапуск app-server: отозвано правило «Всегда» — codex перечитает правила', { why, pid: old.pid })
+    logger.info(forRule ? 'перезапуск app-server: отозвано правило «Всегда» — codex перечитает правила' : 'перезапуск app-server: выгрузить тред с полными правами, которые больше не разрешены', { why, pid: old.pid })
     retiring = killClient(old).catch(() => {}).finally(() => { retiring = null })
-    noticeAll(`${why}: Codex в Пульте перезапущен — правило больше не действует; разговор продолжится с того же места, но ${RELOAD_CAVEAT}. Codex, запущенный вне Пульта (терминал, IDE), держит правило до своего перезапуска.`)
+    noticeAll(forRule
+      ? `${why}: Codex в Пульте перезапущен — правило больше не действует; разговор продолжится с того же места, но ${RELOAD_CAVEAT}. Codex, запущенный вне Пульта (терминал, IDE), держит правило до своего перезапуска.`
+      : `${why}: Codex в Пульте перезапущен — тред с полными правами выгружен; разговор продолжится с того же места с выбранным доступом, но ${RELOAD_CAVEAT}.`)
     return { codex: 'restarted' }
   }
 
@@ -2307,14 +2336,35 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
       // фон — субагенты и команды, пережившие ход, работают с правами хода, который их начал.
       const l = live.get(name)
       if (!l) return null
+      // Перепроверка ревью: фон с полными правами под ходом «Спрашивать» — метка остаётся красной, пока он жив.
+      if (l.bg.pending() && l.bgApproval === 'full') return { approval: 'full' }
       if (l.turn || l.starting || l.serverTurn) return l.turnApproval ? { approval: l.turnApproval } : {}
       if (l.bg.pending()) return l.bgApproval ? { approval: l.bgApproval } : {}
+      // Тред с полными правами, которые больше не разрешены, ещё загружен (ждёт перезапуска процесса): сервер может
+      // начать на нём ход — метка не гаснет до выгрузки.
+      if (fullDisallowed(l)) return { approval: 'full' }
       return null
     },
 
     blocked: () => (providerBlocked === null ? { blocked: false } : { blocked: true, reason: providerBlocked }),
 
+    retire(name) {
+      // Ревью PR #39 (блокер Codex 2): доступ сузили, а тред с полными правами загружен — сервер мог бы начать на нём ход
+      // сам (сообщение субагента). Тред выгружается перезапуском общего процесса — сразу или, если Codex занят, когда
+      // освободится; до того ход сервера останавливает менеджер. Метка красная, пока тред загружен.
+      const l = live.get(name)
+      if (!l || !fullDisallowed(l)) return
+      reloadAccess = true
+      reloadWanted = reloadWanted ?? 'Полный доступ сузили'
+      const r = tryReload()
+      if (r.codex === 'deferred') {
+        emit({ sessionId: name, provider: 'codex', kind: 'session.configured', data: { changes: {}, notice:
+          `Полный доступ сузили, а Codex занят (${r.busy ?? 'идёт ход'}) — тред с полными правами выгрузится, когда он освободится; ход, который сервер начнёт сам, Пульт остановит.` } })
+      }
+    },
+
     reloadPolicy(why) {
+      reloadRule = true
       reloadWanted = why
       const r = tryReload()
       if (r.codex === 'deferred') {
