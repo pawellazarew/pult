@@ -440,7 +440,7 @@ export function NewAgentDialog({ taken, pickFolder, onCreate, onClose, catalog, 
         <div className="row2">
           <div className="field">
             <span className="lbl">провайдер</span>
-            <Seg label="Провайдер" prov value={form.provider} options={['claude', 'codex'] as AgentProvider[]} onChange={(v) => setForm((f) => switchProviderPrefill(f, v, settings ?? null))} />
+            <Seg label="Провайдер" prov value={form.provider} options={['claude', 'codex', 'zcode'] as AgentProvider[]} onChange={(v) => setForm((f) => switchProviderPrefill(f, v, settings ?? null))} />
           </div>
           <div className="field">
             <span className="lbl">имя</span>
@@ -483,19 +483,23 @@ export function NewAgentDialog({ taken, pickFolder, onCreate, onClose, catalog, 
         {/* О3: браузер для агента — Playwright MCP, свой профиль на сессию; каждый вызов идёт через Inbox. */}
         <div className="field" data-testid="new-agent-browser-field">
           <span className="lbl">браузер</span>
-          <label className="check">
-            <input type="checkbox" checked={form.browser} data-testid="new-agent-browser"
-              onChange={(e) => setForm({ ...form, browser: e.target.checked })} />
-            <span>Браузер для агента — открывать страницы, брать данные, скачивать</span>
-          </label>
-          {form.browser && (
-            <label className="check sub">
-              <input type="checkbox" checked={form.browserHeaded} data-testid="new-agent-browser-headed"
-                onChange={(e) => setForm({ ...form, browserHeaded: e.target.checked })} />
-              <span>Показывать окно браузера (в нём можно войти на сайт руками)</span>
-            </label>
-          )}
-          <span className="note">Свой профиль браузера на сессию, не твой Chrome с его куками. Каждый вызов браузера — через Inbox.</span>
+          {form.provider === 'zcode'
+            ? <span className="note">У ZCode браузера для агента нет — у его CLI нет канала MCP-конфига.</span>
+            : <>
+              <label className="check">
+                <input type="checkbox" checked={form.browser} data-testid="new-agent-browser"
+                  onChange={(e) => setForm({ ...form, browser: e.target.checked })} />
+                <span>Браузер для агента — открывать страницы, брать данные, скачивать</span>
+              </label>
+              {form.browser && (
+                <label className="check sub">
+                  <input type="checkbox" checked={form.browserHeaded} data-testid="new-agent-browser-headed"
+                    onChange={(e) => setForm({ ...form, browserHeaded: e.target.checked })} />
+                  <span>Показывать окно браузера (в нём можно войти на сайт руками)</span>
+                </label>
+              )}
+              <span className="note">Свой профиль браузера на сессию, не твой Chrome с его куками. Каждый вызов браузера — через Inbox.</span>
+            </>}
         </div>
 
         {/* M8d: как подтверждать действия — живёт в записи сессии; у живой сессии меняется из подвала (M8f). */}
@@ -505,7 +509,9 @@ export function NewAgentDialog({ taken, pickFolder, onCreate, onClose, catalog, 
         {/* Друг под другом: шесть уровней усилия в половину ширины диалога не помещаются. */}
         <div className="field">
           <span className="lbl">модель</span>
-          {form.provider === 'codex' && preset.models.length
+          {form.provider === 'zcode'
+            ? <span className="note" data-testid="new-agent-model-zcode">GLM — модель и уровень продуманности задаёт аккаунт Z.AI, переключения нет</span>
+            : form.provider === 'codex' && preset.models.length
             ? <select value={form.model ?? ''} data-testid="new-agent-model" onChange={(e) => setForm({ ...form, model: e.target.value || null })}>
               <option value="">По умолчанию Codex</option>
               {catalog?.codex.models.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
@@ -514,10 +520,12 @@ export function NewAgentDialog({ taken, pickFolder, onCreate, onClose, catalog, 
             ? <Seg label="Модель" value={form.model} options={preset.models} onChange={(v) => setForm({ ...form, model: v })} />
             : <span className="note">по умолчанию codex</span>}
         </div>
-        <div className="field">
-          <span className="lbl">усилие</span>
-          <Seg label="Усилие" value={form.effort} options={preset.efforts} onChange={(v) => setForm({ ...form, effort: v })} />
-        </div>
+        {form.provider !== 'zcode' && (
+          <div className="field">
+            <span className="lbl">усилие</span>
+            <Seg label="Усилие" value={form.effort} options={preset.efforts} onChange={(v) => setForm({ ...form, effort: v })} />
+          </div>
+        )}
 
         <div className="field">
           <span className="lbl">первая реплика</span>

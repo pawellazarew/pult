@@ -2,7 +2,7 @@
 
 **English** · [Русский](README.ru.md)
 
-**Run several Claude Code and Codex agents in the background and answer all their permission questions in one place.**
+**Run several Claude Code, Codex and ZCode (GLM) agents in the background and answer all their permission questions in one place.**
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/hero-dark.png">

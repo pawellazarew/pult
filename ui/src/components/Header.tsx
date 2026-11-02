@@ -77,7 +77,7 @@ export function Header(p: {
         </span>
       </div>
 
-      {(['claude', 'codex'] as const).map((provider) => {
+      {(['claude', 'codex', 'zcode'] as const).map((provider) => {
         const st = providerStatusView(p.providers?.[provider], p.providersChecking ?? false)
         return (
           <UsageCell key={provider} provider={provider} u={p.usage[provider]} now={p.now}>

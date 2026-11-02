@@ -76,7 +76,7 @@ export interface StartParams {
   name: string
   /** Название для людей; его же потом меняет `rename`. */
   title?: string
-  kind: 'claude' | 'codex'
+  kind: 'claude' | 'codex' | 'zcode'
   cwd: string
   model?: string
   effort?: string
@@ -300,7 +300,7 @@ export interface SessionManager {
   rm(name: string, opts?: RmOptions): Promise<RmResult>
   tree(name: string): AgentTree
   usage(): UsageRow[]
-  providerReset(kind: 'claude' | 'codex'): { was: boolean }
+  providerReset(kind: 'claude' | 'codex' | 'zcode'): { was: boolean }
   /** Единственная дверь в журнал для адаптеров и брокера. */
   emit(draft: EventDraft): PultEvent
   shutdown(): Promise<void>
@@ -313,7 +313,7 @@ export interface ManagerOptions {
   store: EventStore
   /** Запись в журнал и рассылка подписчикам — её делает демон. */
   publish(draft: EventDraft): PultEvent
-  adapters: Partial<Record<'claude' | 'codex', ProviderAdapter>>
+  adapters: Partial<Record<'claude' | 'codex' | 'zcode', ProviderAdapter>>
   broker: PermBroker
   /**
    * Реестр. В бою он всегда один — `createRegistry(paths)`; подмена нужна тесту, который
@@ -346,7 +346,7 @@ export interface ManagerOptions {
    * M8f: модели провайдера с усилиями — для проверки `configure`. Нет функции или `null` — списка нет (Codex
    * офлайн): тогда только форма имени. У Claude по умолчанию — пресеты формы «+ Сессия».
    */
-  modelChoices?(provider: 'claude' | 'codex'): Promise<ModelChoice[] | null>
+  modelChoices?(provider: 'claude' | 'codex' | 'zcode'): Promise<ModelChoice[] | null>
   /** Срок удержания очереди открытой правкой (мс); по умолчанию `QUEUE_EDIT_HOLD_MS`. Тесты ставят короче. */
   queueEditHoldMs?: number
   /** 0.3.5: фаза хода сессии сменилась — демон шлёт кадр живого канала (src/daemon/live.ts). Синхронно. */
@@ -486,7 +486,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
     return t0 === undefined ? draft : { ...draft, data: { ...d, turnMs: Date.now() - t0 } }
   }
 
-  const adapterFor = (kind: 'claude' | 'codex'): ProviderAdapter => {
+  const adapterFor = (kind: 'claude' | 'codex' | 'zcode'): ProviderAdapter => {
     const a = opts.adapters[kind]
     if (!a) throw new ManagerError('provider_unavailable', `адаптер ${kind} появится в следующей вехе`)
     return a
@@ -997,7 +997,9 @@ export function createManager(opts: ManagerOptions): SessionManager {
       const needList = p.model !== undefined || p.effort !== undefined
       const list = !needList ? null : first.provider === 'claude'
         ? (opts.modelChoices ? await opts.modelChoices('claude') : null) ?? claudeChoices()
-        : (opts.modelChoices ? await opts.modelChoices('codex') : null)
+        : first.provider === 'zcode'
+          ? null
+          : (opts.modelChoices ? await opts.modelChoices('codex') : null)
       // Список мог идти секунды (Codex `model/list`): запись — свежая, а не та, что была до await.
       const cur = needRec(name)
       if (cur.createdAt !== first.createdAt) throw new ManagerError('not_found', `сессию ${name} пересоздали, пока шла проверка — повтори`)

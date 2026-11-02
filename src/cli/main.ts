@@ -55,7 +55,7 @@ export const EXIT = {
   updateAvailable: EXIT_UPDATE_AVAILABLE,
 } as const
 
-const HELP = `pult ${VERSION} — диспетчерская над claude, codex и opencode (веха В4)
+const HELP = `pult ${VERSION} — диспетчерская над claude, codex, zcode и opencode (веха В4)
 
   pult daemon start                 поднять демона (отсоединённым, переживает терминал)
   pult daemon status [--json]       состояние демона
@@ -90,7 +90,7 @@ const HELP = `pult ${VERSION} — диспетчерская над claude, code
 
   pult session …                    сессии (так они названы в окне); pult agent … — то же самое,
                                     прежнее имя команды
-  pult agent start <имя> --kind claude|codex --cwd <папка> [--model M] [--effort E] [--warm]
+  pult agent start <имя> --kind claude|codex|zcode --cwd <папка> [--model M] [--effort E] [--warm]
                     [--title "название"]
                     [--worktree <ветка> [--base <ref>]]   агент в своём git worktree
                                     (PULT_HOME/worktrees/…; ветки нет — заводится от --base или HEAD)
@@ -129,13 +129,13 @@ const HELP = `pult ${VERSION} — диспетчерская над claude, code
   pult perm rules [--json]          правила «Всегда» Codex, записанные Пультом (дата, сессия);
   pult perm rules revoke <id>       отозвать: метка и строка уходят из ~/.codex/rules/default.rules
   pult usage [--json]
-  pult provider reset [claude|codex]   снять остановку провайдера
+  pult provider reset [claude|codex|zcode]   снять остановку провайдера
   pult mcp-ask                         служебный режим: stdio-MCP-заглушка разрешений
   pult browser [--json]             браузер агента: стоит ли Playwright MCP, найден ли Chrome
   pult browser install              поставить Playwright MCP ${PLAYWRIGHT_MCP_VERSION} в PULT_HOME/mcp (npm ci по lock-файлу пакета)
   pult mcp list [--json]            свои MCP-серверы из ~/.claude.json (● — подключён); .mcp.json — позже
   pult mcp select <имя> [<имя>…] | --none   какие из них подключать к сессиям Claude
-  pult net guard [--json]           правило стража страны выхода (одно на claude, codex и opencode)
+  pult net guard [--json]           правило стража страны выхода (одно на claude, codex, zcode и opencode)
   pult net guard --deny RU,BY | --allow DE,FI   сменить: запрещать страны из списка / разрешать только их
                                     (коды ISO 3166-1; через демона — со следующего хода, без рестарта)
 
@@ -460,13 +460,14 @@ async function cmdAgent(paths: PultPaths, args: ParsedArgs): Promise<number> {
           defaults = parseNewSession(((await call('settings.get')) as { newSession?: unknown }).newSession, false).value.defaults
         } catch { defaults = null }
         const kind = flagStr(args, 'kind') ?? 'claude'
-        const d = defaults ? (kind === 'codex' ? defaults.codex : defaults.claude) : {}
+        // ZCode: модели и усилия у него нет (CLI без --model), браузера тоже — умолчания пусты.
+        const d = defaults ? (kind === 'codex' ? defaults.codex : kind === 'zcode' ? defaults.zcode : defaults.claude) : {}
         const approval = flagStr(args, 'approval') ?? d.approval
         const used: string[] = []
         if (!args.flags.has('model') && d.model) used.push(`модель ${d.model}`)
         if (!args.flags.has('effort') && d.effort) used.push(`усилие ${d.effort}`)
         if (!args.flags.has('approval') && d.approval) used.push(`режим ${d.approval}`)
-        const browserDefault = !args.flags.has('browser') && d.browser === true && !modeBlocksBrowser(kind === 'codex' ? 'codex' : 'claude', isApprovalMode(approval) ? approval : undefined)
+        const browserDefault = !args.flags.has('browser') && d.browser === true && !modeBlocksBrowser(kind === 'codex' ? 'codex' : kind === 'zcode' ? 'zcode' : 'claude', isApprovalMode(approval) ? approval : undefined)
         if (browserDefault) used.push('браузер')
         if (used.length && !asJson) err(`pult agent start: из настроек (newSession.defaults): ${used.join(', ')}`)
         // Ревью M8d: `full` — только с `--yes`, отказ до заведения чего-либо.

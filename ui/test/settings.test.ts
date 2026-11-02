@@ -38,6 +38,7 @@ const CATALOG: ProviderCatalog = {
     { id: 'gpt-fast', label: 'GPT Fast', efforts: ['low', 'medium'], defaultEffort: 'low', isDefault: true },
     { id: 'gpt-deep', label: 'GPT Deep', efforts: ['high', 'xhigh'], defaultEffort: 'high', isDefault: false },
   ] },
+  zcode: { provider: 'zcode', state: 'ready', detail: '', models: [] },
 }
 
 describe('M8f: меню подвала', () => {
@@ -119,7 +120,7 @@ describe('M8f: строка ленты о смене', () => {
 
 describe('M8f: «+ Сессия» по слоям', () => {
   const settings = (over: Partial<SettingsReply['newSession']> = {}, last: SettingsReply['lastUsed'] = {}): SettingsReply => ({
-    newSession: { rememberLast: true, defaults: { claude: { model: 'opus', effort: 'high', approval: 'read-only' }, codex: { effort: 'xhigh' } }, ...over },
+    newSession: { rememberLast: true, defaults: { claude: { model: 'opus', effort: 'high', approval: 'read-only' }, codex: { effort: 'xhigh' }, zcode: {} }, ...over },
     lastUsed: last,
   })
   it('нет настроек — как раньше: claude, встроенные модель и усилие, «спрашивать»', () => {
@@ -139,11 +140,11 @@ describe('M8f: «+ Сессия» по слоям', () => {
   it('full из последнего выбора не подставляется НИКОГДА: умолчание провайдера или «спрашивать»', () => {
     const tampered = { provider: 'claude' as const, claude: { approval: 'full' as never } }
     assert.equal(prefillForm({ cwd: null }, settings({}, tampered), []).approval, 'read-only')
-    const noDefault = settings({ defaults: { claude: {}, codex: {} } }, tampered)
+    const noDefault = settings({ defaults: { claude: {}, codex: {}, zcode: {} } }, tampered)
     assert.equal(prefillForm({ cwd: null }, noDefault, []).approval, 'ask')
   })
   it('провайдер: ссылка > последний > умолчание; смена провайдера в форме берёт его слои; браузер в «без вопросов» не ставится', () => {
-    const s = settings({ defaults: { provider: 'codex', claude: {}, codex: { approval: 'workspace', browser: true } } })
+    const s = settings({ defaults: { provider: 'codex', claude: {}, codex: { approval: 'workspace', browser: true }, zcode: {} } })
     assert.equal(prefillForm({ cwd: null }, s, []).provider, 'codex')
     assert.equal(prefillForm({ cwd: null }, s, []).browser, false, 'Codex workspace — браузер не включается')
     assert.equal(prefillForm({ cwd: null, prefill: { provider: 'claude', path: '/p/x' } }, s, []).provider, 'claude')
@@ -151,7 +152,7 @@ describe('M8f: «+ Сессия» по слоям', () => {
     assert.deepEqual([sw.provider, sw.effort], ['codex', 'xhigh'])
   })
   it('предлагать ветку worktree — pult/<имя>', () => {
-    const f = prefillForm({ cwd: '/p/app' }, settings({ defaults: { claude: { worktree: true }, codex: {} } }), [])
+    const f = prefillForm({ cwd: '/p/app' }, settings({ defaults: { claude: { worktree: true }, codex: {}, zcode: {} } }), [])
     assert.equal(f.worktree, 'pult/app')
   })
 })
@@ -173,7 +174,7 @@ describe('M8f: «Настройки» (⌘,)', () => {
     d = setDefault(d, 'claude', 'model', 'opus')
     d = setDefault(d, 'claude', 'model', '')
     assert.equal(draftError(d), null)
-    assert.deepEqual(d, { rememberLast: true, defaults: { provider: 'codex', claude: {}, codex: { approval: 'workspace' } } })
+    assert.deepEqual(d, { rememberLast: true, defaults: { provider: 'codex', claude: {}, codex: { approval: 'workspace' }, zcode: {} } })
   })
   it('экран: раздел «Новая сессия» с обоими провайдерами и переключателем, «Внешний вид» — пустой, с одной строкой', () => {
     const out = html(SettingsDialog, { settings: { rememberLast: false, defaults: { claude: { model: 'opus' }, codex: {} } }, catalog: CATALOG, onSave: async () => null, onClose: noop })

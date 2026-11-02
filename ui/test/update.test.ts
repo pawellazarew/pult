@@ -271,7 +271,7 @@ describe('«Настройки» → «Обновления»: состояни�
   })
 
   it('диалог «Настройки» показывает раздел «Обновления», когда окно его передало', () => {
-    const settings = { rememberLast: true, defaults: { claude: {}, codex: {} } }
+    const settings = { rememberLast: true, defaults: { claude: {}, codex: {}, zcode: {} } }
     const withUpd = renderToStaticMarkup(createElement(SettingsDialog, { settings, catalog: null, updates: panel(upToDate()), autoCheck: false, onSave: async () => null, onClose: noop }))
     assert.match(withUpd, /data-testid="settings-updates"/)
     assert.doesNotMatch(withUpd, /data-testid="settings-update-auto"[^>]*checked/)
@@ -310,7 +310,7 @@ describe('«Обновления»: время проверки, проверк�
   })
 
   it('settings.set: флаг автопроверки — только когда передан', () => {
-    const ns = { rememberLast: true, defaults: { claude: {}, codex: {} } }
+    const ns = { rememberLast: true, defaults: { claude: {}, codex: {}, zcode: {} } }
     assert.deepEqual(settingsParams(ns), { newSession: ns })
     assert.deepEqual(settingsParams(ns, false), { newSession: ns, updates: { check: false } })
   })

@@ -2,7 +2,7 @@
 
 [English](README.md) · **Русский**
 
-**Держи в фоне несколько агентов Claude Code и Codex и отвечай на все их вопросы о разрешениях в одном месте.**
+**Держи в фоне несколько агентов Claude Code, Codex и ZCode (GLM) и отвечай на все их вопросы о разрешениях в одном месте.**
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/hero-dark.png">
@@ -136,7 +136,7 @@ sh install.sh --from … --home ~/.pult --bin-dir ~/.local/bin   # это зна
 
 ```sh
 pult doctor                                                   # всё ли на месте
-pult agent start w --kind claude --cwd ~/code/app             # сессия с именем w; для Codex — --kind codex
+pult agent start w --kind claude --cwd ~/code/app             # сессия с именем w; для Codex — --kind codex, для ZCode — --kind zcode
 pult agent prompt w "почини падающий тест" --wait             # реплика и ждать конца хода
 pult agent read w                                             # что агент сказал
 ```
@@ -402,6 +402,7 @@ pult daemon uninstall         # снять службу; PULT_HOME не трог
 ```sh
 pult agent start w --kind claude --cwd ~/code/app [--model haiku] [--effort low] [--warm] [--title "название"]
 pult agent start c --kind codex  --cwd ~/code/app [--effort low]
+pult agent start z --kind zcode  --cwd ~/code/app             # модель задаёт аккаунт Z.AI; вопросов в Inbox нет
 pult agent rename w "Починить VPN"                      # название для списков и окна; без текста — снять
 pult agent prompt w "текст" --wait [--timeout 600000]   # без --wait — вернуться сразу, ход идёт в фоне
 pult agent wait w                                       # дождаться конца хода
