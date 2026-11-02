@@ -201,7 +201,19 @@ let turnIndex = 0
 const played = new Set()
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-const out = (line) => process.stdout.write(line + '\n')
+// Шаг A: `system/init.permissionMode` — как у настоящего CLI: режим из `--permission-mode` (`manual` CLI показывает как
+// `default`, ИЗМЕРЕНО S10), без флага — `defaultMode` владельца (`.pult-fake.json` → `defaultMode`, иначе `default`).
+// `reportMode` — подмена для теста расхождения «ожидалось/пришло».
+const initMode = (() => {
+  const pm = flag('--permission-mode')
+  return fileCfg.reportMode ?? (pm === 'manual' ? 'default' : pm ?? fileCfg.defaultMode ?? 'default')
+})()
+const out = (line) => {
+  if (isInit(line)) {
+    try { const e = JSON.parse(line); if (!e.parent_tool_use_id) { e.permissionMode = initMode; line = JSON.stringify(e) } } catch { /* как есть */ }
+  }
+  process.stdout.write(line + '\n')
+}
 
 /** Та ли это строка, что заводит разговор на диске. Не-JSON строки (фикстура 10) — нет. */
 function isInit(line) {

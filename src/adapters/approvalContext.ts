@@ -20,7 +20,8 @@ export function approvalContext(provider: 'claude' | 'codex', approval: Approval
     if (mode !== 'full') lines.push('Вложенные процессы, включая claude и codex, наследуют песочницу. Сеть, localhost, Keychain или файлы авторизации могут быть недоступны, даже когда CLI работает в обычном терминале.')
     if (mode === 'workspace' && broker) lines.push('Если задача требует выхода из песочницы, объясни причину и предложи пользователю переключить режим этой сессии на «Спрашивать», затем повторить запрос. Сам режим не меняй и ограничения не обходи.')
   } else {
-    const cliMode = mode === 'workspace' ? 'acceptEdits' : mode === 'full' ? 'bypassPermissions' : mode === 'read-only' ? 'manual' : 'настройки владельца'
+    // Шаг A: «Спрашивать» — явный manual; без флага — только «как в настройках Claude» (inherit).
+    const cliMode = mode === 'workspace' ? 'acceptEdits' : mode === 'full' ? 'bypassPermissions' : mode === 'inherit' ? 'настройки владельца' : 'manual'
     lines.push(`Claude Code: permission-mode=${cliMode}.`)
     if (mode === 'read-only') lines.push('Инструменты правки отключены; Bash требует разрешения.')
     if (mode === 'workspace') lines.push('Правки файлов принимаются автоматически по правилам acceptEdits; для остальных инструментов действуют разрешения Claude Code. Это отличается от workspace-write + never у Codex.')

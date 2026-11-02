@@ -56,18 +56,31 @@ export interface PermissionDecision {
 
 /**
  * M8d: как подтверждать действия — выбирается при заведении сессии и живёт в её записи.
- *   * `read-only` — только читать (Codex: песочница read-only; Claude: `--permission-mode plan`);
- *   * `ask` — по умолчанию, как было до M8d: всё шире рабочей папки — через Inbox;
+ *   * `read-only` — только читать (Codex: песочница read-only; Claude: `--permission-mode manual` без Write/Edit);
+ *   * `ask` — по умолчанию: всё шире рабочей папки — через Inbox (Codex: workspace-write + on-request; Claude с
+ *     быстрого старта (шаг A) — ЯВНЫЙ `--permission-mode manual`, а не «без флага»: иначе действовал бы `defaultMode`
+ *     владельца, и «Спрашивать» могло оказаться bypass);
  *   * `workspace` — правки в рабочей папке без вопросов (Codex: workspace-write + never; Claude: acceptEdits);
- *   * `full` — что угодно без вопросов и без песочницы (Codex: danger-full-access + never; Claude: bypassPermissions).
+ *   * `full` — что угодно без вопросов и без песочницы (Codex: danger-full-access + never; Claude: bypassPermissions);
+ *   * `inherit` — только Claude: флага нет, действует `defaultMode` владельца («Как в настройках Claude»). Так жили
+ *     все сессии Claude в `ask` до шага A — миграция реестра переводит их сюда (src/sessions/registry.ts). Если у
+ *     владельца `defaultMode: bypassPermissions`, уровень считается полным доступом: ему нужно согласие.
  */
-export type ApprovalMode = 'read-only' | 'ask' | 'workspace' | 'full'
+export type ApprovalMode = 'read-only' | 'ask' | 'workspace' | 'full' | 'inherit'
 
-export const APPROVAL_MODES: readonly ApprovalMode[] = ['read-only', 'ask', 'workspace', 'full']
+export const APPROVAL_MODES: readonly ApprovalMode[] = ['read-only', 'ask', 'workspace', 'full', 'inherit']
 
 export function isApprovalMode(x: unknown): x is ApprovalMode {
   return typeof x === 'string' && (APPROVAL_MODES as readonly string[]).includes(x)
 }
+
+/** Уровень, допустимый провайдеру: `inherit` есть только у Claude (у Codex нет «своих настроек» режима). */
+export function approvalFits(provider: 'claude' | 'codex', mode: ApprovalMode): boolean {
+  return mode !== 'inherit' || provider === 'claude'
+}
+
+/** Перечень уровней для отказа словами. */
+export const APPROVAL_LIST = 'read-only | ask | workspace | full | inherit (только claude)'
 
 /** M8f: то, что меняет `agent.configure` у живой сессии. */
 export interface SessionSettingsPatch {
@@ -169,6 +182,12 @@ export interface AdapterDeps {
    * снимает слепок файла правил и метит строку, которую codex допишет (src/perm/codexRules.ts). Не бросает.
    */
   ruleGranted?(grant: RuleGrant): void
+  /**
+   * Быстрый старт, шаг A: с чем запущен процесс (`approval` снимка хода). `reported` — режим, который сказал сам
+   * провайдер (Claude — `system/init.permissionMode`; Codex — `<sandbox.type>/<approvalPolicy>` ответа
+   * `thread/start|resume`); `null` — только отправлено. Не бросает.
+   */
+  applied?(sessionId: string, info: { approval: ApprovalMode | undefined; reported: string | null }): void
 }
 
 /** Что добавить сессии: серверы и правила разрешений. */
@@ -229,6 +248,12 @@ export interface ProviderAdapter {
    * Отдаёт, когда смена вступит в силу. `force` — только откат к прежним (уже бывшим в силе) настройкам: без отказов.
    */
   configure?(name: string, next: SessionSettingsPatch, force?: boolean): 'next_turn' | 'after_background'
+  /**
+   * Быстрый старт, шаг A: процесс этой сессии, который прямо сейчас работает (ход, фоновые задачи Claude, ход,
+   * начатый сервером Codex), и уровень, с которым он запущен (`approval: undefined` — `ask`). `null` — за работой
+   * никого нет. Нет метода — менеджер судит по ходу.
+   */
+  activeAccess?(name: string): { approval?: ApprovalMode } | null
   /** Провайдер целиком остановлен (`provider.blocked`)? */
   blocked(): { blocked: boolean; reason?: string }
   /** Снять остановку провайдера — метод демона `provider.reset`. */

@@ -148,8 +148,20 @@ export function workspaceWriteFromConfig(cfg: Record<string, unknown> | null): R
   }
 }
 
+/**
+ * Шаг A: режим треда по ответу `thread/start|resume` — `<sandbox.type>/<approvalPolicy>` (ИЗМЕРЕНО: codex 0.163
+ * возвращает оба поля, fixture 09). Чего-то нет — `null`: режим не подтверждён, метка покажет отправленное.
+ */
+export function threadReportOf(res: Record<string, unknown>): string | null {
+  const sb = res['sandbox']
+  const type = sb !== null && typeof sb === 'object' && !Array.isArray(sb) ? (sb as Record<string, unknown>)['type'] : null
+  const policy = res['approvalPolicy']
+  return typeof type === 'string' && typeof policy === 'string' ? `${type}/${policy}` : null
+}
+
 export function codexThreadPolicy(approval: ApprovalMode | undefined, broker: boolean): { sandbox: string; approvalPolicy: 'on-request' | 'never' } {
-  const mode = approval ?? 'ask'
+  // `inherit` у Codex не бывает (демон его не примет); пришёл — тише, а не шире: как `ask`.
+  const mode = !approval || approval === 'inherit' ? 'ask' : approval
   const sandbox = mode === 'read-only' ? 'read-only' : mode === 'full' ? 'danger-full-access' : THREAD_SANDBOX
   const asks = broker && (mode === 'read-only' || mode === 'ask')
   return { sandbox, approvalPolicy: asks ? 'on-request' : 'never' }
@@ -385,6 +397,14 @@ interface Live {
    * режима отличается, несёт в `turn/start` только то, что отличается (политику и/или песочницу).
    */
   threadPolicy: { sandbox: string; approvalPolicy: string } | null
+  /**
+   * Шаг A: что сервер сам сказал о режиме загруженного треда — `<sandbox.type>/<approvalPolicy>` ответа
+   * `thread/start|resume`. `null` — не сказал (старый сервер) или ход с тех пор нёс поправку политики: тогда
+   * действующий режим «не подтверждён».
+   */
+  threadReport: string | null
+  /** Шаг A: уровень последнего хода — с ним работает тред, пока идёт ход (свой или начатый сервером). */
+  turnApproval?: ApprovalMode
   /**
    * Объекты `SandboxPolicy` по типу, как их вернул сам сервер (`sandbox` в ответе `thread/start|resume`) или
    * собрал `config/read`: при возврате в режим шлём ИХ — `sandbox_workspace_write` из config.toml не теряется.
@@ -1727,6 +1747,7 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
         l.attached = true
         l.mcpKey = mcpKey
         l.threadPolicy = { ...policy }
+        l.threadReport = threadReportOf(resumed)
         rememberSandbox(l, resumed['sandbox'])
         threadOwner.set(l.threadId, { name: l.spec.name })
         logger.info('тред codex возобновлён', { session: l.spec.name, threadId: l.threadId })
@@ -1756,6 +1777,7 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
     l.attached = true
     l.mcpKey = mcpKey
     l.threadPolicy = { ...policy }
+    l.threadReport = threadReportOf(res)
     rememberSandbox(l, res['sandbox'])
     l.confirmed = false
     threadOwner.set(id, { name: l.spec.name })
@@ -1885,6 +1907,10 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
     if (l.threadPolicy && l.threadPolicy.approvalPolicy !== target.approvalPolicy) override['approvalPolicy'] = target.approvalPolicy
     if (l.threadPolicy && l.threadPolicy.sandbox !== target.sandbox) override['sandboxPolicy'] = await sandboxObject(l, c, target.sandbox)
     if (abandoned()) return giveUp('агент остановлен или снят до отправки реплики')
+    // Шаг A: с чем пойдёт ход. Поправка политики в `turn/start` сервером не подтверждается — «не подтверждено».
+    if (Object.keys(override).length) l.threadReport = null
+    l.turnApproval = flags.approval
+    opts.applied?.(name, { approval: flags.approval, reported: l.threadReport })
     // Сервер ведёт свой ход (сообщение субагента разбудило тред): наш `turn/start` столкнулся бы с ним. Реплика
     // ждёт его конца, как у занятой сессии.
     if (l.serverTurn) {
@@ -2072,6 +2098,7 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
         netEnv: {},
         mcpKey: '',
         threadPolicy: null,
+        threadReport: null,
         sandboxObjects: {},
         pendingMcpKey: '',
         bg: newBackground(),
@@ -2176,6 +2203,7 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
         netEnv: {},
         mcpKey: '',
         threadPolicy: null,
+        threadReport: null,
         sandboxObjects: {},
         pendingMcpKey: '',
         bg: newBackground(),
@@ -2248,6 +2276,13 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
       for (const w of l.serverWaiters.splice(0)) w()
       live.delete(name)
       status(name, 'done', {})
+    },
+
+    activeAccess(name) {
+      // Шаг A: тред за работой — наш ход (в том числе заводится) или ход, начатый сервером.
+      const l = live.get(name)
+      if (!l || !(l.turn || l.starting || l.serverTurn)) return null
+      return l.turnApproval ? { approval: l.turnApproval } : {}
     },
 
     blocked: () => (providerBlocked === null ? { blocked: false } : { blocked: true, reason: providerBlocked }),

@@ -155,7 +155,11 @@ function flagsKey(f: TurnFlags): string {
   return JSON.stringify([f.model ?? null, f.effort ?? null, f.approval ?? 'ask', f.browser === undefined ? '?' : f.browser ? (f.browser.headed ? 'headed' : 'on') : 'off'])
 }
 
-const APPROVAL_RANK: Readonly<Record<ApprovalMode, number>> = { 'read-only': 0, ask: 1, workspace: 2, full: 3 }
+/**
+ * Ширина режима. `inherit` — как `full`: действует `defaultMode` владельца, и он может быть bypass, — гадать в сторону
+ * «тише» нельзя (смена `inherit → ask` ждёт фоновые задачи, как смена с полного).
+ */
+const APPROVAL_RANK: Readonly<Record<ApprovalMode, number>> = { 'read-only': 0, ask: 1, workspace: 2, full: 3, inherit: 3 }
 /** Режим `next` строже `prev` (full > workspace > ask > read-only по ширине). */
 export function stricterMode(next: ApprovalMode | undefined, prev: ApprovalMode | undefined): boolean {
   return APPROVAL_RANK[next ?? 'ask'] < APPROVAL_RANK[prev ?? 'ask']
@@ -407,6 +411,7 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
           return
         case 'turn_started':
           l.started = true
+          if (sig.permissionMode && !gone()) opts.applied?.(name, { approval: l.childFlags?.approval, reported: sig.permissionMode })
           clearQuiet()
           if (!l.autoTurn) {
             l.autoTurn = true
@@ -755,6 +760,8 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
       l.child = child
       // M8f: с чем процесс запущен — по этому граница хода решает, менять ли его.
       l.childFlags = { ...flags }
+      // Шаг A: процесс с этими правами есть — до его `init` метка «ожидается» (отправлено, не подтверждено).
+      opts.applied?.(name, { approval: flags.approval, reported: null })
       l.childNetKey = netKeyOf(netEnv)
       child.once('close', () => { closedChildren.add(child) })
       // О3: файл --mcp-config нужен claude только при запуске, а в нём env и заголовки своих серверов
@@ -944,6 +951,8 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
             return
           case 'turn_started':
             l.started = true
+            // Шаг A: действующий режим — из `init` КАЖДОГО хода, а не из того, что Пульт отправил.
+            if (sig.permissionMode && !gone()) opts.applied?.(name, { approval: l.childFlags?.approval, reported: sig.permissionMode })
             // Пришёл новый `init` внутри отсрочки — значит фоновая работа ожила.
             clearGrace()
             return
@@ -1238,6 +1247,17 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
       askKeys.revokeSession(name)
       live.delete(name)
       status(name, 'done', {})
+    },
+
+    activeAccess(name) {
+      // Шаг A: процесс за работой — ход, ход-итог фоновой задачи или сами фоновые задачи. Тёплый процесс без дела
+      // ничего не делает сам и сменится на границе следующего хода, если флаги другие.
+      const l = live.get(name)
+      const child = l?.child
+      // Только чтение: вышедший процесс — «никого нет», но его уборку делает ход (`dropDeadChild`), не геттер.
+      if (!l || !child || closedChildren.has(child) || child.exitCode !== null || child.signalCode !== null) return null
+      if (!l.childFlags || !(l.busy || bgBusy(l))) return null
+      return l.childFlags.approval ? { approval: l.childFlags.approval } : {}
     },
 
     blocked: () => (providerBlocked === null ? { blocked: false } : { blocked: true, reason: providerBlocked }),

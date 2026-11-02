@@ -2319,3 +2319,41 @@ pult.collapsed. При возвращении фокуса окно обновл
   `rulesFile` — отзыв посреди хода: `deferred`, ход `idle`, после него `policy_reload`, две заметки, следующая реплика —
   второй процесс и `thread/resume`; отзыв без ходов — `restarted`; остановка до записи codex — заметка после рестарта; CLI),
   `ui/test/rules.test.ts`, e2e `shell/test/e2e/settings.test.ts` («Правила „Всегда“»: строка, «Отозвать», итог, файл, журнал).
+
+## Быстрый старт, шаг A: уровни доступа и согласие один раз
+
+Спецификация — `design/2026-11-02-quick-start/DESIGN-REVIEW.md` (v2, §3.6, §3.8, §5 п. 8). Модал «Новая сессия» остаётся;
+черновики, пресеты и память папок — следующие шаги.
+
+- **«Спрашивать» у Claude — явный `--permission-mode manual`** (`CLAUDE_PERMISSION_MODE.ask`, ревью Codex B1): без флага
+  действовал `defaultMode` владельца, вплоть до bypass. Прежнее «без флага» — пятый уровень `inherit` («Как в настройках
+  Claude», только Claude; `approvalFits`). Нет режима (`undefined`) — тоже `manual`.
+- **Миграция реестра** (`SESSIONS_VERSION = 2`, `migrateLegacyAsk`): в файле версии 1 запись Claude без `approval` → `inherit`
+  (поведение идущих и возобновлённых чатов не меняется); файл сразу переписывается версией 2, повтор ничего не делает.
+  Старый демон после отката прочтёт `inherit` как незнакомое → `read-only` (тише). Импорт «Существующие чаты» —
+  явный «Спрашивать».
+- **Согласие** — `src/core/consent.ts`, `PULT_HOME/consent.json` (0600) `{version, rev, providers, grantedAt|revokedAt}`.
+  Пишут только `access.grantFull {confirm, version, providers: [claude, codex]}` (только клиент `shell`) и
+  `access.revokeFull`; `settings.set` их поля не принимает. Демон сверяет сам: `agent.start` и `agent.configure`
+  (полный уровень → `confirm: true` + согласие или `grant: 'cli-once'`, иначе `consent_required`; `consentRev` окна ≠
+  файлу → `consent_changed`), снимок каждого хода и resume — `accessGate` менеджера: нет разрешения → ход в явном
+  «Спрашивать», заметка `session.configured {access: 'downgraded'}` одна на сессию и `rev`. `inherit` при
+  `defaultMode: bypassPermissions` у владельца — полный уровень (`isFullLevel`). Модель угроз прежняя: это защита от
+  опечатки и устаревшего окна, не от локального процесса.
+- **CLI** `--yes` к `full`/`inherit` → `grant: 'cli-once'` в записи сессии: согласие не пишется и не нужно, снимается любой
+  сменой режима. Мост окна вырезает `grant` (`STRIPPED_PARAMS`), `access.*` — в `ALLOWED_METHODS` (окну старше — подсказка).
+- **Действующий режим** — `applied` записи и `AdapterDeps.applied`: Claude — спавн («отправлено») и `permissionMode`
+  каждого `system/init`; Codex — `<sandbox.type>/<approvalPolicy>` ответа `thread/start|resume` (`threadReportOf`), ход с
+  поправкой политики — «не подтверждено». Расхождение с `expectedReport` → заметка `{access: 'mismatch'}`, одна на пару.
+  Живой процесс — `ProviderAdapter.activeAccess` (Claude: ход или фоновые задачи; Codex: ход свой или сервера).
+  `agent.list` отдаёт `access` (`accessView`, src/sessions/access.ts): `desired`, `applied`, `live`, `pending`, `blocked`, `red`.
+- **Окно** (`ui/src/model/access.ts`, `components/Access.tsx`): диалог согласия (фокус на «Оставить как было», Esc и Enter —
+  оставить; поверх «Новой сессии» — свой слой и перехват Esc), без согласия — «Полный доступ · спрошу один раз»; с
+  согласием модала `confirm-configure` для полного доступа больше нет (остался для «не влезет»). Метки: красный чип и рамка,
+  плашка в шапке, щит в сайдбаре, строка ленты «Доступ: X → Y»; понижение во время хода — «после хода», «до конца хода»,
+  строка под полем со «Стоп». «Настройки → Доступ» — дата согласия и «Отозвать». Inbox в текстах — «Inbox» (в прототипе
+  «Ответы» — переименование позже).
+- Тесты: `test/access.test.ts` (чистые правила, файл согласия, миграция, отказ без согласия, только окно даёт согласие,
+  `consent_changed`, отзыв → `manual` и одна заметка, `cli-once`, `inherit` + bypass, расхождение init, Codex из
+  `thread/start`), `ui/test/access.test.ts`, e2e `shell/test/e2e/access.test.ts` (кадры `access-*-light.png`); фальшивые
+  CLI повторяют режим в `system/init` / `thread/start` (`reportMode`, `defaultMode`, `reportSandboxType` — подмены).

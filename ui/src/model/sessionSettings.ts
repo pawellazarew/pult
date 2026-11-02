@@ -8,7 +8,9 @@ import {
 } from '../../../src/sessions/settings.js'
 import type { NewSessionSettings, Provider, ProviderDefaults } from '../../../src/sessions/settings.js'
 import type { AgentView } from './agents.js'
-import { APPROVAL_FULL_WARNING, APPROVAL_LABEL, APPROVAL_ORDER, PRESETS } from './newAgent.js'
+import { APPROVAL_FULL_WARNING, APPROVAL_LABEL, approvalHint, approvalLevels, PRESETS } from './newAgent.js'
+import { consentGrants, isFullLevel } from './access.js'
+import type { ConsentView } from './access.js'
 import type { ProviderCatalog } from './types.js'
 import { compareVersions } from '../../../src/core/semver.js'
 import type { GuardRule } from '../../../src/core/guard.js'
@@ -29,6 +31,7 @@ export type MenuRow =
 
 /** Подпись кнопки подвала: «opus · high · спрашивать». */
 export function footerParts(agent: Pick<AgentView, 'provider' | 'model' | 'effort' | 'approval'>): string[] {
+  // Шаг A: `inherit` словами из того же словаря, что лента и CLI («как в настройках Claude»).
   return [agent.model ?? (agent.provider === 'codex' ? 'модель codex' : 'модель по умолчанию'), ...(agent.effort ? [agent.effort] : []), APPROVAL_WORDS[agent.approval ?? 'ask']]
 }
 
@@ -51,9 +54,10 @@ export function effortOptions(provider: Provider, catalog: ProviderCatalog | nul
 
 /**
  * Меню подвала: модели (текущая отмечена; окно меньше занятого контекста — «не влезет: 300k > 200k»), усилия
- * текущей модели, режимы подтверждений («Полный доступ» — красный, с вопросом), подсказки.
+ * текущей модели, режимы подтверждений («Полный доступ» — красный; без согласия — «спрошу один раз»), подсказки.
+ * Шаг A: у Claude пятый пункт «Как в настройках Claude» с действующим режимом словами; при bypass — красный.
  */
-export function settingsMenu(agent: AgentView, catalog: ProviderCatalog | null | undefined, windows: ReadonlyMap<string, number>): MenuRow[] {
+export function settingsMenu(agent: AgentView, catalog: ProviderCatalog | null | undefined, windows: ReadonlyMap<string, number>, consent?: ConsentView | null): MenuRow[] {
   const rows: MenuRow[] = [{ type: 'heading', label: 'модель — со следующего хода', testId: 'settings-menu-models' }]
   const models = modelOptions(agent.provider, catalog, agent.model)
   const used = agent.context?.used ?? null
@@ -72,13 +76,19 @@ export function settingsMenu(agent: AgentView, catalog: ProviderCatalog | null |
   for (const e of effortOptions(agent.provider, catalog, agent.model)) {
     rows.push({ type: 'item', label: e, checked: e === agent.effort, pick: { kind: 'effort', effort: e }, testId: `settings-effort-${e}` })
   }
-  rows.push({ type: 'sep' }, { type: 'heading', label: 'подтверждения' })
+  rows.push({ type: 'sep' }, { type: 'heading', label: 'доступ агента' })
   const cur = agent.approval ?? 'ask'
-  for (const a of APPROVAL_ORDER) {
+  const inheritMode = agent.access?.inheritMode ?? agent.claudeMode ?? null
+  const granted = consentGrants(consent, agent.provider)
+  for (const a of approvalLevels(agent.provider)) {
+    const full = isFullLevel(agent.provider, a, inheritMode)
+    const label = a === 'inherit' && inheritMode ? `${APPROVAL_LABEL[a]} · сейчас ${inheritMode}`
+      : a === 'full' && !granted ? `${APPROVAL_LABEL[a]} · спрошу один раз` : APPROVAL_LABEL[a]
     rows.push({
-      type: 'item', label: APPROVAL_LABEL[a], checked: a === cur, pick: { kind: 'approval', approval: a }, testId: `settings-approval-${a}`,
-      ...(a === 'full' ? { danger: true, title: APPROVAL_FULL_WARNING } : {}),
-      ...(a !== 'full' && modeBlocksBrowser(agent.provider, a) && agent.browser ? { title: 'в этом режиме браузер для агента выключится' } : {}),
+      type: 'item', label, checked: a === cur, pick: { kind: 'approval', approval: a }, testId: `settings-approval-${a}`,
+      title: approvalHint(agent.provider, a, inheritMode),
+      ...(full ? { danger: true, title: `${approvalHint(agent.provider, a, inheritMode)} — ${APPROVAL_FULL_WARNING}` } : {}),
+      ...(!full && modeBlocksBrowser(agent.provider, a) && agent.browser ? { title: 'в этом режиме браузер для агента выключится' } : {}),
     })
   }
   rows.push({ type: 'sep' },
@@ -87,9 +97,13 @@ export function settingsMenu(agent: AgentView, catalog: ProviderCatalog | null |
   return rows
 }
 
-/** Выбор, о котором надо спросить: «Полный доступ» и модель, в окно которой разговор не влезет. */
-export function confirmNeeded(pick: SettingsPick): 'full' | 'misfit' | null {
-  if (pick.kind === 'approval' && pick.approval === 'full') return 'full'
+/**
+ * Выбор, о котором надо спросить: модель, в окно которой разговор не влезет (`misfit`), и — шаг A — полный доступ
+ * без согласия (`full`: диалог согласия, один раз на всё время). С согласием полный доступ включается без вопроса:
+ * красная метка и строка в ленте вместо модала. `provider`/`inheritMode` — для `inherit` (при bypass это полный).
+ */
+export function confirmNeeded(pick: SettingsPick, consent?: ConsentView | null, provider: 'claude' | 'codex' = 'claude', inheritMode?: string | null): 'full' | 'misfit' | null {
+  if (pick.kind === 'approval' && isFullLevel(provider, pick.approval, inheritMode) && !consentGrants(consent, provider)) return 'full'
   if (pick.kind === 'model' && pick.misfit) return 'misfit'
   return null
 }
@@ -101,19 +115,24 @@ export function isNoop(pick: SettingsPick, agent: Pick<AgentView, 'model' | 'eff
   return pick.approval === (agent.approval ?? 'ask')
 }
 
-/** Параметры `agent.configure`. `confirmed` — человек ответил «да» на вопрос (полный доступ, не влезет). */
-export function configureParams(name: string, pick: SettingsPick, confirmed: boolean): Record<string, unknown> {
+/**
+ * Параметры `agent.configure`. `confirmed` — человек ответил «да» на вопрос (не влезет) или выбрал полный доступ при
+ * действующем согласии; `consentRev` — номер согласия, который видело окно (шаг A: демон сверит и ответит
+ * `consent_changed`, если согласие тем временем отозвали).
+ */
+export function configureParams(name: string, pick: SettingsPick, confirmed: boolean, consentRev?: number): Record<string, unknown> {
   return {
     name,
     ...(pick.kind === 'model' ? { model: pick.model } : pick.kind === 'effort' ? { effort: pick.effort } : { approval: pick.approval }),
     ...(confirmed ? { confirm: true } : {}),
+    ...(confirmed && pick.kind === 'approval' && consentRev !== undefined ? { consentRev } : {}),
   }
 }
 
 // --- «Настройки» → «Новая сессия» -------------------------------------------------------------------
 
-/** Режимы, которые можно поставить умолчанием: «Полный доступ» — только явно при заведении. */
-export const DEFAULT_APPROVALS: ReadonlyArray<Exclude<ApprovalMode, 'full'>> = ['read-only', 'ask', 'workspace']
+/** Режимы, которые можно поставить умолчанием: «Полный доступ» и «Как в настройках Claude» — только явно. */
+export const DEFAULT_APPROVALS: ReadonlyArray<Exclude<ApprovalMode, 'full' | 'inherit'>> = ['read-only', 'ask', 'workspace']
 
 /** Черновик раздела: то, что редактирует экран, — копия, чтобы «Отмена» ничего не тронула. */
 export function settingsDraft(ns: NewSessionSettings | null | undefined): NewSessionSettings {
@@ -174,6 +193,7 @@ export function shellHasSettings(windowVersion: string | null): boolean {
 /** Отказ словами: старая оболочка отвечает `method_not_allowed` — подсказка про терминал. */
 export function settingsErrorText(code: string | null, message: string): string {
   if (code === 'guard_changed') return `${message.replace(/^settings\.set: /, '')}`
+  if (code === 'method_not_allowed' && /access\./.test(message)) return 'Это окно не умеет давать согласие на полный доступ — обнови Пульт (окно новее нужно); из терминала разово: pult agent set <имя> --approval full --yes'
   if (code === 'method_not_allowed') return `Это окно не умеет менять настройки (оболочка старше ${SETTINGS_SHELL_VERSION}) — в терминале: pult agent set <имя> --model … / config.json → newSession`
   if (code === 'not_found' && /неизвестный метод/.test(message)) return 'Демон старше 0.3.0 не умеет менять настройки — перезапусти его новой версией'
   return message

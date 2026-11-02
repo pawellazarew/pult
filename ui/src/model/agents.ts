@@ -9,6 +9,7 @@ import { isUnread, parseAttention } from '../../../src/sessions/attention.js'
 import type { SessionContext } from './context.js'
 import type { TurnPhase } from './phase.js'
 import type { AgentProvider, AgentRecord, Attention, QueueItem, SessionStatus, Tone } from './types.js'
+import type { AccessView } from '../../../src/sessions/access.js'
 
 export interface StatusView {
   label: string
@@ -79,10 +80,12 @@ export interface AgentView {
   browser?: { headed?: boolean }
   /** Папка скачиваний и снимков страниц браузера — кнопка в подвале показывает её в Finder. */
   browserDownloads?: string
-  /** M8d: как подтверждать действия; нет — `ask` (так жили все сессии до M8d). */
-  approval?: 'read-only' | 'workspace' | 'full'
-  /** M8d: Claude в `ask` — действующий режим из настроек владельца (`auto`, `default`, …). */
+  /** M8d: как подтверждать действия; нет — `ask`. Шаг A: `inherit` — «Как в настройках Claude». */
+  approval?: 'read-only' | 'workspace' | 'full' | 'inherit'
+  /** M8d: Claude в `inherit` — действующий режим из настроек владельца (`auto`, `default`, …). */
   claudeMode?: string
+  /** Шаг A: доступ чата от демона (желаемый, применённый, живой процесс, красная метка); нет — старый демон. */
+  access?: AccessView
   /** 0.3.5: фаза хода из живого канала демона — строка «думает… 12 с» и подпись в дереве. */
   phase?: TurnPhase
 }
@@ -164,7 +167,8 @@ export function buildAgents(
       ...(r.queuePaused === true ? { queuePaused: true } : {}),
       ...(r.browser ? { browser: r.browser.headed ? { headed: true } : {} } : {}),
       ...(r.browser && typeof r.browserDownloads === 'string' ? { browserDownloads: r.browserDownloads } : {}),
-      ...(r.approval === 'read-only' || r.approval === 'workspace' || r.approval === 'full' ? { approval: r.approval } : {}),
+      ...(r.approval === 'read-only' || r.approval === 'workspace' || r.approval === 'full' || r.approval === 'inherit' ? { approval: r.approval } : {}),
+      ...(r.access && typeof r.access === 'object' ? { access: r.access } : {}),
       ...(typeof r.claudeMode === 'string' && r.claudeMode ? { claudeMode: r.claudeMode } : {}),
       ...(l.phase ? { phase: l.phase } : {}),
     }

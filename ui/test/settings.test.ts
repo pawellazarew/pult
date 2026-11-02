@@ -97,12 +97,23 @@ describe('M8f: меню подвала', () => {
 
 describe('M8f: строка ленты о смене', () => {
   const ev = (data: Record<string, unknown>): PultEvent => ({ id: 7, ts: '2026-10-20T10:00:00Z', sessionId: 'w', provider: 'claude', kind: 'session.configured', data })
-  it('«модель: opus → sonnet · усилие: high → medium · режим: спрашивать → только чтение — со следующего хода»', () => {
+  it('«модель: opus → sonnet · усилие: high → medium — со следующего хода»; доступ — своей строкой «Доступ: X → Y» (шаг A)', () => {
+    const plain = applyConversation(EMPTY_CONVERSATION, ev({ changes: { model: { from: 'opus', to: 'sonnet' }, effort: { from: 'high', to: 'medium' } }, when: 'next_turn' })).items[0]
+    assert.equal(plain?.type === 'notice' && plain.title, 'модель: opus → sonnet · усилие: high → medium — со следующего хода')
     const conv = applyConversation(EMPTY_CONVERSATION, ev({ changes: { model: { from: 'opus', to: 'sonnet' }, effort: { from: 'high', to: 'medium' }, approval: { from: 'ask', to: 'read-only' } }, when: 'next_turn' }))
     const it0 = conv.items[0]
     assert.equal(it0?.type, 'notice')
-    assert.equal(it0?.type === 'notice' && it0.title, 'модель: opus → sonnet · усилие: high → medium · режим: спрашивать → только чтение — со следующего хода')
+    assert.equal(it0?.type === 'notice' && it0.title, 'Доступ: Спрашивать → Только чтение')
+    assert.equal(it0?.type === 'notice' && it0.text, 'модель: opus → sonnet · усилие: high → medium — со следующего хода')
     assert.equal(it0?.type === 'notice' && it0.tone, 'info')
+    // Полный доступ — красной строкой; понижение во время хода — «применится, когда закончится текущий ход» (кадр 11).
+    const up = applyConversation(EMPTY_CONVERSATION, ev({ changes: { approval: { from: 'workspace', to: 'full' } }, when: 'next_turn' })).items[0]
+    assert.ok(up?.type === 'notice' && up.title === 'Доступ: Правки в папке без вопросов → Полный доступ' && up.tone === 'fail')
+    const down = applyConversation(EMPTY_CONVERSATION, ev({ changes: { approval: { from: 'full', to: 'ask' } }, when: 'next_turn', pending: true })).items[0]
+    assert.ok(down?.type === 'notice' && down.title === 'Доступ: Полный доступ → Спрашивать · применится, когда закончится текущий ход' && down.tone === 'info')
+    // Нет согласия или провайдер в другом режиме — заметка демона; расхождение — красным.
+    const mis = applyConversation(EMPTY_CONVERSATION, ev({ changes: {}, access: 'mismatch', notice: 'Claude запущен в режиме bypassPermissions, ожидался default' })).items[0]
+    assert.ok(mis?.type === 'notice' && mis.tone === 'fail')
   })
   it('заметка адаптера: ход на прежних настройках / ждёт конца фоновых задач — строкой ленты', () => {
     const conv = applyConversation(EMPTY_CONVERSATION, ev({ changes: {}, notice: 'жду окончания фоновых задач, чтобы включить режим «только чтение»' }))

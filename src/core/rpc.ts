@@ -117,6 +117,13 @@ export const ERROR_CODES = {
    * хозяина — всё, КРОМЕ `perm.request` (вопрос от имени агента задаёт только его заглушка).
    */
   forbidden: 'forbidden',
+  /**
+   * Быстрый старт, шаг A: полный доступ без согласия (`PULT_HOME/consent.json`) и без разового `grant: cli-once` —
+   * окно показывает диалог согласия, CLI — подсказку `--yes`.
+   */
+  consentRequired: 'consent_required',
+  /** Шаг A: `consentRev`, который видело окно, не совпал с файлом — согласие дали или отозвали снаружи; перечитать. */
+  consentChanged: 'consent_changed',
 } as const
 
 export interface DaemonStatus {

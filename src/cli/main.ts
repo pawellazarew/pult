@@ -30,7 +30,7 @@ import { packageRoot } from '../service/install.js'
 import { testLocate } from '../env/locate.js'
 import { contextShare, parseSessionContext } from '../sessions/context.js'
 import { isUnread, parseAttention } from '../sessions/attention.js'
-import { isApprovalMode } from '../adapters/types.js'
+import { APPROVAL_LIST, isApprovalMode } from '../adapters/types.js'
 import { APPROVAL_WORDS, describeChanges, HOME_CWD_WARNING, modeBlocksBrowser, parseNewSession } from '../sessions/settings.js'
 import type { ConfigureChanges, ConfigureWhen, NewSessionSettings } from '../sessions/settings.js'
 import type { PermissionOffers } from '../adapters/types.js'
@@ -183,6 +183,7 @@ function approvalLabel(raw: unknown): string {
     ask: 'ask (шире рабочей папки — через Inbox)',
     workspace: 'workspace (правки в папке без вопросов)',
     full: 'full (без вопросов и без песочницы)',
+    inherit: 'inherit (как в настройках Claude: действует твой defaultMode)',
   }[mode]
 }
 
@@ -449,7 +450,7 @@ async function cmdAgent(paths: PultPaths, args: ParsedArgs): Promise<number> {
         if (emptyFlag('title')) { err('pult agent start: --title требует название (начинается с «-» — пиши --title="-…")'); return done(EXIT.error) }
         if (emptyFlag('base')) { err('pult agent start: --base требует ревизию'); return done(EXIT.error) }
         if (args.flags.has('approval') && (flagStr(args, 'approval') === undefined || !isApprovalMode(flagStr(args, 'approval')))) {
-          err('pult agent start: --approval — read-only | ask | workspace | full'); return done(EXIT.error)
+          err(`pult agent start: --approval — ${APPROVAL_LIST}`); return done(EXIT.error)
         }
         // M8f: умолчания `newSession.defaults` (окно → Настройки) — для того, что не задано флагом. Последний выбор
         // окна сюда не идёт: скрипт должен давать один и тот же результат. Старый демон без `settings.get` — без них.
@@ -473,10 +474,14 @@ async function cmdAgent(paths: PultPaths, args: ParsedArgs): Promise<number> {
         if (approval === 'full' && !args.flags.has('yes')) {
           err('pult agent start: --approval full — агент делает что угодно без вопросов, песочницы нет; повтори с --yes'); return done(EXIT.error)
         }
+        // Быстрый старт, шаг A: `--yes` — разовое разрешение ЭТОЙ сессии (`grant: cli-once`). Согласие окна
+        // (`PULT_HOME/consent.json`) CLI не пишет и не требует. `inherit` с `--yes` — на случай, если у владельца
+        // `defaultMode: bypassPermissions`: тогда это тоже полный доступ, и демон без разрешения откажет.
+        const once = args.flags.has('yes') && (approval === 'full' || approval === 'inherit')
         const rec = await call('agent.start', {
           name,
           ...(approval !== undefined ? { approval } : {}),
-          ...(approval === 'full' ? { confirm: true } : {}),
+          ...(once ? { confirm: true, grant: 'cli-once' } : {}),
           ...(flagStr(args, 'title') !== undefined ? { title: flagStr(args, 'title') } : {}),
           kind,
           cwd: flagStr(args, 'cwd') ?? process.cwd(),
@@ -515,12 +520,12 @@ async function cmdAgent(paths: PultPaths, args: ParsedArgs): Promise<number> {
           if (args.flags.has(f) && flagStr(args, f) === undefined) { err(`pult agent set: --${f} требует значение`); return done(EXIT.error) }
         }
         const approval = flagStr(args, 'approval')
-        if (approval !== undefined && !isApprovalMode(approval)) { err('pult agent set: --approval — read-only | ask | workspace | full'); return done(EXIT.error) }
+        if (approval !== undefined && !isApprovalMode(approval)) { err(`pult agent set: --approval — ${APPROVAL_LIST}`); return done(EXIT.error) }
         if (approval === 'full' && !args.flags.has('yes')) {
           err('pult agent set: --approval full — агент делает что угодно без вопросов, песочницы нет; повтори с --yes'); return done(EXIT.error)
         }
         if (flagStr(args, 'model') === undefined && flagStr(args, 'effort') === undefined && approval === undefined) {
-          err('pult agent set <имя> [--model M] [--effort E] [--approval read-only|ask|workspace|full] [--yes]'); return done(EXIT.error)
+          err('pult agent set <имя> [--model M] [--effort E] [--approval read-only|ask|workspace|full|inherit] [--yes]'); return done(EXIT.error)
         }
         let r: Record<string, unknown>
         try {
@@ -530,6 +535,8 @@ async function cmdAgent(paths: PultPaths, args: ParsedArgs): Promise<number> {
             ...(flagStr(args, 'effort') !== undefined ? { effort: flagStr(args, 'effort') } : {}),
             ...(approval !== undefined ? { approval } : {}),
             ...(args.flags.has('yes') ? { confirm: true } : {}),
+            // Шаг A: `--yes` к полному доступу — разовое разрешение этой сессии, согласие окна не пишется.
+            ...(args.flags.has('yes') && (approval === 'full' || approval === 'inherit') ? { grant: 'cli-once' } : {}),
           })) as Record<string, unknown>
         } catch (e) {
           if (e instanceof ClientError && e.code === 'needs_confirm') {

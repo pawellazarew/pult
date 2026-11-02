@@ -1119,3 +1119,33 @@ button { font: inherit; color: inherit; }
 
 /* Служебный курсор журнала демона: точка синхронизации e2e, человеку на экране не нужен. */
 .ag-foot.journal { display: none; }
+
+/* Быстрый старт, шаг A: доступ. Красное — только по действующему режиму (agent.list → access.red). */
+.composer .approval { display: inline-flex; align-items: center; gap: 4px; }
+.composer .approval > .ic { width: 12px; height: 12px; }
+.composer .approval .access-suffix { font-weight: 400; color: var(--mut); }
+.composer .approval.t-wait { color: var(--wait); }
+.composer .box.access-full { border-color: var(--fail-edge); }
+.composer .box.access-full:focus-within { border-color: var(--fail); box-shadow: 0 0 0 2px var(--fail-soft); }
+.access-strip { max-width: 764px; margin: 6px auto 0; display: flex; align-items: center; gap: 7px; padding: 6px 10px; border-radius: 8px;
+  background: var(--sunk); color: var(--mut); font: 12px/1.45 var(--body); }
+.access-strip .ic { width: 13px; height: 13px; flex: none; color: var(--wait); }
+.access-pill { flex: none; display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border: 1px solid var(--fail-edge); border-radius: 5px;
+  background: var(--fail-soft); color: var(--fail); font: 11.5px/1.6 var(--body); white-space: nowrap; }
+.access-pill .ic { width: 11px; height: 11px; }
+.ag-meta .row-access { display: inline-flex; align-items: center; gap: 3px; color: var(--fail); white-space: nowrap; }
+.ag-meta .row-access .ic { width: 11px; height: 11px; }
+/* Диалог согласия может стоять поверх «Новой сессии» — свой слой над её затемнением. */
+.scrim.scrim-top { z-index: 110; }
+.dlg.consent { width: min(560px, calc(100vw - 32px)); }
+.dlg.consent .dlg-h { gap: 10px; }
+.consent-icon { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 7px; background: var(--fail-soft); color: var(--fail); }
+.consent-icon .ic { width: 15px; height: 15px; }
+.consent-lead { margin: 0 0 12px; line-height: 1.55; }
+.consent-prov { display: grid; grid-template-columns: 74px 1fr; gap: 10px 12px; margin: 0 0 12px; padding: 12px 14px; border-radius: 8px; background: var(--sunk); font-size: 12.5px; line-height: 1.55; }
+.consent-prov dt { font-weight: 600; }
+.consent-prov dd { margin: 0; }
+.consent-prov code { font: 11.5px var(--mono); padding: 0 4px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); }
+.consent-list { margin: 0; padding-left: 18px; font-size: 12.5px; line-height: 1.55; }
+.consent-list li + li { margin-top: 4px; }
+.dlg.consent .dlg-f .note { font-size: 12px; color: var(--mut); }

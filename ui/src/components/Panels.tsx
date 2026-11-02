@@ -10,7 +10,10 @@ import type { DoctorGroup } from '../model/health.js'
 import { attentionKeys, searchKeys } from '../model/hotkeys.js'
 import { ATTENTION_LABEL, INBOX_FILTERS } from '../model/inbox.js'
 import type { InboxFilter, InboxItem, SessionCard } from '../model/inbox.js'
-import { APPROVAL_FULL_WARNING, APPROVAL_LABEL, APPROVAL_ORDER, approvalHint, homeWarning, prefillForm, promptStats, providerPreset, switchProviderPrefill, validateForm, withFolder } from '../model/newAgent.js'
+import { APPROVAL_FULL_WARNING, APPROVAL_LABEL, approvalHint, approvalLevels, homeWarning, prefillForm, promptStats, providerPreset, switchProviderPrefill, validateForm, withFolder } from '../model/newAgent.js'
+import { isFullLevel, needsConsent } from '../model/access.js'
+import type { ConsentView } from '../model/access.js'
+import { ConsentDialog } from './Access.js'
 import type { NewAgentForm, SettingsReply } from '../model/newAgent.js'
 import type { NewSessionPrefill } from '../../../shell/src/contract.js'
 import type { AgentProvider, DoctorReport, ProviderCatalog } from '../model/types.js'
@@ -288,17 +291,19 @@ function Seg<T extends string>({ value, options, onChange, prov, label }: {
  * M8d «Как подтверждать действия»: выбор режима, строка о том, что он значит у ЭТОГО провайдера, и красное
  * предупреждение у «Полного доступа». Отдельным компонентом — его состояния проверяются отрисовкой в строку.
  */
-export function ApprovalField({ provider, approval, error, onChange }: {
+export function ApprovalField({ provider, approval, error, onChange, inheritMode = null }: {
   provider: NewAgentForm['provider']; approval: NewAgentForm['approval']; error?: string; onChange(v: NewAgentForm['approval']): void
+  /** Шаг A: действующий `defaultMode` Claude владельца — подпись уровня «Как в настройках Claude». */
+  inheritMode?: string | null
 }): ReactElement {
   return (
     <div className="field" data-testid="new-agent-approval-field">
-      <span className="lbl">подтверждения</span>
+      <span className="lbl">доступ</span>
       <select value={approval} data-testid="new-agent-approval" onChange={(e) => onChange(e.target.value as NewAgentForm['approval'])}>
-        {APPROVAL_ORDER.map((m) => <option key={m} value={m}>{APPROVAL_LABEL[m]}</option>)}
+        {approvalLevels(provider).map((m) => <option key={m} value={m}>{APPROVAL_LABEL[m]}</option>)}
       </select>
-      <span className="note" data-testid="new-agent-approval-hint">{approvalHint(provider, approval)}</span>
-      {approval === 'full' && <span className="bad" role="alert" data-testid="new-agent-approval-warning">{APPROVAL_FULL_WARNING}</span>}
+      <span className="note" data-testid="new-agent-approval-hint">{approvalHint(provider, approval, inheritMode)}</span>
+      {isFullLevel(provider, approval, inheritMode) && <span className="bad" role="alert" data-testid="new-agent-approval-warning">{APPROVAL_FULL_WARNING}</span>}
       {error && <span className="bad" data-testid="new-agent-approval-error">{error}</span>}
     </div>
   )
@@ -309,7 +314,7 @@ const LINK_SUBMIT_DELAY_MS = 1000
 /** Предел высоты поля реплики из ссылки; длиннее — прокрутка, счётчик строк под полем. */
 const LINK_PROMPT_MAX_PX = 360
 
-export function NewAgentDialog({ taken, pickFolder, onCreate, onClose, catalog, checking, onCheck, defaultCwd, prefill, settings, filePaths = null }: {
+export function NewAgentDialog({ taken, pickFolder, onCreate, onGrantFull, onClose, catalog, checking, onCheck, defaultCwd, prefill, settings, filePaths = null }: {
   /** Папка проекта, из которого позвали «+ сессия»: форма открывается уже с ней. */
   defaultCwd?: string | null
   /** M8f: умолчания и последний выбор (`settings.get`); нет — старый демон или оболочка: встроенные умолчания. */
@@ -323,7 +328,10 @@ export function NewAgentDialog({ taken, pickFolder, onCreate, onClose, catalog, 
   pickFolder(): Promise<string | null>
   /** Пути перетащенных и скопированных файлов; нет — старая оболочка: перетаскивание и ⌘V файлов как раньше. */
   filePaths?: FilePathSource | null
-  onCreate(form: NewAgentForm): Promise<string | null>
+  /** `consentRev` — номер согласия на полный доступ, который видело окно (шаг A). */
+  onCreate(form: NewAgentForm, consentRev?: number): Promise<string | null>
+  /** Шаг A: «Разрешить полный доступ» в диалоге согласия — `access.grantFull`; строка — отказ. Нет — старое окно. */
+  onGrantFull?(): Promise<ConsentView | string>
   onClose(): void
 }): ReactElement {
   // M8f: явный контекст (папка проекта, ссылка) > последний выбор (если включён) > умолчания из Настроек > встроенные.
@@ -349,6 +357,29 @@ export function NewAgentDialog({ taken, pickFolder, onCreate, onClose, catalog, 
     el.style.height = 'auto'
     el.style.height = `${Math.min(LINK_PROMPT_MAX_PX, el.scrollHeight + 2)}px`
   }, [form.prompt, prefill])
+  // Шаг A: согласие на полный доступ — то, что видело окно; после «Разрешить» — ответ демона. Выбор полного доступа без
+  // согласия открывает диалог (один раз на всё время), а не меняет поле сразу.
+  const [consent, setConsent] = useState<ConsentView | null>(settings?.access?.consent ?? null)
+  const inheritMode = settings?.access?.claudeDefaultMode ?? null
+  const [consentAsk, setConsentAsk] = useState<NewAgentForm['approval'] | null>(null)
+  const [consentBusy, setConsentBusy] = useState(false)
+  const [consentErr, setConsentErr] = useState<string | null>(null)
+  const pickApproval = (approval: NewAgentForm['approval']): void => {
+    if (needsConsent(form.provider, approval, inheritMode, consent)) { setConsentErr(null); setConsentAsk(approval); return }
+    setForm((f) => ({ ...f, approval }))
+  }
+  const grant = async (): Promise<void> => {
+    if (!consentAsk || consentBusy) return
+    if (!onGrantFull) { setConsentErr('Это окно не умеет давать согласие — обнови Пульт'); return }
+    setConsentBusy(true)
+    const r = await onGrantFull()
+    setConsentBusy(false)
+    if (typeof r === 'string') { setConsentErr(r); return }
+    setConsent(r)
+    const approval = consentAsk
+    setConsentAsk(null)
+    setForm((f) => ({ ...f, approval }))
+  }
   const errors = validateForm(form, taken)
   const preset = providerPreset(form.provider, form.model, catalog)
   const readiness = catalog?.[form.provider]
@@ -406,7 +437,7 @@ export function NewAgentDialog({ taken, pickFolder, onCreate, onClose, catalog, 
     setErr(null)
     try {
       const files = await prompt.finalize(form.name)
-      const e = await onCreate({ ...form, prompt: attachmentPrompt(form.prompt, files) })
+      const e = await onCreate({ ...form, prompt: attachmentPrompt(form.prompt, files) }, consent?.rev)
       if (e) setErr(e)
     } catch (e) { setErr(e instanceof Error ? e.message : 'Не удалось подготовить вложения. Попробуй ещё раз.') }
     finally { setBusy(false) }
@@ -416,6 +447,7 @@ export function NewAgentDialog({ taken, pickFolder, onCreate, onClose, catalog, 
   }
 
   return (
+    <>
     <Dialog title="Новая сессия" onClose={onClose} testId="new-agent-dialog"
       footer={<>
         {err && <span className="err" role="alert" data-testid="new-agent-error">{err}</span>}
@@ -499,8 +531,8 @@ export function NewAgentDialog({ taken, pickFolder, onCreate, onClose, catalog, 
         </div>
 
         {/* M8d: как подтверждать действия — живёт в записи сессии; у живой сессии меняется из подвала (M8f). */}
-        <ApprovalField provider={form.provider} approval={form.approval} {...(tried && errors.approval ? { error: errors.approval } : {})}
-          onChange={(approval) => setForm({ ...form, approval })} />
+        <ApprovalField provider={form.provider} approval={form.approval} inheritMode={inheritMode} {...(tried && errors.approval ? { error: errors.approval } : {})}
+          onChange={pickApproval} />
 
         {/* Друг под другом: шесть уровней усилия в половину ширины диалога не помещаются. */}
         <div className="field">
@@ -535,6 +567,9 @@ export function NewAgentDialog({ taken, pickFolder, onCreate, onClose, catalog, 
         </div>
       </div>
     </Dialog>
+    {/* Рядом, а не внутри формы: ⌘↵ и Esc диалога согласия не должны доходить до «Новой сессии». */}
+    {consentAsk && <ConsentDialog busy={consentBusy} error={consentErr} onGrant={() => void grant()} onKeep={() => { setConsentAsk(null); setConsentErr(null) }} />}
+    </>
   )
 }
 

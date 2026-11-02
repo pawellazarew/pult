@@ -82,6 +82,11 @@ export const ALLOWED_METHODS = [
   'agent.configure',
   'settings.get',
   'settings.set',
+  // Быстрый старт, шаг A: согласие на полный доступ — один раз из диалога окна и отзыв в «Настройки → Доступ».
+  // Отдельные методы, а не `settings.set`: согласие проверяет демон в каждой точке применения, и писать его может только
+  // этот путь. Окно старой оболочки получает `method_not_allowed` — интерфейс подсказывает обновить окно.
+  'access.grantFull',
+  'access.revokeFull',
 ] as const
 
 export type AllowedMethod = (typeof ALLOWED_METHODS)[number]
@@ -102,12 +107,16 @@ export const SUBSCRIBE_VIA_BRIDGE = new Set<string>(['events.subscribe', 'events
  * Поля параметров, которые интерфейс окна не шлёт, а демон принимает и которые РАСШИРЯЮТ права:
  *   - `perm.resolve.updatedInput` — подменил бы вход разрешённого инструмента (разрешили одну
  *     команду, исполнилась другая);
- *   - `agent.start.settingSources` — какие файлы настроек грузит claude (граница доступа CLI).
+ *   - `agent.start.settingSources` — какие файлы настроек грузит claude (граница доступа CLI);
+ *   - `agent.start.grant`, `agent.configure.grant` — разовое разрешение полного доступа CLI (`--yes`) в обход согласия.
  * Наименьшие права: main вырезает их до демона. Понадобятся окну — убрать отсюда осознанно.
  */
 export const STRIPPED_PARAMS: Readonly<Partial<Record<AllowedMethod, readonly string[]>>> = {
   'perm.resolve': ['updatedInput'],
-  'agent.start': ['settingSources'],
+  // `grant: cli-once` (шаг A) — разовое разрешение полного доступа терминалом в обход согласия: окну оно не положено,
+  // полный доступ из окна идёт только через согласие (`access.grantFull`).
+  'agent.start': ['settingSources', 'grant'],
+  'agent.configure': ['grant'],
 }
 
 /** Параметры вызова без вырезанных полей; нечего вырезать — тот же объект. */

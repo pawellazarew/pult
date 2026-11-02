@@ -7,6 +7,8 @@
 
 import { useEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
+import { AccessSection } from './Access.js'
+import type { ConsentView } from '../model/access.js'
 import { APPROVAL_LABEL, PRESETS } from '../model/newAgent.js'
 import { DEFAULT_APPROVALS, draftError, effortOptions, setDefault, setDefaultProvider, settingsDraft } from '../model/sessionSettings.js'
 import type { NewSessionSettings, Provider } from '../../../src/sessions/settings.js'
@@ -336,7 +338,7 @@ export function RulesSection({ panel }: { panel: RulesPanel }): ReactElement {
   )
 }
 
-export function SettingsDialog({ settings, catalog, updates, autoCheck = null, netGuard, rules, onSave, onClose }: {
+export function SettingsDialog({ settings, catalog, updates, autoCheck = null, netGuard, rules, access, onSave, onClose }: {
   settings: NewSessionSettings | null
   catalog: ProviderCatalog | null
   /** Раздел «Обновления»; нет — раздела нет. */
@@ -347,6 +349,8 @@ export function SettingsDialog({ settings, catalog, updates, autoCheck = null, n
   netGuard?: NetGuardPanel
   /** Раздел «Правила „Всегда“»; нет — демон их не отдаёт (старый), раздела нет. */
   rules?: RulesPanel
+  /** Шаг A: раздел «Доступ» — согласие на полный доступ и «Отозвать»; нет — старый демон, раздела нет. */
+  access?: { consent: ConsentView | null; onRevoke(): Promise<string | null> }
   /**
    * `null` — записано; строка — отказ демона. `autoCheck` — флаг автопроверки (null — не трогать); `guard` — новое
    * правило стража и то, на котором стоял черновик (null — не менялось или раздела нет).
@@ -416,6 +420,7 @@ export function SettingsDialog({ settings, catalog, updates, autoCheck = null, n
           </div>
         </section>
         {netGuard && guard && <NetGuardSection key={guardKey} panel={netGuard} rule={guard} onChange={setGuard} />}
+        {access && <AccessSection consent={access.consent} onRevoke={access.onRevoke} />}
         {rules && <RulesSection panel={rules} />}
         {updates && <UpdatesSection panel={updates} auto={auto} onAuto={setAuto} />}
         <section className="settings-sec" aria-labelledby="settings-look-h" data-testid="settings-appearance">

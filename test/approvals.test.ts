@@ -152,17 +152,18 @@ describe('M8d: режим подтверждений → песочница и �
 })
 
 describe('M8d: режим подтверждений → argv claude', () => {
-  it('read-only → plan, ask/нет → флага нет, workspace → acceptEdits, full → bypassPermissions', () => {
+  it('read-only и ask/нет → manual (шаг A: явный, ревью Codex B1), workspace → acceptEdits, full → bypassPermissions, inherit → флага нет', () => {
     const mode = (approval?: ApprovalMode): string | null => {
       const argv = buildClaudeArgv({ sessionId: 'x', resume: false, ...(approval ? { approval } : {}) })
       const i = argv.indexOf('--permission-mode')
       return i < 0 ? null : argv[i + 1] as string
     }
     assert.equal(mode('read-only'), 'manual', 'не plan: в нём Claude пишет планы без вопроса (ревью M8d)')
-    assert.equal(mode('ask'), null)
-    assert.equal(mode(undefined), null)
+    assert.equal(mode('ask'), 'manual', '«Спрашивать» — явный режим: defaultMode владельца (вплоть до bypass) его не перебьёт')
+    assert.equal(mode(undefined), 'manual', 'нет режима — тоже «Спрашивать», а не «по настройкам владельца»')
     assert.equal(mode('workspace'), 'acceptEdits')
     assert.equal(mode('full'), 'bypassPermissions')
+    assert.equal(mode('inherit'), null, '«Как в настройках Claude» — единственный уровень без флага')
   })
   it('read-only: правки и ExitPlanMode запрещены --disallowedTools (имена — замер S10); у прочих режимов флага нет', () => {
     const ro = argvOf({ sessionId: 'x', resume: false, approval: 'read-only', mcpConfigPath: '/m.json' })
@@ -422,17 +423,22 @@ describe('M8d: демон — режим подтверждений в запи�
       await assert.rejects(c.request('agent.start', { name: 'x', kind: 'claude', cwd: w.cwd, approval: 'yolo' }), code('invalid_params'))
       await assert.rejects(c.request('agent.start', { name: 'x', kind: 'claude', cwd: w.cwd, approval: 'full' }),
         (e: { code?: string; message?: string }) => e.code === 'invalid_params' && /confirm/.test(e.message ?? ''), 'full без подтверждения — отказ')
-      await assert.rejects(c.request('agent.start', { name: 'x', kind: 'claude', cwd: w.cwd, approval: 'full', confirm: true, browser: true }),
+      await assert.rejects(c.request('agent.start', { name: 'x', kind: 'claude', cwd: w.cwd, approval: 'full', confirm: true, grant: 'cli-once', browser: true }),
         (e: { code?: string; message?: string }) => e.code === 'invalid_params' && /полный доступ/.test(e.message ?? ''))
       await assert.rejects(c.request('agent.start', { name: 'x', kind: 'codex', cwd: w.cwd, approval: 'workspace', browser: true }),
         (e: { code?: string; message?: string }) => e.code === 'invalid_params' && /спрашивать некого/.test(e.message ?? ''))
       const rec = (await c.request('agent.start', { name: 'w', kind: 'claude', cwd: w.cwd, approval: 'workspace' })) as Record<string, unknown>
       assert.equal(rec['approval'], 'workspace')
       const ask = (await c.request('agent.start', { name: 'plain', kind: 'claude', cwd: plain.cwd, approval: 'ask' })) as Record<string, unknown>
-      assert.equal('approval' in ask, false, '`ask` — это отсутствие поля: старые записи и новые одинаковы')
+      assert.equal('approval' in ask, false, '`ask` — это отсутствие поля')
+      const inh = claudeWork(root, 'inh')
+      const inherit = (await c.request('agent.start', { name: 'inh', kind: 'claude', cwd: inh.cwd, approval: 'inherit' })) as Record<string, unknown>
+      assert.equal(inherit['approval'], 'inherit')
+      await assert.rejects(c.request('agent.start', { name: 'x', kind: 'codex', cwd: w.cwd, approval: 'inherit' }),
+        (e: { code?: string; message?: string }) => e.code === 'invalid_params' && /только у Claude/.test(e.message ?? ''), 'у Codex «своих настроек» режима нет')
       // Браузер в «полном доступе» нельзя включить и потом.
       const full = claudeWork(root, 'full')
-      await c.request('agent.start', { name: 'full', kind: 'claude', cwd: full.cwd, approval: 'full', confirm: true })
+      await c.request('agent.start', { name: 'full', kind: 'claude', cwd: full.cwd, approval: 'full', confirm: true, grant: 'cli-once' })
       await assert.rejects(c.request('agent.browser', { name: 'full', on: true }), code('invalid_params'))
 
       // Рестарт демона: запись с диска, адаптер поднимает сессию лениво — с тем же режимом.
@@ -440,12 +446,13 @@ describe('M8d: демон — режим подтверждений в запи�
       assert.equal(parseSessions(JSON.parse(readFileSync(home.paths.sessions, 'utf8'))).find((s) => s.name === 'w')?.approval, 'workspace')
       d = await startTestDaemon(home)
       c = await connectClient(home.paths)
-      // У Claude в ask окно показывает действующий режим из настроек владельца (тестовый демон: PULT_HOME/claude-settings.json).
+      // У Claude в inherit окно показывает действующий режим из настроек владельца (тестовый демон: PULT_HOME/claude-settings.json).
       writeFileSync(join(home.paths.home, 'claude-settings.json'), JSON.stringify({ permissions: { defaultMode: 'auto' } }))
       const listed = ((await c.request('agent.list')) as { sessions: Array<Record<string, unknown>> }).sessions
       assert.equal(listed.find((s) => s['name'] === 'w')?.['approval'], 'workspace')
       assert.equal(listed.find((s) => s['name'] === 'w')?.['claudeMode'], undefined, 'режим задан — настройки не при чём')
-      assert.equal(listed.find((s) => s['name'] === 'plain')?.['claudeMode'], 'auto')
+      assert.equal(listed.find((s) => s['name'] === 'plain')?.['claudeMode'], undefined, 'шаг A: «Спрашивать» — явный manual, настройки не при чём')
+      assert.equal(listed.find((s) => s['name'] === 'inh')?.['claudeMode'], 'auto')
       rmSync(join(home.paths.home, 'claude-settings.json'))
       await c.request('agent.prompt', { name: 'w', text: 'привет' })
       await c.request('agent.wait', { name: 'w', timeoutMs: 10_000 })
@@ -453,7 +460,11 @@ describe('M8d: демон — режим подтверждений в запи�
       assert.equal(argv[argv.indexOf('--permission-mode') + 1], 'acceptEdits')
       await c.request('agent.prompt', { name: 'plain', text: 'привет' })
       await c.request('agent.wait', { name: 'plain', timeoutMs: 10_000 })
-      assert.equal(lastArgv(plain.argvOut).includes('--permission-mode'), false, 'ask — флага нет, как до M8d')
+      const pa = lastArgv(plain.argvOut)
+      assert.equal(pa[pa.indexOf('--permission-mode') + 1], 'manual', 'шаг A: ask — явный manual')
+      await c.request('agent.prompt', { name: 'inh', text: 'привет' })
+      await c.request('agent.wait', { name: 'inh', timeoutMs: 10_000 })
+      assert.equal(lastArgv(inh.argvOut).includes('--permission-mode'), false, 'inherit — флага нет, как у ask до шага A')
     } finally { c.close(); await d.stop('конец теста'); home.remove(); rmSync(root, { recursive: true, force: true }) }
   })
 

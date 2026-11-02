@@ -56,7 +56,10 @@ import { atomicWrite } from '../service/fsutil.js'
 import { createExternalSessions } from '../sessions/external.js'
 import { createProjectStore, ProjectError } from '../projects/store.js'
 import type { ApprovalMode, PermissionDecision, PermissionScope } from '../adapters/types.js'
-import { isApprovalMode, PERMISSION_SCOPES } from '../adapters/types.js'
+import { APPROVAL_LIST, approvalFits, isApprovalMode, PERMISSION_SCOPES } from '../adapters/types.js'
+import { CONSENT_PROVIDERS, CONSENT_VERSION, consentCovers, consentView, createConsentStore } from '../core/consent.js'
+import type { ConsentProvider } from '../core/consent.js'
+import { accessView, isFullLevel } from '../sessions/access.js'
 import { createBroker, ScopeError } from '../perm/broker.js'
 import { createAskKeys } from '../perm/askKeys.js'
 import { codexChildRulesPath, createCodexRules, RulesError } from '../perm/codexRules.js'
@@ -360,13 +363,73 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
    * режим («спрашивать — у Claude по твоим настройкам: auto»): тот же порядок файлов, что у `claudeSettings`, но
    * только из наборов, которые сессии разрешено читать (`settingSources`). Нет настройки — `default`.
    */
-  const claudeEffectiveMode = (rec: SessionRecord): string => {
+  const claudeEffectiveMode = (rec: Pick<SessionRecord, 'cwd' | 'settingSources'>): string => {
     const [user, project, local] = claudeSettings(rec.cwd) as [string, string, string]
     const allowed = rec.settingSources ? new Set(rec.settingSources.split(',').map((x) => x.trim())) : null
     const files = [['user', user], ['project', project], ['local', local]]
       .filter(([k]) => !allowed || allowed.has(k as string)).map(([, f]) => f as string)
     return claudeDefaultMode(files) ?? 'default'
   }
+  // --- быстрый старт, шаг A: согласие на полный доступ ------------------------------------------
+  // Демон проверяет согласие САМ в каждой точке применения (ревью Codex B2): `agent.start`, `agent.configure`, снимок
+  // каждого хода (`accessGate` менеджера), resume. Окно передаёт `consentRev`, который видело, — расхождение даёт
+  // `consent_changed`. Разовое `--yes` CLI (`grant: cli-once`) живёт в записи сессии и файла не трогает.
+  const consent = createConsentStore(paths.consent)
+  /** `defaultMode` владельца, который действует у сессии `inherit` (только Claude). */
+  const inheritModeOf = (provider: string, cwd: string, settingSources?: string): string | null =>
+    provider === 'claude' ? claudeEffectiveMode({ cwd, ...(settingSources ? { settingSources } : {}) }) : null
+  /** Полный доступ разрешён этой сессии: разовое `--yes` CLI или действующее согласие на провайдера. */
+  const fullAllowed = (provider: ConsentProvider, grant: string | undefined): boolean =>
+    grant === 'cli-once' || consentCovers(consent.read(), provider)
+  /**
+   * Полный доступ при заведении или смене режима: `confirm: true` (защита от опечатки, ревью M8d) и разрешение —
+   * разовое (`grant: cli-once`, только вместе с `confirm`) или согласие. Отдаёт `grant` для записи.
+   */
+  const checkFull = (method: string, provider: ConsentProvider, p: Record<string, unknown>): 'cli-once' | undefined => {
+    if (p['confirm'] !== true) {
+      throw new ManagerError(ERROR_CODES.invalidParams, `${method}: approval full — агент делает что угодно без вопросов, песочницы нет; нужен confirm: true`)
+    }
+    if (p['grant'] === 'cli-once') return 'cli-once'
+    const c = consent.read()
+    if (p['consentRev'] !== undefined && p['consentRev'] !== c.rev) {
+      throw new ManagerError(ERROR_CODES.consentChanged, `${method}: согласие на полный доступ изменилось (сейчас — запись ${c.rev}) — открой выбор доступа заново`)
+    }
+    if (!consentCovers(c, provider)) {
+      throw new ManagerError(ERROR_CODES.consentRequired, `${method}: полный доступ не разрешён — разреши его в окне (спрашивается один раз; `
+        + 'отозвать — Настройки → Доступ) или из терминала разово: --approval full --yes')
+    }
+    return undefined
+  }
+  // Заметка «полный доступ не действует» — одна на сессию и состояние согласия, а не на каждый ход.
+  const gateNoted = new Map<string, string>()
+  const accessGate = (rec: SessionRecord): { approval: ApprovalMode | undefined; notice?: string } => {
+    const a = rec.approval ?? 'ask'
+    const inherit = a === 'inherit' ? inheritModeOf(rec.provider, rec.cwd, rec.settingSources) : null
+    if (!isFullLevel(rec.provider, a, inherit) || fullAllowed(rec.provider, rec.grant)) {
+      gateNoted.delete(rec.name)
+      return { approval: rec.approval }
+    }
+    // Нет разрешения — ход в ЯВНОМ «Спрашивать» (`manual` у Claude), никогда не «без флага» (ревью Codex B1).
+    const c = consent.read()
+    const key = `${a}|${c.rev}`
+    const noted = gateNoted.get(rec.name) === key
+    gateNoted.set(rec.name, key)
+    if (noted) return { approval: undefined }
+    const why = a === 'inherit'
+      ? 'в настройках Claude defaultMode: bypassPermissions — это полный доступ, а он не разрешён'
+      : c.revokedAt ? 'полный доступ отозван' : 'полный доступ не разрешён'
+    return { approval: undefined, notice: `${why} — ход в «Спрашивать»` }
+  }
+  /** Доступ сессии для окна и CLI (`access` в `agent.list` и ответах). */
+  const accessOf = (rec: SessionRecord & { liveApproval?: ApprovalMode | null }): ReturnType<typeof accessView> => {
+    const inherit = rec.provider === 'claude' ? claudeEffectiveMode(rec) : null
+    return accessView({
+      provider: rec.provider, ...(rec.approval ? { approval: rec.approval } : {}), inheritMode: inherit,
+      applied: rec.applied ?? null, liveApproval: rec.liveApproval ?? null,
+      allowed: fullAllowed(rec.provider, rec.grant), ...(rec.grant ? { grant: rec.grant } : {}),
+    })
+  }
+
   /** О3: в режиме `bypassPermissions` браузер Claude не включается (src/mcp/browser.ts BYPASS_REFUSAL). */
   const refuseBypass = (kind: string, cwd: string, approval?: ApprovalMode): void => {
     // M8d: и режим подтверждений самой сессии — «полный доступ» у Claude, «без вопросов» у Codex.
@@ -434,6 +497,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     ...(opts.cliEntry !== undefined ? { cliEntry: opts.cliEntry } : {}),
     emit: (draft) => { manager.emit(draft) },
     live: (name, sig) => { manager.live(name, sig) },
+    applied: (name, info) => { manager.applied(name, info) },
     askPermission: (req) => broker.request(req),
     askKeys,
     ...(netCheck ? { netCheck } : {}),
@@ -481,6 +545,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     ruleGranted: (g) => { rules.granted(g) },
     emit: (draft) => { manager.emit(draft) },
     live: (name, sig) => { manager.live(name, sig) },
+    applied: (name, info) => { manager.applied(name, info) },
     askPermission: (req) => broker.request(req),
     // Разрешения Codex живут в ОБЩЕМ процессе app-server: когда он умирает, отвечать по их
     // id уже некому, и вопрос обязан уйти из Inbox отказом, а не висеть (инвариант 5).
@@ -520,6 +585,8 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     holdTurns: () => updaterRef?.applying() ?? false,
     adapters: { claude, codex },
     broker,
+    accessGate,
+    inheritMode: (rec) => inheritModeOf(rec.provider, rec.cwd, rec.settingSources),
     modelChoices: (provider) => (provider === 'codex' ? codexChoices() : Promise.resolve(null)),
     ...(opts.queueEditHoldMs !== undefined ? { queueEditHoldMs: opts.queueEditHoldMs } : {}),
     ...(titler ? { titler } : {}),
@@ -694,6 +761,8 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     newSession: config.newSession, lastUsed: readLastUsed(), updates: { check: config.updates.check },
     network: { guard: { mode: config.guard.mode, countries: [...config.guard.countries] }, exits: lastNetExits() },
     codexRules: rules.list(),
+    // Шаг A: согласие на полный доступ и действующий `defaultMode` Claude владельца (уровень «Как в настройках Claude»).
+    access: { consent: consentView(consent.read()), providers: [...CONSENT_PROVIDERS], claudeDefaultMode: inheritModeOf('claude', paths.home) },
   })
   const projects = createProjectStore(join(paths.home, 'projects.json'))
   // `PULT_TEST_PROVIDERS=run` (только вместе с PULT_TEST=1): проверка входа идёт по-настоящему — в фальшивые CLI
@@ -856,11 +925,23 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
           if (p[k] !== undefined && (typeof p[k] !== 'string' || !p[k])) throw new ManagerError(ERROR_CODES.invalidParams, `agent.configure: ${k} — непустая строка`)
         }
         if (p['approval'] !== undefined && !isApprovalMode(p['approval'])) {
-          throw new ManagerError(ERROR_CODES.invalidParams, 'agent.configure: approval — read-only | ask | workspace | full')
+          throw new ManagerError(ERROR_CODES.invalidParams, `agent.configure: approval — ${APPROVAL_LIST}`)
         }
         if (p['confirm'] !== undefined && typeof p['confirm'] !== 'boolean') throw new ManagerError(ERROR_CODES.invalidParams, 'agent.configure: confirm — true | false')
+        if (p['grant'] !== undefined && p['grant'] !== 'cli-once') throw new ManagerError(ERROR_CODES.invalidParams, 'agent.configure: grant — только cli-once')
         if (p['model'] === undefined && p['effort'] === undefined && p['approval'] === undefined) {
           throw new ManagerError(ERROR_CODES.invalidParams, 'agent.configure: нечего менять — model, effort или approval')
+        }
+        // Шаг A: полный доступ (и «как в настройках Claude» при bypass у владельца) — только с подтверждением И
+        // разрешением: согласием или разовым `--yes`. Тот же режим, что уже стоит, — не смена: проверять нечего.
+        let grant: 'cli-once' | undefined
+        const target = manager.list().find((r) => r.name === String(p['name'] ?? ''))
+        if (target && p['approval'] !== undefined && p['approval'] !== (target.approval ?? 'ask')) {
+          const to = p['approval'] as ApprovalMode
+          if (!approvalFits(target.provider, to)) throw new ManagerError(ERROR_CODES.invalidParams, 'agent.configure: режим «как в настройках Claude» есть только у Claude')
+          if (isFullLevel(target.provider, to, to === 'inherit' ? inheritModeOf(target.provider, target.cwd, target.settingSources) : null)) {
+            grant = checkFull('agent.configure', target.provider, p)
+          }
         }
         const r = await manager.configure({
           name: String(p['name'] ?? ''),
@@ -868,12 +949,39 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
           ...(p['effort'] !== undefined ? { effort: p['effort'] as string } : {}),
           ...(p['approval'] !== undefined ? { approval: p['approval'] as ApprovalMode } : {}),
           ...(p['confirm'] === true ? { confirm: true } : {}),
+          ...(grant ? { grant } : {}),
         })
         if (r.changes.browser === 'on') browserOn(r.record.name)
-        return { ...withBrowser(publicRecord(r.record)), changes: r.changes, when: r.when }
+        const live = manager.list().find((x) => x.name === r.record.name)
+        return { ...withBrowser(publicRecord(r.record)), ...(live ? { access: accessOf(live) } : {}), changes: r.changes, when: r.when }
       }
       case 'settings.get':
         return settingsReply()
+      case 'access.grantFull': {
+        // Шаг A: согласие на полный доступ — ЕДИНСТВЕННЫЙ писатель `consent.json` (кроме отзыва). Только окно: его
+        // зовёт диалог согласия; CLI согласия не пишет (у него разовое `--yes`). `client` — самоназвание, это защита
+        // от ошибки, а не от локального процесса (модель угроз, docs/DEV.md).
+        if (conn.client !== 'shell') throw new ManagerError(ERROR_CODES.forbidden, 'access.grantFull: согласие даёт только окно Пульта; из терминала — разово: --approval full --yes')
+        if (p['confirm'] !== true) throw new ManagerError(ERROR_CODES.invalidParams, 'access.grantFull: нужен confirm: true — человек нажал «Разрешить» в диалоге')
+        if (p['version'] !== CONSENT_VERSION) {
+          throw new ManagerError(ERROR_CODES.invalidParams, `access.grantFull: текст согласия версии ${String(p['version'])}, а действует ${CONSENT_VERSION} — открой диалог заново`)
+        }
+        const want = p['providers']
+        if (!Array.isArray(want) || want.length !== CONSENT_PROVIDERS.length || !CONSENT_PROVIDERS.every((x) => want.includes(x))) {
+          throw new ManagerError(ERROR_CODES.invalidParams, `access.grantFull: providers — ровно ${CONSENT_PROVIDERS.join(', ')}: диалог называет обоих`)
+        }
+        let c
+        try { c = consent.grant(CONSENT_PROVIDERS) } catch (e) { throw new ManagerError(ERROR_CODES.internal, `согласие не записано: ${(e as Error).message}`) }
+        logger.info('полный доступ разрешён', { rev: c.rev, providers: c.providers, by: `${conn.client}#${conn.id}` })
+        return { consent: consentView(c) }
+      }
+      case 'access.revokeFull': {
+        // Отзыв: идущие ходы доживают с красной меткой, следующий ход любой сессии на согласии — в «Спрашивать».
+        let c
+        try { c = consent.revoke() } catch (e) { throw new ManagerError(ERROR_CODES.internal, `отзыв не записан: ${(e as Error).message}`) }
+        logger.info('полный доступ отозван', { rev: c.rev, by: `${conn.client}#${conn.id}` })
+        return { consent: consentView(c) }
+      }
       case 'settings.set': {
         // Окно пишет ТОЛЬКО раздел `newSession`, флаг `updates.check` (автопроверка обновлений) и правило стража
         // `network.guard` (0.3.6): профили сети, прокси, noProxy, команды, адрес канала (`updates.url`) и всё прочее
@@ -1023,14 +1131,16 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
         // M8d: как подтверждать действия. Нет поля — `ask`; незнакомое значение — отказ, а не тихий `ask`:
         // человек, попросивший `full`, но опечатавшийся, иначе получил бы не то, что думает.
         if (p['approval'] !== undefined && !isApprovalMode(p['approval'])) {
-          throw new ManagerError(ERROR_CODES.invalidParams, 'agent.start: approval — read-only | ask | workspace | full')
+          throw new ManagerError(ERROR_CODES.invalidParams, `agent.start: approval — ${APPROVAL_LIST}`)
         }
+        if (p['grant'] !== undefined && p['grant'] !== 'cli-once') throw new ManagerError(ERROR_CODES.invalidParams, 'agent.start: grant — только cli-once')
         const approval = (p['approval'] ?? 'ask') as ApprovalMode
-        // Ревью M8d: «полный доступ» — только с явным подтверждением (окно шлёт его после красного предупреждения,
-        // CLI — по `--yes`). Без него отказ ДО заведения чего-либо.
-        if (approval === 'full' && p['confirm'] !== true) {
-          throw new ManagerError(ERROR_CODES.invalidParams, 'agent.start: approval full — агент делает что угодно без вопросов, песочницы нет; нужен confirm: true')
-        }
+        if (!approvalFits(kind, approval)) throw new ManagerError(ERROR_CODES.invalidParams, 'agent.start: режим «как в настройках Claude» (inherit) есть только у Claude')
+        // Ревью M8d: «полный доступ» — только с явным подтверждением (`confirm: true`; CLI — по `--yes`). Шаг A: и с
+        // разрешением — согласием окна (`consent.json`, сверка `consentRev`) или разовым `grant: cli-once` из CLI.
+        // `inherit` при `defaultMode: bypassPermissions` у владельца — тоже полный доступ. Отказ ДО заведения чего-либо.
+        const startGrant = isFullLevel(kind, approval, approval === 'inherit' ? inheritModeOf(kind, String(p['cwd'] ?? ''), str(p['settingSources'])) : null)
+          ? checkFull('agent.start', kind, p) : undefined
         const browser = browserParam(p['browser'], 'agent.start')
         if (browser) refuseBypass(kind, String(p['cwd'] ?? ''), approval)
         const rec = publicRecord(await manager.start({
@@ -1046,6 +1156,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
           ...(str(p['base']) !== undefined ? { base: str(p['base']) as string } : {}),
           ...(browser ? { browser } : {}),
           ...(approval !== 'ask' ? { approval } : {}),
+          ...(startGrant ? { grant: startGrant } : {}),
         }))
         if (browser) browserOn(rec.name)
         // M8f: последний выбор «+ Сессия» — только с окна (клиент `shell`): CLI и скрипты его не трогают.
@@ -1165,9 +1276,11 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
         return { sessions: manager.list().map((rec) => {
           const attention = store.attention(rec.name)
           const pub = withBrowser(publicRecord(rec))
-          // M8d: действующий режим Claude у `ask` (флага нет — решают настройки владельца).
-          const eff = rec.provider === 'claude' && !rec.approval ? { claudeMode: claudeEffectiveMode(rec) } : {}
-          return attention ? { ...pub, ...eff, attention } : { ...pub, ...eff }
+          // M8d: действующий режим Claude у `inherit` (флага нет — решают настройки владельца). Шаг A: доступ чата —
+          // желаемый, применённый, ожидающий и красная метка (src/sessions/access.ts).
+          const eff = rec.provider === 'claude' && rec.approval === 'inherit' ? { claudeMode: claudeEffectiveMode(rec) } : {}
+          const access = { access: accessOf(rec) }
+          return attention ? { ...pub, ...eff, ...access, attention } : { ...pub, ...eff, ...access }
         }) }
       case 'agent.seen':
         if (p['unread'] !== undefined && typeof p['unread'] !== 'boolean') {
@@ -1590,6 +1703,8 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
       case 'agent.configure':
       case 'settings.get':
       case 'settings.set':
+      case 'access.grantFull':
+      case 'access.revokeFull':
       case 'sessions.external.list':
       case 'sessions.external.read':
       case 'agent.import':

@@ -14,21 +14,26 @@ import type { ApprovalMode } from '../types.js'
 export const PERMISSION_SERVER_NAME = 'pult'
 
 /**
- * M8d: режим подтверждений сессии → `--permission-mode` CLI. `ask` — флага НЕТ: действуют собственные
- * настройки владельца (`defaultMode` и правила), как у всех сессий до M8d. `full` — `bypassPermissions`:
- * в нём браузер для агента не включается (src/mcp/browser.ts `approvalBrowserRefusal`, правило О3).
+ * M8d: режим подтверждений сессии → `--permission-mode` CLI. `full` — `bypassPermissions`: в нём браузер для агента
+ * не включается (src/mcp/browser.ts `approvalBrowserRefusal`, правило О3).
  *
  * `read-only` — НЕ `plan` (ревью M8d): в `plan` haiku писал `~/.claude/plans/…md` без вопроса, а ExitPlanMode
  * выводил из плана одним общим «да» в Inbox. Теперь это `manual` — явный «спрашивать» CLI, перебивающий
  * `defaultMode` владельца (в system/init он виден как `default`), — плюс запрет инструментов правки и ExitPlanMode
  * (`CLAUDE_READONLY_DENIED`). ИЗМЕРЕНО спайком S10 (CLI 2.1.303, haiku): Write отказан без вопроса, файла нет;
  * `touch` через Bash — вопрос пришёл в заглушку.
+ *
+ * Быстрый старт, шаг A (ревью Codex B1): `ask` — тоже ЯВНЫЙ `manual`. Раньше у `ask` флага не было, и действовал
+ * `defaultMode` владельца — вплоть до `bypassPermissions`, пока чип писал «Спрашивать»; откат «в ask» (отзыв
+ * согласия, нет согласия) не гарантировал бы ничего. Прежнее «без флага» — отдельный уровень `inherit`
+ * («Как в настройках Claude»). Нет режима вовсе (`undefined`) — `ask`, то есть тоже `manual`.
  */
 export const CLAUDE_PERMISSION_MODE: Readonly<Record<ApprovalMode, string | null>> = {
   'read-only': 'manual',
-  ask: null,
+  ask: 'manual',
   workspace: 'acceptEdits',
   full: 'bypassPermissions',
+  inherit: null,
 }
 export const PERMISSION_TOOL = `mcp__${PERMISSION_SERVER_NAME}__ask`
 
@@ -96,7 +101,7 @@ export interface ClaudeArgvOptions {
   model?: string
   effort?: string
   settingSources?: string
-  /** M8d: режим подтверждений сессии; нет или `ask` — флага `--permission-mode` нет. */
+  /** M8d: режим подтверждений сессии; нет — `ask` (`manual`); флага `--permission-mode` нет только у `inherit`. */
   approval?: ApprovalMode
   /** Путь к сгенерированному файлу mcp-config; есть только когда брокер подключён. */
   mcpConfigPath?: string
@@ -137,7 +142,7 @@ export function buildClaudeArgv(opts: ClaudeArgvOptions): string[] {
   if (opts.model) a.push('--model', opts.model)
   if (opts.effort) a.push('--effort', opts.effort)
   if (opts.settingSources) a.push('--setting-sources', opts.settingSources)
-  const mode = opts.approval ? CLAUDE_PERMISSION_MODE[opts.approval] : null
+  const mode = CLAUDE_PERMISSION_MODE[opts.approval ?? 'ask']
   if (mode) a.push('--permission-mode', mode)
   // Список — отдельными словами, ровно как в замере S10 (флаг вариадический; следом всегда идёт флаг на «--»).
   if (opts.approval === 'read-only') a.push('--disallowedTools', ...CLAUDE_READONLY_DENIED)

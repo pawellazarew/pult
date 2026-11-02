@@ -178,6 +178,18 @@ export interface SessionRecord {
    */
   approval?: ApprovalMode
   /**
+   * Быстрый старт, шаг A: полный доступ этой сессии дан разово из CLI (`--yes`) — согласие окна
+   * (`PULT_HOME/consent.json`) ему не нужно. Снимается сменой режима на любой другой. Нет поля — полный доступ
+   * живёт только на согласии.
+   */
+  grant?: 'cli-once'
+  /**
+   * Шаг A: с чем запущен текущий или последний процесс провайдера (`applied` в спецификации) — уровень из снимка хода
+   * и то, что подтвердил сам провайдер (`system/init.permissionMode` у Claude, `sandbox`/`approvalPolicy` ответа
+   * `thread/start|resume` у Codex). Нет поля — ни одного хода ещё не было («ожидается»).
+   */
+  applied?: AppliedAccess
+  /**
    * M8f: браузер, который выключила смена режима (Claude `full`, Codex `workspace`/`full` — вызовы шли бы без
    * вопроса). Возврат в режим, где браузер можно, включает его обратно — как было у человека.
    */
@@ -187,6 +199,40 @@ export interface SessionRecord {
 export interface SessionBrowser {
   headed?: boolean
 }
+
+/** Шаг A: действующий доступ процесса (см. `SessionRecord.applied`). */
+export interface AppliedAccess {
+  /** Уровень, с которым процесс запущен (снимок хода после проверки согласия). */
+  approval: ApprovalMode
+  /** Что сказал провайдер: Claude — `permissionMode`; Codex — `<sandbox.type>/<approvalPolicy>`. `null` — не сказал. */
+  reported: string | null
+  /** Провайдер подтвердил режим (`reported` пришёл от него), а не только Пульт его отправил. */
+  confirmed: boolean
+  /** Процесс идёт с полными правами (по ответу провайдера, если он есть; иначе по отправленному). */
+  full: boolean
+  at: string
+}
+
+export function parseApplied(x: unknown): AppliedAccess | null {
+  if (x === null || typeof x !== 'object' || Array.isArray(x)) return null
+  const o = x as Record<string, unknown>
+  if (!isApprovalMode(o['approval'])) return null
+  return {
+    approval: o['approval'],
+    reported: typeof o['reported'] === 'string' ? o['reported'] : null,
+    confirmed: o['confirmed'] === true,
+    full: o['full'] === true,
+    at: typeof o['at'] === 'string' ? o['at'] : new Date(0).toISOString(),
+  }
+}
+
+/**
+ * Версия файла реестра. 2 — быстрый старт, шаг A: у Claude «Спрашивать» стало явным `--permission-mode manual`, а
+ * запись без `approval` теперь значит именно его. Записи Claude из файла версии 1 без `approval` жили «без флага»
+ * (действовал `defaultMode` владельца) — миграция переводит их в `inherit`, чтобы поведение идущих чатов не сменилось
+ * молча (§5 п. 8 спецификации).
+ */
+export const SESSIONS_VERSION = 2
 
 /** Поле `browser` из файла или параметров: `true` — без окна, объект — с `headed`; прочее — нет браузера. */
 export function parseBrowser(x: unknown): SessionBrowser | null {
@@ -298,6 +344,8 @@ export function parseSessions(raw: unknown): SessionRecord[] {
       // гадать в сторону шире нельзя. Поля нет — `ask`, как у всех записей до M8d.
       ...(o['approval'] === undefined || o['approval'] === 'ask' ? {}
         : { approval: isApprovalMode(o['approval']) ? o['approval'] : 'read-only' as const }),
+      ...(o['grant'] === 'cli-once' ? { grant: 'cli-once' as const } : {}),
+      ...((): { applied?: AppliedAccess } => { const a = parseApplied(o['applied']); return a ? { applied: a } : {} })(),
     })
   }
   return out
@@ -313,7 +361,7 @@ export function writeSessionsAtomic(file: string, list: SessionRecord[]): void {
   const dir = dirname(file)
   mkdirSync(dir, { recursive: true, mode: 0o700 })
   const tmp = join(dir, `.sessions.${process.pid}.${Date.now()}.tmp`)
-  const body = JSON.stringify({ version: 1, sessions: list }, null, 2) + '\n'
+  const body = JSON.stringify({ version: SESSIONS_VERSION, sessions: list }, null, 2) + '\n'
   const fd = openSync(tmp, 'w', 0o600)
   try {
     const buf = Buffer.from(body, 'utf8')
@@ -331,15 +379,38 @@ export function writeSessionsAtomic(file: string, list: SessionRecord[]): void {
   }
 }
 
+/**
+ * Шаг A: записи Claude из реестра версии 1 без `approval` → `inherit` (см. `SESSIONS_VERSION`). Отдаёт число
+ * исправленных. Файл версии 2 и новее не трогается: там отсутствие поля — уже явный «Спрашивать».
+ */
+export function migrateLegacyAsk(raw: unknown, list: SessionRecord[]): number {
+  const v = raw !== null && typeof raw === 'object' ? (raw as { version?: unknown }).version : undefined
+  if (typeof v === 'number' && v >= SESSIONS_VERSION) return 0
+  let n = 0
+  for (const s of list) {
+    if (s.provider !== 'claude' || s.approval !== undefined) continue
+    s.approval = 'inherit'
+    n++
+  }
+  return n
+}
+
 export function createRegistry(paths: PultPaths): SessionRegistry {
   let list: SessionRecord[]
+  let raw: unknown = null
   try {
-    list = parseSessions(JSON.parse(readFileSync(paths.sessions, 'utf8')))
+    raw = JSON.parse(readFileSync(paths.sessions, 'utf8'))
+    list = parseSessions(raw)
   } catch {
     list = []
   }
 
   const save = (): void => { writeSessionsAtomic(paths.sessions, list) }
+  // Миграция — сразу на диск: иначе запись, заведённая до первого сохранения, ушла бы в файл версии 2 рядом с
+  // НЕмигрированными старыми, и следующий старт уже не отличил бы их от явного «Спрашивать».
+  if (raw !== null && migrateLegacyAsk(raw, list) > 0) {
+    try { save() } catch { /* не записалось — повторится на следующем старте: файл всё ещё версии 1 */ }
+  }
   const find = (name: string): SessionRecord | undefined => list.find((s) => s.name === name)
 
   return {

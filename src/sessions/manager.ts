@@ -28,7 +28,8 @@ import type { PermBroker } from '../perm/broker.js'
 import { mergeContext, parseContextData } from './context.js'
 import type { SessionContext } from './context.js'
 import { createRegistry, isSessionName, normalizeTitle, QUEUE_MAX, SESSION_TITLE_MAX, titleLength } from './registry.js'
-import type { QueueItem, SessionBrowser, SessionMode, SessionRecord, SessionRegistry, SessionStatus, SessionWorktree } from './registry.js'
+import type { AppliedAccess, QueueItem, SessionBrowser, SessionMode, SessionRecord, SessionRegistry, SessionStatus, SessionWorktree } from './registry.js'
+import { expectedReport, isFullLevel, reportIsFull, reportWords } from './access.js'
 import { approvalBrowserRefusal, removeBrowserProfile, resetBrowserDirs } from '../mcp/browser.js'
 import { createPhaseTracker } from './phaseTracker.js'
 import type { LiveSignal } from './phaseTracker.js'
@@ -90,6 +91,8 @@ export interface StartParams {
   browser?: SessionBrowser
   /** M8d: как подтверждать действия; нет — `ask`. Живёт в записи и переживает resume. */
   approval?: ApprovalMode
+  /** Шаг A: полный доступ дан разово из CLI (`--yes`) — живёт в записи вместе с режимом. */
+  grant?: 'cli-once'
 }
 
 /** Ответ `agent.start`: запись реестра и — для `--worktree` — что сделано с папкой. */
@@ -138,6 +141,11 @@ export interface WaitResult {
 /** M8f: `agent.configure` — что сменить у живой сессии. */
 export interface ConfigureParams extends ConfigureRequest {
   name: string
+  /**
+   * Шаг A: разовое разрешение полного доступа из CLI (`pult agent set --approval full --yes`). Демон ставит его, только
+   * когда новый режим — полный доступ; любая другая смена режима его снимает.
+   */
+  grant?: 'cli-once'
 }
 
 /** Ответ `agent.configure`: запись после смены, что поменялось и когда вступит. */
@@ -285,7 +293,12 @@ export interface SessionManager {
    * Строки реестра с живым статусом, числом запросов в Inbox, последним известным контекстом и фазой хода (0.3.5,
    * без текста размышлений).
    */
-  list(): Array<SessionRecord & { pendingPermissions: number; phase?: TurnPhase }>
+  list(): Array<SessionRecord & { pendingPermissions: number; phase?: TurnPhase; liveApproval: ApprovalMode | null }>
+  /**
+   * Шаг A: адаптер сообщает, с чем запущен процесс: `reported: null` — только отправлено (спавн, ход с поправкой
+   * политики), строка — режим, который подтвердил сам провайдер. Расхождение с ожидаемым — заметка в ленте.
+   */
+  applied(name: string, info: { approval: ApprovalMode | undefined; reported: string | null }): void
   /**
    * Фаза хода сессии (0.3.5, src/sessions/phaseTracker.ts) — с текстом размышлений: её отдаёт живой канал окна.
    * `null` — хода нет.
@@ -351,6 +364,14 @@ export interface ManagerOptions {
   queueEditHoldMs?: number
   /** 0.3.5: фаза хода сессии сменилась — демон шлёт кадр живого канала (src/daemon/live.ts). Синхронно. */
   onPhase?(name: string): void
+  /**
+   * Быстрый старт, шаг A: проверка доступа ХОДА. Демон сверяет полный доступ с согласием (`PULT_HOME/consent.json`) или
+   * разовым `grant: cli-once` САМ — на снимке каждого хода, в том числе первого после resume. Отдаёт уровень, с которым
+   * ход реально пойдёт, и заметку в ленту, если он понижен до «Спрашивать». Нет функции — ход идёт по записи.
+   */
+  accessGate?(rec: SessionRecord): { approval: ApprovalMode | undefined; notice?: string }
+  /** Шаг A: действующий `defaultMode` владельца для сессии Claude (`inherit`) — сверка ответа провайдера. */
+  inheritMode?(rec: SessionRecord): string | null
 }
 
 /** Отказ хода, пока ставится обновление: окно оставляет текст в поле ввода. */
@@ -684,6 +705,19 @@ export function createManager(opts: ManagerOptions): SessionManager {
     const st = currentStatus(name)
     return (!!live && live.outcome === null) || prompting.has(name) || st === 'working' || HUMAN_STATUSES.has(st)
   }
+  // --- шаг A: действующий доступ ---------------------------------------------------------------------
+  // Последнее, что сообщил адаптер (в памяти: спавн на каждом ходу не пишет реестр). В реестр — только смена.
+  const appliedNow = new Map<string, AppliedAccess>()
+  // Последнее расхождение «ожидалось/пришло», о котором уже сказано в ленте: одна заметка на смену, а не на ход.
+  const mismatchNoted = new Map<string, string>()
+  /** Уровень процесса, который прямо сейчас работает (ход или фоновые задачи); `null` — процесса за работой нет. */
+  const liveApprovalOf = (rec: SessionRecord): ApprovalMode | null => {
+    const adapter = opts.adapters[rec.provider]
+    const a = adapter?.activeAccess?.(rec.name)
+    if (a !== undefined) return a === null ? null : a.approval ?? 'ask'
+    // Адаптер не умеет сказать — по ходу: пока он идёт, действует применённое.
+    return busyNow(rec.name) ? ((appliedNow.get(rec.name) ?? rec.applied)?.approval ?? 'ask') : null
+  }
   // Сессии, у которых идёт «прервать и сказать»: очередь ждёт, пока сказанное не уйдёт.
   const holdDrain = new Set<string>()
   // Стоп или закрытие попросил сам Пульт: `interrupted` в исходе хода — наш, событие пишет `stop`. Нет здесь —
@@ -935,6 +969,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
           // M8d: режим подтверждений — граница доступа, как settingSources: без этой строки resume после
           // рестарта демона поднимал бы сессию в `ask` (тише, чем просили) или — хуже — наоборот.
           ...(params.approval && params.approval !== 'ask' ? { approval: params.approval } : {}),
+          ...(params.grant === 'cli-once' && (params.approval === 'full' || params.approval === 'inherit') ? { grant: 'cli-once' as const } : {}),
           createdAt: new Date().toISOString(),
           lastStatus: 'cold',
           lastEventId: 0,
@@ -944,6 +979,9 @@ export function createManager(opts: ManagerOptions): SessionManager {
         }
         if (!registry.create(rec)) throw new ManagerError('invalid_params', `агент ${params.name} уже есть`)
         statuses.set(rec.name, 'cold')
+        // Имя переиспользуемо: действующий доступ прежней сессии с этим именем новой не достаётся.
+        appliedNow.delete(rec.name)
+        mismatchNoted.delete(rec.name)
         return prepared
           ? { ...rec, worktreeAction: prepared.action, ...(prepared.baseIgnored ? { baseIgnored: true } : {}) }
           : rec
@@ -1037,6 +1075,8 @@ export function createManager(opts: ManagerOptions): SessionManager {
       const patch: Partial<Omit<SessionRecord, 'name'>> = {
         model: next.model, effort: next.effort, approval: next.approval,
       }
+      // Шаг A: разовое разрешение CLI живёт ровно до смены режима: новый полный доступ — с новым `--yes` или на согласии.
+      if (changes.approval) patch.grant = p.grant === 'cli-once' && (next.approval === 'full' || next.approval === 'inherit') ? 'cli-once' : undefined
       // Браузер — по правилу О3/M8d: в режиме без вопросов его вызовы шли бы мимо Inbox. Выключенный режимом
       // браузер помнится и возвращается, когда режим снова его позволяет.
       if (changes.approval) {
@@ -1076,7 +1116,9 @@ export function createManager(opts: ManagerOptions): SessionManager {
         } catch (re) { opts.logger.error('откат настроек в адаптере не удался', { session: name, error: (re as Error).message }) }
         throw e
       }
-      emit({ sessionId: name, provider: cur.provider, kind: 'session.configured', data: { changes, when } })
+      // Шаг A: смена доступа, пока жив процесс с прежними правами, — «применится, когда закончится текущий ход».
+      const pending = !!changes.approval && liveApprovalOf(cur) !== null
+      emit({ sessionId: name, provider: cur.provider, kind: 'session.configured', data: { changes, when, ...(pending ? { pending: true } : {}) } })
       opts.logger.info('настройки сессии сменились', { session: name, changes, when })
       return { record, changes, when }
     },
@@ -1108,9 +1150,12 @@ export function createManager(opts: ManagerOptions): SessionManager {
       const adapter = adapterFor(rec.provider)
       // M8f (ревью, HIGH 3): настройки ЭТОГО хода — снимок сейчас, до первого await. `agent.configure`, пришедший,
       // пока ход заводится (resume, страж сети, MCP), — для следующего хода: в ленте он стоит после реплики.
+      // Шаг A: полный доступ — только с согласием или разовым `--yes`; иначе ход в явном «Спрашивать» (демон решает
+      // сам, на снимке: отзыв в «Настройках» действует со следующего хода любой сессии, в том числе после resume).
+      const gate = opts.accessGate ? opts.accessGate(rec) : { approval: rec.approval }
       const at: TurnSettings = {
         ...(rec.model ? { model: rec.model } : {}), ...(rec.effort ? { effort: rec.effort } : {}),
-        ...(rec.approval ? { approval: rec.approval } : {}), browser: rec.browser ?? null,
+        ...(gate.approval ? { approval: gate.approval } : {}), browser: rec.browser ?? null,
       }
       // РЕПЛИКА ЧЕЛОВЕКА — В ЖУРНАЛ (Ф2, О1). Окну нужна лента разговора целиком, в том числе
       // после закрытия и повторного открытия, а до этого реплика жила только в stdin ребёнка.
@@ -1118,6 +1163,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
       // «что сказал человек → почему не получилось». Отдельный вид, а не `message.done`:
       // статус сессии и текст ответа (`agent read`) реплика человека менять не должна.
       // Текст — через ту же редакцию, что и ответы модели (инвариант 7).
+      if (gate.notice) emit({ sessionId: name, provider: rec.provider, kind: 'session.configured', data: { changes: {}, notice: gate.notice, access: 'downgraded' } })
       const user = emit({ sessionId: name, provider: rec.provider, kind: 'message.user', data: { text: redactString(text) } })
       phases.accepted(name)
       // Начало хода — время для порядка бесед в окне (`lastTurnAt`): одна запись реестра на ход, тем же `ts`, что у
@@ -1146,7 +1192,8 @@ export function createManager(opts: ManagerOptions): SessionManager {
       // Звать можно безусловно: `resume` идемпотентен (знакомую сессию он не трогает) и
       // НИЧЕГО не запускает — процесс поднимет сам ход, разговор оживает через `--resume`.
       try {
-        await adapter.resume(name, rec)
+        // Запись — с уровнем после проверки согласия: адаптер, поднимающий сессию, не узнаёт полного доступа без него.
+        await adapter.resume(name, gate.approval === rec.approval ? rec : { ...rec, ...(gate.approval ? { approval: gate.approval } : { approval: undefined }) })
       } catch (e) {
         releasePrompting(name)
         // Ход не завёлся, а события конца нет: строка «запускается…» не должна висеть.
@@ -1475,12 +1522,52 @@ export function createManager(opts: ManagerOptions): SessionManager {
         const phase = phases.get(rec.name, { reasoning: false })
         return {
           ...rec,
+          ...((): { applied?: AppliedAccess } => { const a = appliedNow.get(rec.name) ?? rec.applied; return a ? { applied: a } : {} })(),
+          liveApproval: liveApprovalOf(rec),
           lastStatus: currentStatus(rec.name),
           pendingPermissions: opts.broker.list(rec.name).length,
           ...(context ? { context } : {}),
           ...(phase ? { phase } : {}),
         }
       })
+    },
+
+    applied(name, info) {
+      const rec = registry.get(name)
+      if (!rec) return
+      const approval = info.approval ?? 'ask'
+      const inheritMode = approval === 'inherit' ? opts.inheritMode?.(rec) ?? null : null
+      const prev = appliedNow.get(name) ?? rec.applied
+      // Тот же уровень уже подтверждён провайдером — спавн нового процесса на ходу («отправлено») подтверждения не снимает.
+      if (info.reported === null && prev && prev.approval === approval && prev.confirmed) return
+      const next: AppliedAccess = {
+        approval,
+        reported: info.reported,
+        confirmed: info.reported !== null,
+        full: info.reported !== null ? reportIsFull(rec.provider, info.reported) : isFullLevel(rec.provider, approval, inheritMode),
+        at: new Date().toISOString(),
+      }
+      appliedNow.set(name, next)
+      if (!rec.applied || rec.applied.approval !== next.approval || rec.applied.reported !== next.reported
+        || rec.applied.confirmed !== next.confirmed || rec.applied.full !== next.full) {
+        try { registry.update(name, { applied: next }) } catch (e) {
+          opts.logger.warn('действующий доступ не записан в реестр', { session: name, error: (e as Error).message })
+        }
+      }
+      if (info.reported === null) return
+      // Провайдер сказал не то, что ожидалось для уровня (`defaultMode` переписал режим, сервер не принял политику):
+      // метка строится по сказанному, а в ленте — одна заметка на расхождение.
+      const expected = expectedReport(rec.provider, approval, inheritMode)
+      if (expected === null || expected === info.reported) { mismatchNoted.delete(name); return }
+      const key = `${expected}|${info.reported}`
+      if (mismatchNoted.get(name) === key) return
+      mismatchNoted.set(name, key)
+      const who = rec.provider === 'claude' ? 'Claude' : 'Codex'
+      emit({ sessionId: name, provider: rec.provider, kind: 'session.configured', data: {
+        changes: {}, access: 'mismatch', reported: info.reported, expected,
+        notice: `${who} запущен в режиме ${reportWords(rec.provider, info.reported)}, ожидался ${reportWords(rec.provider, expected)}`
+          + (next.full ? ' — это полный доступ' : ''),
+      } })
     },
 
     phase(name) { return registry.get(name) ? phases.get(name) : null },
