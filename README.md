@@ -49,7 +49,7 @@ Everything it does is written to an event journal in `~/.pult`, so the CLI and t
 
 ## Preview and devices
 
-In the development build after 0.3.17, **Preview** opens a shared browser page, iOS Simulator or Android Emulator beside the chat. The browser uses Electron's existing Chromium. Mobile SDKs and system images are not bundled.
+Since 0.3.18, **Preview** opens a shared browser page, iOS Simulator or Android Emulator beside the chat. The browser uses Electron's existing Chromium. Mobile SDKs and system images are not bundled.
 
 Connect an installed device, watch screen updates about once a second, and select **Take control** to cancel queued agent input. Return control when ready; an already-running operation may finish during takeover. Claude and Codex share the `pult_runtime` MCP tools, including in full-access sessions. This is separate from the existing external Playwright browser.
 
