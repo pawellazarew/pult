@@ -155,7 +155,10 @@ export function workspaceWriteFromConfig(cfg: Record<string, unknown> | null): R
 export function threadReportOf(res: Record<string, unknown>): string | null {
   const sb = res['sandbox']
   const type = sb !== null && typeof sb === 'object' && !Array.isArray(sb) ? (sb as Record<string, unknown>)['type'] : null
-  const policy = res['approvalPolicy']
+  const raw = res['approvalPolicy']
+  // Ревью PR #39 (Codex 9): `AskForApproval` — строка ИЛИ объект `{granular: {...}}` (схема 0.163); объект — по его ключу.
+  const keys = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? Object.keys(raw as Record<string, unknown>) : []
+  const policy = typeof raw === 'string' ? raw : keys.length === 1 ? keys[0] : null
   return typeof type === 'string' && typeof policy === 'string' ? `${type}/${policy}` : null
 }
 
@@ -406,6 +409,13 @@ interface Live {
   /** Шаг A: уровень последнего хода — с ним работает тред, пока идёт ход (свой или начатый сервером). */
   turnApproval?: ApprovalMode
   /**
+   * Ревью PR #39 (Codex 4): самый широкий уровень ходов, чей фон (субагенты, команды) ещё жив: фон работает с правами
+   * хода, который его начал, и метка не гаснет, пока он не кончился.
+   */
+  bgApproval?: ApprovalMode
+  /** Тред заново загружен (`thread/start|resume`) и ход об этом ещё не сообщил: прежнее подтверждение не в счёт. */
+  threadFresh?: boolean
+  /**
    * Объекты `SandboxPolicy` по типу, как их вернул сам сервер (`sandbox` в ответе `thread/start|resume`) или
    * собрал `config/read`: при возврате в режим шлём ИХ — `sandbox_workspace_write` из config.toml не теряется.
    */
@@ -604,6 +614,10 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
     if (l.bg.clear()) emitBackground(l, reason)
   }
 
+  /** Ход начинается: фон, переживший прежние ходы, держит самый широкий их уровень (ревью PR #39, Codex 4). */
+  const noteBgApproval = (l: Live): void => {
+    if (!l.bg.pending() || l.turnApproval === 'full') l.bgApproval = l.turnApproval
+  }
   /** Серверный ход кончился (или его больше некому вести): статус, фон и ждущие реплики. */
   const endServerTurn = (l: Live, st: string | null, extra: Record<string, unknown> = {}): void => {
     if (!l.serverTurn) return
@@ -1482,9 +1496,13 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
         // Ход начал сервер (нашего `turn/start` не было): сессия работает — явно, иначе статус и сторож его не видят.
         if (!ctx && sig.providerTurnId && l.serverTurn?.providerTurnId !== sig.providerTurnId) {
           l.serverTurn = { providerTurnId: sig.providerTurnId, stopRequested: false }
+          noteBgApproval(l)
           l.bg.turnStarted()
           status(l.spec.name, 'working', { reason: 'server_turn' })
           logger.info('codex начал ход сам (не реплика человека)', { session: l.spec.name, providerTurnId: sig.providerTurnId })
+          // Ревью PR #39 (блокер Codex 2): ход сервера идёт по политике треда, а не по проверке хода Пульта. Менеджер
+          // узнаёт, с какими правами он идёт, и без разрешения останавливает его (`turn/interrupt`).
+          opts.applied?.(l.spec.name, { approval: l.turnApproval, reported: l.threadReport, full: l.threadPolicy?.sandbox === 'danger-full-access' })
         }
         if (!l.confirmed && l.threadId) {
           l.confirmed = true
@@ -1748,6 +1766,7 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
         l.mcpKey = mcpKey
         l.threadPolicy = { ...policy }
         l.threadReport = threadReportOf(resumed)
+        l.threadFresh = true
         rememberSandbox(l, resumed['sandbox'])
         threadOwner.set(l.threadId, { name: l.spec.name })
         logger.info('тред codex возобновлён', { session: l.spec.name, threadId: l.threadId })
@@ -1778,6 +1797,7 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
     l.mcpKey = mcpKey
     l.threadPolicy = { ...policy }
     l.threadReport = threadReportOf(res)
+    l.threadFresh = true
     rememberSandbox(l, res['sandbox'])
     l.confirmed = false
     threadOwner.set(id, { name: l.spec.name })
@@ -1907,10 +1927,6 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
     if (l.threadPolicy && l.threadPolicy.approvalPolicy !== target.approvalPolicy) override['approvalPolicy'] = target.approvalPolicy
     if (l.threadPolicy && l.threadPolicy.sandbox !== target.sandbox) override['sandboxPolicy'] = await sandboxObject(l, c, target.sandbox)
     if (abandoned()) return giveUp('агент остановлен или снят до отправки реплики')
-    // Шаг A: с чем пойдёт ход. Поправка политики в `turn/start` сервером не подтверждается — «не подтверждено».
-    if (Object.keys(override).length) l.threadReport = null
-    l.turnApproval = flags.approval
-    opts.applied?.(name, { approval: flags.approval, reported: l.threadReport })
     // Сервер ведёт свой ход (сообщение субагента разбудило тред): наш `turn/start` столкнулся бы с ним. Реплика
     // ждёт его конца, как у занятой сессии.
     if (l.serverTurn) {
@@ -1922,6 +1938,13 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
       }
       if (abandoned()) return giveUp('агент остановлен или снят, пока шёл ход сервера')
     }
+    // Шаг A: с чем пойдёт ход. Поправка политики в `turn/start` сервером не подтверждается — «не подтверждено».
+    // Ревью PR #39 (Codex 3, m1): только ПОСЛЕ хода сервера — пока он идёт, тред работает с прежними правами, и метка
+    // показывает их, а не уровень реплики, которая ещё ждёт.
+    if (Object.keys(override).length) l.threadReport = null
+    l.turnApproval = flags.approval
+    opts.applied?.(name, { approval: flags.approval, reported: l.threadReport, ...(l.threadFresh ? { fresh: true } : {}) })
+    l.threadFresh = false
 
     // --- ход -------------------------------------------------------------------
     let finishOuter: (o: TurnOutcome) => void = () => {}
@@ -2000,6 +2023,7 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
       finish: (o) => { finishOuter(o) },
     }
     l.turn = ctx
+    noteBgApproval(l)
     l.bg.turnStarted()
     statusL('working', { turnId })
     // Модель снимка — переводчику (`context.updated`), в момент хода, а не смены (ревью, LOW 7).
@@ -2279,10 +2303,13 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
     },
 
     activeAccess(name) {
-      // Шаг A: тред за работой — наш ход (в том числе заводится) или ход, начатый сервером.
+      // Шаг A: тред за работой — наш ход (в том числе заводится) или ход, начатый сервером. Ревью PR #39 (Codex 4): и
+      // фон — субагенты и команды, пережившие ход, работают с правами хода, который их начал.
       const l = live.get(name)
-      if (!l || !(l.turn || l.starting || l.serverTurn)) return null
-      return l.turnApproval ? { approval: l.turnApproval } : {}
+      if (!l) return null
+      if (l.turn || l.starting || l.serverTurn) return l.turnApproval ? { approval: l.turnApproval } : {}
+      if (l.bg.pending()) return l.bgApproval ? { approval: l.bgApproval } : {}
+      return null
     },
 
     blocked: () => (providerBlocked === null ? { blocked: false } : { blocked: true, reason: providerBlocked }),

@@ -794,13 +794,14 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     return a?.title ? <><b>{a.title}</b> (<span className="mono">{name}</span>)</> : <b>{name}</b>
   }
 
-  const createAgent = async (form: NewAgentForm, rememberCwd: boolean, consentRev?: number): Promise<string | null> => {
+  const createAgent = async (form: NewAgentForm, rememberCwd: boolean, consentRev?: number): Promise<string | { consent: true; text: string } | null> => {
     try {
       // M8f: `rememberCwd: false` — форму открыли уже с папкой (проект, ссылка): последний выбор её не запомнит.
       await bridge.call('agent.start', { ...startParams(form, consentRev ?? settings?.access?.consent.rev), ...(rememberCwd ? {} : { rememberCwd: false }) })
     } catch (e) {
       // Шаг A: согласие отозвали или дали снаружи, пока форма была открыта, — окно перечитывает правду.
       if (isBridgeError(e) && (e.code === 'consent_changed' || e.code === 'consent_required')) void refreshSettings()
+      if (isBridgeError(e) && e.code === 'consent_required') return { consent: true, text: errorText(e) }
       return errorText(e)
     }
     select(form.name)

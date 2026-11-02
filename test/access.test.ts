@@ -9,7 +9,7 @@
 //   * действующий режим — из `system/init` (Claude) и ответа `thread/start` (Codex); расхождение — заметка.
 
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
@@ -17,9 +17,9 @@ import { connectClient } from '../dist/cli/client.js'
 import { consentCovers, createConsentStore, parseConsent } from '../dist/core/consent.js'
 import { layout, ensureLayout } from '../dist/core/paths.js'
 import { accessView, expectedReport, isFullLevel, reportIsFull } from '../dist/sessions/access.js'
-import { createRegistry, migrateLegacyAsk, parseSessions, SESSIONS_VERSION } from '../dist/sessions/registry.js'
+import { ACCESS_MIGRATION, createRegistry, migrateLegacyAsk, parseSessions, SESSIONS_VERSION } from '../dist/sessions/registry.js'
 import { codexThreadPolicy, threadReportOf } from '../dist/adapters/codex/adapter.js'
-import { startTestDaemon, tempHome, waitFor } from './helpers.js'
+import { FAKE_CODEX_SCRIPTED, startTestDaemon, tempHome, waitFor } from './helpers.js'
 
 type Ev = { kind: string; data: Record<string, unknown> }
 type Access = { desired: string; desiredFull: boolean; blocked: boolean; red: boolean; live: boolean; pending: boolean; grant?: string; applied?: { approval: string; reported: string | null; confirmed: boolean; full: boolean } }
@@ -57,6 +57,9 @@ describe('шаг A: чистые правила доступа', () => {
     // Ответ Codex: оба поля — подтверждено; чего-то нет — нет (fixture 09).
     assert.equal(threadReportOf({ approvalPolicy: 'on-request', sandbox: { type: 'readOnly', networkAccess: false } }), 'readOnly/on-request')
     assert.equal(threadReportOf({ sandbox: { type: 'readOnly' } }), null)
+    // Ревью PR #39 (Codex 9): политика-объект `{granular: …}` (схема 0.163) — не теряет известную песочницу.
+    assert.equal(threadReportOf({ approvalPolicy: { granular: { sandbox_approval: true } }, sandbox: { type: 'dangerFullAccess' } }), 'dangerFullAccess/granular')
+    assert.equal(reportIsFull('codex', threadReportOf({ approvalPolicy: { granular: {} }, sandbox: { type: 'dangerFullAccess' } })), true)
     assert.deepEqual(codexThreadPolicy('inherit', true), codexThreadPolicy('ask', true), 'у Codex inherit нет — тише некуда, как ask')
   })
   it('метка: красная, пока выбран полный (с разрешением) или жив процесс с полными правами; понижение — pending', () => {
@@ -122,6 +125,34 @@ describe('шаг A: миграция реестра (§5 п. 8)', () => {
       again.create({ ...base, name: 'fresh', provider: 'claude', mode: 'turn', lastStatus: 'cold' } as never)
       assert.equal(createRegistry(paths).get('fresh')?.approval, undefined, 'новая сессия «Спрашивать» не становится inherit на следующем старте')
       assert.equal(createRegistry(paths).get('old')?.approval, 'inherit')
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+  it('откат и возврат (ревью M2): копия .bak-v1 и маркер в config.json; после маркера новый «Спрашивать» не становится inherit', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pt-mig-rb-'))
+    try {
+      const paths = layout(dir)
+      ensureLayout(paths)
+      const base = { provider: 'claude', cwd: '/w', mode: 'turn', lastStatus: 'cold', lastEventId: 0 }
+      const v1 = JSON.stringify({ version: 1, sessions: [{ ...base, name: 'old', createdAt: '2026-10-01T00:00:00Z' }] })
+      writeFileSync(paths.sessions, v1)
+      writeFileSync(paths.config, JSON.stringify({ network: { claude: { mode: 'off' } } }))
+      assert.equal(createRegistry(paths).get('old')?.approval, 'inherit')
+      assert.equal(readFileSync(`${paths.sessions}.bak-v1`, 'utf8'), v1, 'копия файла ДО миграции')
+      const cfg = JSON.parse(readFileSync(paths.config, 'utf8')) as { network?: unknown; migrations?: Record<string, { at: string }> }
+      assert.ok(cfg.migrations?.[ACCESS_MIGRATION]?.at, 'маркер migrations.accessLevels')
+      assert.equal(ACCESS_MIGRATION, 'accessLevels', 'не quickStart — то имя у миграции пресетов (§5)')
+      assert.deepEqual(cfg.network, { claude: { mode: 'off' } }, 'чужие разделы config.json не тронуты')
+      // Новый «Спрашивать» после обновления (createdAt позже маркера), затем откат: прежний демон переписал файл версией 1
+      // без полей, которых не знает.
+      const fresh = new Date(Date.parse(cfg.migrations?.[ACCESS_MIGRATION]?.at ?? '') + 1000).toISOString()
+      writeFileSync(paths.sessions, JSON.stringify({ version: 1, sessions: [
+        { ...base, name: 'old', createdAt: '2026-10-01T00:00:00Z' },
+        { ...base, name: 'fresh', createdAt: fresh },
+      ] }))
+      const again = createRegistry(paths)
+      assert.equal(again.get('old')?.approval, 'inherit', 'запись до маркера — как раньше, без флага')
+      assert.equal(again.get('fresh')?.approval, undefined, 'новый «Спрашивать» остаётся явным, а не молча шире')
+      assert.equal(readFileSync(`${paths.sessions}.bak-v1`, 'utf8'), v1, 'копия первая и единственная')
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
   it('мигрированная сессия идёт без флага, как до обновления; новая «Спрашивать» — manual', async () => {
@@ -261,13 +292,13 @@ describe('шаг A: согласие проверяет демон', () => {
 })
 
 describe('шаг A: действующий режим', () => {
-  it('Claude сказал не тот режим — заметка одна на расхождение, метка по сказанному', async () => {
+  it('Claude сказал не тот режим (не полный) — заметка одна на расхождение, метка по сказанному', async () => {
     const home = tempHome()
     const root = mkdtempSync(join(tmpdir(), 'pt-mis-'))
     const d = await startTestDaemon(home)
     const c = await connectClient(home.paths)
     try {
-      const m = claudeWork(root, 'm', { reportMode: 'bypassPermissions' })
+      const m = claudeWork(root, 'm', { reportMode: 'acceptEdits' })
       await c.request('agent.start', { name: 'm', kind: 'claude', cwd: m.cwd })
       for (const t of ['раз', 'два']) {
         await c.request('agent.prompt', { name: 'm', text: t })
@@ -275,10 +306,66 @@ describe('шаг A: действующий режим', () => {
       }
       const evs = ((await c.request('events.tail', { since: 0, sessionId: 'm' })) as { events: Ev[] }).events.filter((e) => e.data['access'] === 'mismatch')
       assert.equal(evs.length, 1)
-      assert.match(String(evs[0]?.data['notice']), /Claude запущен в режиме bypassPermissions, ожидался default — это полный доступ/)
+      assert.match(String(evs[0]?.data['notice']), /Claude запущен в режиме acceptEdits, ожидался default/)
       const row = ((await c.request('agent.list')) as { sessions: Row[] }).sessions.find((r) => r.name === 'm')
-      assert.deepEqual([row?.access?.applied?.reported, row?.access?.applied?.full], ['bypassPermissions', true])
+      assert.deepEqual([row?.access?.applied?.reported, row?.access?.applied?.full], ['acceptEdits', false])
     } finally { c.close(); await d.stop('конец теста'); home.remove(); rmSync(root, { recursive: true, force: true }) }
+  })
+  it('ревью M1: inherit, прогноз «не полный», а init сказал bypassPermissions без согласия (MDM) — ход остановлен, дальше manual', async () => {
+    const home = tempHome()
+    const root = mkdtempSync(join(tmpdir(), 'pt-mdm-'))
+    const m = claudeWork(root, 'm', { reportMode: 'bypassPermissions', hangAfterInit: 5000 })
+    writeFileSync(home.paths.sessions, JSON.stringify({ version: 1, sessions: [
+      { name: 'm', provider: 'claude', cwd: m.cwd, mode: 'turn', createdAt: '2026-10-01T00:00:00Z', lastStatus: 'idle', lastEventId: 0 },
+    ] }))
+    const d = await startTestDaemon(home)
+    const c = await connectClient(home.paths)
+    try {
+      const t0 = Date.now()
+      await c.request('agent.prompt', { name: 'm', text: 'раз' })
+      await c.request('agent.wait', { name: 'm', timeoutMs: 10_000 })
+      assert.ok(Date.now() - t0 < 4000, 'ход не дожил до конца паузы после init — его остановили')
+      assert.equal(mode(lastArgv(m.argvOut)), undefined, 'первый ход — по прогнозу, без флага')
+      const evs = ((await c.request('events.tail', { since: 0, sessionId: 'm' })) as { events: Ev[] }).events
+      const note = evs.find((e) => e.data['access'] === 'downgraded')
+      assert.match(String(note?.data['notice']), /Claude запущен в режиме bypassPermissions — это полный доступ, а он не разрешён: ход остановлен/)
+      assert.ok(evs.some((e) => e.kind === 'status.changed' && e.data['status'] === 'interrupted'), 'ход прерван')
+      let row = ((await c.request('agent.list')) as { sessions: Row[] }).sessions.find((r) => r.name === 'm')
+      assert.deepEqual([row?.approval, row?.access?.desiredFull, row?.access?.blocked], ['inherit', true, true], 'сказанный bypass помнится')
+      // Следующий ход — явный «Спрашивать», даже когда init уже говорит правду.
+      writeFileSync(join(m.cwd, '.pult-fake.json'), JSON.stringify({ scenario: 'simple', speed: 0, argvOut: m.argvOut }))
+      await c.request('agent.prompt', { name: 'm', text: 'два' })
+      await c.request('agent.wait', { name: 'm', timeoutMs: 10_000 })
+      assert.equal(mode(lastArgv(m.argvOut)), 'manual')
+      // Новый выбор уровня забывает сказанное.
+      await c.request('agent.configure', { name: 'm', approval: 'ask' })
+      row = ((await c.request('agent.list')) as { sessions: Row[] }).sessions.find((r) => r.name === 'm')
+      assert.equal(row?.access?.blocked, false)
+    } finally { c.close(); await d.stop('конец теста'); home.remove(); rmSync(root, { recursive: true, force: true }) }
+  })
+  it('ревью M1, m3, m6: управляемые настройки Claude с bypass — inherit это полный доступ', async () => {
+    const home = tempHome()
+    const root = mkdtempSync(join(tmpdir(), 'pt-managed-'))
+    const i = claudeWork(root, 'i')
+    writeFileSync(home.paths.sessions, JSON.stringify({ version: 1, sessions: [
+      { name: 'i', provider: 'claude', cwd: i.cwd, mode: 'turn', createdAt: '2026-10-01T00:00:00Z', lastStatus: 'idle', lastEventId: 0 },
+    ] }))
+    // Тестовый демон читает управляемые настройки из PULT_HOME/claude-managed-settings.json; свои — без режима.
+    writeFileSync(join(home.paths.home, 'claude-settings.json'), JSON.stringify({ permissions: { defaultMode: 'auto' } }))
+    writeFileSync(join(home.paths.home, 'claude-managed-settings.json'), JSON.stringify({ permissions: { defaultMode: 'bypassPermissions' } }))
+    const d = await startTestDaemon(home)
+    const win = await connectClient(home.paths, { client: 'shell' })
+    try {
+      await win.request('agent.prompt', { name: 'i', text: 'раз' })
+      await win.request('agent.wait', { name: 'i', timeoutMs: 10_000 })
+      assert.equal(mode(lastArgv(i.argvOut)), 'manual', 'bypass администратора без согласия не действует')
+      const st = (await win.request('settings.get')) as { access: { claudeDefaultMode: string } }
+      assert.equal(st.access.claudeDefaultMode, 'bypassPermissions', 'm3: окно видит управляемый режим, без «проекта» PULT_HOME')
+      // m6: inherit без confirm при bypass — «нужно согласие», а не «нужен confirm».
+      await assert.rejects(win.request('agent.start', { name: 'n', kind: 'claude', cwd: claudeWork(root, 'n').cwd, approval: 'inherit' }), code('consent_required'))
+      await win.request('access.grantFull', GRANT)
+      await win.request('agent.start', { name: 'n', kind: 'claude', cwd: claudeWork(root, 'n2').cwd, approval: 'inherit' })
+    } finally { win.close(); await d.stop('конец теста'); home.remove(); rmSync(root, { recursive: true, force: true }) }
   })
   it('Codex: режим из ответа thread/start — подтверждён; inherit у Codex — отказ', async () => {
     const home = tempHome()
@@ -296,5 +383,114 @@ describe('шаг A: действующий режим', () => {
       assert.deepEqual([row?.access?.applied?.reported, row?.access?.applied?.full, row?.access?.red], ['readOnly/on-request', false, false])
       await assert.rejects(c.request('agent.configure', { name: 'r', approval: 'inherit' }), code('invalid_params'))
     } finally { c.close(); await d.stop('конец теста'); home.remove(); rmSync(root, { recursive: true, force: true }) }
+  })
+})
+
+describe('ревью PR #39: сузили доступ — живые процессы, повторное разрешение', () => {
+  it('M3 + Codex 6/7: повторный выбор «не разрешённого» полного уровня — не no-op; grant от окна — отказ', async () => {
+    const home = tempHome()
+    const root = mkdtempSync(join(tmpdir(), 'pt-regrant-'))
+    const d = await startTestDaemon(home)
+    const cli = await connectClient(home.paths)
+    const win = await connectClient(home.paths, { client: 'shell' })
+    try {
+      const f = claudeWork(root, 'f')
+      // Оболочка старше этой версии не вырезает grant — демон отказывает сам.
+      await assert.rejects(win.request('agent.start', { name: 'f', kind: 'claude', cwd: f.cwd, approval: 'full', confirm: true, grant: 'cli-once' }), code('forbidden'))
+      await win.request('access.grantFull', GRANT)
+      await win.request('agent.start', { name: 'f', kind: 'claude', cwd: f.cwd, approval: 'full', confirm: true })
+      await cli.request('access.revokeFull')
+      let row = ((await cli.request('agent.list')) as { sessions: Row[] }).sessions.find((r) => r.name === 'f')
+      assert.equal(row?.access?.blocked, true)
+      await assert.rejects(win.request('agent.configure', { name: 'f', approval: 'full', confirm: true, grant: 'cli-once' }), code('forbidden'))
+      // Тот же уровень без разрешения — честный отказ, а не молчаливый no-op.
+      await assert.rejects(win.request('agent.configure', { name: 'f', approval: 'full', confirm: true }), code('consent_required'))
+      // CLI `--yes` на заблокированной сессии — разовое разрешение записано.
+      const once = (await cli.request('agent.configure', { name: 'f', approval: 'full', confirm: true, grant: 'cli-once' })) as Row
+      assert.equal(once.grant, 'cli-once')
+      row = ((await cli.request('agent.list')) as { sessions: Row[] }).sessions.find((r) => r.name === 'f')
+      assert.equal(row?.access?.blocked, false)
+      await cli.request('agent.prompt', { name: 'f', text: 'раз' })
+      await cli.request('agent.wait', { name: 'f', timeoutMs: 10_000 })
+      assert.equal(mode(lastArgv(f.argvOut)), 'bypassPermissions')
+    } finally { cli.close(); win.close(); await d.stop('конец теста'); home.remove(); rmSync(root, { recursive: true, force: true }) }
+  })
+
+  it('M5 Codex: тёплый Claude с полными правами без дела — метка красная, отзыв снимает процесс', async () => {
+    const home = tempHome()
+    const root = mkdtempSync(join(tmpdir(), 'pt-warm-'))
+    const d = await startTestDaemon(home)
+    const win = await connectClient(home.paths, { client: 'shell' })
+    try {
+      const w = claudeWork(root, 'w', { scenario: 'warm' })
+      await win.request('access.grantFull', GRANT)
+      await win.request('agent.start', { name: 'w', kind: 'claude', cwd: w.cwd, approval: 'full', confirm: true, mode: 'warm' })
+      await win.request('agent.prompt', { name: 'w', text: 'раз' })
+      await win.request('agent.wait', { name: 'w', timeoutMs: 10_000 })
+      const pid = (JSON.parse(readFileSync(w.argvOut, 'utf8').trim().split('\n').at(-1) as string) as { pid: number }).pid
+      const alive = (): boolean => { try { process.kill(pid, 0); return true } catch { return false } }
+      assert.ok(alive(), 'тёплый процесс жив после хода')
+      // Человек выбирает «Спрашивать» при живом согласии — процесс с bypass без дела снимается сразу.
+      await win.request('agent.configure', { name: 'w', approval: 'ask' })
+      assert.ok(await waitFor(() => !alive(), 5000), 'тёплый процесс с полными правами снят на понижении')
+      const row = ((await win.request('agent.list')) as { sessions: Row[] }).sessions.find((r) => r.name === 'w')
+      assert.deepEqual([row?.access?.live, row?.access?.red], [false, false])
+
+      // Отзыв согласия: тёплый процесс второй сессии с полными правами тоже уходит, а пока жив — метка красная.
+      const v = claudeWork(root, 'v', { scenario: 'warm' })
+      await win.request('agent.start', { name: 'v', kind: 'claude', cwd: v.cwd, approval: 'full', confirm: true, mode: 'warm' })
+      await win.request('agent.prompt', { name: 'v', text: 'раз' })
+      await win.request('agent.wait', { name: 'v', timeoutMs: 10_000 })
+      const vpid = (JSON.parse(readFileSync(v.argvOut, 'utf8').trim().split('\n').at(-1) as string) as { pid: number }).pid
+      const before = ((await win.request('agent.list')) as { sessions: Row[] }).sessions.find((r) => r.name === 'v')
+      assert.deepEqual([before?.access?.live, before?.access?.red], [true, true], 'тёплый процесс с bypass — живой, метка красная')
+      await win.request('access.revokeFull')
+      assert.ok(await waitFor(() => { try { process.kill(vpid, 0); return false } catch { return true } }, 5000), 'отзыв снял тёплый процесс')
+    } finally { win.close(); await d.stop('конец теста'); home.remove(); rmSync(root, { recursive: true, force: true }) }
+  })
+
+  it('блокер Codex 2: отзыв → ход, начатый сервером Codex на треде с полными правами, остановлен', async () => {
+    const home = tempHome()
+    const root = mkdtempSync(join(tmpdir(), 'pt-cx-srv-'))
+    mkdirSync(join(root, 'x'), { recursive: true })
+    const logOut = join(root, 'server.jsonl')
+    writeFileSync(join(home.paths.home, '.pult-fake-scripted.json'), JSON.stringify({ logOut, bgPauseMs: 1500 }))
+    const d = await startTestDaemon(home, { codexBin: FAKE_CODEX_SCRIPTED })
+    const win = await connectClient(home.paths, { client: 'shell' })
+    const raw = (): Array<Record<string, unknown>> => (existsSync(logOut)
+      ? readFileSync(logOut, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>) : [])
+    const method = (x: Record<string, unknown>): unknown => (x['msg'] as { method?: unknown } | undefined)?.method
+    try {
+      await win.request('access.grantFull', GRANT)
+      await win.request('agent.start', { name: 'x', kind: 'codex', cwd: join(root, 'x'), approval: 'full', confirm: true })
+      await win.request('agent.prompt', { name: 'x', text: '[[server-turn]] начни' })
+      await win.request('agent.wait', { name: 'x', timeoutMs: 15_000 })
+      await win.request('access.revokeFull')
+      assert.ok(await waitFor(() => raw().some((x) => method(x) === 'turn/interrupt'), 6000), 'ход сервера не остановлен')
+      const evs = ((await win.request('events.tail', { since: 0, sessionId: 'x' })) as { events: Ev[] }).events
+      assert.match(String(evs.find((e) => e.data['access'] === 'downgraded')?.data['notice']), /Codex начал ход сам на треде с полными правами — это полный доступ, а он не разрешён/)
+      await new Promise((r) => setTimeout(r, 1800))
+      const after = ((await win.request('events.tail', { since: 0, sessionId: 'x' })) as { events: Ev[] }).events
+      assert.ok(after.some((e) => e.kind === 'status.changed' && e.data['status'] === 'interrupted'), 'ход сервера прерван')
+      assert.ok(!after.some((e) => e.kind === 'status.changed' && e.data['reason'] === 'server_turn_done'), 'ход сервера не дошёл до конца')
+    } finally { win.close(); await d.stop('конец теста'); home.remove(); rmSync(root, { recursive: true, force: true }) }
+  })
+
+  it('Codex 4: фон (субагент, команда) хода с полными правами держит красную метку после понижения', async () => {
+    const home = tempHome()
+    const root = mkdtempSync(join(tmpdir(), 'pt-cx-bg-'))
+    mkdirSync(join(root, 'b'), { recursive: true })
+    writeFileSync(join(home.paths.home, '.pult-fake-scripted.json'), JSON.stringify({ logOut: join(root, 'server.jsonl'), bgPauseMs: 2500 }))
+    const d = await startTestDaemon(home, { codexBin: FAKE_CODEX_SCRIPTED })
+    const win = await connectClient(home.paths, { client: 'shell' })
+    try {
+      await win.request('access.grantFull', GRANT)
+      await win.request('agent.start', { name: 'b', kind: 'codex', cwd: join(root, 'b'), approval: 'full', confirm: true })
+      await win.request('agent.prompt', { name: 'b', text: '[[background]] начни' })
+      await win.request('agent.wait', { name: 'b', timeoutMs: 15_000 })
+      await win.request('agent.configure', { name: 'b', approval: 'ask' })
+      const row = ((await win.request('agent.list')) as { sessions: Row[] }).sessions.find((r) => r.name === 'b')
+      assert.deepEqual([row?.access?.live, row?.access?.red, row?.access?.pending], [true, true, true], 'фон жив с полными правами — метка красная')
+    } finally { win.close(); await d.stop('конец теста'); home.remove(); rmSync(root, { recursive: true, force: true }) }
   })
 })

@@ -2330,8 +2330,14 @@ pult.collapsed. При возвращении фокуса окно обновл
   Claude», только Claude; `approvalFits`). Нет режима (`undefined`) — тоже `manual`.
 - **Миграция реестра** (`SESSIONS_VERSION = 2`, `migrateLegacyAsk`): в файле версии 1 запись Claude без `approval` → `inherit`
   (поведение идущих и возобновлённых чатов не меняется); файл сразу переписывается версией 2, повтор ничего не делает.
-  Старый демон после отката прочтёт `inherit` как незнакомое → `read-only` (тише). Импорт «Существующие чаты» —
-  явный «Спрашивать».
+  Перед первой миграцией — копия `sessions.json.bak-v1` (одна, следующие миграции её не затирают) и маркер
+  `config.json → migrations.accessLevels {at}` (`ACCESS_MIGRATION`; не `quickStart` — то имя у миграции пресетов, §5).
+  Импорт «Существующие чаты» — явный «Спрашивать».
+- **Откат и возврат** (ревью PR #39, M2). Прежний демон читает `inherit` как незнакомое → `read-only` (тише), запись
+  без `approval` (новый «Спрашивать») — как своё «без флага», то есть по `defaultMode` владельца, и переписывает файл
+  версией 1. Маркер в `config.json` переживает откат: прежний демон пишет только своё поддерево (`writeConfigSubtree`).
+  При следующем обновлении файл версии 1 с маркером — след отката: `inherit` получают только записи с `createdAt`
+  раньше маркера, остальные Claude без режима остаются явным «Спрашивать» (`manual`), а не молча расширяются.
 - **Согласие** — `src/core/consent.ts`, `PULT_HOME/consent.json` (0600) `{version, rev, providers, grantedAt|revokedAt}`.
   Пишут только `access.grantFull {confirm, version, providers: [claude, codex]}` (только клиент `shell`) и
   `access.revokeFull`; `settings.set` их поля не принимает. Демон сверяет сам: `agent.start` и `agent.configure`
@@ -2345,7 +2351,22 @@ pult.collapsed. При возвращении фокуса окно обновл
 - **Действующий режим** — `applied` записи и `AdapterDeps.applied`: Claude — спавн («отправлено») и `permissionMode`
   каждого `system/init`; Codex — `<sandbox.type>/<approvalPolicy>` ответа `thread/start|resume` (`threadReportOf`), ход с
   поправкой политики — «не подтверждено». Расхождение с `expectedReport` → заметка `{access: 'mismatch'}`, одна на пару.
-  Живой процесс — `ProviderAdapter.activeAccess` (Claude: ход или фоновые задачи; Codex: ход свой или сервера).
+  Живой процесс — `ProviderAdapter.activeAccess` (Claude: ход, фоновые задачи или тёплый процесс с полными правами;
+  Codex: ход свой или сервера и фон — с самым широким уровнем ходов, чей фон жив, `bgApproval`).
+- **Полные права без разрешения — стоп** (ревью PR #39, M1 и блокер Codex 2). Прогноз `inherit` читает и управляемые
+  настройки Claude (`claudeManagedSettingsFiles`: `/Library/Application Support/ClaudeCode/managed-settings.json` и
+  `managed-settings.d/*.json`, на Linux `/etc/claude-code/`; тестовый демон — `PULT_HOME/claude-managed-settings.json`).
+  `CLAUDE_CONFIG_DIR` не нужен: окружение ребёнка — по белому списку. Если процесс всё же сказал «полные права»
+  (`system/init: bypassPermissions` — MDM-профиль; ход сервера Codex на треде `danger-full-access`, `AppliedInfo.full`),
+  а разрешения нет (`fullAllowed` менеджера) — менеджер останавливает ход (`stop`), пишет заметку `{access: 'downgraded'}`,
+  у `inherit` запоминает сказанное (`inheritSeen`) — дальше явное «Спрашивать» до нового выбора уровня.
+- **Сузили доступ — процессы** (`ProviderAdapter.retire`, `AdapterDeps.mayRunFull`). После `access.revokeFull` и смены
+  уровня тёплый Claude с полными правами без дела снимается сразу; на границе хода такой процесс не остаётся тёплым.
+  Занятые доживают ход (метка красная, «до конца хода»). Ход сервера Codex после понижения при живом согласии идёт по
+  прежней политике треда до следующей реплики человека — метка при этом красная (m2, осознанно).
+- **Повторный выбор полного уровня «не разрешён»** — не no-op (ревью M3): окно открывает диалог согласия, демон
+  принимает тот же уровень у заблокированной сессии и проверяет разрешение; `--yes` из CLI ставит `grant: 'cli-once'`.
+  `grant` от клиента `shell` — отказ `forbidden` (оболочка старше этой версии не вырезает его из вызовов окна).
   `agent.list` отдаёт `access` (`accessView`, src/sessions/access.ts): `desired`, `applied`, `live`, `pending`, `blocked`, `red`.
 - **Окно** (`ui/src/model/access.ts`, `components/Access.tsx`): диалог согласия (фокус на «Оставить как было», Esc и Enter —
   оставить; поверх «Новой сессии» — свой слой и перехват Esc), без согласия — «Полный доступ · спрошу один раз»; с

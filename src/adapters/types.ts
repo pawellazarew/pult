@@ -187,7 +187,26 @@ export interface AdapterDeps {
    * провайдер (Claude — `system/init.permissionMode`; Codex — `<sandbox.type>/<approvalPolicy>` ответа
    * `thread/start|resume`); `null` — только отправлено. Не бросает.
    */
-  applied?(sessionId: string, info: { approval: ApprovalMode | undefined; reported: string | null }): void
+  applied?(sessionId: string, info: AppliedInfo): void
+  /**
+   * Ревью PR #39: может ли сессия СЕЙЧАС работать с полными правами — выбран полный уровень и он разрешён (согласие
+   * или `cli-once`). Нет — процесс с полными правами без дела не держится (Claude: тёплый процесс снимается). Нет
+   * функции — считается, что может (тесты адаптера без демона).
+   */
+  mayRunFull?(sessionId: string): boolean
+}
+
+/** Что адаптер говорит менеджеру о действующем доступе процесса (`AdapterDeps.applied`). */
+export interface AppliedInfo {
+  approval: ApprovalMode | undefined
+  reported: string | null
+  /**
+   * Ревью PR #39: процесс работает с полными правами по знанию адаптера, хотя провайдер этого не сказал (Codex: ход,
+   * начатый сервером на треде с `danger-full-access`). Без разрешения менеджер такой ход останавливает.
+   */
+  full?: boolean
+  /** Новый процесс или тред (Codex: заново загружен): прежнее подтверждение к нему не относится. */
+  fresh?: boolean
 }
 
 /** Что добавить сессии: серверы и правила разрешений. */
@@ -254,6 +273,11 @@ export interface ProviderAdapter {
    * никого нет. Нет метода — менеджер судит по ходу.
    */
   activeAccess?(name: string): { approval?: ApprovalMode } | null
+  /**
+   * Ревью PR #39: доступ сессии сузили (понижение, отзыв согласия). Процесс с полными правами, который сейчас без дела
+   * (тёплый Claude), снимается сразу; занятый доживает ход и сменится на его границе. Не бросает.
+   */
+  retire?(name: string): void
   /** Провайдер целиком остановлен (`provider.blocked`)? */
   blocked(): { blocked: boolean; reason?: string }
   /** Снять остановку провайдера — метод демона `provider.reset`. */

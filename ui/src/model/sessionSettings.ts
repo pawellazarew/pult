@@ -108,11 +108,14 @@ export function confirmNeeded(pick: SettingsPick, consent?: ConsentView | null, 
   return null
 }
 
-/** Выбор текущего значения — ничего не менять. */
-export function isNoop(pick: SettingsPick, agent: Pick<AgentView, 'model' | 'effort' | 'approval'>): boolean {
+/**
+ * Выбор текущего значения — ничего не менять. Ревью PR #39, M3: кроме полного уровня «не разрешён» — его повторный
+ * выбор и есть «Разрешить»: диалог согласия, затем `agent.configure` с тем же уровнем.
+ */
+export function isNoop(pick: SettingsPick, agent: Pick<AgentView, 'model' | 'effort' | 'approval' | 'access'>): boolean {
   if (pick.kind === 'model') return pick.model === agent.model
   if (pick.kind === 'effort') return pick.effort === agent.effort
-  return pick.approval === (agent.approval ?? 'ask')
+  return pick.approval === (agent.approval ?? 'ask') && agent.access?.blocked !== true
 }
 
 /**

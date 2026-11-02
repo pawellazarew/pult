@@ -74,6 +74,10 @@ describe('M8f: меню подвала', () => {
     assert.deepEqual(configureParams('w', { kind: 'approval', approval: 'full' }, true), { name: 'w', approval: 'full', confirm: true })
     assert.equal(isNoop({ kind: 'approval', approval: 'ask' }, agent()), true)
     assert.equal(isNoop({ kind: 'effort', effort: 'low' }, agent()), false)
+    // Ревью PR #39, M3: полный уровень «не разрешён» — повторный выбор открывает согласие, а не тонет в no-op.
+    const blocked = { desired: 'full', desiredFull: true, blocked: true, live: false, pending: false, red: false } as const
+    assert.equal(isNoop({ kind: 'approval', approval: 'full' }, agent({ approval: 'full', access: blocked })), false)
+    assert.equal(isNoop({ kind: 'approval', approval: 'full' }, agent({ approval: 'full', access: { ...blocked, blocked: false, red: true } })), true)
     assert.deepEqual(footerParts(agent({ approval: 'read-only' })), ['opus', 'high', 'только чтение'])
   })
   it('подвал: кнопка меню только с onConfigure (старая оболочка — просто текст)', () => {

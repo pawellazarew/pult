@@ -11,9 +11,10 @@
 // было». После рестарта демона ни один процесс провайдера не жив, поэтому при старте каждая
 // незавершённая сессия становится `cold` (инвариант «без шторма перезапусков»).
 
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from 'node:fs'
+import { closeSync, copyFileSync, constants as fsConstants, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { PultPaths } from '../core/paths.js'
+import { readMigrationMarker, writeMigrationMarker } from '../core/config.js'
 import { isApprovalMode } from '../adapters/types.js'
 import type { ApprovalMode } from '../adapters/types.js'
 import { parseSessionContext } from './context.js'
@@ -190,6 +191,12 @@ export interface SessionRecord {
    */
   applied?: AppliedAccess
   /**
+   * Ревью PR #39, M1: режим, который Claude САМ сказал в `system/init` хода без флага (`inherit`). Прогноз по файлам
+   * настроек может ошибиться (MDM-профиль, источник, которого Пульт не читает); сказанное `bypassPermissions` —
+   * правда, и без согласия такой чат дальше идёт в «Спрашивать», пока человек не выберет уровень заново.
+   */
+  inheritSeen?: string
+  /**
    * M8f: браузер, который выключила смена режима (Claude `full`, Codex `workspace`/`full` — вызовы шли бы без
    * вопроса). Возврат в режим, где браузер можно, включает его обратно — как было у человека.
    */
@@ -346,6 +353,7 @@ export function parseSessions(raw: unknown): SessionRecord[] {
         : { approval: isApprovalMode(o['approval']) ? o['approval'] : 'read-only' as const }),
       ...(o['grant'] === 'cli-once' ? { grant: 'cli-once' as const } : {}),
       ...((): { applied?: AppliedAccess } => { const a = parseApplied(o['applied']); return a ? { applied: a } : {} })(),
+      ...(typeof o['inheritSeen'] === 'string' && o['inheritSeen'] ? { inheritSeen: o['inheritSeen'] } : {}),
     })
   }
   return out
@@ -379,16 +387,29 @@ export function writeSessionsAtomic(file: string, list: SessionRecord[]): void {
   }
 }
 
+/** Имя маркера миграции уровней доступа в `config.json → migrations` (не `quickStart`: тот — у миграции пресетов). */
+export const ACCESS_MIGRATION = 'accessLevels'
+
 /**
  * Шаг A: записи Claude из реестра версии 1 без `approval` → `inherit` (см. `SESSIONS_VERSION`). Отдаёт число
  * исправленных. Файл версии 2 и новее не трогается: там отсутствие поля — уже явный «Спрашивать».
+ *
+ * `markerAt` (ревью PR #39, M2) — миграция уже была. Файл версии 1 после неё — след отката: прежний демон переписал
+ * реестр своей версией. `inherit` тогда получают только записи, заведённые ДО миграции (`createdAt` раньше маркера):
+ * у них «без флага» и было поведением. Запись новее маркера — «Спрашивать» нового демона (или сессия прежнего демона
+ * после отката) — остаётся явным «Спрашивать»: молча расширять её до `defaultMode` владельца нельзя.
  */
-export function migrateLegacyAsk(raw: unknown, list: SessionRecord[]): number {
+export function migrateLegacyAsk(raw: unknown, list: SessionRecord[], markerAt?: string): number {
   const v = raw !== null && typeof raw === 'object' ? (raw as { version?: unknown }).version : undefined
   if (typeof v === 'number' && v >= SESSIONS_VERSION) return 0
+  const cut = markerAt !== undefined ? Date.parse(markerAt) : null
   let n = 0
   for (const s of list) {
     if (s.provider !== 'claude' || s.approval !== undefined) continue
+    if (cut !== null) {
+      const at = Date.parse(s.createdAt)
+      if (!Number.isFinite(at) || at >= cut) continue
+    }
     s.approval = 'inherit'
     n++
   }
@@ -408,8 +429,19 @@ export function createRegistry(paths: PultPaths): SessionRegistry {
   const save = (): void => { writeSessionsAtomic(paths.sessions, list) }
   // Миграция — сразу на диск: иначе запись, заведённая до первого сохранения, ушла бы в файл версии 2 рядом с
   // НЕмигрированными старыми, и следующий старт уже не отличил бы их от явного «Спрашивать».
-  if (raw !== null && migrateLegacyAsk(raw, list) > 0) {
-    try { save() } catch { /* не записалось — повторится на следующем старте: файл всё ещё версии 1 */ }
+  const v = raw !== null && typeof raw === 'object' ? (raw as { version?: unknown }).version : undefined
+  if (raw !== null && !(typeof v === 'number' && v >= SESSIONS_VERSION)) {
+    // Ревью PR #39, M2 (спецификация §5 п. 1–2): копия файла до миграции и маркер в config.json. Копия — одна, первая:
+    // она и есть «как было до обновления»; повторные миграции (после отката) её не затирают.
+    const marker = readMigrationMarker(paths.config, ACCESS_MIGRATION)
+    try { copyFileSync(paths.sessions, `${paths.sessions}.bak-v1`, fsConstants.COPYFILE_EXCL) } catch { /* уже есть или не вышло — миграция не ждёт */ }
+    const n = migrateLegacyAsk(raw, list, marker?.at)
+    if (!marker) {
+      try { writeMigrationMarker(paths.config, ACCESS_MIGRATION, new Date().toISOString()) } catch { /* без маркера следующий старт мигрирует ещё раз — те же записи */ }
+    }
+    if (n > 0) {
+      try { save() } catch { /* не записалось — повторится на следующем старте: файл всё ещё версии 1 */ }
+    }
   }
   const find = (name: string): SessionRecord | undefined => list.find((s) => s.name === name)
 

@@ -136,6 +136,8 @@ interface Live {
    */
   childFlags: TurnFlags | null
   childNetKey: string
+  /** Ревью PR #39: режим, который живой процесс сказал в последнем `system/init` (`permissionMode`); до init — `null`. */
+  childReported: string | null
   /**
    * Ход запустил фоновую работу, а `background_tasks_changed` ещё не пришёл (ревью M8f, LOW 13). Живёт не дольше
    * `subagentGraceMs` (`bgExpectedTimer`) и гаснет на любом сигнале о задачах (`background_tasks`, `task_notification`):
@@ -411,6 +413,7 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
           return
         case 'turn_started':
           l.started = true
+          if (sig.permissionMode) l.childReported = sig.permissionMode
           if (sig.permissionMode && !gone()) opts.applied?.(name, { approval: l.childFlags?.approval, reported: sig.permissionMode })
           clearQuiet()
           if (!l.autoTurn) {
@@ -488,6 +491,8 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
    */
   /** M8f (ревью): процесс ещё держит фоновую работу — задачи, ход-итог или запущенное в ходе, о чём CLI ещё не сказал. */
   const bgBusy = (l: Live): boolean => l.bgTasks > 0 || l.autoTurn || l.bgExpected
+  /** Ревью PR #39: живой процесс запущен с полными правами — флагом `bypassPermissions` или так сказал его `init`. */
+  const childFull = (l: Live): boolean => l.childFlags?.approval === 'full' || l.childReported === 'bypassPermissions'
 
   /** Флаг «CLI ещё скажет о фоновых задачах» — снять (сигнал пришёл, процесс ушёл, срок вышел). */
   const clearBgExpected = (l: Live): void => {
@@ -761,6 +766,7 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
       // M8f: с чем процесс запущен — по этому граница хода решает, менять ли его.
       l.childFlags = { ...flags }
       // Шаг A: процесс с этими правами есть — до его `init` метка «ожидается» (отправлено, не подтверждено).
+      l.childReported = null
       opts.applied?.(name, { approval: flags.approval, reported: null })
       l.childNetKey = netKeyOf(netEnv)
       child.once('close', () => { closedChildren.add(child) })
@@ -851,7 +857,10 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
         l.lastTurnAt = now()
         // Жив ли процесс после хода: тёплый — всегда (после удачного хода), «на ход» — только ради
         // фоновых задач. Его дальше слушает attachIdle — ходы-итоги не теряются ни в одном режиме.
+        // Ревью PR #39: тёплый процесс с полными правами, которые сессии больше не положены (понижение или отзыв во
+        // время хода), без фоновой работы не остаётся ждать следующего хода — уходит сразу.
         const keep = outcome.ok && l.child === child && (l.spec.mode === 'warm' || keepForBackground)
+          && (keepForBackground || !childFull(l) || opts.mayRunFull?.(name) !== false)
         if (l.spec.mode === 'warm' && l.child && outcome.ok) armReaper(l)
         // Процесс ждёт задачи, о которых CLI ещё не сказал (`startedInBackground` в result без
         // `background_tasks_changed`) — граница хода считает его занятым (M8f, ревью LOW 13).
@@ -952,6 +961,7 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
           case 'turn_started':
             l.started = true
             // Шаг A: действующий режим — из `init` КАЖДОГО хода, а не из того, что Пульт отправил.
+            if (sig.permissionMode) l.childReported = sig.permissionMode
             if (sig.permissionMode && !gone()) opts.applied?.(name, { approval: l.childFlags?.approval, reported: sig.permissionMode })
             // Пришёл новый `init` внутри отсрочки — значит фоновая работа ожила.
             clearGrace()
@@ -1132,7 +1142,7 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
       live.set(spec.name, {
         spec, providerSessionId, started: false, child: null, mapper: null,
         lastTurnAt: 0, mcpConfigPath: null, busy: false, reaper: null, closing: false,
-        stopRequested: false, netEnv: {}, bgTasks: 0, idle: null, autoTurn: false, autoWaiters: [], childFlags: null, childNetKey: '{}', bgExpected: false, bgExpectedTimer: null, turnAbort: null,
+        stopRequested: false, netEnv: {}, bgTasks: 0, idle: null, autoTurn: false, autoWaiters: [], childFlags: null, childNetKey: '{}', childReported: null, bgExpected: false, bgExpectedTimer: null, turnAbort: null,
       })
       return { name: spec.name, providerSessionId } satisfies StartedSession
     },
@@ -1212,7 +1222,7 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
         started: Boolean(rec.providerSessionId),
         child: null, mapper: null, lastTurnAt: 0, mcpConfigPath: null,
         busy: false, reaper: null, closing: false, stopRequested: false, netEnv: {},
-        bgTasks: 0, idle: null, autoTurn: false, autoWaiters: [], childFlags: null, childNetKey: '{}', bgExpected: false, bgExpectedTimer: null, turnAbort: null,
+        bgTasks: 0, idle: null, autoTurn: false, autoWaiters: [], childFlags: null, childNetKey: '{}', childReported: null, bgExpected: false, bgExpectedTimer: null, turnAbort: null,
       })
     },
 
@@ -1250,14 +1260,28 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
     },
 
     activeAccess(name) {
-      // Шаг A: процесс за работой — ход, ход-итог фоновой задачи или сами фоновые задачи. Тёплый процесс без дела
-      // ничего не делает сам и сменится на границе следующего хода, если флаги другие.
+      // Шаг A: процесс за работой — ход, ход-итог фоновой задачи или сами фоновые задачи. Ревью PR #39: процесс с
+      // полными правами считается и без дела (тёплый): он жив с bypass, и метка не снимается, пока он не вышел.
       const l = live.get(name)
       const child = l?.child
       // Только чтение: вышедший процесс — «никого нет», но его уборку делает ход (`dropDeadChild`), не геттер.
       if (!l || !child || closedChildren.has(child) || child.exitCode !== null || child.signalCode !== null) return null
-      if (!l.childFlags || !(l.busy || bgBusy(l))) return null
+      if (!l.childFlags || !(l.busy || bgBusy(l) || childFull(l))) return null
       return l.childFlags.approval ? { approval: l.childFlags.approval } : {}
+    },
+
+    retire(name) {
+      // Ревью PR #39: доступ сузили. Тёплый процесс с полными правами без дела снимается сейчас — иначе он жил бы с
+      // bypass до жнеца. Занятый (ход, фоновые задачи) доживает: на границе хода его сменит новый процесс по снимку,
+      // а ход, который он начнёт сам после отзыва, менеджер остановит по его `init`.
+      const l = live.get(name)
+      if (!l || l.closing) return
+      dropDeadChild(l)
+      if (!l.child || l.busy || bgBusy(l) || !childFull(l) || opts.mayRunFull?.(name) !== false) return
+      logger.info('доступ сузили — тёплый процесс с полными правами снят', { session: name, pid: l.child.pid })
+      if (l.reaper) { clearTimeout(l.reaper); l.reaper = null }
+      releaseProcess(l)
+      status(name, 'cold', { reason: 'access_changed' })
     },
 
     blocked: () => (providerBlocked === null ? { blocked: false } : { blocked: true, reason: providerBlocked }),

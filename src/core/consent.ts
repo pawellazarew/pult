@@ -13,7 +13,7 @@
 // `rev` растёт на каждой записи: окно передаёт `consentRev`, который видело, и при расхождении получает
 // `consent_changed` — то есть «согласие дали или отозвали, пока ты смотрел старую картинку».
 
-import { readFileSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import { atomicWrite } from '../service/fsutil.js'
 
 /** Версия текста согласия. Поднимается, когда диалог обещает другое: старое согласие тогда не действует. */
@@ -73,7 +73,7 @@ export function consentView(c: Consent): ConsentView {
 }
 
 export interface ConsentStore {
-  /** Согласие с диска — КАЖДЫЙ раз (файл крошечный): ручная правка или удаление действуют сразу. */
+  /** Согласие с диска: перечитывается, когда файл сменился, — ручная правка или удаление действуют сразу. */
   read(): Consent
   grant(providers: readonly ConsentProvider[], now?: Date): Consent
   revoke(now?: Date): Consent
@@ -83,15 +83,26 @@ export function createConsentStore(file: string): ConsentStore {
   // Наибольший виденный номер записи: файл удалили или испортили — следующая запись всё равно получит номер больше,
   // и окно со старым `consentRev` не совпадёт с новым согласием случайно.
   let seenRev = 0
+  // Ревью PR #39, m5: `agent.list` раз в 4 с спрашивает согласие у каждой сессии — файл перечитывается, только когда
+  // сменился (inode, размер, mtime/ctime в наносекундах): ручная правка или удаление по-прежнему действуют сразу.
+  let cached: { key: string; c: Consent } | null = null
   const read = (): Consent => {
+    let key = 'none'
+    try {
+      const st = statSync(file, { bigint: true })
+      key = `${st.ino}|${st.size}|${st.mtimeNs}|${st.ctimeNs}`
+    } catch { /* нет файла */ }
+    if (cached && cached.key === key) return cached.c
     let c: Consent
     try { c = parseConsent(JSON.parse(readFileSync(file, 'utf8'))) } catch { c = { version: 0, rev: 0, providers: [] } }
     if (c.rev > seenRev) seenRev = c.rev
+    cached = { key, c }
     return c
   }
   const write = (c: Consent): Consent => {
     atomicWrite(file, JSON.stringify(c, null, 2) + '\n', 0o600)
     seenRev = c.rev
+    cached = null
     return c
   }
   return {

@@ -411,6 +411,23 @@ export function writeNetworkGuard(file: string, rule: GuardRule): void {
   writeConfigSubtree(file, 'network', (prev) => ({ ...prev, guard: { mode: rule.mode, countries: [...rule.countries] } }), 'правило стража сети не записано', ['guardCountries'])
 }
 
+/**
+ * Маркеры однократных миграций — `config.json → migrations.<имя>` (быстрый старт, ревью PR #39 M2). Живут в
+ * config.json, а не в файле, который мигрируют: прежний демон при откате переписывает `sessions.json` своей версией
+ * и о маркере не знает, а чужие ключи config.json он сохраняет (`writeConfigSubtree` пишет только своё поддерево).
+ */
+export function readMigrationMarker(file: string, name: string): { at: string } | null {
+  try {
+    const raw = JSON.parse(readFileSync(file, 'utf8')) as { migrations?: Record<string, unknown> }
+    const m = raw?.migrations?.[name] as { at?: unknown } | undefined
+    return m && typeof m.at === 'string' && Number.isFinite(Date.parse(m.at)) ? { at: m.at } : null
+  } catch { return null }
+}
+
+export function writeMigrationMarker(file: string, name: string, at: string): void {
+  writeConfigSubtree(file, 'migrations', (prev) => ({ ...prev, [name]: { at } }), `маркер миграции ${name} не записан`)
+}
+
 function writeConfigSubtree(file: string, key: string, next: (prev: Record<string, unknown>) => Record<string, unknown>, what: string, drop: readonly string[] = []): void {
   let raw: Record<string, unknown> = {}
   let text: string | null = null

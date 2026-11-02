@@ -328,8 +328,11 @@ export function NewAgentDialog({ taken, pickFolder, onCreate, onGrantFull, onClo
   pickFolder(): Promise<string | null>
   /** Пути перетащенных и скопированных файлов; нет — старая оболочка: перетаскивание и ⌘V файлов как раньше. */
   filePaths?: FilePathSource | null
-  /** `consentRev` — номер согласия на полный доступ, который видело окно (шаг A). */
-  onCreate(form: NewAgentForm, consentRev?: number): Promise<string | null>
+  /**
+   * `consentRev` — номер согласия на полный доступ, который видело окно (шаг A). Ответ — текст ошибки или
+   * `{consent: true}`: демон сказал, что выбранный уровень — полный доступ без согласия (ревью PR #39, m3).
+   */
+  onCreate(form: NewAgentForm, consentRev?: number): Promise<string | { consent: true; text: string } | null>
   /** Шаг A: «Разрешить полный доступ» в диалоге согласия — `access.grantFull`; строка — отказ. Нет — старое окно. */
   onGrantFull?(): Promise<ConsentView | string>
   onClose(): void
@@ -360,6 +363,10 @@ export function NewAgentDialog({ taken, pickFolder, onCreate, onGrantFull, onClo
   // Шаг A: согласие на полный доступ — то, что видело окно; после «Разрешить» — ответ демона. Выбор полного доступа без
   // согласия открывает диалог (один раз на всё время), а не меняет поле сразу.
   const [consent, setConsent] = useState<ConsentView | null>(settings?.access?.consent ?? null)
+  // Ревью PR #39 (Codex 10): согласие дали или отозвали снаружи (другое окно, CLI) — окно перечитало настройки, и форма
+  // берёт новый снимок, а не шлёт старый `consentRev` до переоткрытия.
+  const outerRev = settings?.access?.consent?.rev
+  useEffect(() => { if (settings?.access?.consent) setConsent(settings.access.consent) }, [outerRev])
   const inheritMode = settings?.access?.claudeDefaultMode ?? null
   const [consentAsk, setConsentAsk] = useState<NewAgentForm['approval'] | null>(null)
   const [consentBusy, setConsentBusy] = useState(false)
@@ -438,7 +445,8 @@ export function NewAgentDialog({ taken, pickFolder, onCreate, onGrantFull, onClo
     try {
       const files = await prompt.finalize(form.name)
       const e = await onCreate({ ...form, prompt: attachmentPrompt(form.prompt, files) }, consent?.rev)
-      if (e) setErr(e)
+      // Демон знает настройки папки, а форма — нет (m3): уровень оказался полным доступом — диалог согласия.
+      if (e && typeof e === 'object') { setConsentErr(null); setConsentAsk(form.approval) } else if (e) setErr(e)
     } catch (e) { setErr(e instanceof Error ? e.message : 'Не удалось подготовить вложения. Попробуй ещё раз.') }
     finally { setBusy(false) }
   }

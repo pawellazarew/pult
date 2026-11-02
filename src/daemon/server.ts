@@ -78,7 +78,7 @@ import { createLiveChannel } from './live.js'
 import type { LiveChannel } from './live.js'
 import { LIVE_CURSOR_BASE } from '../sessions/turnPhase.js'
 import {
-  approvalBrowserRefusal, browserDirs, BYPASS_REFUSAL, claudeDefaultMode, createBrowserInstaller, ensureBrowserDirs, findChrome, PLAYWRIGHT_MCP_VERSION, sweepDeadBrowserDirs,
+  approvalBrowserRefusal, browserDirs, BYPASS_REFUSAL, claudeDefaultMode, claudeManagedSettingsFiles, createBrowserInstaller, ensureBrowserDirs, findChrome, PLAYWRIGHT_MCP_VERSION, sweepDeadBrowserDirs,
 } from '../mcp/browser.js'
 import type { BrowserInstaller, InstallResult } from '../mcp/browser.js'
 import { browserDoctorItems, bypassDoctorItems, mcpDoctorItems } from '../mcp/doctor.js'
@@ -352,11 +352,21 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
   // `~/.claude.json` только читается. Тестовый демон смотрит в файл внутри PULT_HOME — как `claudeRoot`
   // внешних сессий: настоящий домашний каталог машины в тест не попадает.
   const claudeUserFile = opts.testMode ? join(paths.home, 'claude.json') : join(homedir(), '.claude.json')
-  /** Настройки Claude, откуда берётся `permissions.defaultMode`: пользователь, затем проект (старшие перекрывают). */
+  /** Файл настроек Claude владельца (`~/.claude/settings.json`; тестовый демон — внутри PULT_HOME). */
+  const claudeUserSettings = opts.testMode ? join(paths.home, 'claude-settings.json') : join(homedir(), '.claude', 'settings.json')
+  /** Управляемые настройки Claude (managed settings) — старше всех и действуют при любом `--setting-sources`. */
+  const claudeManaged = (): string[] => claudeManagedSettingsFiles(opts.testMode ? paths.home : undefined)
+  /**
+   * Настройки Claude, откуда берётся `permissions.defaultMode`: пользователь, проект, локальные, затем управляемые
+   * (старшие перекрывают). Ревью PR #39 (M1, блокер Codex 1): управляемые — тоже: `defaultMode: bypassPermissions`
+   * администратора даёт полный доступ так же, как свой. `CLAUDE_CONFIG_DIR` сюда не нужен: окружение ребёнка — по
+   * белому списку (src/env/allowlist.ts), и claude Пульта всегда читает `$HOME/.claude/settings.json`.
+   */
   const claudeSettings = (cwd: string): string[] => [
-    opts.testMode ? join(paths.home, 'claude-settings.json') : join(homedir(), '.claude', 'settings.json'),
+    claudeUserSettings,
     join(cwd, '.claude', 'settings.json'),
     join(cwd, '.claude', 'settings.local.json'),
+    ...claudeManaged(),
   ]
   /**
    * M8d (ревью): у Claude в режиме `ask` флага нет — действует `defaultMode` владельца. Окно показывает ДЕЙСТВУЮЩИЙ
@@ -364,11 +374,12 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
    * только из наборов, которые сессии разрешено читать (`settingSources`). Нет настройки — `default`.
    */
   const claudeEffectiveMode = (rec: Pick<SessionRecord, 'cwd' | 'settingSources'>): string => {
-    const [user, project, local] = claudeSettings(rec.cwd) as [string, string, string]
+    const [user, project, local, ...managed] = claudeSettings(rec.cwd) as [string, string, string, ...string[]]
     const allowed = rec.settingSources ? new Set(rec.settingSources.split(',').map((x) => x.trim())) : null
     const files = [['user', user], ['project', project], ['local', local]]
       .filter(([k]) => !allowed || allowed.has(k as string)).map(([, f]) => f as string)
-    return claudeDefaultMode(files) ?? 'default'
+    // Управляемые — после всех и без фильтра: `--setting-sources` их не отключает.
+    return claudeDefaultMode([...files, ...managed]) ?? 'default'
   }
   // --- быстрый старт, шаг A: согласие на полный доступ ------------------------------------------
   // Демон проверяет согласие САМ в каждой точке применения (ревью Codex B2): `agent.start`, `agent.configure`, снимок
@@ -378,6 +389,13 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
   /** `defaultMode` владельца, который действует у сессии `inherit` (только Claude). */
   const inheritModeOf = (provider: string, cwd: string, settingSources?: string): string | null =>
     provider === 'claude' ? claudeEffectiveMode({ cwd, ...(settingSources ? { settingSources } : {}) }) : null
+  /**
+   * `defaultMode` сессии `inherit` — с поправкой на то, что Claude САМ сказал в `system/init` (ревью PR #39, M1):
+   * прогноз по файлам мог ошибиться (MDM-профиль), а сказанное `bypassPermissions` — правда до нового выбора уровня.
+   */
+  const inheritFor = (rec: Pick<SessionRecord, 'provider' | 'cwd' | 'settingSources' | 'inheritSeen'>): string | null =>
+    rec.provider !== 'claude' ? null
+      : rec.inheritSeen === 'bypassPermissions' ? 'bypassPermissions' : inheritModeOf(rec.provider, rec.cwd, rec.settingSources)
   /** Полный доступ разрешён этой сессии: разовое `--yes` CLI или действующее согласие на провайдера. */
   const fullAllowed = (provider: ConsentProvider, grant: string | undefined): boolean =>
     grant === 'cli-once' || consentCovers(consent.read(), provider)
@@ -385,8 +403,15 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
    * Полный доступ при заведении или смене режима: `confirm: true` (защита от опечатки, ревью M8d) и разрешение —
    * разовое (`grant: cli-once`, только вместе с `confirm`) или согласие. Отдаёт `grant` для записи.
    */
-  const checkFull = (method: string, provider: ConsentProvider, p: Record<string, unknown>): 'cli-once' | undefined => {
+  const checkFull = (method: string, provider: ConsentProvider, p: Record<string, unknown>, level: ApprovalMode = 'full'): 'cli-once' | undefined => {
     if (p['confirm'] !== true) {
+      // Ревью PR #39, m6: `inherit` полным доступом делает `defaultMode` владельца, а не опечатка в уровне. Окно могло не
+      // знать его (прогноз устарел) — ответ «нужно согласие», а с согласием подтверждать нечего: его дал диалог.
+      if (level === 'inherit') {
+        if (consentCovers(consent.read(), provider)) return undefined
+        throw new ManagerError(ERROR_CODES.consentRequired, `${method}: в настройках Claude defaultMode: bypassPermissions — «как в настройках» `
+          + 'здесь значит полный доступ, а он не разрешён: разреши его в окне или из терминала разово: --yes')
+      }
       throw new ManagerError(ERROR_CODES.invalidParams, `${method}: approval full — агент делает что угодно без вопросов, песочницы нет; нужен confirm: true`)
     }
     if (p['grant'] === 'cli-once') return 'cli-once'
@@ -404,7 +429,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
   const gateNoted = new Map<string, string>()
   const accessGate = (rec: SessionRecord): { approval: ApprovalMode | undefined; notice?: string } => {
     const a = rec.approval ?? 'ask'
-    const inherit = a === 'inherit' ? inheritModeOf(rec.provider, rec.cwd, rec.settingSources) : null
+    const inherit = a === 'inherit' ? inheritFor(rec) : null
     if (!isFullLevel(rec.provider, a, inherit) || fullAllowed(rec.provider, rec.grant)) {
       gateNoted.delete(rec.name)
       return { approval: rec.approval }
@@ -422,7 +447,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
   }
   /** Доступ сессии для окна и CLI (`access` в `agent.list` и ответах). */
   const accessOf = (rec: SessionRecord & { liveApproval?: ApprovalMode | null }): ReturnType<typeof accessView> => {
-    const inherit = rec.provider === 'claude' ? claudeEffectiveMode(rec) : null
+    const inherit = inheritFor(rec)
     return accessView({
       provider: rec.provider, ...(rec.approval ? { approval: rec.approval } : {}), inheritMode: inherit,
       applied: rec.applied ?? null, liveApproval: rec.liveApproval ?? null,
@@ -430,12 +455,39 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     })
   }
 
+  /**
+   * Сессия может работать с полными правами СЕЙЧАС: выбран полный уровень (или `inherit` при bypass) и он разрешён.
+   * Нет — процесс с полными правами без дела не держится (адаптеры: `mayRunFull`, `retire`).
+   */
+  const mayRunFull = (name: string): boolean => {
+    const rec = manager.list().find((r) => r.name === name)
+    if (!rec || (rec.provider !== 'claude' && rec.provider !== 'codex')) return false
+    const a = rec.approval ?? 'ask'
+    return isFullLevel(rec.provider, a, a === 'inherit' ? inheritFor(rec) : null) && fullAllowed(rec.provider, rec.grant)
+  }
+  /** Сессия выбрала полный уровень, а разрешения нет («не разрешён»): повторный выбор того же уровня — не no-op. */
+  const blockedNow = (rec: SessionRecord): boolean => {
+    if (rec.provider !== 'claude' && rec.provider !== 'codex') return false
+    const a = rec.approval ?? 'ask'
+    return isFullLevel(rec.provider, a, a === 'inherit' ? inheritFor(rec) : null) && !fullAllowed(rec.provider, rec.grant)
+  }
+
+  /**
+   * Ревью PR #39 (major Codex 6): разовое `--yes` — только из терминала. Оболочка из прежних версий не вырезает `grant`
+   * из вызовов окна, и рендерер мог бы прислать его через мост; окно разрешает полный доступ согласием.
+   */
+  const refuseShellGrant = (client: string | undefined, p: Record<string, unknown>, method: string): void => {
+    if (client === 'shell' && p['grant'] !== undefined) {
+      throw new ManagerError(ERROR_CODES.forbidden, `${method}: grant (разовое --yes) — только из терминала; окно разрешает полный доступ согласием`)
+    }
+  }
   /** О3: в режиме `bypassPermissions` браузер Claude не включается (src/mcp/browser.ts BYPASS_REFUSAL). */
   const refuseBypass = (kind: string, cwd: string, approval?: ApprovalMode): void => {
     // M8d: и режим подтверждений самой сессии — «полный доступ» у Claude, «без вопросов» у Codex.
     const byMode = approvalBrowserRefusal(kind, approval)
     if (byMode) throw new ManagerError(ERROR_CODES.invalidParams, byMode)
-    if (kind === 'claude' && claudeDefaultMode(claudeSettings(cwd)) === 'bypassPermissions') {
+    // Ревью PR #39, m4: `defaultMode` владельца действует только у `inherit` — остальные уровни идут с явным флагом.
+    if (kind === 'claude' && approval === 'inherit' && claudeDefaultMode(claudeSettings(cwd)) === 'bypassPermissions') {
       throw new ManagerError(ERROR_CODES.invalidParams, BYPASS_REFUSAL)
     }
   }
@@ -498,6 +550,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     emit: (draft) => { manager.emit(draft) },
     live: (name, sig) => { manager.live(name, sig) },
     applied: (name, info) => { manager.applied(name, info) },
+    mayRunFull,
     askPermission: (req) => broker.request(req),
     askKeys,
     ...(netCheck ? { netCheck } : {}),
@@ -546,6 +599,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     emit: (draft) => { manager.emit(draft) },
     live: (name, sig) => { manager.live(name, sig) },
     applied: (name, info) => { manager.applied(name, info) },
+    mayRunFull,
     askPermission: (req) => broker.request(req),
     // Разрешения Codex живут в ОБЩЕМ процессе app-server: когда он умирает, отвечать по их
     // id уже некому, и вопрос обязан уйти из Inbox отказом, а не висеть (инвариант 5).
@@ -586,7 +640,8 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     adapters: { claude, codex },
     broker,
     accessGate,
-    inheritMode: (rec) => inheritModeOf(rec.provider, rec.cwd, rec.settingSources),
+    inheritMode: (rec) => inheritFor(rec),
+    fullAllowed: (rec) => (rec.provider === 'claude' || rec.provider === 'codex') && fullAllowed(rec.provider, rec.grant),
     modelChoices: (provider) => (provider === 'codex' ? codexChoices() : Promise.resolve(null)),
     ...(opts.queueEditHoldMs !== undefined ? { queueEditHoldMs: opts.queueEditHoldMs } : {}),
     ...(titler ? { titler } : {}),
@@ -762,7 +817,8 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     network: { guard: { mode: config.guard.mode, countries: [...config.guard.countries] }, exits: lastNetExits() },
     codexRules: rules.list(),
     // Шаг A: согласие на полный доступ и действующий `defaultMode` Claude владельца (уровень «Как в настройках Claude»).
-    access: { consent: consentView(consent.read()), providers: [...CONSENT_PROVIDERS], claudeDefaultMode: inheritModeOf('claude', paths.home) },
+    // Ревью PR #39, m3: папка формы ещё не выбрана — только файлы владельца (свой и управляемые), без «проекта» PULT_HOME.
+    access: { consent: consentView(consent.read()), providers: [...CONSENT_PROVIDERS], claudeDefaultMode: claudeDefaultMode([claudeUserSettings, ...claudeManaged()]) ?? 'default' },
   })
   const projects = createProjectStore(join(paths.home, 'projects.json'))
   // `PULT_TEST_PROVIDERS=run` (только вместе с PULT_TEST=1): проверка входа идёт по-настоящему — в фальшивые CLI
@@ -929,18 +985,21 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
         }
         if (p['confirm'] !== undefined && typeof p['confirm'] !== 'boolean') throw new ManagerError(ERROR_CODES.invalidParams, 'agent.configure: confirm — true | false')
         if (p['grant'] !== undefined && p['grant'] !== 'cli-once') throw new ManagerError(ERROR_CODES.invalidParams, 'agent.configure: grant — только cli-once')
+        refuseShellGrant(conn.client, p, 'agent.configure')
         if (p['model'] === undefined && p['effort'] === undefined && p['approval'] === undefined) {
           throw new ManagerError(ERROR_CODES.invalidParams, 'agent.configure: нечего менять — model, effort или approval')
         }
         // Шаг A: полный доступ (и «как в настройках Claude» при bypass у владельца) — только с подтверждением И
-        // разрешением: согласием или разовым `--yes`. Тот же режим, что уже стоит, — не смена: проверять нечего.
+        // разрешением: согласием или разовым `--yes`. Тот же режим, что уже стоит, — не смена, кроме полного уровня без
+        // разрешения (ревью PR #39, M3): повторный выбор — это просьба разрешить, и проверка идёт как у смены.
         let grant: 'cli-once' | undefined
         const target = manager.list().find((r) => r.name === String(p['name'] ?? ''))
-        if (target && p['approval'] !== undefined && p['approval'] !== (target.approval ?? 'ask')) {
+        if (target && p['approval'] !== undefined && (p['approval'] !== (target.approval ?? 'ask') || blockedNow(target))) {
           const to = p['approval'] as ApprovalMode
           if (!approvalFits(target.provider, to)) throw new ManagerError(ERROR_CODES.invalidParams, 'agent.configure: режим «как в настройках Claude» есть только у Claude')
-          if (isFullLevel(target.provider, to, to === 'inherit' ? inheritModeOf(target.provider, target.cwd, target.settingSources) : null)) {
-            grant = checkFull('agent.configure', target.provider, p)
+          const inherit = to !== 'inherit' ? null : to === target.approval ? inheritFor(target) : inheritModeOf(target.provider, target.cwd, target.settingSources)
+          if (isFullLevel(target.provider, to, inherit)) {
+            grant = checkFull('agent.configure', target.provider, p, to)
           }
         }
         const r = await manager.configure({
@@ -980,6 +1039,9 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
         let c
         try { c = consent.revoke() } catch (e) { throw new ManagerError(ERROR_CODES.internal, `отзыв не записан: ${(e as Error).message}`) }
         logger.info('полный доступ отозван', { rev: c.rev, by: `${conn.client}#${conn.id}` })
+        // Ревью PR #39 (блокеры Codex 2, M5): живые процессы с полными правами без дела снимаются сразу (тёплый Claude);
+        // занятые доживают ход, а ход, который процесс или сервер Codex начнёт сам, менеджер остановит по его режиму.
+        for (const r of manager.list()) (r.provider === 'codex' ? codex : claude).retire?.(r.name)
         return { consent: consentView(c) }
       }
       case 'settings.set': {
@@ -1134,13 +1196,14 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
           throw new ManagerError(ERROR_CODES.invalidParams, `agent.start: approval — ${APPROVAL_LIST}`)
         }
         if (p['grant'] !== undefined && p['grant'] !== 'cli-once') throw new ManagerError(ERROR_CODES.invalidParams, 'agent.start: grant — только cli-once')
+        refuseShellGrant(conn.client, p, 'agent.start')
         const approval = (p['approval'] ?? 'ask') as ApprovalMode
         if (!approvalFits(kind, approval)) throw new ManagerError(ERROR_CODES.invalidParams, 'agent.start: режим «как в настройках Claude» (inherit) есть только у Claude')
         // Ревью M8d: «полный доступ» — только с явным подтверждением (`confirm: true`; CLI — по `--yes`). Шаг A: и с
         // разрешением — согласием окна (`consent.json`, сверка `consentRev`) или разовым `grant: cli-once` из CLI.
         // `inherit` при `defaultMode: bypassPermissions` у владельца — тоже полный доступ. Отказ ДО заведения чего-либо.
         const startGrant = isFullLevel(kind, approval, approval === 'inherit' ? inheritModeOf(kind, String(p['cwd'] ?? ''), str(p['settingSources'])) : null)
-          ? checkFull('agent.start', kind, p) : undefined
+          ? checkFull('agent.start', kind, p, approval) : undefined
         const browser = browserParam(p['browser'], 'agent.start')
         if (browser) refuseBypass(kind, String(p['cwd'] ?? ''), approval)
         const rec = publicRecord(await manager.start({
@@ -1278,7 +1341,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
           const pub = withBrowser(publicRecord(rec))
           // M8d: действующий режим Claude у `inherit` (флага нет — решают настройки владельца). Шаг A: доступ чата —
           // желаемый, применённый, ожидающий и красная метка (src/sessions/access.ts).
-          const eff = rec.provider === 'claude' && rec.approval === 'inherit' ? { claudeMode: claudeEffectiveMode(rec) } : {}
+          const eff = rec.provider === 'claude' && rec.approval === 'inherit' ? { claudeMode: inheritFor(rec) ?? 'default' } : {}
           const access = { access: accessOf(rec) }
           return attention ? { ...pub, ...eff, ...access, attention } : { ...pub, ...eff, ...access }
         }) }

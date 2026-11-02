@@ -23,7 +23,7 @@ import { MAX_LINE_BYTES } from '../core/ndjson.js'
 import { redactString } from '../core/log.js'
 import type { PultPaths } from '../core/paths.js'
 import type { EventStore } from '../core/store.js'
-import type { ApprovalMode, ProviderAdapter, SessionSettingsPatch, TurnOutcome, TurnSettings } from '../adapters/types.js'
+import type { AppliedInfo, ApprovalMode, ProviderAdapter, SessionSettingsPatch, TurnOutcome, TurnSettings } from '../adapters/types.js'
 import type { PermBroker } from '../perm/broker.js'
 import { mergeContext, parseContextData } from './context.js'
 import type { SessionContext } from './context.js'
@@ -298,7 +298,7 @@ export interface SessionManager {
    * Шаг A: адаптер сообщает, с чем запущен процесс: `reported: null` — только отправлено (спавн, ход с поправкой
    * политики), строка — режим, который подтвердил сам провайдер. Расхождение с ожидаемым — заметка в ленте.
    */
-  applied(name: string, info: { approval: ApprovalMode | undefined; reported: string | null }): void
+  applied(name: string, info: AppliedInfo): void
   /**
    * Фаза хода сессии (0.3.5, src/sessions/phaseTracker.ts) — с текстом размышлений: её отдаёт живой канал окна.
    * `null` — хода нет.
@@ -372,6 +372,11 @@ export interface ManagerOptions {
   accessGate?(rec: SessionRecord): { approval: ApprovalMode | undefined; notice?: string }
   /** Шаг A: действующий `defaultMode` владельца для сессии Claude (`inherit`) — сверка ответа провайдера. */
   inheritMode?(rec: SessionRecord): string | null
+  /**
+   * Ревью PR #39 (M1, блокер Codex 2): полный доступ этой сессии разрешён (согласие или разовое `--yes`)? Процесс,
+   * который сказал, что работает с полными правами, без разрешения останавливается. Нет функции — не проверяется.
+   */
+  fullAllowed?(rec: SessionRecord): boolean
 }
 
 /** Отказ хода, пока ставится обновление: окно оставляет текст в поле ввода. */
@@ -1060,7 +1065,17 @@ export function createManager(opts: ManagerOptions): SessionManager {
         if (e instanceof ConfigureError) throw new ManagerError(e.code, e.message)
         throw e
       }
-      if (!hasChanges(changes)) return { record: cur, changes, when: 'next_turn' }
+      if (!hasChanges(changes)) {
+        // Ревью PR #39, M3: тот же полный уровень, а демон проверил разрешение (`grant` — разовое `--yes`) — это смена
+        // разрешения, а не no-op: без неё сессия «не разрешён» так и шла бы в «Спрашивать».
+        if (p.grant === 'cli-once' && p.approval !== undefined && (cur.approval === 'full' || cur.approval === 'inherit') && cur.grant !== 'cli-once') {
+          const record = registry.update(name, { grant: 'cli-once' }) as SessionRecord
+          emit({ sessionId: name, provider: cur.provider, kind: 'session.configured', data: { changes, access: 'granted', notice: 'полный доступ разрешён разово (--yes) — со следующего хода' } })
+          opts.logger.info('разовое разрешение полного доступа', { session: name })
+          return { record, changes, when: 'next_turn' }
+        }
+        return { record: cur, changes, when: 'next_turn' }
+      }
       // Папка сессии накрывает PULT_HOME (сессия из sessions.json до этой проверки): режим шире «Только чтение» дал бы
       // агенту править config.json Пульта без вопроса. Проверяется настоящая папка сессии (у worktree — его папка).
       if (changes.approval && changes.approval.to !== 'read-only' && coversPultHome(cur.cwd, opts.paths.home)) {
@@ -1077,6 +1092,8 @@ export function createManager(opts: ManagerOptions): SessionManager {
       }
       // Шаг A: разовое разрешение CLI живёт ровно до смены режима: новый полный доступ — с новым `--yes` или на согласии.
       if (changes.approval) patch.grant = p.grant === 'cli-once' && (next.approval === 'full' || next.approval === 'inherit') ? 'cli-once' : undefined
+      // Ревью PR #39, M1: сказанный Claude режим `inherit` — до нового выбора уровня.
+      if (changes.approval) patch.inheritSeen = undefined
       // Браузер — по правилу О3/M8d: в режиме без вопросов его вызовы шли бы мимо Inbox. Выключенный режимом
       // браузер помнится и возвращается, когда режим снова его позволяет.
       if (changes.approval) {
@@ -1116,6 +1133,8 @@ export function createManager(opts: ManagerOptions): SessionManager {
         } catch (re) { opts.logger.error('откат настроек в адаптере не удался', { session: name, error: (re as Error).message }) }
         throw e
       }
+      // Ревью PR #39 (M5 Codex): доступ сузили — процесс с полными правами без дела (тёплый Claude) снимается сейчас.
+      if (changes.approval) adapter?.retire?.(name)
       // Шаг A: смена доступа, пока жив процесс с прежними правами, — «применится, когда закончится текущий ход».
       const pending = !!changes.approval && liveApprovalOf(cur) !== null
       emit({ sessionId: name, provider: cur.provider, kind: 'session.configured', data: { changes, when, ...(pending ? { pending: true } : {}) } })
@@ -1206,6 +1225,16 @@ export function createManager(opts: ManagerOptions): SessionManager {
         releasePrompting(name)
         emit({ sessionId: name, provider: rec.provider, kind: 'status.changed', data: { status: 'failed', error: UPDATING_MESSAGE, errorCode: 'updating' } })
         throw new ManagerError('updating', UPDATING_MESSAGE)
+      }
+      // Ревью PR #39, m7: пока шли resume, страж сети и MCP (секунды), полный доступ могли отозвать — проверка ещё раз,
+      // прямо перед отправкой. Понизить можно, расширить — нет: снимок хода остаётся снимком.
+      if (opts.accessGate && gate.approval !== undefined) {
+        const again = opts.accessGate(rec)
+        if (again.approval !== gate.approval) {
+          if (again.approval) at.approval = again.approval
+          else delete at.approval
+          if (again.notice) emit({ sessionId: name, provider: rec.provider, kind: 'session.configured', data: { changes: {}, notice: again.notice, access: 'downgraded' } })
+        }
       }
       // `send` резолвится, когда ход ЗАПУЩЕН, а не когда закончен: id уходит клиенту сразу,
       // конца ждут отдельным `agent.wait`.
@@ -1536,15 +1565,29 @@ export function createManager(opts: ManagerOptions): SessionManager {
       const rec = registry.get(name)
       if (!rec) return
       const approval = info.approval ?? 'ask'
-      const inheritMode = approval === 'inherit' ? opts.inheritMode?.(rec) ?? null : null
-      const prev = appliedNow.get(name) ?? rec.applied
-      // Тот же уровень уже подтверждён провайдером — спавн нового процесса на ходу («отправлено») подтверждения не снимает.
-      if (info.reported === null && prev && prev.approval === approval && prev.confirmed) return
+      // Ревью PR #39, M1: `inherit` — что Claude САМ сказал о режиме; сказанный bypass действует и для проверки хода.
+      if (rec.provider === 'claude' && approval === 'inherit' && info.reported !== null && rec.inheritSeen !== info.reported) {
+        try { registry.update(name, { inheritSeen: info.reported }) } catch (e) {
+          opts.logger.warn('режим «как в настройках» не записан в реестр', { session: name, error: (e as Error).message })
+        }
+      }
+      const cur = registry.get(name) ?? rec
+      const inheritMode = approval === 'inherit' ? opts.inheritMode?.(cur) ?? null : null
+      const reportedFull = reportIsFull(rec.provider, info.reported)
+      // Ревью PR #39 (M1, блокер Codex 2): процесс сказал «полные права», а разрешения нет — ход не идёт ни мгновения
+      // дольше: прогноз по настройкам ошибся (MDM, источник, которого Пульт не читает) или ход начал сам процесс/сервер
+      // после отзыва. Стоп — как у человека; дальше проверка хода даст явное «Спрашивать».
+      const fullNow = reportedFull || info.full === true
+      const forbidden = fullNow && opts.fullAllowed !== undefined && !opts.fullAllowed(cur)
+      // Тот же уровень уже подтверждён провайдером В ЭТОМ демоне (ревью Codex 8: не прошлым процессом с диска) — спавн
+      // нового процесса на ходу («отправлено») подтверждения не снимает; новый тред Codex (`fresh`) — снимает.
+      const mem = appliedNow.get(name)
+      if (!forbidden && info.reported === null && info.full === undefined && !info.fresh && mem && mem.approval === approval && mem.confirmed) return
       const next: AppliedAccess = {
         approval,
         reported: info.reported,
         confirmed: info.reported !== null,
-        full: info.reported !== null ? reportIsFull(rec.provider, info.reported) : isFullLevel(rec.provider, approval, inheritMode),
+        full: info.reported !== null ? reportedFull || info.full === true : info.full ?? isFullLevel(rec.provider, approval, inheritMode),
         at: new Date().toISOString(),
       }
       appliedNow.set(name, next)
@@ -1554,6 +1597,19 @@ export function createManager(opts: ManagerOptions): SessionManager {
           opts.logger.warn('действующий доступ не записан в реестр', { session: name, error: (e as Error).message })
         }
       }
+      const who = rec.provider === 'claude' ? 'Claude' : 'Codex'
+      if (forbidden) {
+        const said = info.full === true ? `${who} начал ход сам на треде с полными правами` : `${who} запущен в режиме ${reportWords(rec.provider, info.reported ?? '')}`
+        emit({ sessionId: name, provider: rec.provider, kind: 'session.configured', data: {
+          changes: {}, access: 'downgraded', ...(info.reported !== null ? { reported: info.reported } : {}),
+          notice: `${said} — это полный доступ, а он не разрешён: ход остановлен, дальше — «Спрашивать»`,
+        } })
+        opts.logger.warn('процесс с полными правами без разрешения — ход остановлен', { session: name, reported: info.reported, approval })
+        void api.stop(name).catch((e: unknown) => {
+          opts.logger.error('ход с полными правами без разрешения не остановлен', { session: name, error: (e as Error).message })
+        })
+        return
+      }
       if (info.reported === null) return
       // Провайдер сказал не то, что ожидалось для уровня (`defaultMode` переписал режим, сервер не принял политику):
       // метка строится по сказанному, а в ленте — одна заметка на расхождение.
@@ -1562,7 +1618,6 @@ export function createManager(opts: ManagerOptions): SessionManager {
       const key = `${expected}|${info.reported}`
       if (mismatchNoted.get(name) === key) return
       mismatchNoted.set(name, key)
-      const who = rec.provider === 'claude' ? 'Claude' : 'Codex'
       emit({ sessionId: name, provider: rec.provider, kind: 'session.configured', data: {
         changes: {}, access: 'mismatch', reported: info.reported, expected,
         notice: `${who} запущен в режиме ${reportWords(rec.provider, info.reported)}, ожидался ${reportWords(rec.provider, expected)}`
