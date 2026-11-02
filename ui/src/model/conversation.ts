@@ -168,6 +168,21 @@ export function resultText(content: unknown, limit = 4000): string | undefined {
   return s.length > limit ? `${s.slice(0, limit)}…` : s
 }
 
+/**
+ * Вход инструмента для раскрытия «Полный ввод и вывод»: поле на строку `ключ: значение`. Многострочная строка
+ * (команда с heredoc, текст файла у Write, old_string/new_string у Edit) идёт блоком `ключ: |` — своими строками
+ * с отступом 2, а не одной строкой с `\n` внутри, как у JSON.stringify. Остальное — JSON, вложенное — с отступом.
+ */
+export function toolInputText(input: Record<string, unknown>): string {
+  if (!Object.keys(input).length) return '{}'
+  const indent = (s: string): string => s.split('\n').map((l) => `  ${l}`).join('\n')
+  return Object.entries(input).map(([k, v]) => {
+    if (typeof v === 'string' && v.includes('\n')) return `${k}: |\n${indent(v)}`
+    const json = JSON.stringify(v, null, 2) ?? String(v)
+    return json.includes('\n') ? `${k}:\n${indent(json)}` : `${k}: ${json}`
+  }).join('\n')
+}
+
 function scopePath(items: readonly ConvItem[], parentId: string | undefined): number[] {
   if (!parentId) return []
   return findAgentPath(items, parentId) ?? []

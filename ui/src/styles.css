@@ -494,7 +494,9 @@ button { font: inherit; color: inherit; }
 .md code.md-icode { cursor: pointer; }
 .md code.md-icode:hover { background: var(--accent-soft); }
 .md code.md-icode.md-flash { background: var(--ok-soft); }
-.md pre { margin: 0 0 8px; padding: 9px 11px; background: var(--sunk); border: 1px solid var(--hair); overflow: auto; font-family: var(--mono); font-size: 12px; line-height: 1.5; }
+/* Блок кода идёт сверху вниз строками как есть (отступы на месте), а длинная строка переносится внутри колонки —
+   без горизонтальной прокрутки: оверлейные полосы macOS её не показывают, хвост команды просто пропадает за краем. */
+.md pre { margin: 0 0 8px; padding: 9px 11px; background: var(--sunk); border: 1px solid var(--hair); overflow: auto; font-family: var(--mono); font-size: 12px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 4; }
 .md pre code { background: none; padding: 0; }
 /* Блок кода: шапка с языком и «Копировать». Шапка не выделяется — копия реплики целиком без неё. */
 .md-code { margin: 0 0 8px; background: var(--sunk); border: 1px solid var(--hair); }
@@ -638,18 +640,16 @@ button { font: inherit; color: inherit; }
 .diff { margin: 7px 10px 0; border: 1px solid var(--hair); font-family: var(--mono); font-size: 11.5px; line-height: 1.5; max-height: 280px; overflow: auto; background: var(--ground); }
 .diff-h { display: flex; gap: 10px; padding: 3px 8px; background: var(--sunk); border-bottom: 1px solid var(--hair); font-size: 10.5px; color: var(--mut); position: sticky; top: 0; }
 .diff-h .a { color: var(--add); } .diff-h .d { color: var(--del); }
-.dl { display: grid; grid-template-columns: 34px 14px 1fr; white-space: pre; }
+/* Строки диффа переносятся, а не уходят за край под невидимую прокрутку (оверлейные полосы macOS её
+   не показывают) — и в ленте, и в узкой колонке Inbox. Номер и знак остаются в своих колонках, перенос
+   идёт под текстом строки; minmax(0,1fr) — иначе длинный токен снова раздвигает колонку. */
+.dl { display: grid; grid-template-columns: 34px 14px minmax(0, 1fr); white-space: pre; }
 .dl .no { color: var(--faint); text-align: right; padding-right: 6px; user-select: none; }
 .dl .op { color: var(--faint); user-select: none; text-align: center; }
-.dl .tx { padding-right: 8px; }
+.dl .tx { padding-right: 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .dl.add { background: var(--add-soft); } .dl.add .op, .dl.add .tx { color: var(--add); }
 .dl.del { background: var(--del-soft); } .dl.del .op, .dl.del .tx { color: var(--del); }
 .dl.gap { color: var(--faint); background: var(--sunk); font-size: 10.5px; padding-left: 48px; display: block; }
-/* Узкая колонка Inbox: длинные строки переносятся, а не уходят за край под невидимую прокрутку
-   (оверлейные полосы macOS её не показывают). minmax(0,1fr) — иначе длинный токен снова
-   раздвигает колонку. В ленте дифф широкий и остаётся без переноса. */
-.inbox .dl { grid-template-columns: 34px 14px minmax(0, 1fr); }
-.inbox .dl .tx { white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* --- Inbox ------------------------------------------------------------------------ */
 .inbox { display: flex; flex-direction: column; min-height: 0; background: var(--panel); border-left: 1px solid var(--line); }
