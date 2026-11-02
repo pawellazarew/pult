@@ -11,7 +11,7 @@ import type { SessionContext } from '../model/context.js'
 import type { AgentItem, ConvItem, ItemState, NoticeItem, ToolItem } from '../model/conversation.js'
 import { composerCmdEnter, searchKeys } from '../model/hotkeys.js'
 import { adjacentUser, itemForEvent, userMarks } from '../model/search.js'
-import { formatSeconds, messageSource, resultText, toolSummary } from '../model/conversation.js'
+import { formatSeconds, messageSource, resultText, toolInputText, toolSummary } from '../model/conversation.js'
 import { obj } from '../model/types.js'
 import type { QueueItem } from '../model/types.js'
 import type { ProviderUsage } from '../model/usage.js'
@@ -688,7 +688,7 @@ function ToolRow({ it, loadEvents }: { it: ToolItem; loadEvents?: (ids: number[]
             <details className="tool-raw" open={!failure}>
               <summary>Полный ввод и вывод</summary>
               {it.exitCode !== undefined && <div className="k">Код завершения: {it.exitCode}</div>}
-              <div className="k">вход</div><pre>{JSON.stringify(shown.input, null, 2)}</pre>
+              <div className="k">вход</div><pre>{toolInputText(shown.input)}</pre>
               {shown.result !== undefined && <><div className="k">результат</div><pre>{shown.result}</pre></>}
             </details>
             {detail === 'loading' && <div className="k" data-testid="tool-detail-loading">загружаю полный вход и вывод…</div>}
