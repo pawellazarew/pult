@@ -24,7 +24,7 @@ export type AgentRecord = SessionRecord & { pendingPermissions: number; attentio
   access?: AccessView }
 
 /** Провайдеры агентов (без служебного `pult`). */
-export type AgentProvider = 'claude' | 'codex'
+export type AgentProvider = 'claude' | 'codex' | 'zcode'
 
 /** Тон статуса — одна палитра на весь интерфейс (docs/12 §3). */
 export type Tone = 'ok' | 'run' | 'wait' | 'fail' | 'queued'

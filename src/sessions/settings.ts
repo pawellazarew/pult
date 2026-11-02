@@ -6,7 +6,7 @@
 import type { ApprovalMode } from '../adapters/types.js'
 import { APPROVAL_LIST, approvalFits, isApprovalMode } from '../adapters/types.js'
 
-export type Provider = 'claude' | 'codex'
+export type Provider = 'claude' | 'codex' | 'zcode'
 
 /**
  * Пресеты Claude — те, что предлагает форма «+ Сессия» (дословно то, что принимает CLI: `--model` знает
@@ -51,7 +51,7 @@ export const APPROVAL_WORDS: Readonly<Record<ApprovalMode, string>> = {
  * пропустят), а предупреждение в «+ Сессия» и в `pult agent start`: в любом режиме, кроме «Только чтение», агент
  * правит файлы под папкой — а там настройки самих агентов и оболочки.
  */
-export const HOME_CWD_WARNING = 'папка — домашняя или выше: агент сможет менять ~/.claude, ~/.codex, ~/.zshrc и др. без вопросов '
+export const HOME_CWD_WARNING = 'папка — домашняя или выше: агент сможет менять ~/.claude, ~/.codex, ~/.zcode, ~/.zshrc и др. без вопросов '
   + 'в режимах «Правки в папке без вопросов» и «Полный доступ» (у Codex — и в «Спрашивать»)'
 
 // --- смена модели, усилия и режима у живой сессии -------------------------------------------------
@@ -140,6 +140,12 @@ function choiceFor(list: readonly ModelChoice[], model: string | null | undefine
  */
 export function planConfigure(cur: ConfigureTarget, req: ConfigureRequest, list: readonly ModelChoice[] | null, windows: ReadonlyMap<string, number>): ConfigureChanges {
   const changes: ConfigureChanges = {}
+  // ZCode (маршрут A): у его CLI нет флага модели и усилия — смена честно отклоняется, а не молча
+  // запоминается и не применяется. Режим подтверждений (`--mode`) меняется как у всех.
+  if (cur.provider === 'zcode') {
+    if (req.model !== undefined) throw new ConfigureError('invalid_params', 'у ZCode модель задаётся аккаунтом Z.AI — выбора модели нет')
+    if (req.effort !== undefined) throw new ConfigureError('invalid_params', 'у ZCode нет переключения усилия — модель и уровень продуманности задаёт аккаунт')
+  }
   if (req.model !== undefined) {
     if (typeof req.model !== 'string' || !MODEL_RE.test(req.model)) throw new ConfigureError('invalid_params', 'модель — непустое имя без пробелов')
     if (list && list.length && req.model !== cur.model && !list.some((m) => m.id === req.model)) {
@@ -227,7 +233,7 @@ export interface ProviderDefaults {
 export interface NewSessionSettings {
   /** Подставлять в «+ Сессия» последний выбор окна (иначе — умолчания). */
   rememberLast: boolean
-  defaults: { provider?: Provider; claude: ProviderDefaults; codex: ProviderDefaults }
+  defaults: { provider?: Provider; claude: ProviderDefaults; codex: ProviderDefaults; zcode: ProviderDefaults }
 }
 
 /** Последний выбор окна: те же поля плюс папка. `full` не хранится. */
@@ -235,18 +241,23 @@ export interface LastUsed {
   provider?: Provider
   claude?: ProviderDefaults
   codex?: ProviderDefaults
+  zcode?: ProviderDefaults
   cwd?: string
   at?: string
 }
 
 export function defaultNewSession(): NewSessionSettings {
-  return { rememberLast: true, defaults: { claude: {}, codex: {} } }
+  return { rememberLast: true, defaults: { claude: {}, codex: {}, zcode: {} } }
 }
 
 const PROVIDER_KEYS = new Set(['model', 'effort', 'approval', 'mode', 'browser', 'worktree'])
 
-/** Блокирует ли режим браузер (тот же список, что `approvalBrowserRefusal` в src/mcp/browser.ts). */
+/**
+ * Блокирует ли режим браузер (тот же список, что `approvalBrowserRefusal` в src/mcp/browser.ts).
+ * ZCode (маршрут A) браузера не получает ни в каком режиме: у его CLI нет канала MCP-конфига.
+ */
 export function modeBlocksBrowser(provider: Provider, mode: ApprovalMode | undefined): boolean {
+  if (provider === 'zcode') return true
   return provider === 'claude' ? mode === 'full' : mode === 'workspace' || mode === 'full'
 }
 
@@ -310,13 +321,14 @@ export function parseNewSession(x: unknown, strict: boolean): { value: NewSessio
     if (d === null || typeof d !== 'object' || Array.isArray(d)) bad('.defaults — объект')
     else {
       const dd = d as Record<string, unknown>
-      for (const k of Object.keys(dd)) if (k !== 'provider' && k !== 'claude' && k !== 'codex' && strict) bad(`.defaults.${k} — незнакомое поле`)
+      for (const k of Object.keys(dd)) if (k !== 'provider' && k !== 'claude' && k !== 'codex' && k !== 'zcode' && strict) bad(`.defaults.${k} — незнакомое поле`)
       if (dd['provider'] !== undefined) {
-        if (dd['provider'] === 'claude' || dd['provider'] === 'codex') value.defaults.provider = dd['provider']
-        else bad('.defaults.provider — claude | codex')
+        if (dd['provider'] === 'claude' || dd['provider'] === 'codex' || dd['provider'] === 'zcode') value.defaults.provider = dd['provider']
+        else bad('.defaults.provider — claude | codex | zcode')
       }
       value.defaults.claude = parseProviderDefaults('claude', dd['claude'], '.defaults.claude', bad, strict)
       value.defaults.codex = parseProviderDefaults('codex', dd['codex'], '.defaults.codex', bad, strict)
+      value.defaults.zcode = parseProviderDefaults('zcode', dd['zcode'], '.defaults.zcode', bad, strict)
     }
   }
   return { value, warnings }
@@ -327,7 +339,7 @@ export function parseLastUsed(x: unknown): LastUsed {
   if (x === null || typeof x !== 'object' || Array.isArray(x)) return {}
   const o = x as Record<string, unknown>
   const out: LastUsed = {}
-  if (o['provider'] === 'claude' || o['provider'] === 'codex') out.provider = o['provider']
+  if (o['provider'] === 'claude' || o['provider'] === 'codex' || o['provider'] === 'zcode') out.provider = o['provider']
   const soft = (p: Provider): ProviderDefaults | undefined => {
     const v = o[p]
     if (v === undefined) return undefined
@@ -337,6 +349,7 @@ export function parseLastUsed(x: unknown): LastUsed {
   }
   const c = soft('claude'); if (c) out.claude = c
   const x2 = soft('codex'); if (x2) out.codex = x2
+  const z = soft('zcode'); if (z) out.zcode = z
   if (typeof o['cwd'] === 'string' && o['cwd'].startsWith('/') && o['cwd'].length <= 4096 && !/[\p{Cc}\p{Cf}]/u.test(o['cwd'])) out.cwd = o['cwd']
   if (typeof o['at'] === 'string') out.at = o['at']
   return out

@@ -19,10 +19,14 @@ import { atomicWrite } from '../service/fsutil.js'
 /** Версия текста согласия. Поднимается, когда диалог обещает другое: старое согласие тогда не действует. */
 export const CONSENT_VERSION = 1
 
-export type ConsentProvider = 'claude' | 'codex'
+export type ConsentProvider = 'claude' | 'codex' | 'zcode'
 
-/** Провайдеры, которых называет диалог согласия: одно согласие на обоих (решение лида 3). */
-export const CONSENT_PROVIDERS: readonly ConsentProvider[] = ['claude', 'codex']
+/**
+ * Провайдеры, которых называет диалог согласия: одно согласие на всех (решение лида 3). ZCode (PR #40) — тоже здесь:
+ * его `--mode yolo` — такой же «что угодно без вопросов». Согласие, данное до ZCode (`['claude', 'codex']`), его не
+ * покрывает: полный доступ ZCode спросит диалог ещё раз, а тот запишет всех троих.
+ */
+export const CONSENT_PROVIDERS: readonly ConsentProvider[] = ['claude', 'codex', 'zcode']
 
 export interface Consent {
   version: number
@@ -34,7 +38,7 @@ export interface Consent {
   revokedAt?: string
 }
 
-const isProvider = (x: unknown): x is ConsentProvider => x === 'claude' || x === 'codex'
+const isProvider = (x: unknown): x is ConsentProvider => x === 'claude' || x === 'codex' || x === 'zcode'
 
 /** Разбор не верит файлу: кривое поле — согласия нет (тише, а не шире). `rev` берётся, если он целый. */
 export function parseConsent(raw: unknown): Consent {

@@ -1,7 +1,8 @@
-// Быстрый старт, шаг A: диалог согласия на полный доступ (один раз на оба провайдера, кадр 04) и раздел
+// Быстрый старт, шаг A: диалог согласия на полный доступ (один раз на всех провайдеров, кадр 04) и раздел
 // «Настройки → Доступ» (отзыв). Текст сверен с кодом: Claude — src/adapters/claude/argv.ts (`bypassPermissions`,
 // правила Пульта на PULT_HOME/run), Codex — `codexThreadPolicy` (`danger-full-access` + `never`; вопрос, который Codex
-// всё же задаст, адаптер отдаёт брокеру — в Inbox, сам не разрешает), браузер — src/mcp/browser.ts
+// всё же задаст, адаптер отдаёт брокеру — в Inbox, сам не разрешает), ZCode — src/adapters/zcode/argv.ts (`--mode yolo`;
+// канала вопросов у маршрута A нет, режим в потоке CLI не называет), браузер — src/mcp/browser.ts
 // `approvalBrowserRefusal` (выключается только встроенный браузер Пульта; свои MCP-серверы и shell — нет).
 
 import { useEffect, useRef, useState } from 'react'
@@ -36,7 +37,7 @@ export function ConsentDialog({ onGrant, onKeep, busy = false, error = null }: {
   return (
     <div className="scrim scrim-top" onMouseDown={(e) => { if (e.target === e.currentTarget) onKeep() }}>
       <div className="dlg consent" role="alertdialog" aria-modal="true" aria-labelledby="consent-h" aria-describedby="consent-lead" data-testid="consent-dialog">
-        <div className="dlg-h"><span className="consent-icon" aria-hidden="true"><Icon name="shield" /></span><h2 id="consent-h">Полный доступ: Claude и Codex</h2></div>
+        <div className="dlg-h"><span className="consent-icon" aria-hidden="true"><Icon name="shield" /></span><h2 id="consent-h">Полный доступ: Claude, Codex и ZCode</h2></div>
         <div className="dlg-b">
           <p id="consent-lead" className="consent-lead">Агент перестаёт спрашивать разрешения: правит и удаляет файлы где угодно, ставит пакеты, ходит в сеть
             и запускает команды с твоими правами на этом Mac. Песочницы нет.</p>
@@ -47,10 +48,13 @@ export function ConsentDialog({ onGrant, onKeep, busy = false, error = null }: {
             <dt className="who-codex">Codex</dt>
             <dd><code>danger-full-access</code> + <code>never</code>: песочницы нет, разрешений не просит. Если Codex всё же потребует
               подтверждение (например, для части MCP-вызовов), Пульт его сам не даст — оно придёт в Inbox.</dd>
+            <dt className="who-zcode">ZCode</dt>
+            <dd><code>--mode yolo</code>: что угодно без вопросов. Вопросов в Inbox у ZCode нет вовсе, а свой режим он не сообщает —
+              метка у его чата «не подтверждено».</dd>
           </dl>
           <ul className="consent-list">
             <li>Встроенный браузер Пульта в этом режиме выключен. Твои MCP-серверы и shell — нет.</li>
-            <li>Разрешение одно на оба провайдера. Дальше не спрашиваю: чаты с полным доступом помечены красным.</li>
+            <li>Разрешение одно на всех провайдеров. Дальше не спрашиваю: чаты с полным доступом помечены красным.</li>
             <li>Сам он не включается: ссылка <span className="mono">pult://new</span> его не даёт — только твой выбор.</li>
             <li>Вернуть — другой доступ в меню чата, со следующего хода. Отозвать разрешение — Настройки → Доступ.</li>
           </ul>
@@ -93,7 +97,7 @@ export function AccessSection({ consent, onRevoke }: {
         {consent?.granted && <button type="button" className="btn btn-sm" disabled={busy} onClick={() => void revoke()} data-testid="access-revoke">
           {busy ? 'Отзываю…' : 'Отозвать'}</button>}
       </div>
-      <span className="note">Одно разрешение на Claude и Codex; его проверяет демон на каждом ходу. После отзыва идущий ход доживает с красной
+      <span className="note">Одно разрешение на Claude, Codex и ZCode; его проверяет демон на каждом ходу. После отзыва идущий ход доживает с красной
         меткой, следующий ход любой сессии с полным доступом идёт в «Спрашивать». Разовое <span className="mono">--yes</span> из терминала
         действует только на свою сессию и сюда не пишется.</span>
       {err && <span className="err" role="alert" data-testid="access-error">{err}</span>}

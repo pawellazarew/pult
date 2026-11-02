@@ -51,7 +51,7 @@ describe('окно: доступ — согласие один раз и мет�
     await consent.waitFor({ timeout: 5000 })
     assert.equal(await h.win.evaluate(() => document.activeElement?.getAttribute('data-testid')), 'consent-keep', 'фокус — на «Оставить как было»')
     const body = (await consent.textContent()) ?? ''
-    assert.match(body, /Полный доступ: Claude и Codex/)
+    assert.match(body, /Полный доступ: Claude, Codex и ZCode/)
     assert.match(body, /bypassPermissions/)
     assert.match(body, /danger-full-access/)
     assert.match(body, /Твои MCP-серверы и shell — нет/)

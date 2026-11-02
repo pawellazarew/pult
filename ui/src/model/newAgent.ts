@@ -38,6 +38,8 @@ export interface ProviderPreset {
 export const PRESETS: Readonly<Record<AgentProvider, ProviderPreset>> = {
   claude: { models: CLAUDE_MODELS, efforts: CLAUDE_EFFORTS, defaultModel: CLAUDE_DEFAULT_MODEL, defaultEffort: CLAUDE_DEFAULT_EFFORT },
   codex: { models: [], efforts: CODEX_EFFORTS_FALLBACK, defaultModel: null, defaultEffort: 'medium' },
+  // ZCode (маршрут A): у CLI нет флага --model — модель задаёт аккаунт Z.AI, выбора в форме нет.
+  zcode: { models: [], efforts: [], defaultModel: null, defaultEffort: '' },
 }
 
 export interface NewAgentForm {
@@ -92,6 +94,13 @@ const APPROVAL_HINT: Readonly<Record<AgentProvider, Record<ApprovalMode, string>
     // У Codex уровня нет: демон его не примет. Строка — на случай записи, пришедшей от Claude-формы.
     inherit: 'у Codex такого уровня нет',
   },
+  zcode: {
+    'read-only': 'режим plan: только чтение и планирование, правки недоступны',
+    ask: 'guarded: безопасное делает сам, опасное отклоняет; вопросов в Inbox не будет — ограничения объяснит в ответе',
+    workspace: 'правки файлов применяются сами (edit); остальное — по правилам ZCode',
+    full: 'что угодно без вопросов (yolo); свой режим ZCode не сообщает — метка «не подтверждено»',
+    inherit: 'у ZCode такого уровня нет',
+  },
 }
 /**
  * Подсказка под выбором режима — для провайдера формы. У `inherit` — действующий `defaultMode` словами
@@ -134,8 +143,10 @@ export function homeWarning(form: Pick<NewAgentForm, 'cwd' | 'approval' | 'workt
 /**
  * Режим, при котором браузер для агента не включается (тот же список, что у демона — src/mcp/browser.ts
  * `approvalBrowserRefusal`): Claude `full`; Codex `workspace` и `full` (спрашивать некого).
+ * ZCode (маршрут A) браузера не получает ни в одном режиме: у его CLI нет канала MCP-конфига.
  */
 export function approvalBlocksBrowser(provider: AgentProvider, mode: ApprovalMode): boolean {
+  if (provider === 'zcode') return true
   return provider === 'claude' ? mode === 'full' : mode === 'workspace' || mode === 'full'
 }
 
@@ -184,6 +195,11 @@ function applyProviderDefaults(f: NewAgentForm, d: ProviderDefaults | undefined,
  * «Подставлять последний выбор») < явный контекст (папка проекта, ссылка). Реплика не подставляется никогда;
  * папка из последнего выбора — только когда форму открыли без папки. `full` из последнего выбора — никогда.
  */
+/** Умолчания/последний выбор конкретного провайдера из ответа `settings.get`. */
+function providerPick(x: { claude?: ProviderDefaults; codex?: ProviderDefaults; zcode?: ProviderDefaults } | undefined, provider: AgentProvider): ProviderDefaults | undefined {
+  return x ? x[provider] : undefined
+}
+
 export function prefillForm(ctx: { cwd?: string | null; prefill?: NewSessionPrefill | null }, settings: SettingsReply | null, taken: readonly string[]): NewAgentForm {
   const ns = settings?.newSession
   const last = ns?.rememberLast ? settings?.lastUsed : undefined
@@ -193,9 +209,9 @@ export function prefillForm(ctx: { cwd?: string | null; prefill?: NewSessionPref
   const cwd = ctx.prefill ? (ctx.prefill.pathRejected ? undefined : ctx.prefill.path) : ctx.cwd ?? (last?.cwd || undefined)
   if (cwd) f = { ...f, cwd, name: suggestName(cwd, taken) }
   if (ctx.prefill?.prompt) f = { ...f, prompt: ctx.prefill.prompt }
-  const defaults = ns ? (provider === 'codex' ? ns.defaults.codex : ns.defaults.claude) : undefined
+  const defaults = providerPick(ns?.defaults, provider)
   f = applyProviderDefaults(f, defaults, false, undefined)
-  if (last) f = applyProviderDefaults(f, provider === 'codex' ? last.codex : last.claude, true, defaults)
+  if (last) f = applyProviderDefaults(f, providerPick(last, provider), true, defaults)
   return f
 }
 
@@ -222,7 +238,7 @@ export function linkPrefill(x: unknown): NewSessionPrefill | null {
   // 10 000 знаков в main — до 20 000 единиц UTF-16 здесь.
   if (typeof t === 'string' && t.length <= 20_000 && !PROMPT_BAD_RE.test(t) && t.split('\n').length <= LINK_PROMPT_MAX_LINES) out.prompt = t
   const v = o['provider']
-  if (v === 'claude' || v === 'codex') out.provider = v
+  if (v === 'claude' || v === 'codex' || v === 'zcode') out.provider = v
   return out
 }
 
@@ -243,10 +259,10 @@ export function switchProviderPrefill(form: NewAgentForm, provider: AgentProvide
   let f = switchProvider(form, provider)
   const ns = settings?.newSession
   if (!ns) return f
-  const defaults = provider === 'codex' ? ns.defaults.codex : ns.defaults.claude
+  const defaults = providerPick(ns.defaults, provider)
   f = applyProviderDefaults(f, defaults, false, undefined)
   const last = ns.rememberLast ? settings?.lastUsed : undefined
-  if (last) f = applyProviderDefaults(f, provider === 'codex' ? last.codex : last.claude, true, defaults)
+  if (last) f = applyProviderDefaults(f, providerPick(last, provider), true, defaults)
   return f
 }
 
@@ -308,8 +324,9 @@ export function validateForm(form: NewAgentForm, taken: readonly string[]): Form
 }
 
 /**
- * Параметры `agent.start` из формы (без пустых полей). `consentRev` — номер согласия на полный доступ, который видело
- * окно (шаг A): демон сверит его с файлом и, если согласие тем временем отозвали, ответит `consent_changed`.
+ * Параметры `agent.start` из формы (без пустых полей). У ZCode модели и усилия нет — поля не шлются. `consentRev` —
+ * номер согласия на полный доступ, который видело окно (шаг A): демон сверит его с файлом и, если согласие тем
+ * временем отозвали, ответит `consent_changed`.
  */
 export function startParams(form: NewAgentForm, consentRev?: number): Record<string, unknown> {
   const b = form.worktree.trim()
@@ -317,8 +334,8 @@ export function startParams(form: NewAgentForm, consentRev?: number): Record<str
     name: form.name,
     kind: form.provider,
     cwd: form.cwd,
-    ...(form.model ? { model: form.model } : {}),
-    ...(form.effort ? { effort: form.effort } : {}),
+    ...(form.provider !== 'zcode' && form.model ? { model: form.model } : {}),
+    ...(form.provider !== 'zcode' && form.effort ? { effort: form.effort } : {}),
     ...(b ? { worktree: b } : {}),
     ...(form.browser ? { browser: form.browserHeaded ? { headed: true } : true } : {}),
     // `ask` не шлём: так и старый демон (без M8d) примет параметры, и запись останется без поля.

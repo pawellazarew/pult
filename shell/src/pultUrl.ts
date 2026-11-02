@@ -26,7 +26,7 @@ export const MAX_PATH = 4096
 export const MAX_URL_LEN = 128 * 1024
 /** Вторая годная ссылка раньше этого — отброшена: серия ссылок подряд — не работа человека. */
 export const LINK_GAP_MS = 1500
-export const PROVIDERS = ['claude', 'codex'] as const
+export const PROVIDERS = ['claude', 'codex', 'zcode'] as const
 
 export type PultLink =
   | { type: 'session'; name: string }
@@ -98,7 +98,7 @@ export function checkPultUrl(raw: unknown): PultUrlCheck {
     }
     const v = one('provider')
     if (v !== null && v !== '') {
-      if (!(PROVIDERS as readonly string[]).includes(v)) return no('provider не claude и не codex')
+      if (!(PROVIDERS as readonly string[]).includes(v)) return no('provider не claude, codex и не zcode')
       link.provider = v as NewSessionPrefill['provider']
     }
     return { ok: true, link }

@@ -21,7 +21,7 @@ const html = (c: unknown, props: Record<string, unknown>): string =>
 const text = (s: string): string => s.replace(/<[^>]+>/g, ' ').replace(/&#x27;/g, "'").replace(/&quot;/g, '"').replace(/\s+/g, ' ').trim()
 const noop = (): void => {}
 
-const GRANTED: ConsentView = { rev: 3, version: 1, current: 1, granted: true, providers: ['claude', 'codex'], grantedAt: '2026-11-02T11:00:00Z' }
+const GRANTED: ConsentView = { rev: 3, version: 1, current: 1, granted: true, providers: ['claude', 'codex', 'zcode'], grantedAt: '2026-11-02T11:00:00Z' }
 const NONE: ConsentView = { rev: 0, version: 0, current: 1, granted: false, providers: [] }
 const REVOKED: ConsentView = { rev: 4, version: 1, current: 1, granted: false, providers: [], revokedAt: '2026-11-03T09:00:00Z' }
 const view = (over: Partial<AccessView> = {}): AccessView => ({ desired: 'ask', desiredFull: false, blocked: false, live: false, pending: false, red: false, ...over })
@@ -52,7 +52,7 @@ describe('шаг A: согласие в окне', () => {
   it('диалог: оба провайдера, честные границы (MCP, браузер Пульта), «Оставить как было» и «Разрешить»', () => {
     const out = html(ConsentDialog, { onGrant: noop, onKeep: noop })
     const t = text(out)
-    assert.match(t, /Полный доступ: Claude и Codex/)
+    assert.match(t, /Полный доступ: Claude, Codex и ZCode/)
     assert.match(t, /bypassPermissions .* ask\/deny/)
     assert.match(t, /danger-full-access \+ never/)
     assert.match(t, /Пульт его сам не даст — оно придёт в Inbox/)
@@ -134,5 +134,22 @@ describe('шаг A: меню доступа в подвале', () => {
     const rows = items(settingsMenu(agent({ provider: 'codex', model: 'gpt-x' }), null, new Map(), NONE))
     assert.equal(rows.length, 4)
     assert.equal(rows.some((r) => r.type === 'item' && r.pick.kind === 'approval' && r.pick.approval === 'inherit'), false)
+  })
+  it('ZCode (PR #40): четыре уровня, полный — под тем же согласием; согласие на двоих его не покрывает; чип «не подтверждено»', () => {
+    const z = agent({ provider: 'zcode' })
+    delete (z as { model?: string }).model
+    delete (z as { effort?: string }).effort
+    const rows = items(settingsMenu(z, null, new Map(), NONE))
+    assert.deepEqual(rows.map(label), ['Только чтение', 'Спрашивать', 'Правки в папке без вопросов', 'Полный доступ · спрошу один раз'])
+    assert.equal(items(settingsMenu(z, null, new Map(), GRANTED)).map(label)[3], 'Полный доступ')
+    const OLD: ConsentView = { ...GRANTED, providers: ['claude', 'codex'] }
+    assert.equal(needsConsent('zcode', 'full', null, OLD), true, 'согласие до ZCode — диалог ещё раз')
+    assert.equal(needsConsent('zcode', 'full', null, GRANTED), false)
+    assert.equal(confirmNeeded({ kind: 'approval', approval: 'full' }, OLD, 'zcode'), 'full')
+    const c = accessChip({ provider: 'zcode', approval: 'full', access: view({ desired: 'full', desiredFull: true, red: true, applied: { approval: 'full', reported: null, confirmed: false, full: true, at: 'x' } }) })
+    assert.deepEqual([c.state, c.suffix, c.red], ['unconfirmed', 'не подтверждено', true])
+    assert.match(c.title, /последний процесс запущен с «Полный доступ» \(не подтверждено\)/)
+    const d = text(html(ConsentDialog, { onGrant: noop, onKeep: noop }))
+    assert.match(d, /ZCode --mode yolo/)
   })
 })

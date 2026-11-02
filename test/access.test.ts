@@ -26,7 +26,7 @@ type Access = { desired: string; desiredFull: boolean; blocked: boolean; red: bo
 type Row = { name: string; approval?: string; grant?: string; access?: Access }
 
 const code = (want: string) => (e: { code?: string }): boolean => e.code === want
-const GRANT = { confirm: true, version: 1, providers: ['claude', 'codex'] }
+const GRANT = { confirm: true, version: 1, providers: ['claude', 'codex', 'zcode'] }
 
 /** Папка сессии с настройкой фальшивого claude: сценарий, куда писать argv, `defaultMode`/подмена режима init. */
 function claudeWork(root: string, name: string, extra: Record<string, unknown> = {}): { cwd: string; argvOut: string } {
@@ -555,5 +555,89 @@ describe('ревью PR #39: сузили доступ — живые проце
       assert.deepEqual([row?.access?.live, row?.access?.red], [true, true], 'ход ask поверх full-фона')
       await win.request('agent.stop', { name: 'b' })
     } finally { win.close(); await d.stop('конец теста'); home.remove(); rmSync(root, { recursive: true, force: true }) }
+  })
+})
+
+// Слияние с PR #40: ZCode — третий провайдер. Полный доступ у него — `--mode yolo` и живёт под тем же согласием:
+// без разрешения ход идёт в явном «Спрашивать» (`--mode guarded`), режим CLI не сообщает — метка «не подтверждено».
+describe('шаг A × ZCode: уровни, согласие, действующий режим', () => {
+  /** Папка сессии фальшивого zcode: сценарий и куда писать argv. */
+  const zcodeWork = (root: string, name: string): { cwd: string; argvOut: string } => {
+    const cwd = join(root, name)
+    mkdirSync(cwd, { recursive: true })
+    const argvOut = join(root, `${name}.argv.jsonl`)
+    writeFileSync(join(cwd, '.pult-fake.json'), JSON.stringify({ scenario: 'simple', speed: 0, argvOut }))
+    return { cwd, argvOut }
+  }
+  const zmode = (argv: string[]): string | undefined => { const i = argv.indexOf('--mode'); return i >= 0 ? argv[i + 1] : undefined }
+
+  it('чистые правила: full — полный, inherit нет; ожидать от CLI нечего; ZCODE_MODE и inherit → guarded', async () => {
+    const { ZCODE_MODE } = await import('../dist/adapters/zcode/argv.js')
+    const { approvalFits } = await import('../dist/adapters/types.js')
+    assert.equal(isFullLevel('zcode', 'full'), true)
+    assert.equal(isFullLevel('zcode', 'inherit', 'bypassPermissions'), false)
+    assert.equal(approvalFits('zcode', 'inherit'), false)
+    assert.equal(expectedReport('zcode', 'full'), null, 'поток stream-json режима не называет')
+    assert.equal(reportIsFull('zcode', 'yolo'), false)
+    assert.deepEqual(ZCODE_MODE, { 'read-only': 'plan', ask: 'guarded', workspace: 'edit', full: 'yolo', inherit: 'guarded' })
+    // Согласие, данное до ZCode, его не покрывает: диалог спросит ещё раз и запишет всех троих.
+    assert.equal(consentCovers(parseConsent({ version: 1, rev: 1, providers: ['claude', 'codex'], grantedAt: '2026-11-02T10:00:00Z' }), 'zcode'), false)
+    assert.equal(consentCovers(parseConsent({ version: 1, rev: 1, providers: ['claude', 'codex', 'zcode'], grantedAt: '2026-11-02T10:00:00Z' }), 'zcode'), true)
+  })
+
+  it('без согласия full отказан (start, configure); с согласием — --mode yolo, метка красная и «не подтверждено»; отзыв — guarded', async () => {
+    const home = tempHome()
+    const root = mkdtempSync(join(tmpdir(), 'pt-zc-acc-'))
+    const d = await startTestDaemon(home)
+    const cli = await connectClient(home.paths)
+    const win = await connectClient(home.paths, { client: 'shell' })
+    try {
+      const z = zcodeWork(root, 'z')
+      await assert.rejects(win.request('agent.start', { name: 'z', kind: 'zcode', cwd: z.cwd, approval: 'full' }), code('invalid_params'), 'без confirm')
+      await assert.rejects(win.request('agent.start', { name: 'z', kind: 'zcode', cwd: z.cwd, approval: 'full', confirm: true }), code('consent_required'))
+      await assert.rejects(win.request('agent.start', { name: 'z', kind: 'zcode', cwd: z.cwd, approval: 'inherit' }), code('invalid_params'), 'inherit — только Claude')
+      // Согласие только на Claude и Codex (как до ZCode) окно больше не пишет: диалог называет всех троих.
+      await assert.rejects(win.request('access.grantFull', { ...GRANT, providers: ['claude', 'codex'] }), code('invalid_params'))
+      // Старый файл согласия на двоих: Claude можно, ZCode — нет.
+      writeFileSync(home.paths.consent, JSON.stringify({ version: 1, rev: 1, providers: ['claude', 'codex'], grantedAt: '2026-11-02T10:00:00Z' }))
+      await assert.rejects(win.request('agent.start', { name: 'z', kind: 'zcode', cwd: z.cwd, approval: 'full', confirm: true }), code('consent_required'))
+      await win.request('agent.start', { name: 'z', kind: 'zcode', cwd: z.cwd })
+      await assert.rejects(win.request('agent.configure', { name: 'z', approval: 'full', confirm: true }), code('consent_required'))
+      await win.request('agent.prompt', { name: 'z', text: 'раз' })
+      await win.request('agent.wait', { name: 'z', timeoutMs: 10_000 })
+      assert.equal(zmode(lastArgv(z.argvOut)), 'guarded', '«Спрашивать» у ZCode — guarded')
+
+      const g = (await win.request('access.grantFull', GRANT)) as { consent: { rev: number; granted: boolean; providers: string[] } }
+      assert.deepEqual(g.consent.providers, ['claude', 'codex', 'zcode'])
+      await win.request('agent.configure', { name: 'z', approval: 'full', confirm: true, consentRev: g.consent.rev })
+      await win.request('agent.prompt', { name: 'z', text: 'два' })
+      await win.request('agent.wait', { name: 'z', timeoutMs: 10_000 })
+      assert.equal(zmode(lastArgv(z.argvOut)), 'yolo')
+      let row = ((await win.request('agent.list')) as { sessions: Row[] }).sessions.find((r) => r.name === 'z')
+      assert.deepEqual([row?.access?.applied?.approval, row?.access?.applied?.reported, row?.access?.applied?.confirmed, row?.access?.applied?.full],
+        ['full', null, false, true], 'CLI режим не называет: отправлено, не подтверждено')
+      assert.deepEqual([row?.access?.red, row?.access?.live], [true, false])
+
+      // Отзыв — следующий ход в явном guarded и одна заметка; уровень остаётся «не разрешён».
+      await cli.request('access.revokeFull')
+      for (const t of ['три', 'четыре']) {
+        await win.request('agent.prompt', { name: 'z', text: t })
+        await win.request('agent.wait', { name: 'z', timeoutMs: 10_000 })
+        assert.equal(zmode(lastArgv(z.argvOut)), 'guarded', 'после отзыва — guarded, не yolo')
+      }
+      const notes = ((await win.request('events.tail', { since: 0, sessionId: 'z' })) as { events: Ev[] }).events
+        .filter((e) => e.kind === 'session.configured' && e.data['access'] === 'downgraded')
+      assert.equal(notes.length, 1)
+      row = ((await win.request('agent.list')) as { sessions: Row[] }).sessions.find((r) => r.name === 'z')
+      assert.deepEqual([row?.approval, row?.access?.blocked, row?.access?.red, row?.access?.applied?.full], ['full', true, false, false])
+
+      // Разовое --yes из CLI работает и у ZCode: согласия не пишет.
+      const o = zcodeWork(root, 'o')
+      const rec = (await cli.request('agent.start', { name: 'o', kind: 'zcode', cwd: o.cwd, approval: 'full', confirm: true, grant: 'cli-once' })) as Row
+      assert.equal(rec.grant, 'cli-once')
+      await cli.request('agent.prompt', { name: 'o', text: 'раз' })
+      await cli.request('agent.wait', { name: 'o', timeoutMs: 10_000 })
+      assert.equal(zmode(lastArgv(o.argvOut)), 'yolo')
+    } finally { cli.close(); win.close(); await d.stop('конец теста'); home.remove(); rmSync(root, { recursive: true, force: true }) }
   })
 })

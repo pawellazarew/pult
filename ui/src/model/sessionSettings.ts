@@ -32,11 +32,13 @@ export type MenuRow =
 /** Подпись кнопки подвала: «opus · high · спрашивать». */
 export function footerParts(agent: Pick<AgentView, 'provider' | 'model' | 'effort' | 'approval'>): string[] {
   // Шаг A: `inherit` словами из того же словаря, что лента и CLI («как в настройках Claude»).
-  return [agent.model ?? (agent.provider === 'codex' ? 'модель codex' : 'модель по умолчанию'), ...(agent.effort ? [agent.effort] : []), APPROVAL_WORDS[agent.approval ?? 'ask']]
+  const model = agent.model ?? (agent.provider === 'zcode' ? 'GLM' : agent.provider === 'codex' ? 'модель codex' : 'модель по умолчанию')
+  return [model, ...(agent.effort ? [agent.effort] : []), APPROVAL_WORDS[agent.approval ?? 'ask']]
 }
 
-/** Модели провайдера для меню: id, подпись, усилия. Текущая модель вне списка — тоже в нём (отмеченной). */
+/** Модели провайдера для меню: id, подпись, усилия. Текущая модель вне списка — тоже в нём (отмеченной). ZCode — пусто: выбора нет. */
 export function modelOptions(provider: Provider, catalog: ProviderCatalog | null | undefined, current: string | undefined): Array<{ id: string; label: string; efforts: readonly string[]; isDefault: boolean }> {
+  if (provider === 'zcode') return []
   const out: Array<{ id: string; label: string; efforts: readonly string[]; isDefault: boolean }> = provider === 'claude'
     ? PRESETS.claude.models.map((id) => ({ id, label: id, efforts: CLAUDE_EFFORTS, isDefault: id === PRESETS.claude.defaultModel }))
     : (catalog?.codex.models ?? []).map((m) => ({ id: m.id, label: m.label, efforts: m.efforts, isDefault: m.isDefault }))
@@ -44,8 +46,9 @@ export function modelOptions(provider: Provider, catalog: ProviderCatalog | null
   return out
 }
 
-/** Усилия модели сессии (у Codex — по живому списку; модели в нём нет — общий набор). */
+/** Усилия модели сессии (у Codex — по живому списку; модели в нём нет — общий набор). ZCode — пусто. */
 export function effortOptions(provider: Provider, catalog: ProviderCatalog | null | undefined, model: string | undefined): readonly string[] {
+  if (provider === 'zcode') return []
   if (provider === 'claude') return CLAUDE_EFFORTS
   const list = catalog?.codex.models ?? []
   const m = model ? list.find((x) => x.id === model) : list.find((x) => x.isDefault)
@@ -58,6 +61,17 @@ export function effortOptions(provider: Provider, catalog: ProviderCatalog | nul
  * Шаг A: у Claude пятый пункт «Как в настройках Claude» с действующим режимом словами; при bypass — красный.
  */
 export function settingsMenu(agent: AgentView, catalog: ProviderCatalog | null | undefined, windows: ReadonlyMap<string, number>, consent?: ConsentView | null): MenuRow[] {
+  // ZCode: модели и усилия задаёт аккаунт Z.AI — разделов не будет, только доступ (тот же раздел, что у остальных:
+  // полный доступ и у него под согласием).
+  if (agent.provider === 'zcode') {
+    const rows: MenuRow[] = [
+      { type: 'heading', label: 'модель' },
+      { type: 'note', label: 'модель и уровень продуманности задаёт аккаунт Z.AI — переключения нет', testId: 'settings-menu-no-models' },
+    ]
+    accessRows(rows, agent, consent)
+    rows.push({ type: 'sep' }, { type: 'note', label: 'Действует со следующего хода: идущий ход не меняется.', testId: 'settings-menu-next-turn' })
+    return rows
+  }
   const rows: MenuRow[] = [{ type: 'heading', label: 'модель — со следующего хода', testId: 'settings-menu-models' }]
   const models = modelOptions(agent.provider, catalog, agent.model)
   const used = agent.context?.used ?? null
@@ -76,6 +90,16 @@ export function settingsMenu(agent: AgentView, catalog: ProviderCatalog | null |
   for (const e of effortOptions(agent.provider, catalog, agent.model)) {
     rows.push({ type: 'item', label: e, checked: e === agent.effort, pick: { kind: 'effort', effort: e }, testId: `settings-effort-${e}` })
   }
+  accessRows(rows, agent, consent)
+  rows.push({ type: 'sep' },
+    { type: 'note', label: 'Действует со следующего хода: идущий ход и вопросы в Inbox не меняются.', testId: 'settings-menu-next-turn' },
+    { type: 'note', label: 'Первый ход после смены модели дороже — кэш промпта у каждой модели свой.', testId: 'settings-menu-cache' })
+  return rows
+}
+
+
+/** Раздел «доступ агента» меню подвала — общий для всех провайдеров («Полный доступ» без согласия — «спрошу один раз»). */
+function accessRows(rows: MenuRow[], agent: AgentView, consent: ConsentView | null | undefined): void {
   rows.push({ type: 'sep' }, { type: 'heading', label: 'доступ агента' })
   const cur = agent.approval ?? 'ask'
   const inheritMode = agent.access?.inheritMode ?? agent.claudeMode ?? null
@@ -91,18 +115,13 @@ export function settingsMenu(agent: AgentView, catalog: ProviderCatalog | null |
       ...(!full && modeBlocksBrowser(agent.provider, a) && agent.browser ? { title: 'в этом режиме браузер для агента выключится' } : {}),
     })
   }
-  rows.push({ type: 'sep' },
-    { type: 'note', label: 'Действует со следующего хода: идущий ход и вопросы в Inbox не меняются.', testId: 'settings-menu-next-turn' },
-    { type: 'note', label: 'Первый ход после смены модели дороже — кэш промпта у каждой модели свой.', testId: 'settings-menu-cache' })
-  return rows
 }
-
 /**
  * Выбор, о котором надо спросить: модель, в окно которой разговор не влезет (`misfit`), и — шаг A — полный доступ
  * без согласия (`full`: диалог согласия, один раз на всё время). С согласием полный доступ включается без вопроса:
  * красная метка и строка в ленте вместо модала. `provider`/`inheritMode` — для `inherit` (при bypass это полный).
  */
-export function confirmNeeded(pick: SettingsPick, consent?: ConsentView | null, provider: 'claude' | 'codex' = 'claude', inheritMode?: string | null): 'full' | 'misfit' | null {
+export function confirmNeeded(pick: SettingsPick, consent?: ConsentView | null, provider: AgentView['provider'] = 'claude', inheritMode?: string | null): 'full' | 'misfit' | null {
   if (pick.kind === 'approval' && isFullLevel(provider, pick.approval, inheritMode) && !consentGrants(consent, provider)) return 'full'
   if (pick.kind === 'model' && pick.misfit) return 'misfit'
   return null
@@ -139,8 +158,8 @@ export const DEFAULT_APPROVALS: ReadonlyArray<Exclude<ApprovalMode, 'full' | 'in
 
 /** Черновик раздела: то, что редактирует экран, — копия, чтобы «Отмена» ничего не тронула. */
 export function settingsDraft(ns: NewSessionSettings | null | undefined): NewSessionSettings {
-  const base = ns ?? { rememberLast: true, defaults: { claude: {}, codex: {} } }
-  return { rememberLast: base.rememberLast, defaults: { ...(base.defaults.provider ? { provider: base.defaults.provider } : {}), claude: { ...base.defaults.claude }, codex: { ...base.defaults.codex } } }
+  const base = ns ?? { rememberLast: true, defaults: { claude: {}, codex: {}, zcode: {} } }
+  return { rememberLast: base.rememberLast, defaults: { ...(base.defaults.provider ? { provider: base.defaults.provider } : {}), claude: { ...base.defaults.claude }, codex: { ...base.defaults.codex }, zcode: { ...base.defaults.zcode } } }
 }
 
 /** Поле умолчания провайдера: `undefined` / пустая строка — снять (форма возьмёт своё). */

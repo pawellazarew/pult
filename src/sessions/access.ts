@@ -12,7 +12,7 @@
 import type { ApprovalMode } from '../adapters/types.js'
 import type { AppliedAccess } from './registry.js'
 
-export type AccessProvider = 'claude' | 'codex'
+export type AccessProvider = 'claude' | 'codex' | 'zcode'
 
 /**
  * Уровень — полный доступ? `full` — всегда; `inherit` у Claude — когда действующий `defaultMode` владельца
@@ -26,10 +26,12 @@ export function isFullLevel(provider: AccessProvider, approval: ApprovalMode | u
 /**
  * Что провайдер должен сказать о режиме при этом уровне: Claude — `permissionMode` из `system/init` (`manual` он
  * показывает как `default`: ИЗМЕРЕНО S10), Codex — `<sandbox.type>/<approvalPolicy>` ответа `thread/start|resume`
- * (сессии Пульта всегда с брокером разрешений). `null` — сверять не с чем (`inherit` без известного `defaultMode`).
+ * (сессии Пульта всегда с брокером разрешений). `null` — сверять не с чем (`inherit` без известного `defaultMode`;
+ * ZCode: поток `stream-json` режима не называет — фикстуры CLI 0.17.1, — метка у него всегда «не подтверждено»).
  */
 export function expectedReport(provider: AccessProvider, approval: ApprovalMode | undefined, inheritMode?: string | null): string | null {
   const a = approval ?? 'ask'
+  if (provider === 'zcode') return null
   if (provider === 'claude') {
     if (a === 'inherit') return inheritMode ?? null
     return a === 'workspace' ? 'acceptEdits' : a === 'full' ? 'bypassPermissions' : 'default'
@@ -42,13 +44,13 @@ export function expectedReport(provider: AccessProvider, approval: ApprovalMode 
 
 /** Ответ провайдера означает полные права (без песочницы и без вопросов)? */
 export function reportIsFull(provider: AccessProvider, reported: string | null): boolean {
-  if (reported === null) return false
+  if (reported === null || provider === 'zcode') return false
   return provider === 'claude' ? reported === 'bypassPermissions' : reported.startsWith('dangerFullAccess/')
 }
 
 /** Режим словами для ленты: «bypassPermissions», «danger-full-access + never». */
 export function reportWords(provider: AccessProvider, reported: string): string {
-  if (provider === 'claude') return reported
+  if (provider !== 'codex') return reported
   const [sandbox, policy] = reported.split('/')
   const s = sandbox === 'readOnly' ? 'read-only' : sandbox === 'dangerFullAccess' ? 'danger-full-access' : sandbox === 'workspaceWrite' ? 'workspace-write' : sandbox ?? '?'
   return `${s} + ${policy ?? '?'}`

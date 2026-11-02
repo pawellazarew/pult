@@ -74,8 +74,8 @@ export function isApprovalMode(x: unknown): x is ApprovalMode {
   return typeof x === 'string' && (APPROVAL_MODES as readonly string[]).includes(x)
 }
 
-/** Уровень, допустимый провайдеру: `inherit` есть только у Claude (у Codex нет «своих настроек» режима). */
-export function approvalFits(provider: 'claude' | 'codex', mode: ApprovalMode): boolean {
+/** Уровень, допустимый провайдеру: `inherit` есть только у Claude (у Codex и ZCode нет «своих настроек» режима). */
+export function approvalFits(provider: 'claude' | 'codex' | 'zcode', mode: ApprovalMode): boolean {
   return mode !== 'inherit' || provider === 'claude'
 }
 

@@ -483,7 +483,7 @@ describe('daemon.status для окна (Ф2)', () => {
     const home = tempHome()
     const daemon = await startTestDaemon(home)
     try {
-      assert.deepEqual(daemon.status().providers, { claude: { blocked: false }, codex: { blocked: false } })
+      assert.deepEqual(daemon.status().providers, { claude: { blocked: false }, codex: { blocked: false }, zcode: { blocked: false } })
     } finally {
       await daemon.stop('тест')
       home.remove()

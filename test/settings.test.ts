@@ -89,14 +89,14 @@ describe('M8f: настройки «Новая сессия» и последн�
     assert.throws(() => parseNewSession({ defaults: { codex: { approval: 'workspace', browser: true } } }, true), /браузер/)
     assert.throws(() => parseNewSession({ defaults: { claude: { model: 'a b' } } }, true), /model/)
     assert.throws(() => parseNewSession({ defaults: { provider: 'opencode' } }, true), /claude \| codex/)
-    const ok = parseNewSession({ rememberLast: false, defaults: { provider: 'codex', claude: { model: 'opus', effort: 'high', approval: 'workspace', mode: 'warm', browser: true, worktree: true }, codex: {} } }, true)
-    assert.deepEqual(ok.value, { rememberLast: false, defaults: { provider: 'codex', claude: { model: 'opus', effort: 'high', approval: 'workspace', mode: 'warm', browser: true, worktree: true }, codex: {} } })
+    const ok = parseNewSession({ rememberLast: false, defaults: { provider: 'codex', claude: { model: 'opus', effort: 'high', approval: 'workspace', mode: 'warm', browser: true, worktree: true }, codex: {}, zcode: { approval: 'read-only' } } }, true)
+    assert.deepEqual(ok.value, { rememberLast: false, defaults: { provider: 'codex', claude: { model: 'opus', effort: 'high', approval: 'workspace', mode: 'warm', browser: true, worktree: true }, codex: {}, zcode: { approval: 'read-only' } } })
   })
   it('мягкий разбор config.json: кривое поле выброшено с предупреждением, остальное на месте; нет раздела — умолчания', () => {
     const { config, warnings } = validateConfig({ newSession: { rememberLast: 'да', defaults: { claude: { model: 'opus', approval: 'full' } } } })
-    assert.deepEqual(config.newSession, { rememberLast: true, defaults: { claude: { model: 'opus' }, codex: {} } })
+    assert.deepEqual(config.newSession, { rememberLast: true, defaults: { claude: { model: 'opus' }, codex: {}, zcode: {} } })
     assert.equal(warnings.length, 2, warnings.join('\n'))
-    assert.deepEqual(defaultConfig().newSession, { rememberLast: true, defaults: { claude: {}, codex: {} } })
+    assert.deepEqual(defaultConfig().newSession, { rememberLast: true, defaults: { claude: {}, codex: {}, zcode: {} } })
   })
   it('последний выбор: full не запоминается; папка — только когда форма открыта без папки; второй провайдер не стирается', () => {
     const a = nextLastUsed({}, { kind: 'claude', model: 'opus', effort: 'high', approval: 'full', mode: 'warm', browser: false, worktree: true, cwd: '/p/app' }, true, 't1')
@@ -620,7 +620,7 @@ describe('M8f: демон — agent.configure', () => {
     const c = await connectClient(home.paths, { client: 'shell' })
     try {
       // Шаг A: окно один раз даёт согласие — дальше полный доступ включается без вопроса.
-      await c.request('access.grantFull', { confirm: true, version: 1, providers: ['claude', 'codex'] })
+      await c.request('access.grantFull', { confirm: true, version: 1, providers: ['claude', 'codex', 'zcode'] })
       await c.request('agent.start', { name: 'b', kind: 'claude', cwd: claudeWork(root, 'b').cwd, browser: { headed: true } })
       const off = (await c.request('agent.configure', { name: 'b', approval: 'full', confirm: true })) as Record<string, unknown>
       assert.equal(off['browser'], undefined)
@@ -648,9 +648,9 @@ describe('M8f: демон — settings.get|set и последний выбор'
     try {
       const got = (await c.request('settings.get')) as Record<string, unknown>
       const { network, codexRules, access, ...rest } = got
-      assert.deepEqual(rest, { newSession: { rememberLast: true, defaults: { claude: {}, codex: {} } }, lastUsed: {}, updates: { check: true } })
+      assert.deepEqual(rest, { newSession: { rememberLast: true, defaults: { claude: {}, codex: {}, zcode: {} } }, lastUsed: {}, updates: { check: true } })
       // Шаг A: согласия нет; действующий defaultMode владельца (тестовый дом — файла настроек нет).
-      assert.deepEqual(access, { consent: { rev: 0, version: 0, current: 1, granted: false, providers: [] }, providers: ['claude', 'codex'], claudeDefaultMode: 'default' })
+      assert.deepEqual(access, { consent: { rev: 0, version: 0, current: 1, granted: false, providers: [] }, providers: ['claude', 'codex', 'zcode'], claudeDefaultMode: 'default' })
       await assert.rejects(c.request('settings.set', { access: { consent: true } }), code('invalid_params'), 'согласие — только access.grantFull')
       await assert.rejects(c.request('settings.set', { consent: { rev: 1, providers: ['claude'] } }), code('invalid_params'))
       // План 16, № 11: правила «Всегда» Codex — из файла временного дома, не из настоящего ~/.codex.
@@ -662,7 +662,7 @@ describe('M8f: демон — settings.get|set и последний выбор'
       await assert.rejects(c.request('settings.set', { newSession: { rememberLast: true }, notifyCommand: 'curl x' }), code('invalid_params'))
       await assert.rejects(c.request('settings.set', { newSession: { defaults: { claude: { approval: 'full' } } } }), code('invalid_params'))
       await assert.rejects(c.request('settings.set', { newSession: { defaults: { claude: { proxy: 'http://evil' } } } }), code('invalid_params'))
-      const ns = { rememberLast: false, defaults: { provider: 'codex', claude: { model: 'opus' }, codex: { effort: 'high', approval: 'read-only' } } }
+      const ns = { rememberLast: false, defaults: { provider: 'codex', claude: { model: 'opus' }, codex: { effort: 'high', approval: 'read-only' }, zcode: {} } }
       const set = (await c.request('settings.set', { newSession: ns })) as Record<string, unknown>
       assert.deepEqual(set['newSession'], ns)
       const file = JSON.parse(readFileSync(home.paths.config, 'utf8')) as Record<string, unknown>
@@ -683,7 +683,7 @@ describe('M8f: демон — settings.get|set и последний выбор'
       await cli.request('agent.start', { name: 'a', kind: 'claude', cwd: claudeWork(root, 'a').cwd, model: 'opus' })
       assert.equal(existsSync(home.paths.newSessionLast), false, 'CLI последний выбор не трогает')
       const b = claudeWork(root, 'b').cwd
-      await win.request('access.grantFull', { confirm: true, version: 1, providers: ['claude', 'codex'] })
+      await win.request('access.grantFull', { confirm: true, version: 1, providers: ['claude', 'codex', 'zcode'] })
       await win.request('agent.start', { name: 'b', kind: 'claude', cwd: b, model: 'opus', effort: 'high', approval: 'full', confirm: true, mode: 'warm', worktree: undefined })
       const last = ((await win.request('settings.get')) as { lastUsed: Record<string, unknown> }).lastUsed
       assert.deepEqual([last['provider'], last['cwd'], last['claude']], ['claude', b, { model: 'opus', effort: 'high', mode: 'warm', browser: false, worktree: false }])

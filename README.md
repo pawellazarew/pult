@@ -2,7 +2,7 @@
 
 **English** · [Русский](README.ru.md)
 
-**Run several Claude Code and Codex agents in the background and answer all their permission questions in one place.**
+**Run several Claude Code, Codex and ZCode (GLM) agents in the background and answer all their permission questions in one place.**
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/hero-dark.png">
@@ -275,12 +275,13 @@ Every turn includes an explanation of the selected mode, including after a live 
 is needed. Nested CLIs inherit the sandbox, so `Not logged in` there alone does not establish that the terminal login
 has expired. Claude's `acceptEdits` follows its own permission rules for other tools.
 
-`full` means no sandbox and no questions: the agent can do anything your user can. The window asks once, for both
-providers, and stores the consent in `PULT_HOME/consent.json`; after that `full` switches without a dialog and the chat is
+`full` means no sandbox and no questions: the agent can do anything your user can. The window asks once, for all
+providers (Claude, Codex, ZCode), and stores the consent in `PULT_HOME/consent.json`; after that `full` switches without a dialog and the chat is
 marked red (header, composer, sidebar). The daemon checks the consent itself at every start, mode change and turn:
 revoke it in Settings → Доступ and the next turn of every `full` session runs in explicit `ask`. The CLI keeps a one-off
 grant per session (`--yes`), which neither writes nor needs the consent. The red mark follows the mode the provider
-actually reports (Claude `system/init`, Codex `thread/start`), and stays on until a full-access process has finished.
+actually reports (Claude `system/init`, Codex `thread/start`; ZCode does not report its mode — `--mode yolo`
+is shown as «не подтверждено»), and stays on until a full-access process has finished.
 Claude sessions created before this version in `ask` keep their behaviour as `inherit`.
 
 ## Changing a session later

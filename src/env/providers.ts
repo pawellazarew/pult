@@ -2,6 +2,7 @@ import { createAppServerClient } from '../adapters/codex/client.js'
 import { parseClaudeAuth } from './doctor.js'
 import { execAsync } from './exec.js'
 import type { ExecResult } from './exec.js'
+import { zcodeCredsFile, zcodeLoginState } from './zcodeLogin.js'
 
 export interface ProviderModel {
   id: string
@@ -11,7 +12,7 @@ export interface ProviderModel {
   isDefault: boolean
 }
 export interface ProviderReadiness {
-  provider: 'claude' | 'codex'
+  provider: 'claude' | 'codex' | 'zcode'
   state: 'ready' | 'login_required' | 'unavailable' | 'error'
   detail: string
   fixCmd?: string
@@ -21,6 +22,7 @@ export interface ProviderCatalog {
   checkedAt: string
   claude: ProviderReadiness
   codex: ProviderReadiness
+  zcode: ProviderReadiness
 }
 
 export async function codexMetadataRequest(bin: string, cwd: string, env: Record<string, string>, method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -76,8 +78,21 @@ export async function fetchCodexModels(bin: string, cwd: string, env: Record<str
   }
 }
 
+/**
+ * Вход ZCode. У CLI нет команды «статус входа», поэтому состояние читается по файлу кред
+ * `~/.zcode/v2/credentials.json` (каталог переносится env `ZCODE_DATA_BASE_DIR`): файл есть и в нём
+ * есть ключ `oauth:*:access_token` или `zcodejwttoken` — вход выполнен. Содержимое токенов НЕ читается
+ * и наружу не попадает — только наличие ключей. `unknown` — файл есть, но разобрать не удалось.
+ */
+export { zcodeCredsFile, zcodeLoginState }
+
+/** Единственный «модельный» пункт ZCode: у CLI нет флага `--model`, модель задаёт аккаунт Z.AI. */
+export function zcodeModelChoices(): ProviderModel[] {
+  return [{ id: 'default', label: 'По умолчанию (GLM)', efforts: [], defaultEffort: '', isDefault: true }]
+}
+
 export function createProviderCatalog(opts: {
-  bins: Record<'claude' | 'codex', string>
+  bins: Record<'claude' | 'codex' | 'zcode', string>
   cwd: string
   env: Record<string, string>
   testMode?: boolean
@@ -85,15 +100,26 @@ export function createProviderCatalog(opts: {
   models?: () => Promise<ProviderModel[]>
   /** Окружение `codex app-server` для `model/list` — через страж сети, как у ходов (он ходит в сеть). */
   codexEnv?: () => Promise<Record<string, string>>
+  /** Проверка входа ZCode — файл кред. Тест подменяет; нет — настоящий `~/.zcode/v2/credentials.json`. */
+  zcodeCreds?: () => string
 }): { check(): Promise<ProviderCatalog> } {
   let running: Promise<ProviderCatalog> | null = null
   const run = opts.run ?? ((bin, args) => execAsync(bin, args, { env: opts.env, timeoutMs: 20_000 }))
   const models = opts.models ?? (async (): Promise<ProviderModel[]> =>
     fetchCodexModels(opts.bins.codex, opts.cwd, opts.codexEnv ? await opts.codexEnv() : opts.env))
-  const checkOne = async (provider: 'claude' | 'codex'): Promise<ProviderReadiness> => {
+  const checkOne = async (provider: 'claude' | 'codex' | 'zcode'): Promise<ProviderReadiness> => {
     const result: ProviderReadiness = { provider, state: 'error', detail: 'Проверка не завершилась', models: [] }
     if (opts.testMode && !opts.run) return { ...result, detail: 'Проверка CLI отключена в тестовом режиме' }
     try {
+      if (provider === 'zcode') {
+        // `--version` не ходит в сеть и не тратит квоту; вход — по файлу кред, не по CLI-запросу.
+        const ver = await run(opts.bins.zcode, ['--version'])
+        if (ver.status === null) return { ...result, state: ver.error?.includes('ENOENT') ? 'unavailable' : 'error', detail: 'CLI не запускается', fixCmd: 'zcode --version' }
+        const login = zcodeLoginState((opts.zcodeCreds ?? zcodeCredsFile)())
+        if (login === 'no') return { ...result, state: 'login_required', detail: 'Нужен вход', fixCmd: 'zcode login' }
+        if (login !== 'yes') return { ...result, detail: 'Не удалось проверить вход (файл кред не разбирается)', fixCmd: 'pult doctor' }
+        return { ...result, state: 'ready', detail: 'Вход выполнен · готов', models: zcodeModelChoices() }
+      }
       const auth = await run(opts.bins[provider], provider === 'codex' ? ['login', 'status'] : ['auth', 'status', '--json'])
       if (auth.status === null) return { ...result, state: auth.error?.includes('ENOENT') ? 'unavailable' : 'error', detail: 'CLI не запускается', fixCmd: `${provider} --version` }
       const loggedIn = provider === 'claude' ? parseClaudeAuth(auth.stdout).loggedIn
@@ -105,12 +131,12 @@ export function createProviderCatalog(opts: {
       return { ...result, state: 'ready', detail: 'Вход выполнен · готов' }
     } catch (e) {
       return { ...result, detail: provider === 'codex' ? `Вход выполнен · список моделей недоступен: ${e instanceof Error ? e.message : String(e)}` : 'Ошибка проверки CLI',
-        fixCmd: provider === 'codex' ? 'pult doctor' : `${provider} --version` }
+        fixCmd: provider === 'codex' ? 'pult doctor' : provider === 'zcode' ? 'pult doctor' : `${provider} --version` }
     }
   }
   return { check() {
     if (running) return running
-    running = Promise.all([checkOne('claude'), checkOne('codex')]).then(([claude, codex]) => ({ checkedAt: new Date().toISOString(), claude, codex }))
+    running = Promise.all([checkOne('claude'), checkOne('codex'), checkOne('zcode')]).then(([claude, codex, zcode]) => ({ checkedAt: new Date().toISOString(), claude, codex, zcode }))
       .finally(() => { running = null })
     return running
   } }

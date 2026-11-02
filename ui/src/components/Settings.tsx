@@ -24,7 +24,7 @@ import type { CodexRulesList } from '../model/rules.js'
 import { CMD, Kbd } from './common.js'
 import { Dialog } from './Panels.js'
 
-const PROVIDERS: readonly Provider[] = ['claude', 'codex']
+const PROVIDERS: readonly Provider[] = ['claude', 'codex', 'zcode']
 
 function ProviderDefaultsBox({ provider, draft, catalog, onChange }: {
   provider: Provider; draft: NewSessionSettings; catalog: ProviderCatalog | null; onChange(d: NewSessionSettings): void
@@ -40,23 +40,27 @@ function ProviderDefaultsBox({ provider, draft, catalog, onChange }: {
   return (
     <fieldset data-testid={`settings-${provider}`}>
       <legend>{provider}</legend>
-      <label className="field" htmlFor={id('model')}>
-        <span className="lbl">модель</span>
-        <select id={id('model')} value={d.model ?? ''} data-testid={`settings-${provider}-model`}
-          onChange={(e) => onChange(setDefault(draft, provider, 'model', e.target.value))}>
-          <option value="">{provider === 'codex' ? 'по умолчанию Codex' : `как в форме (${PRESETS.claude.defaultModel})`}</option>
-          {models.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
-        </select>
-        {provider === 'codex' && !catalog?.codex.models.length && <span className="note">список моделей Codex не загружен — «Проверить» в «+ Сессия»</span>}
-      </label>
-      <label className="field" htmlFor={id('effort')}>
-        <span className="lbl">усилие</span>
-        <select id={id('effort')} value={d.effort ?? ''} data-testid={`settings-${provider}-effort`}
-          onChange={(e) => onChange(setDefault(draft, provider, 'effort', e.target.value))}>
-          <option value="">как в форме</option>
-          {effortList.map((x) => <option key={x} value={x}>{x}</option>)}
-        </select>
-      </label>
+      {provider === 'zcode'
+        ? <span className="note" data-testid="settings-zcode-fixed">Модель и уровень продуманности задаёт аккаунт Z.AI — переключения нет. Браузера и тёплого процесса у ZCode нет.</span>
+        : <>
+          <label className="field" htmlFor={id('model')}>
+            <span className="lbl">модель</span>
+            <select id={id('model')} value={d.model ?? ''} data-testid={`settings-${provider}-model`}
+              onChange={(e) => onChange(setDefault(draft, provider, 'model', e.target.value))}>
+              <option value="">{provider === 'codex' ? 'по умолчанию Codex' : `как в форме (${PRESETS.claude.defaultModel})`}</option>
+              {models.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+            </select>
+            {provider === 'codex' && !catalog?.codex.models.length && <span className="note">список моделей Codex не загружен — «Проверить» в «+ Сессия»</span>}
+          </label>
+          <label className="field" htmlFor={id('effort')}>
+            <span className="lbl">усилие</span>
+            <select id={id('effort')} value={d.effort ?? ''} data-testid={`settings-${provider}-effort`}
+              onChange={(e) => onChange(setDefault(draft, provider, 'effort', e.target.value))}>
+              <option value="">как в форме</option>
+              {effortList.map((x) => <option key={x} value={x}>{x}</option>)}
+            </select>
+          </label>
+        </>}
       <label className="field" htmlFor={id('approval')}>
         <span className="lbl">подтверждения</span>
         <select id={id('approval')} value={d.approval ?? ''} data-testid={`settings-${provider}-approval`}
@@ -66,17 +70,21 @@ function ProviderDefaultsBox({ provider, draft, catalog, onChange }: {
         </select>
         <span className="note">«Полный доступ» по умолчанию не ставится — только явно при заведении.</span>
       </label>
-      <label className="check">
-        <input type="checkbox" checked={d.mode === 'warm'} data-testid={`settings-${provider}-warm`}
-          onChange={(e) => onChange(setDefault(draft, provider, 'mode', e.target.checked ? 'warm' : undefined))} />
-        <span>Тёплый процесс между репликами</span>
-        {provider === 'codex' && <span className="note">у Codex процесс app-server и так общий — флаг ни на что не влияет</span>}
-      </label>
-      <label className="check">
-        <input type="checkbox" checked={d.browser === true} data-testid={`settings-${provider}-browser`}
-          onChange={(e) => onChange(setDefault(draft, provider, 'browser', e.target.checked ? true : undefined))} />
-        <span>Браузер для агента</span>
-      </label>
+      {provider !== 'zcode' && (
+        <label className="check">
+          <input type="checkbox" checked={d.mode === 'warm'} data-testid={`settings-${provider}-warm`}
+            onChange={(e) => onChange(setDefault(draft, provider, 'mode', e.target.checked ? 'warm' : undefined))} />
+          <span>Тёплый процесс между репликами</span>
+          {provider === 'codex' && <span className="note">у Codex процесс app-server и так общий — флаг ни на что не влияет</span>}
+        </label>
+      )}
+      {provider !== 'zcode' && (
+        <label className="check">
+          <input type="checkbox" checked={d.browser === true} data-testid={`settings-${provider}-browser`}
+            onChange={(e) => onChange(setDefault(draft, provider, 'browser', e.target.checked ? true : undefined))} />
+          <span>Браузер для агента</span>
+        </label>
+      )}
       <label className="check">
         <input type="checkbox" checked={d.worktree === true} data-testid={`settings-${provider}-worktree`}
           onChange={(e) => onChange(setDefault(draft, provider, 'worktree', e.target.checked ? true : undefined))} />

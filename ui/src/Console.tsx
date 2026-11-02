@@ -28,7 +28,7 @@ import type { SettingsPick } from './model/sessionSettings.js'
 import type { SettingsReply } from './model/newAgent.js'
 import type { NewSessionSettings } from '../../src/sessions/settings.js'
 import { ConsentDialog } from './components/Access.js'
-import { CONSENT_DIALOG_VERSION, isFullLevel } from './model/access.js'
+import { CONSENT_DIALOG_PROVIDERS, CONSENT_DIALOG_VERSION, isFullLevel } from './model/access.js'
 import type { ConsentView } from './model/access.js'
 import { UpdateBanner } from './components/UpdateBanner.js'
 import { addDismissed, applyErrorText, checkErrorText, FOCUS_CHECK_STALE_MS, focusCheckWanted, updateBanner, upToDateNote, windowVersionFromUA } from './model/update.js'
@@ -900,10 +900,10 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   }
   // --- шаг A: согласие на полный доступ ---------------------------------------------------------------
   const [consentState, setConsentState] = useState<{ busy: boolean; error: string | null }>({ busy: false, error: null })
-  /** «Разрешить полный доступ»: `access.grantFull` (оба провайдера, версия текста диалога); ответ — согласие или текст отказа. */
+  /** «Разрешить полный доступ»: `access.grantFull` (провайдеры и версия текста диалога); ответ — согласие или текст отказа. */
   const grantFull = async (): Promise<ConsentView | string> => {
     try {
-      const r = await bridge.call('access.grantFull', { confirm: true, version: CONSENT_DIALOG_VERSION, providers: ['claude', 'codex'] }) as { consent: ConsentView }
+      const r = await bridge.call('access.grantFull', { confirm: true, version: CONSENT_DIALOG_VERSION, providers: [...CONSENT_DIALOG_PROVIDERS] }) as { consent: ConsentView }
       setSettings((cur) => (cur?.access ? { ...cur, access: { ...cur.access, consent: r.consent } } : cur))
       void refreshSettings()
       return r.consent

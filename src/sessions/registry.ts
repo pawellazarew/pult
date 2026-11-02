@@ -21,7 +21,7 @@ import { parseSessionContext } from './context.js'
 import type { SessionContext } from './context.js'
 
 export type SessionMode = 'turn' | 'warm'
-export type SessionProvider = 'claude' | 'codex'
+export type SessionProvider = 'claude' | 'codex' | 'zcode'
 
 /** Словарь статусов — план Ф1 §3 и §6. Порядок в массиве смысла не несёт. */
 export const SESSION_STATUSES = [
@@ -313,7 +313,7 @@ export function parseSessions(raw: unknown): SessionRecord[] {
     if (item === null || typeof item !== 'object') continue
     const o = item as Record<string, unknown>
     if (!isSessionName(o['name'])) continue
-    if (o['provider'] !== 'claude' && o['provider'] !== 'codex') continue
+    if (o['provider'] !== 'claude' && o['provider'] !== 'codex' && o['provider'] !== 'zcode') continue
     if (typeof o['cwd'] !== 'string' || !o['cwd']) continue
     const mode = o['mode'] === 'warm' ? 'warm' : 'turn'
     const worktree = parseWorktree(o['worktree'])

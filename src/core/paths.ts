@@ -58,7 +58,7 @@ export interface PultPaths {
   /** `new-session-last.json` — последний выбор «+ Сессия» окна (M8f): провайдер, модель, усилие, режим, папка. */
   readonly newSessionLast: string
   /**
-   * `consent.json` — согласие на полный доступ (быстрый старт, шаг A, src/core/consent.ts): одно на оба провайдера,
+   * `consent.json` — согласие на полный доступ (быстрый старт, шаг A, src/core/consent.ts): одно на всех провайдеров,
    * пишут только `access.grantFull` / `access.revokeFull`. 0600.
    */
   readonly consent: string

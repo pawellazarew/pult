@@ -1,4 +1,4 @@
-// Быстрый старт, шаг A: доступ в окне — согласие на полный доступ (один раз на оба провайдера), метки по
+// Быстрый старт, шаг A: доступ в окне — согласие на полный доступ (один раз на всех провайдеров), метки по
 // действующему режиму и строки ленты (design/2026-11-02-quick-start/DESIGN-REVIEW.md §3.6). Чистые функции:
 // проверяются отрисовкой в строку (ui/test/access.test.ts).
 //
@@ -26,6 +26,9 @@ export interface AccessSettings {
 
 /** Версия текста согласия, которую показывает этот диалог (`CONSENT_VERSION` демона). */
 export const CONSENT_DIALOG_VERSION = 1
+
+/** Кого называет диалог согласия (`CONSENT_PROVIDERS` демона): ровно их окно и шлёт в `access.grantFull`. */
+export const CONSENT_DIALOG_PROVIDERS: readonly AgentProvider[] = ['claude', 'codex', 'zcode']
 
 /** Согласие действует для провайдера. Нет данных (старый демон) — нет. */
 export function consentGrants(c: ConsentView | null | undefined, provider: AgentProvider): boolean {
@@ -82,7 +85,8 @@ const levelWords = (provider: AgentProvider, approval: ApprovalMode, claudeMode?
  * Чип доступа в подвале: желаемый уровень словами и что с ним сейчас.
  *   * понижение, пока жив процесс с прежними правами, — «Спрашивать · после хода» (кадр 11);
  *   * полный выбран, а разрешения нет — «Полный доступ · не разрешён» (ход пойдёт в «Спрашивать»);
- *   * ходов ещё не было — «ожидается»; Codex не подтвердил режим — «не подтверждено».
+ *   * ходов ещё не было — «ожидается»; Codex не подтвердил режим — «не подтверждено» (у ZCode — всегда: режим он не
+ *     сообщает, известно только, с каким `--mode` ушёл процесс).
  */
 export function accessChip(a: AccessAgent): AccessChip {
   const desired = a.access?.desired ?? a.approval ?? 'ask'
@@ -94,10 +98,11 @@ export function accessChip(a: AccessAgent): AccessChip {
   if (v?.pending) { state = 'pending'; suffix = 'после хода' }
   else if (v?.blocked) { state = 'blocked'; suffix = 'не разрешён' }
   else if (v && !v.applied) { state = 'expected'; suffix = 'ожидается' }
-  else if (v?.applied && !v.applied.confirmed && a.provider === 'codex') { state = 'unconfirmed'; suffix = 'не подтверждено' }
+  else if (v?.applied && !v.applied.confirmed && a.provider !== 'claude') { state = 'unconfirmed'; suffix = 'не подтверждено' }
   else if (red) state = 'full'
   const applied = v?.applied
-  const now = applied?.reported ? `сейчас процесс: ${applied.reported}${applied.confirmed ? '' : ' (не подтверждено)'}` : 'ходов с этим режимом ещё не было'
+  const now = applied?.reported ? `сейчас процесс: ${applied.reported}${applied.confirmed ? '' : ' (не подтверждено)'}`
+    : applied ? `последний процесс запущен с «${APPROVAL_LABEL[applied.approval]}» (не подтверждено)` : 'ходов с этим режимом ещё не было'
   const title = v?.blocked
     ? 'Полный доступ выбран, но не разрешён (согласие отозвано или не дано): ходы идут в «Спрашивать». Разрешить — выбери «Полный доступ» снова.'
     : v?.pending

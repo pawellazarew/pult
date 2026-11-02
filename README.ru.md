@@ -2,7 +2,7 @@
 
 [English](README.md) · **Русский**
 
-**Держи в фоне несколько агентов Claude Code и Codex и отвечай на все их вопросы о разрешениях в одном месте.**
+**Держи в фоне несколько агентов Claude Code, Codex и ZCode (GLM) и отвечай на все их вопросы о разрешениях в одном месте.**
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/hero-dark.png">
@@ -136,7 +136,7 @@ sh install.sh --from … --home ~/.pult --bin-dir ~/.local/bin   # это зна
 
 ```sh
 pult doctor                                                   # всё ли на месте
-pult agent start w --kind claude --cwd ~/code/app             # сессия с именем w; для Codex — --kind codex
+pult agent start w --kind claude --cwd ~/code/app             # сессия с именем w; для Codex — --kind codex, для ZCode — --kind zcode
 pult agent prompt w "почини падающий тест" --wait             # реплика и ждать конца хода
 pult agent read w                                             # что агент сказал
 ```
@@ -402,6 +402,7 @@ pult daemon uninstall         # снять службу; PULT_HOME не трог
 ```sh
 pult agent start w --kind claude --cwd ~/code/app [--model haiku] [--effort low] [--warm] [--title "название"]
 pult agent start c --kind codex  --cwd ~/code/app [--effort low]
+pult agent start z --kind zcode  --cwd ~/code/app             # модель задаёт аккаунт Z.AI; вопросов в Inbox нет
 pult agent rename w "Починить VPN"                      # название для списков и окна; без текста — снять
 pult agent prompt w "текст" --wait [--timeout 600000]   # без --wait — вернуться сразу, ход идёт в фоне
 pult agent wait w                                       # дождаться конца хода
@@ -502,12 +503,13 @@ pult perm deny p1-3fa9c2 --reason "почему"  # отказать; агент
 | `full` — полный доступ | `bypassPermissions` | `danger-full-access`, без вопросов |
 | `inherit` — как в настройках Claude (только Claude) | флага нет: действует твой `defaultMode`; `bypassPermissions` в нём — это `full` | — |
 
-`full` — агент делает что угодно без вопросов, песочницы нет. Окно спрашивает согласие **один раз** на оба провайдера и
+`full` — агент делает что угодно без вопросов, песочницы нет. Окно спрашивает согласие **один раз** на всех провайдеров (Claude, Codex, ZCode) и
 хранит его в `PULT_HOME/consent.json`; дальше полный доступ включается без диалога, а чат помечен красным (шапка, рамка
 поля, щит в сайдбаре). Согласие проверяет сам демон — при заведении, смене режима и на каждом ходу: отозвал в «Настройки →
 Доступ» — следующий ход любой сессии с полным доступом идёт в явном «Спрашивать», в ленте заметка. В CLI `--yes` —
 разовое разрешение своей сессии: согласие оно не пишет и не требует. Метка строится по режиму, который сказал сам
-провайдер (`system/init` у Claude, ответ `thread/start` у Codex), и горит, пока жив процесс с полными правами: понижение
+провайдер (`system/init` у Claude, ответ `thread/start` у Codex; ZCode режим не сообщает — его `--mode yolo` помечен
+«не подтверждено»), и горит, пока жив процесс с полными правами: понижение
 во время хода — «Спрашивать · после хода» и кнопка «Стоп». Сессии Claude, заведённые до этой версии в `ask`, после
 обновления живут как `inherit` — их поведение не меняется. Если Codex в `full` всё же попросит подтверждение (часть
 MCP-вызовов), Пульт его сам не даёт — вопрос придёт в Inbox. Браузер для агента не включается у Claude в `full` и у Codex в

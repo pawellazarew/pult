@@ -34,6 +34,7 @@ import { rotateToken, tokenEquals } from '../core/token.js'
 import { VERSION } from '../core/version.js'
 import { createClaudeAdapter } from '../adapters/claude/adapter.js'
 import { codexNetworkEnv, createCodexAdapter, shellJoin } from '../adapters/codex/adapter.js'
+import { createZcodeAdapter } from '../adapters/zcode/adapter.js'
 import { claudeNetworkEnv } from '../adapters/claude/adapter.js'
 import type { ProviderAdapter } from '../adapters/types.js'
 import { runDoctor } from '../env/doctor.js'
@@ -128,6 +129,8 @@ export interface DaemonOptions {
   claudeBin?: string
   /** Путь к бинарю `codex`; тест подсовывает фальшивый app-server через PULT_CODEX_BIN. */
   codexBin?: string
+  /** Путь к бинарю `zcode`; тест подсовывает фальшивый CLI через PULT_ZCODE_BIN. */
+  zcodeBin?: string
   /** Путь к dist/cli/main.js для заглушки разрешений; тест ставит свой. */
   cliEntry?: string
   /**
@@ -462,13 +465,12 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
   const mayRunFull = (name: string): boolean => {
     // Запись — без `list()`: тот спрашивает `activeAccess` адаптеров, а адаптер Codex сам зовёт эту функцию.
     const rec = manager.record(name)
-    if (!rec || (rec.provider !== 'claude' && rec.provider !== 'codex')) return false
+    if (!rec) return false
     const a = rec.approval ?? 'ask'
     return isFullLevel(rec.provider, a, a === 'inherit' ? inheritFor(rec) : null) && fullAllowed(rec.provider, rec.grant)
   }
   /** Сессия выбрала полный уровень, а разрешения нет («не разрешён»): повторный выбор того же уровня — не no-op. */
   const blockedNow = (rec: SessionRecord): boolean => {
-    if (rec.provider !== 'claude' && rec.provider !== 'codex') return false
     const a = rec.approval ?? 'ask'
     return isFullLevel(rec.provider, a, a === 'inherit' ? inheritFor(rec) : null) && !fullAllowed(rec.provider, rec.grant)
   }
@@ -561,6 +563,12 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     ?? process.env['PULT_CODEX_BIN']
     ?? locateToolPath('codex').path
     ?? 'codex'
+  // ZCode: node-скрипт с shebang внутри ZCode.app — путь плывёт за обновлениями приложения
+  // (грабля codex/ChatGPT.app), поиск кандидатов в env/locate.ts.
+  const zcodeBin = opts.zcodeBin
+    ?? process.env['PULT_ZCODE_BIN']
+    ?? locateToolPath('zcode').path
+    ?? 'zcode'
   // План 16, № 11: правила «Всегда» Codex — метка над строкой, которую codex допишет, список и «Отозвать». Файл — тот,
   // куда пишет НАШ app-server: его окружение без CODEX_HOME (белый список), значит `$HOME/.codex` ребёнка.
   const rulesPath = opts.codexRulesPath
@@ -614,6 +622,18 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     ...(netCheck ? { netCheck } : {}),
     mcpExtras: (name, nodeBin, at) => mcpExtras(name, nodeBin, at),
   })
+  // ZCode (маршрут A, docs/17-SPIKE-zcode.md): процесс на ход, без MCP-брокера и фоновой работы.
+  // askPermission обязательна контрактом AdapterDeps, но у маршрута A канала вопросов нет — не зовётся.
+  const zcode: ProviderAdapter = createZcodeAdapter({
+    config, logger, bin: zcodeBin,
+    emit: (draft) => { manager.emit(draft) },
+    live: (name, sig) => { manager.live(name, sig) },
+    // Шаг A: с каким уровнем ушёл процесс хода (режима CLI не сообщает — «не подтверждено») и может ли он быть полным.
+    applied: (name, info) => { manager.applied(name, info) },
+    mayRunFull,
+    askPermission: (req) => broker.request(req),
+    ...(netCheck ? { netCheck } : {}),
+  })
   // Автоназвание: одноразовый `claude -p` к haiku через тот же страж сети, что и ходы.
   const titler = opts.titler ?? (!opts.testMode && config.autoTitle ? createAutoTitler({
     bin: claudeBin,
@@ -638,11 +658,11 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     publish: emit,
     onPhase: (name) => { liveRef?.touch(name) },
     holdTurns: () => updaterRef?.applying() ?? false,
-    adapters: { claude, codex },
+    adapters: { claude, codex, zcode },
     broker,
     accessGate,
     inheritMode: (rec) => inheritFor(rec),
-    fullAllowed: (rec) => (rec.provider === 'claude' || rec.provider === 'codex') && fullAllowed(rec.provider, rec.grant),
+    fullAllowed: (rec) => fullAllowed(rec.provider, rec.grant),
     modelChoices: (provider) => (provider === 'codex' ? codexChoices() : Promise.resolve(null)),
     ...(opts.queueEditHoldMs !== undefined ? { queueEditHoldMs: opts.queueEditHoldMs } : {}),
     ...(titler ? { titler } : {}),
@@ -824,7 +844,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
   const projects = createProjectStore(join(paths.home, 'projects.json'))
   // `PULT_TEST_PROVIDERS=run` (только вместе с PULT_TEST=1): проверка входа идёт по-настоящему — в фальшивые CLI
   // из PULT_CLAUDE_BIN / PULT_CODEX_BIN. Нужна кадрам README (shell/test/readme): шапка «готов», а не «ошибка».
-  const catalog = createProviderCatalog({ bins: { claude: claudeBin, codex: codexBin }, cwd: paths.home, env: childEnv, codexEnv,
+  const catalog = createProviderCatalog({ bins: { claude: claudeBin, codex: codexBin, zcode: zcodeBin }, cwd: paths.home, env: childEnv, codexEnv,
     testMode: opts.testMode && process.env['PULT_TEST_PROVIDERS'] !== 'run' })
   const external = createExternalSessions({
     claudeRoot: opts.testMode ? join(paths.home, 'claude-projects') : join(homedir(), '.claude', 'projects'),
@@ -854,6 +874,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
     providers: {
       claude: providerState(claude),
       codex: providerState(codex),
+      zcode: providerState(zcode),
     },
     node: daemonNodeInfo(paths.runtime, process.execPath, process.version, nodeAtStart),
     // Правила уведомлений окна (О2): порог длительности хода и звук. Сама команда `notifyCommand` наружу не уходит.
@@ -1028,7 +1049,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
         }
         const want = p['providers']
         if (!Array.isArray(want) || want.length !== CONSENT_PROVIDERS.length || !CONSENT_PROVIDERS.every((x) => want.includes(x))) {
-          throw new ManagerError(ERROR_CODES.invalidParams, `access.grantFull: providers — ровно ${CONSENT_PROVIDERS.join(', ')}: диалог называет обоих`)
+          throw new ManagerError(ERROR_CODES.invalidParams, `access.grantFull: providers — ровно ${CONSENT_PROVIDERS.join(', ')}: диалог называет всех`)
         }
         let c
         try { c = consent.grant(CONSENT_PROVIDERS) } catch (e) { throw new ManagerError(ERROR_CODES.internal, `согласие не записано: ${(e as Error).message}`) }
@@ -1042,7 +1063,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
         logger.info('полный доступ отозван', { rev: c.rev, by: `${conn.client}#${conn.id}` })
         // Ревью PR #39 (блокеры Codex 2, M5): живые процессы с полными правами без дела снимаются сразу (тёплый Claude);
         // занятые доживают ход, а ход, который процесс или сервер Codex начнёт сам, менеджер остановит по его режиму.
-        for (const r of manager.list()) (r.provider === 'codex' ? codex : claude).retire?.(r.name)
+        for (const r of manager.list()) ({ claude, codex, zcode })[r.provider].retire?.(r.name)
         return { consent: consentView(c) }
       }
       case 'settings.set': {
@@ -1190,7 +1211,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
           title: [...source.session.title].slice(0, 60).join('') }, providerId, source.messages, source.session.provider === 'claude'))
       }
       case 'agent.start': {
-        const kind = p['kind'] === 'codex' ? 'codex' : 'claude'
+        const kind = p['kind'] === 'codex' ? 'codex' : p['kind'] === 'zcode' ? 'zcode' : 'claude'
         // M8d: как подтверждать действия. Нет поля — `ask`; незнакомое значение — отказ, а не тихий `ask`:
         // человек, попросивший `full`, но опечатавшийся, иначе получил бы не то, что думает.
         if (p['approval'] !== undefined && !isApprovalMode(p['approval'])) {
@@ -1459,7 +1480,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartResult> {
       case 'usage.get':
         return { usage: manager.usage() }
       case 'provider.reset': {
-        const kind = p['provider'] === 'codex' ? 'codex' : 'claude'
+        const kind = p['provider'] === 'codex' ? 'codex' : p['provider'] === 'zcode' ? 'zcode' : 'claude'
         return { provider: kind, ...manager.providerReset(kind) }
       }
       default:
