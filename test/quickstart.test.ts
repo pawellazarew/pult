@@ -592,6 +592,52 @@ describe('перепроверка Codex: настоящая папка сесс
     } finally { win.close(); cli.close(); await d.stop('конец теста'); home.remove(); rmSync(root, { recursive: true, force: true }) }
   })
 
+  it('ответ на отправку черновика потерялся: повтор — тот же чат и duplicate, а не draft_conflict', async () => {
+    const home = tempHome()
+    const root = mkdtempSync(join(tmpdir(), 'pt-lost-'))
+    const d = await startTestDaemon(home)
+    const win = await connectClient(home.paths, { client: 'shell' }) as unknown as Ctl
+    try {
+      const cwd = join(root, 'app')
+      mkdirSync(cwd)
+      const id = randomUUID()
+      await win.request('draft.put', { id, data: { text: 'задача' }, baseRev: 0, owner: 'wa' })
+      const p = { requestId: id, kind: 'claude', cwd, prompt: 'задача', draft: { id, rev: 1, owner: 'wa' } }
+      const first = (await win.request('agent.start', p)) as Rec & { promptSent?: boolean }
+      assert.equal(first.promptSent, true)
+      assert.equal(existsSync(join(home.paths.drafts, `${id}.json`)), false)
+      const again = (await win.request('agent.start', p)) as Rec & { promptSent?: boolean; duplicate?: boolean }
+      assert.deepEqual([again.name, again.promptSent, again.duplicate], [first.name, true, true])
+      assert.equal(await userMessages(win, first.name), 1, 'реплика ушла один раз')
+      // Чата по этому запросу нет, а черновик удалили — по-прежнему отказ, старт не заводится.
+      const id2 = randomUUID()
+      await win.request('draft.put', { id: id2, data: { text: 'x' }, baseRev: 0, owner: 'wa' })
+      await win.request('draft.remove', { id: id2, owner: 'wa' })
+      await assert.rejects(win.request('agent.start', { requestId: id2, kind: 'claude', cwd, prompt: 'x', draft: { id: id2, rev: 1, owner: 'wa' } }), code('draft_conflict'))
+    } finally { (win as unknown as { close(): void }).close(); await d.stop('конец теста'); home.remove(); rmSync(root, { recursive: true, force: true }) }
+  })
+
+  it('настройки Claude, которые нельзя прочитать безопасно (больше 1 МБ, FIFO), — режим неизвестен, считается полным', async () => {
+    const home = tempHome()
+    const root = mkdtempSync(join(tmpdir(), 'pt-bigset-'))
+    const d = await startTestDaemon(home)
+    const win = await connectClient(home.paths, { client: 'shell' }) as unknown as Ctl
+    try {
+      await win.request('access.grantFull', GRANT)
+      const big = join(root, 'big')
+      mkdirSync(join(big, '.claude'), { recursive: true })
+      writeFileSync(join(big, '.claude', 'settings.json'), JSON.stringify({ pad: 'x'.repeat(1024 * 1024 + 10), permissions: { defaultMode: 'bypassPermissions' } }))
+      const fifo = join(root, 'fifo')
+      mkdirSync(join(fifo, '.claude'), { recursive: true })
+      execFileSync('mkfifo', [join(fifo, '.claude', 'settings.local.json')])
+      for (const cwd of [big, fifo]) {
+        const pre = (await win.request('agent.preflight', { cwd })) as { inheritMode: string | null }
+        assert.equal(pre.inheritMode, 'bypassPermissions', cwd)
+        await assert.rejects(win.request('agent.start', { requestId: randomUUID(), kind: 'claude', cwd, approval: 'inherit', confirm: true, origin: 'link' }), code('link_full_refused'), cwd)
+      }
+    } finally { (win as unknown as { close(): void }).close(); await d.stop('конец теста'); home.remove(); rmSync(root, { recursive: true, force: true }) }
+  })
+
   it('повтор того же requestId с другими настройками: после заведения — start_changed; до — новый старт', async () => {
     const home = tempHome()
     const root = mkdtempSync(join(tmpdir(), 'pt-shape-'))
@@ -612,7 +658,7 @@ describe('перепроверка Codex: настоящая папка сесс
     } finally { win.close(); await d.stop('конец теста'); home.remove(); rmSync(root, { recursive: true, force: true }) }
   })
 
-  it('настройки Claude проекта: FIFO и /dev/zero не вешают, симлинк на обычный файл читается', () => {
+  it('настройки Claude проекта: FIFO и /dev/zero не вешают (режим неизвестен — полный), симлинк на обычный файл читается', () => {
     const root = mkdtempSync(join(tmpdir(), 'pt-setfifo-'))
     try {
       const fifo = join(root, 'fifo.json')
@@ -620,12 +666,12 @@ describe('перепроверка Codex: настоящая папка сесс
       const zero = join(root, 'zero.json')
       symlinkSync('/dev/zero', zero)
       const real = join(root, 'real.json')
-      writeFileSync(real, JSON.stringify({ permissions: { defaultMode: 'bypassPermissions' } }))
+      writeFileSync(real, JSON.stringify({ permissions: { defaultMode: 'acceptEdits' } }))
       const link = join(root, 'link.json')
       symlinkSync(real, link)
       const script = `import('${new URL('../dist/mcp/browser.js', import.meta.url).href}').then((m) => process.stdout.write(String(m.claudeDefaultMode(process.argv.slice(1)))))`
-      assert.equal(execFileSync(process.execPath, ['-e', script, fifo, zero], { timeout: 10_000, encoding: 'utf8' }), 'null')
-      assert.equal(execFileSync(process.execPath, ['-e', script, fifo, link, zero], { timeout: 10_000, encoding: 'utf8' }), 'bypassPermissions')
+      assert.equal(execFileSync(process.execPath, ['-e', script, fifo, zero], { timeout: 10_000, encoding: 'utf8' }), 'bypassPermissions')
+      assert.equal(execFileSync(process.execPath, ['-e', script, fifo, zero, link], { timeout: 10_000, encoding: 'utf8' }), 'acceptEdits')
     } finally { rmSync(root, { recursive: true, force: true }) }
   })
 })

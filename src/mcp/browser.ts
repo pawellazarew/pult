@@ -288,7 +288,10 @@ function defaultModeOf(file: string): string | null {
     // Только обычный файл до 1 МБ, без блокировки (ревью шага B, Codex recheck 10): FIFO или `/dev/zero` под именем
     // `.claude/settings.json` проекта не повесят демон. Симлинк на обычный файл — можно (dotfiles).
     const raw = readRegularFile(file, { max: 1024 * 1024, follow: true })
-    const v = raw === null ? undefined : (JSON.parse(raw) as { permissions?: { defaultMode?: unknown } }).permissions?.defaultMode
+    // Файл есть, а прочитать его безопасно нельзя (больше 1 МБ, FIFO, устройство): режим неизвестен — считаем полным
+    // доступом (финальное ревью шага B): иначе JSON с набивкой и `bypassPermissions` прошёл бы ссылку как «не полный»,
+    // а Claude его прочитал бы. Человек увидит полный уровень и выберет явно.
+    const v = raw === null ? 'bypassPermissions' : (JSON.parse(raw) as { permissions?: { defaultMode?: unknown } }).permissions?.defaultMode
     if (typeof v === 'string') mode = v
   } catch { /* кривой — не наш */ }
   modeCache.set(file, { key, mode })
