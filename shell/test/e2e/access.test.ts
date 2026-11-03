@@ -72,7 +72,7 @@ describe('окно: доступ — согласие один раз и мет�
     assert.ok(await waitFor(async () => (await consent.count()) === 0, 5000))
     assert.equal(await select.inputValue(), 'full')
     const file = JSON.parse(readFileSync(h.paths.consent, 'utf8')) as { version: number; rev: number; providers: string[] }
-    assert.deepEqual([file.version, file.rev, file.providers], [1, 1, ['claude', 'codex']])
+    assert.deepEqual([file.version, file.rev, file.providers], [1, 1, ['claude', 'codex', 'zcode']])
     assert.equal(statSync(h.paths.consent).mode & 0o777, 0o600)
 
     await dlg.getByTestId('new-agent-prompt').fill('Поправь пагинацию и прогони миграцию')
