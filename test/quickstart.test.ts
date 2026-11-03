@@ -166,6 +166,26 @@ describe('шаг B: черновики у демона (§3.2)', () => {
       assert.throws(() => store.put(randomUUID(), { text: 'x'.repeat(300_000) }, 0, 'w'), (e: { code?: string }) => e.code === 'invalid_params')
     } finally { rmSync(root, { recursive: true, force: true }) }
   })
+  it('захват стартом: пока старт идёт — ни записи, ни «Забрать», ни удаления; отказ — черновик цел, принятая реплика — убран', () => {
+    const root = mkdtempSync(join(tmpdir(), 'pt-dclaim-'))
+    try {
+      const store = createDraftStore(join(root, 'drafts'))
+      const id = randomUUID()
+      store.put(id, { text: 'задача' }, 0, 'wa')
+      const starting = (e: { code?: string }): boolean => e.code === 'draft_starting'
+      assert.throws(() => store.beginStart(id, 0, 'wa', 'r1'), (e: { code?: string }) => e.code === 'draft_conflict', 'чужая ревизия')
+      store.beginStart(id, 1, 'wa', 'r1')
+      assert.throws(() => store.beginStart(id, 1, 'wa', 'r2'), starting, 'второй старт того же черновика')
+      assert.throws(() => store.claim(id, 'wb'), starting)
+      assert.throws(() => store.put(id, { text: 'чужое' }, 1, 'wb'), starting)
+      assert.throws(() => store.remove(id, 'wb'), starting)
+      store.endStart(id, 'r1', false)
+      assert.equal(store.get(id)?.rev, 1, 'отказ — черновик цел, захват снят')
+      store.beginStart(id, 1, 'wa', 'r1')
+      store.endStart(id, 'r1', true)
+      assert.equal(store.get(id), null, 'реплика принята — черновик убран')
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
 })
 
 type Rec = { name: string; approval?: string; phase?: string; requestId?: string; promptError?: { code: string }; worktree?: { path: string; branch: string } }
@@ -555,7 +575,7 @@ describe('перепроверка Codex: настоящая папка сесс
     } finally { win.close(); await d.stop('конец теста'); home.remove(); rmSync(root, { recursive: true, force: true }) }
   })
 
-  it('старт держит черновик: «Забрать» и запись из другого окна во время старта — draft_starting; отказ say — черновик цел', async () => {
+  it('старт из черновика через worktree: принятая реплика убирает черновик; отказ say — черновик цел', async () => {
     const home = tempHome()
     const root = mkdtempSync(join(tmpdir(), 'pt-claim-'))
     const d = await startTestDaemon(home)
@@ -567,13 +587,8 @@ describe('перепроверка Codex: настоящая папка сесс
       git(repo, 'init', '-q'); writeFileSync(join(repo, 'a'), 'a'); git(repo, 'add', 'a'); git(repo, 'commit', '-qm', 'a')
       const id = randomUUID()
       await win.request('draft.put', { id, data: { text: 'задача' }, baseRev: 0, owner: 'wa' })
-      const start = win.request('agent.start', { requestId: id, kind: 'claude', cwd: repo, worktree: true, prompt: 'задача', draft: { id, rev: 1, owner: 'wa' } })
-      // Пока идёт git worktree add (журнал уже на фазе worktree) — окно B пытается забрать и переписать.
-      const j = createStartJournal(home.paths.startJournal)
-      assert.ok(await waitFor(() => j.get(id)?.phase === 'worktree', 5000), 'старт не дошёл до worktree')
-      await assert.rejects(win.request('draft.claim', { id, owner: 'wb' }), code('draft_starting'))
-      await assert.rejects(win.request('draft.put', { id, data: { text: 'чужое' }, baseRev: 1, owner: 'wb' }), code('draft_starting'))
-      const r = (await start) as Rec & { promptSent?: boolean }
+      // Захват во время старта — детерминированно в тесте хранилища выше: фаза worktree на быстром Linux короче опроса.
+      const r = (await win.request('agent.start', { requestId: id, kind: 'claude', cwd: repo, worktree: true, prompt: 'задача', draft: { id, rev: 1, owner: 'wa' } })) as Rec & { promptSent?: boolean }
       assert.equal(r.promptSent, true)
       assert.equal(existsSync(join(home.paths.drafts, `${id}.json`)), false, 'принятая реплика — черновик убран')
 
