@@ -59,6 +59,13 @@ import type { LastUsed, ModelChoice, NewSessionSettings } from '../sessions/sett
 import { atomicWrite } from '../service/fsutil.js'
 import { createExternalSessions } from '../sessions/external.js'
 import { createProjectStore, ProjectError } from '../projects/store.js'
+import { createFolderStore, folderIdentity } from '../core/folders.js'
+import type { FolderRecall } from '../core/folders.js'
+import { createDraftStore, DRAFT_OWNER_STALE_MS, DraftError } from '../core/drafts.js'
+import { createStartJournal, phaseAtLeast, REQUEST_ID_RE } from '../core/startJournal.js'
+import type { StartEntry, StartPhase } from '../core/startJournal.js'
+import { suggestName } from '../sessions/naming.js'
+import { coversPultHome } from '../sessions/manager.js'
 import type { ApprovalMode, PermissionDecision, PermissionScope } from '../adapters/types.js'
 import { APPROVAL_LIST, approvalFits, isApprovalMode, PERMISSION_SCOPES } from '../adapters/types.js'
 import { CONSENT_PROVIDERS, CONSENT_VERSION, consentCovers, consentView, createConsentStore } from '../core/consent.js'
@@ -851,6 +858,14 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
     access: { consent: consentView(consent.read()), providers: [...CONSENT_PROVIDERS], claudeDefaultMode: claudeDefaultMode([claudeUserSettings, ...claudeManaged()]) ?? 'default' },
   })
   const projects = createProjectStore(join(paths.home, 'projects.json'))
+  // Быстрый старт, шаг B: память папок, черновики новых чатов и журнал стартов (design/2026-11-02-quick-start §3.2–§3.3,
+  // §3.9). Журнал чистится от записей старше 7 дней при старте демона.
+  const folders = createFolderStore(paths.folders)
+  const drafts = createDraftStore(paths.drafts)
+  const startJournal = createStartJournal(paths.startJournal)
+  try { startJournal.prune() } catch (e) { logger.warn('журнал стартов не почищен', { error: (e as Error).message }) }
+  /** Старты в пути по `requestId`: повтор, пришедший раньше ответа, ждёт тот же старт, а не заводит второй. */
+  const startsInFlight = new Map<string, Promise<unknown>>()
   // `PULT_TEST_PROVIDERS=run` (только вместе с PULT_TEST=1): проверка входа идёт по-настоящему — в фальшивые CLI
   // из PULT_CLAUDE_BIN / PULT_CODEX_BIN. Нужна кадрам README (shell/test/readme): шапка «готов», а не «ошибка».
   const catalog = createProviderCatalog({ bins: { claude: claudeBin, codex: codexBin, zcode: zcodeBin }, cwd: paths.home, env: childEnv, codexEnv,
@@ -995,6 +1010,163 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
   }
   const int = (v: unknown, dflt: number): number => (typeof v === 'number' && Number.isFinite(v) ? v : dflt)
 
+  // --- `agent.start`: проверка, заведение, память папки (шаг B) -------------------------------------------------
+  type StartChecks = { kind: 'claude' | 'codex' | 'zcode'; approval: ApprovalMode; grant: 'cli-once' | undefined; browser: SessionBrowser | null; worktree: boolean }
+  /** Всё, что может отказать ДО заведения чего-либо: режим, полный доступ (согласие), браузер. */
+  const validateStart = (conn: Connection, p: Record<string, unknown>): StartChecks => {
+    const kind = p['kind'] === 'codex' ? 'codex' : p['kind'] === 'zcode' ? 'zcode' : 'claude'
+    // M8d: как подтверждать действия. Нет поля — `ask`; незнакомое значение — отказ, а не тихий `ask`:
+    // человек, попросивший `full`, но опечатавшийся, иначе получил бы не то, что думает.
+    if (p['approval'] !== undefined && !isApprovalMode(p['approval'])) {
+      throw new ManagerError(ERROR_CODES.invalidParams, `agent.start: approval — ${APPROVAL_LIST}`)
+    }
+    if (p['grant'] !== undefined && p['grant'] !== 'cli-once') throw new ManagerError(ERROR_CODES.invalidParams, 'agent.start: grant — только cli-once')
+    if (p['worktree'] !== undefined && p['worktree'] !== true && typeof p['worktree'] !== 'string') throw new ManagerError(ERROR_CODES.invalidParams, 'agent.start: worktree — имя ветки или true (ветка pult/<имя>)')
+    refuseShellGrant(conn.client, p, 'agent.start')
+    const approval = (p['approval'] ?? 'ask') as ApprovalMode
+    if (!approvalFits(kind, approval)) throw new ManagerError(ERROR_CODES.invalidParams, 'agent.start: режим «как в настройках Claude» (inherit) есть только у Claude')
+    // Ревью M8d: «полный доступ» — только с явным подтверждением (`confirm: true`; CLI — по `--yes`). Шаг A: и с
+    // разрешением — согласием окна (`consent.json`, сверка `consentRev`) или разовым `grant: cli-once` из CLI.
+    // `inherit` при `defaultMode: bypassPermissions` у владельца — тоже полный доступ. Отказ ДО заведения чего-либо.
+    const grant = isFullLevel(kind, approval, approval === 'inherit' ? inheritModeOf(kind, String(p['cwd'] ?? ''), str(p['settingSources'])) : null)
+      ? checkFull('agent.start', kind, p, approval) : undefined
+    const browser = browserParam(p['browser'], 'agent.start')
+    if (browser) refuseBypass(kind, String(p['cwd'] ?? ''), approval)
+    return { kind, approval, grant, browser, worktree: p['worktree'] === true || str(p['worktree']) !== undefined }
+  }
+  const doStart = async (conn: Connection, p: Record<string, unknown>, name: string, v: StartChecks): Promise<SessionRecord & { browserDownloads?: string }> => {
+    // `worktree: true` — ветку называет демон: `pult/<имя>` (имя выделено им же).
+    const branch = p['worktree'] === true ? `pult/${name}` : str(p['worktree'])
+    const rec = publicRecord(await manager.start({
+      name,
+      ...(str(p['title']) !== undefined ? { title: str(p['title']) as string } : {}),
+      kind: v.kind,
+      cwd: String(p['cwd'] ?? ''),
+      ...(str(p['model']) !== undefined ? { model: str(p['model']) as string } : {}),
+      ...(str(p['effort']) !== undefined ? { effort: str(p['effort']) as string } : {}),
+      ...(p['mode'] === 'warm' ? { mode: 'warm' as const } : {}),
+      ...(str(p['settingSources']) !== undefined ? { settingSources: str(p['settingSources']) as string } : {}),
+      ...(branch !== undefined ? { worktree: branch } : {}),
+      ...(str(p['base']) !== undefined ? { base: str(p['base']) as string } : {}),
+      ...(v.browser ? { browser: v.browser } : {}),
+      ...(v.approval !== 'ask' ? { approval: v.approval } : {}),
+      ...(v.grant ? { grant: v.grant } : {}),
+    }))
+    if (v.browser) browserOn(rec.name)
+    // M8f: последний выбор «+ Сессия» — только с окна (клиент `shell`): CLI и скрипты его не трогают.
+    // Папка — если форма не была открыта уже с папкой (`rememberCwd: false`). `full` не запоминается.
+    if (conn.client === 'shell') {
+      try {
+        const next = nextLastUsed(readLastUsed(), {
+          kind: v.kind,
+          ...(rec.model ? { model: rec.model } : {}),
+          ...(rec.effort ? { effort: rec.effort } : {}),
+          approval: v.approval,
+          mode: rec.mode,
+          browser: !!v.browser,
+          worktree: v.worktree,
+          cwd: String(p['cwd'] ?? ''),
+        }, p['rememberCwd'] !== false, new Date().toISOString())
+        atomicWrite(paths.newSessionLast, JSON.stringify(next, null, 2) + '\n', 0o600)
+      } catch (e) { logger.warn('последний выбор «+ Сессия» не записан', { error: (e as Error).message }) }
+    }
+    return withBrowser(rec)
+  }
+  /**
+   * После реального старта: папка — в историю (последняя папка, «Где работаем?»), доступ — в память папки, если окно
+   * просит (`rememberAccess: true` — уровень выбран явно и не «Только этот чат», src/sessions/resolve.ts). Полный
+   * доступ из черновика по ссылке не запоминается никогда: «Включить для этого чата» — разрешение одного чата (B3).
+   * CLI в память не пишет. Сбой записи памяти старт не роняет — чат уже заведён.
+   */
+  const afterStart = (conn: Connection, p: Record<string, unknown>, rec: SessionRecord, v: StartChecks): void => {
+    if (conn.client !== 'shell') return
+    const folder = String(p['cwd'] ?? '')
+    try {
+      folders.use(folder)
+      const full = isFullLevel(v.kind, v.approval, v.approval === 'inherit' ? inheritFor(rec) : null)
+      if (p['rememberAccess'] === true && !(p['origin'] === 'link' && full)) folders.remember(folder, v.approval)
+    } catch (e) { logger.warn('память папки не записана', { folder, error: (e as Error).message }) }
+  }
+  /** Свободное имя для папки: не занято сессией, не заводится и не выделено другому старту в журнале. */
+  const allocName = (cwd: string): string => {
+    const taken = new Set([...manager.list().map((r) => r.name), ...startJournal.reservedNames()])
+    return suggestName(cwd, taken)
+  }
+  const startWithRequest = async (conn: Connection, p: Record<string, unknown>, requestId: string): Promise<Record<string, unknown>> => {
+    const prompt = typeof p['prompt'] === 'string' && p['prompt'].trim() ? p['prompt'] : undefined
+    const entry = startJournal.get(requestId)
+    const put = (e: Omit<StartEntry, 'updatedAt'>): StartEntry => { const x = { ...e, updatedAt: '' }; startJournal.put(x); return x }
+    if (entry?.name && phaseAtLeast(entry.phase, 'registered')) {
+      const live = manager.list().find((r) => r.name === entry.name)
+      if (!live) throw new ManagerError(ERROR_CODES.notFound, `сессию ${entry.name}, заведённую по этому запросу, уже удалили`)
+      return finishPrompt(requestId, entry, withBrowser(publicRecord(live)), prompt, put)
+    }
+    const v = validateStart(conn, p)
+    const at = entry?.at ?? new Date().toISOString()
+    let name = entry?.name
+    if (!name) {
+      const asked = str(p['name'])
+      name = asked ?? allocName(String(p['cwd'] ?? ''))
+      put({ requestId, phase: 'name-reserved', name, at })
+    }
+    if (p['reserveOnly'] === true) return { requestId, name, phase: 'name-reserved' satisfies StartPhase }
+    if (v.worktree) put({ requestId, phase: 'worktree', name, at })
+    let rec: SessionRecord & { browserDownloads?: string }
+    try {
+      rec = await doStart(conn, p, name, v)
+    } catch (e) {
+      // До `registered`: имя остаётся за запросом (повтор возьмёт его же), созданный worktree убрал менеджер.
+      put({ requestId, phase: 'name-reserved', name, at, error: { code: e instanceof ManagerError ? e.code : ERROR_CODES.internal, message: (e as Error).message } })
+      throw e
+    }
+    const registered = put({ requestId, phase: 'registered', name, at })
+    afterStart(conn, p, rec, v)
+    return finishPrompt(requestId, registered, rec, prompt, put)
+  }
+  /** Первая реплика старта: после `prompt-accepted` второй раз не уходит; отказ — в ответе, сессия остаётся. */
+  const finishPrompt = async (requestId: string, entry: StartEntry, rec: SessionRecord, prompt: string | undefined,
+    put: (e: Omit<StartEntry, 'updatedAt'>) => StartEntry): Promise<Record<string, unknown>> => {
+    const base = { ...rec, requestId }
+    if (!prompt || phaseAtLeast(entry.phase, 'prompt-accepted')) return { ...base, phase: entry.phase }
+    try {
+      await manager.say(rec.name, prompt)
+    } catch (e) {
+      const error = { code: e instanceof ManagerError ? e.code : ERROR_CODES.internal, message: (e as Error).message }
+      put({ requestId, phase: 'registered', name: rec.name, at: entry.at, error })
+      return { ...base, phase: 'registered', promptError: error }
+    }
+    put({ requestId, phase: 'running', name: rec.name, at: entry.at })
+    return { ...base, phase: 'running' }
+  }
+  /**
+   * «Где работаем?» (§3.2, кадр 08): недавние папки из чатов Пульта (история `folders.json` и папки сессий) и из
+   * истории Claude Code/Codex (первая страница списка, Codex — не дольше 3 с). Только существующие папки, без тех, что
+   * покрывают PULT_HOME (там чат без worktree не заведётся).
+   */
+  const recentFolders = async (limit: number): Promise<Array<{ path: string; at: string; source: 'pult' | 'claude' | 'codex'; access?: ApprovalMode }>> => {
+    const out = new Map<string, { path: string; at: string; source: 'pult' | 'claude' | 'codex'; access?: ApprovalMode }>()
+    const add = (path: string, at: string, source: 'pult' | 'claude' | 'codex', access?: ApprovalMode): void => {
+      const id = folderIdentity(path)
+      if (!id || coversPultHome(id.key, paths.home)) return
+      const have = out.get(id.key)
+      if (have && have.at >= at) { if (access && !have.access) have.access = access; return }
+      out.set(id.key, { path: id.key === path ? path : id.display, at, source, ...(access ?? have?.access ? { access: (access ?? have?.access) as ApprovalMode } : {}) })
+    }
+    for (const f of folders.recent(limit * 2)) add(f.path, f.lastUsedAt, 'pult', f.access)
+    for (const r of manager.list()) if (!r.archived) add(r.worktree?.repo ?? r.cwd, r.lastTurnAt ?? r.createdAt, 'pult')
+    const ext = async (provider: 'claude' | 'codex'): Promise<void> => {
+      try {
+        const page = await Promise.race([
+          external.list(provider),
+          new Promise<null>((r) => { const t = setTimeout(() => r(null), 3000); t.unref?.() }),
+        ])
+        for (const x of page?.sessions ?? []) add(x.cwd, x.updatedAt, provider)
+      } catch { /* истории этого CLI нет или он недоступен — без неё */ }
+    }
+    await Promise.all([ext('claude'), ext('codex')])
+    return [...out.values()].sort((a, b) => b.at.localeCompare(a.at)).slice(0, limit)
+  }
+
   /**
    * Методы вокруг агентов. Право на `perm.request` (только соединение с ключом вопросов, 0.3.7) проверяется здесь
    * и в начале `dispatch` (ключ вопросов — ничего, кроме `perm.request`).
@@ -1043,6 +1215,11 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
           ...(grant ? { grant } : {}),
         })
         if (r.changes.browser === 'on') browserOn(r.record.name)
+        // Шаг B: смена доступа в живом чате окном — в память папки (у worktree — основного репозитория), §3.7.
+        if (r.changes.approval && p['rememberAccess'] === true && conn.client === 'shell') {
+          const folder = r.record.worktree?.repo ?? r.record.cwd
+          try { folders.remember(folder, r.changes.approval.to ?? 'ask') } catch (e) { logger.warn('память папки не записана', { folder, error: (e as Error).message }) }
+        }
         const live = manager.list().find((x) => x.name === r.record.name)
         return { ...withBrowser(publicRecord(r.record)), ...(live ? { access: accessOf(live) } : {}), changes: r.changes, when: r.when }
       }
@@ -1228,57 +1405,75 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
           title: [...source.session.title].slice(0, 60).join('') }, providerId, source.messages, source.session.provider === 'claude'))
       }
       case 'agent.start': {
-        const kind = p['kind'] === 'codex' ? 'codex' : p['kind'] === 'zcode' ? 'zcode' : 'claude'
-        // M8d: как подтверждать действия. Нет поля — `ask`; незнакомое значение — отказ, а не тихий `ask`:
-        // человек, попросивший `full`, но опечатавшийся, иначе получил бы не то, что думает.
-        if (p['approval'] !== undefined && !isApprovalMode(p['approval'])) {
-          throw new ManagerError(ERROR_CODES.invalidParams, `agent.start: approval — ${APPROVAL_LIST}`)
+        // Шаг B: `requestId` (= uuid черновика окна) делает старт идемпотентным — журнал фаз, имя выделяет демон, первая
+        // реплика (`prompt`) уходит в том же вызове и второй раз не шлётся (design/2026-11-02-quick-start §3.3).
+        const requestId = p['requestId']
+        if (requestId !== undefined && (typeof requestId !== 'string' || !REQUEST_ID_RE.test(requestId))) {
+          throw new ManagerError(ERROR_CODES.invalidParams, 'agent.start: requestId — UUID (uuid черновика)')
         }
-        if (p['grant'] !== undefined && p['grant'] !== 'cli-once') throw new ManagerError(ERROR_CODES.invalidParams, 'agent.start: grant — только cli-once')
-        refuseShellGrant(conn.client, p, 'agent.start')
-        const approval = (p['approval'] ?? 'ask') as ApprovalMode
-        if (!approvalFits(kind, approval)) throw new ManagerError(ERROR_CODES.invalidParams, 'agent.start: режим «как в настройках Claude» (inherit) есть только у Claude')
-        // Ревью M8d: «полный доступ» — только с явным подтверждением (`confirm: true`; CLI — по `--yes`). Шаг A: и с
-        // разрешением — согласием окна (`consent.json`, сверка `consentRev`) или разовым `grant: cli-once` из CLI.
-        // `inherit` при `defaultMode: bypassPermissions` у владельца — тоже полный доступ. Отказ ДО заведения чего-либо.
-        const startGrant = isFullLevel(kind, approval, approval === 'inherit' ? inheritModeOf(kind, String(p['cwd'] ?? ''), str(p['settingSources'])) : null)
-          ? checkFull('agent.start', kind, p, approval) : undefined
-        const browser = browserParam(p['browser'], 'agent.start')
-        if (browser) refuseBypass(kind, String(p['cwd'] ?? ''), approval)
-        const rec = publicRecord(await manager.start({
-          name: String(p['name'] ?? ''),
-          ...(str(p['title']) !== undefined ? { title: str(p['title']) as string } : {}),
-          kind,
-          cwd: String(p['cwd'] ?? ''),
-          ...(str(p['model']) !== undefined ? { model: str(p['model']) as string } : {}),
-          ...(str(p['effort']) !== undefined ? { effort: str(p['effort']) as string } : {}),
-          ...(p['mode'] === 'warm' ? { mode: 'warm' as const } : {}),
-          ...(str(p['settingSources']) !== undefined ? { settingSources: str(p['settingSources']) as string } : {}),
-          ...(str(p['worktree']) !== undefined ? { worktree: str(p['worktree']) as string } : {}),
-          ...(str(p['base']) !== undefined ? { base: str(p['base']) as string } : {}),
-          ...(browser ? { browser } : {}),
-          ...(approval !== 'ask' ? { approval } : {}),
-          ...(startGrant ? { grant: startGrant } : {}),
-        }))
-        if (browser) browserOn(rec.name)
-        // M8f: последний выбор «+ Сессия» — только с окна (клиент `shell`): CLI и скрипты его не трогают.
-        // Папка — если форма не была открыта уже с папкой (`rememberCwd: false`). `full` не запоминается.
-        if (conn.client === 'shell') {
-          try {
-            const next = nextLastUsed(readLastUsed(), {
-              kind,
-              ...(rec.model ? { model: rec.model } : {}),
-              ...(rec.effort ? { effort: rec.effort } : {}),
-              approval,
-              mode: rec.mode,
-              browser: !!browser,
-              worktree: str(p['worktree']) !== undefined,
-              cwd: String(p['cwd'] ?? ''),
-            }, p['rememberCwd'] !== false, new Date().toISOString())
-            atomicWrite(paths.newSessionLast, JSON.stringify(next, null, 2) + '\n', 0o600)
-          } catch (e) { logger.warn('последний выбор «+ Сессия» не записан', { error: (e as Error).message }) }
+        if (p['prompt'] !== undefined && typeof p['prompt'] !== 'string') throw new ManagerError(ERROR_CODES.invalidParams, 'agent.start: prompt — строка')
+        if (p['origin'] !== undefined && p['origin'] !== 'user' && p['origin'] !== 'link') throw new ManagerError(ERROR_CODES.invalidParams, 'agent.start: origin — user | link')
+        if (typeof requestId !== 'string') {
+          if (p['reserveOnly'] !== undefined) throw new ManagerError(ERROR_CODES.invalidParams, 'agent.start: reserveOnly — только с requestId')
+          const v = validateStart(conn, p)
+          const rec = await doStart(conn, p, String(p['name'] ?? ''), v)
+          afterStart(conn, p, rec, v)
+          const prompt = typeof p['prompt'] === 'string' && p['prompt'].trim() ? p['prompt'] : undefined
+          if (prompt) await manager.say(rec.name, prompt)
+          return rec
         }
-        return withBrowser(rec)
+        // Повтор, пришедший, пока первый старт ещё идёт, ждёт его — и продолжает по журналу (сессия уже будет).
+        const before = startsInFlight.get(requestId)
+        if (before) await before.catch(() => undefined)
+        const run = startWithRequest(conn, p, requestId)
+        startsInFlight.set(requestId, run)
+        try { return await run } finally { if (startsInFlight.get(requestId) === run) startsInFlight.delete(requestId) }
+      }
+      case 'agent.startStatus': {
+        // Ответ `agent.start` потерялся: окно спрашивает, до какой фазы дошёл старт (§3.3 п. 4).
+        const id = p['requestId']
+        if (typeof id !== 'string' || !REQUEST_ID_RE.test(id)) throw new ManagerError(ERROR_CODES.invalidParams, 'agent.startStatus: requestId — UUID')
+        const e = startJournal.get(id)
+        if (!e) throw new ManagerError(ERROR_CODES.notFound, 'старта с таким requestId не было (или журнал старше 7 дней)')
+        return { ...e, ...(startsInFlight.has(id) ? { inFlight: true } : {}) }
+      }
+      case 'agent.preflight': {
+        // До отправки черновика — та же проверка, что сделает `agent.start` (§4, ревью Codex № 21): папки нет, это не
+        // папка, она покрывает PULT_HOME (без worktree). И память папки — для резолвера окна.
+        const cwd = p['cwd']
+        if (typeof cwd !== 'string' || !cwd.startsWith('/') || cwd.includes('\0')) throw new ManagerError(ERROR_CODES.invalidParams, 'agent.preflight: cwd — абсолютный путь')
+        let isDir = false
+        try { isDir = statSync(cwd).isDirectory() } catch { isDir = false }
+        if (!isDir) return { cwd, ok: false, refusal: 'missing' }
+        const worktree = p['worktree'] === true
+        if (!worktree && coversPultHome(cwd, paths.home)) return { cwd, ok: false, refusal: 'covers_pult_home', home: paths.home, folder: folders.recall(cwd) }
+        return { cwd, ok: true, folder: folders.recall(cwd) }
+      }
+      case 'folders.recent':
+        return { folders: await recentFolders(typeof p['limit'] === 'number' ? Math.max(1, Math.min(20, Math.floor(p['limit']))) : 8) }
+      case 'folders.list':
+        return { folders: folders.entries() }
+      case 'folders.forget': {
+        if (typeof p['path'] !== 'string' || !p['path'].startsWith('/')) throw new ManagerError(ERROR_CODES.invalidParams, 'folders.forget: path — абсолютный путь')
+        return { forgotten: folders.forget(p['path']) }
+      }
+      case 'folders.clearHistory':
+        return { cleared: folders.clearHistory() }
+      case 'draft.list':
+        return { drafts: drafts.list(), staleMs: DRAFT_OWNER_STALE_MS }
+      case 'draft.put':
+      case 'draft.claim':
+      case 'draft.touch':
+      case 'draft.remove': {
+        try {
+          if (method === 'draft.put') return { draft: drafts.put(p['id'] as string, p['data'], typeof p['baseRev'] === 'number' ? p['baseRev'] : NaN, p['owner'] as string, p['force'] === true) }
+          if (method === 'draft.claim') return { draft: drafts.claim(p['id'] as string, p['owner'] as string) }
+          if (method === 'draft.touch') return { touched: drafts.touch(Array.isArray(p['ids']) ? p['ids'] as string[] : [], p['owner'] as string) }
+          return { removed: drafts.remove(p['id'] as string, p['owner'] === undefined ? undefined : p['owner'] as string) }
+        } catch (e) {
+          if (e instanceof DraftError) throw new ManagerError(e.code, e.message)
+          throw e
+        }
       }
       case 'agent.browser': {
         // О3: браузер для агента вкл/выкл — со следующего хода: идущий ход не трогается, тёплый процесс Claude сменится на
@@ -1811,6 +2006,17 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
       case 'sessions.external.read':
       case 'agent.import':
       case 'agent.start':
+      case 'agent.startStatus':
+      case 'agent.preflight':
+      case 'folders.recent':
+      case 'folders.list':
+      case 'folders.forget':
+      case 'folders.clearHistory':
+      case 'draft.list':
+      case 'draft.put':
+      case 'draft.claim':
+      case 'draft.touch':
+      case 'draft.remove':
       case 'agent.browser':
       case 'mcp.list':
       case 'mcp.select':

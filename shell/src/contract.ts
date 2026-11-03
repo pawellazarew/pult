@@ -87,6 +87,21 @@ export const ALLOWED_METHODS = [
   // этот путь. Окно старой оболочки получает `method_not_allowed` — интерфейс подсказывает обновить окно.
   'access.grantFull',
   'access.revokeFull',
+  // Быстрый старт, шаг B (design/2026-11-02-quick-start §3.2–§3.3, §3.9): черновики нового чата у демона (по файлу на
+  // черновик, compare-and-set по `rev`, владелец-окно), фаза идемпотентного старта, проверка папки до отправки, недавние
+  // папки и память доступа папок («Забыть папку», «Очистить историю»). Окно старой оболочки получает
+  // `method_not_allowed` — черновик тогда живёт только в памяти окна.
+  'agent.startStatus',
+  'agent.preflight',
+  'folders.recent',
+  'folders.list',
+  'folders.forget',
+  'folders.clearHistory',
+  'draft.list',
+  'draft.put',
+  'draft.claim',
+  'draft.touch',
+  'draft.remove',
 ] as const
 
 export type AllowedMethod = (typeof ALLOWED_METHODS)[number]

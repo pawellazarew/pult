@@ -884,6 +884,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
         throw new ManagerError('invalid_params', `агент ${params.name} уже заводится`)
       }
       starting.add(params.name)
+      let prepared: PreparedWorktree | null = null
       try {
         if (!params.cwd) throw new ManagerError('invalid_params', 'нужен --cwd')
         // Папку проверяем ЗДЕСЬ, а не у spawn: опечатка в `--cwd` иначе доходила до
@@ -911,7 +912,6 @@ export function createManager(opts: ManagerOptions): SessionManager {
         // worktree, и именно её запомнит реестр (ленивый resume после рестарта демона попадёт
         // туда же без особого случая). Проверка «провайдер остановлен» стоит выше — незачем
         // заводить ветку агенту, которого всё равно не пустят.
-        let prepared: PreparedWorktree | null = null
         if (params.worktree) {
           const branch = params.worktree
           const wtOpts = {
@@ -992,6 +992,16 @@ export function createManager(opts: ManagerOptions): SessionManager {
         return prepared
           ? { ...rec, worktreeAction: prepared.action, ...(prepared.baseIgnored ? { baseIgnored: true } : {}) }
           : rec
+      } catch (e) {
+        // Шаг B (design/2026-11-02-quick-start §3.3 п. 4): сбой до записи в реестр — новый worktree убирается, иначе
+        // «Повторить» упёрся бы в занятую папку. Чужой (`reused`) не трогаем; ветка остаётся — в ней ничего нет.
+        if (prepared && prepared.action !== 'reused' && !registry.get(params.name)) {
+          const wt = prepared.worktree
+          await serialWorktree(() => removeWorktree(wt, opts.env)).catch((err: unknown) => {
+            opts.logger.warn('worktree несостоявшегося старта не убран', { session: params.name, path: wt.path, error: (err as Error).message })
+          })
+        }
+        throw e
       } finally {
         starting.delete(params.name)
         for (const [p, n] of pendingWorktrees) if (n === params.name) pendingWorktrees.delete(p)
