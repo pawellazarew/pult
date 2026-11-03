@@ -32,6 +32,8 @@ const PATHS: Record<string, ReactElement> = {
   model: <path d="M3 3.5h10v7H7l-3 2.5v-2.5H3z" />,
   tool: <path d="M10.5 2.5a3 3 0 0 0-2.8 4L3 11.2 4.8 13l4.7-4.7a3 3 0 0 0 4-2.8l-1.8 1.8-1.7-.4-.4-1.7z" />,
   mark: <><rect x="1.5" y="1.5" width="13" height="13" rx="2" /><path d="M4.5 10.5l2-2 2 1.5 3-4.5" /></>,
+  // Шаг A: щит доступа — чип, плашка в шапке, строка сайдбара, диалог согласия.
+  shield: <path d="M8 1.8l5 1.9v4c0 3.1-2.1 5.6-5 6.5-2.9-.9-5-3.4-5-6.5v-4z" />,
 }
 
 export function Icon({ name, className = 'ic' }: { name: keyof typeof PATHS | string; className?: string }): ReactElement {

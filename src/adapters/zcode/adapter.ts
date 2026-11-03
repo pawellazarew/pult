@@ -33,7 +33,7 @@ import { checkNetwork, netGeneration, netRefusal, noProxyValue } from '../../env
 import type { NetCheck } from '../../env/net.js'
 import type { SessionRecord } from '../../sessions/registry.js'
 import type {
-  AdapterDeps, PermissionDecision, ProviderAdapter, SessionSpec, StartedSession, TurnOutcome, TurnSettings, TurnStarted,
+  AdapterDeps, ApprovalMode, PermissionDecision, ProviderAdapter, SessionSpec, StartedSession, TurnOutcome, TurnSettings, TurnStarted,
 } from '../types.js'
 import { approvalContext } from '../approvalContext.js'
 import { buildZcodeArgv } from './argv.js'
@@ -126,6 +126,8 @@ interface Live {
   netEnv: Record<string, string>
   /** Закрыть идущий ход стопом, даже если его процесс уже закрылся. */
   turnAbort: ((message: string) => void) | null
+  /** Шаг A: уровень, с которым запущен текущий процесс хода (`undefined` — `ask`); для `activeAccess`. */
+  childApproval?: ApprovalMode
 }
 
 /** Процессы, чей `close` уже был: ход не должен ждать второго. */
@@ -199,7 +201,14 @@ export function createZcodeAdapter(opts: ZcodeAdapterOptions): ProviderAdapter {
     const statusL = (s: string, extra: Record<string, unknown> = {}): void => { if (!gone()) status(name, s, extra) }
 
     l.stopRequested = false
-    const approval = at?.approval ?? l.spec.approval
+    let approval = at?.approval ?? l.spec.approval
+    // Шаг A (PR #39): полный уровень (`--mode yolo`) — только если демон его СЕЙЧАС разрешает (согласие или `--yes`).
+    // Снимок хода демон уже провёл через `accessGate`; это вторая линия — согласие отозвали между снимком и спавном.
+    // Без разрешения — явный `ask` (`guarded`), никогда не «шире».
+    if (approval === 'full' && opts.mayRunFull && !opts.mayRunFull(name)) {
+      logger.warn('полный доступ не разрешён к моменту хода — ход в «Спрашивать»', { session: name })
+      approval = undefined
+    }
 
     // --- страж страны выхода (инвариант 2) ------------------------------------
     if (!l.started || now() - l.lastTurnAt > IDLE_RECHECK_MS || netSeen.get(l) !== netGeneration()) {
@@ -382,6 +391,11 @@ export function createZcodeAdapter(opts: ZcodeAdapterOptions): ProviderAdapter {
           env: buildChildEnv(process.env, { network: l.netEnv, extra: zcodeExtraEnv() }),
           stdio: ['pipe', 'pipe', 'pipe'],
         })
+        // Шаг A: с каким уровнем ушёл процесс. Режим CLI в потоке не называет (`reported: null` — «не подтверждено»);
+        // `--mode yolo` — полные права по знанию адаптера (`full`), процесс на ход — всегда новый (`fresh`).
+        if (approval) l.childApproval = approval
+        else delete l.childApproval
+        opts.applied?.(name, { approval, reported: null, fresh: true, ...(approval === 'full' ? { full: true } : {}) })
       } catch (e) {
         logger.error('zcode не запустился: spawn бросил', { session: name, error: (e as Error).message })
         finish({ turnId, ok: false, errorCode: 'internal', message: `zcode не запустился: ${(e as Error).message.slice(0, 300)}` })
@@ -426,6 +440,14 @@ export function createZcodeAdapter(opts: ZcodeAdapterOptions): ProviderAdapter {
     },
 
     send(name, text, at) { return runTurn(need(name), text, at) },
+
+    activeAccess(name) {
+      // Шаг A: процесс хода жив — его права действуют (метка «полный» горит до его выхода). Тёплых процессов нет.
+      const l = live.get(name)
+      const child = l?.child
+      if (!l || !child || closedChildren.has(child) || child.exitCode !== null || child.signalCode !== null) return null
+      return l.childApproval ? { approval: l.childApproval } : {}
+    },
 
     async respondPermission(_name, _requestId, _decision: PermissionDecision) {
       // Маршрут A: канала вопросов в Пульт у CLI нет — «спрашивать» ложится на guarded,

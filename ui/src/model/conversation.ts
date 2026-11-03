@@ -17,6 +17,7 @@ import { parseOffers } from './permissions.js'
 import type { PermissionOffers } from '../../../src/adapters/types.js'
 import { browserNote, describeChanges } from '../../../src/sessions/settings.js'
 import type { ConfigureChanges } from '../../../src/sessions/settings.js'
+import { accessChangeLine } from './access.js'
 
 /** `stopped` — ход прервали или он провалился, а свой конец (`tool_result`) так и не пришёл. */
 export type ItemState = 'running' | 'ok' | 'error' | 'stopped'
@@ -444,11 +445,23 @@ export function applyConversation(conv: Conversation, ev: PultEvent): Conversati
       // или возвращён режимом).
       // Ход идёт не на тех настройках, что в подвале (идут фоновые задачи), — заметка адаптера словами.
       const notice = str(d['notice'])
-      if (notice) return push(conv, ev, { ...base, type: 'notice', tone: 'wait', title: notice })
+      // Шаг A: полный доступ не действует (нет согласия) или провайдер запущен не в том режиме — красным: это о правах.
+      const accessNote = str(d['access'])
+      if (notice) return push(conv, ev, { ...base, type: 'notice', tone: accessNote === 'mismatch' ? 'fail' : 'wait', title: notice })
       const changes = (obj(d['changes']) ?? {}) as ConfigureChanges
-      const title = describeChanges(changes, str(d['when']) === 'after_background' ? 'after_background' : 'next_turn')
-      if (!title) return { ...conv, lastId: ev.id }
+      const when = str(d['when']) === 'after_background' ? 'after_background' : 'next_turn'
       const note = browserNote(changes)
+      // Шаг A: смена доступа — своя строка «Доступ: Правки в папке → Полный доступ» (одна на смену, кадр 05), при
+      // понижении во время хода — «… · применится, когда закончится текущий ход» (кадр 11). Прочее (модель, усилие) — ниже.
+      const acc = accessChangeLine(changes, d['pending'] === true, when)
+      if (acc) {
+        const { approval: _a, ...rest } = changes
+        const other = describeChanges(rest, when)
+        const extra = [other, note].filter(Boolean).join(' · ')
+        return push(conv, ev, { ...base, type: 'notice', tone: acc.full ? 'fail' : 'info', title: acc.title, ...(extra ? { text: extra } : {}) })
+      }
+      const title = describeChanges(changes, when)
+      if (!title) return { ...conv, lastId: ev.id }
       return push(conv, ev, { ...base, type: 'notice', tone: 'info', title, ...(note ? { text: note } : {}) })
     }
 

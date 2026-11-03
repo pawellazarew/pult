@@ -30,7 +30,7 @@
 // ИМЯ СЕРВЕРА — `pult_browser`, а не `browser`: у Codex конфиг треда сливается с ~/.codex/config.toml, и свой
 // `browser` владельца смешался бы с нашим.
 
-import { existsSync, mkdirSync, chmodSync, copyFileSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, chmodSync, copyFileSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -259,12 +259,45 @@ export function browserPermissions(dirs: BrowserDirs): { allow: string[]; ask: s
 export function claudeDefaultMode(files: readonly string[]): string | null {
   let mode: string | null = null
   for (const f of files) {
-    try {
-      const v = (JSON.parse(readFileSync(f, 'utf8')) as { permissions?: { defaultMode?: unknown } }).permissions?.defaultMode
-      if (typeof v === 'string') mode = v
-    } catch { /* нет файла или кривой — не наш */ }
+    const v = defaultModeOf(f)
+    if (v !== null) mode = v
   }
   return mode
+}
+
+// Быстрый старт, шаг A (ревью PR #39, m5): `agent.list` зовётся окном раз в 4 с и спрашивает `defaultMode` у каждой
+// сессии Claude — файлы перечитываются, только когда сменились (inode, размер, mtime в наносекундах). `stat` дешёв.
+const modeCache = new Map<string, { key: string; mode: string | null }>()
+function defaultModeOf(file: string): string | null {
+  let key: string
+  try {
+    const st = statSync(file, { bigint: true })
+    key = `${st.ino}|${st.size}|${st.mtimeNs}|${st.ctimeNs}`
+  } catch { modeCache.delete(file); return null }
+  const hit = modeCache.get(file)
+  if (hit && hit.key === key) return hit.mode
+  let mode: string | null = null
+  try {
+    const v = (JSON.parse(readFileSync(file, 'utf8')) as { permissions?: { defaultMode?: unknown } }).permissions?.defaultMode
+    if (typeof v === 'string') mode = v
+  } catch { /* кривой — не наш */ }
+  modeCache.set(file, { key, mode })
+  return mode
+}
+
+/**
+ * Управляемые настройки Claude (managed settings) — СТАРШЕ всех прочих и читаются при любом `--setting-sources`
+ * (ревью PR #39, M1 и блокер Codex 1): `defaultMode: bypassPermissions` администратора — тоже полный доступ. Файл
+ * `managed-settings.json` и дополнения `managed-settings.d/*.json` по алфавиту (позднее перекрывает раннее).
+ * Тестовый демон смотрит в `PULT_HOME/claude-managed-settings.json` — системные пути машины в тест не попадают.
+ * Настройки из MDM-профиля (`com.anthropic.claudecode`) здесь не читаются: их ловит проверка режима из `system/init`.
+ */
+export function claudeManagedSettingsFiles(testHome?: string): string[] {
+  if (testHome) return [join(testHome, 'claude-managed-settings.json')]
+  const dir = process.platform === 'darwin' ? '/Library/Application Support/ClaudeCode' : '/etc/claude-code'
+  let extra: string[] = []
+  try { extra = readdirSync(join(dir, 'managed-settings.d')).filter((f) => f.endsWith('.json')).sort().map((f) => join(dir, 'managed-settings.d', f)) } catch { /* нет папки */ }
+  return [join(dir, 'managed-settings.json'), ...extra]
 }
 
 export const BYPASS_REFUSAL = 'в настройках Claude стоит permissions.defaultMode = "bypassPermissions": вызовы браузера могли бы идти без вопроса — '

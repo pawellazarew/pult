@@ -4,7 +4,7 @@
 // один и тот же вход обязан быть одним.
 
 import type { ApprovalMode } from '../adapters/types.js'
-import { isApprovalMode } from '../adapters/types.js'
+import { APPROVAL_LIST, approvalFits, isApprovalMode } from '../adapters/types.js'
 
 export type Provider = 'claude' | 'codex' | 'zcode'
 
@@ -43,6 +43,7 @@ export const APPROVAL_WORDS: Readonly<Record<ApprovalMode, string>> = {
   ask: 'спрашивать',
   workspace: 'правки в папке без вопросов',
   full: 'полный доступ',
+  inherit: 'как в настройках Claude',
 }
 
 /**
@@ -155,7 +156,10 @@ export function planConfigure(cur: ConfigureTarget, req: ConfigureRequest, list:
     throw new ConfigureError('invalid_params', 'усилие — слово латиницей (low, medium, high…)')
   }
   if (req.approval !== undefined && !isApprovalMode(req.approval)) {
-    throw new ConfigureError('invalid_params', 'режим подтверждений — read-only | ask | workspace | full')
+    throw new ConfigureError('invalid_params', `режим подтверждений — ${APPROVAL_LIST}`)
+  }
+  if (req.approval !== undefined && !approvalFits(cur.provider, req.approval)) {
+    throw new ConfigureError('invalid_params', 'режим «как в настройках Claude» есть только у Claude')
   }
   const model = req.model ?? cur.model ?? null
   const modelChanged = req.model !== undefined && req.model !== (cur.model ?? null)
@@ -210,8 +214,11 @@ export function browserNote(c: ConfigureChanges): string | null {
 
 // --- «+ Сессия»: умолчания, последний выбор -------------------------------------------------------
 
-/** Режим подтверждений по умолчанию: `full` сюда не ставится никогда — только явно при заведении. */
-export type DefaultApproval = Exclude<ApprovalMode, 'full'>
+/**
+ * Режим подтверждений по умолчанию: `full` сюда не ставится никогда — только явно при заведении. `inherit` — тоже:
+ * при `defaultMode: bypassPermissions` у владельца он и есть полный доступ.
+ */
+export type DefaultApproval = Exclude<ApprovalMode, 'full' | 'inherit'>
 
 export interface ProviderDefaults {
   model?: string
@@ -270,6 +277,7 @@ function parseProviderDefaults(provider: Provider, x: unknown, path: string, bad
   }
   if (o['approval'] !== undefined) {
     if (o['approval'] === 'full') bad(`${path}.approval — полный доступ по умолчанию не ставится: только явно при заведении`)
+    else if (o['approval'] === 'inherit') bad(`${path}.approval — «как в настройках Claude» по умолчанию не ставится: только явно при заведении`)
     else if (isApprovalMode(o['approval'])) out.approval = o['approval'] as DefaultApproval
     else bad(`${path}.approval — read-only | ask | workspace`)
   }
@@ -336,7 +344,7 @@ export function parseLastUsed(x: unknown): LastUsed {
     const v = o[p]
     if (v === undefined) return undefined
     const src = v !== null && typeof v === 'object' && !Array.isArray(v) ? { ...(v as Record<string, unknown>) } : {}
-    if (src['approval'] === 'full') delete src['approval']
+    if (src['approval'] === 'full' || src['approval'] === 'inherit') delete src['approval']
     try { return parseProviderDefaults(p, src, p, () => { /* мягко */ }, false) } catch { return {} }
   }
   const c = soft('claude'); if (c) out.claude = c
@@ -358,7 +366,7 @@ export function nextLastUsed(prev: LastUsed, start: {
   const p: ProviderDefaults = {
     ...(start.model && MODEL_RE.test(start.model) ? { model: start.model } : {}),
     ...(start.effort && EFFORT_RE.test(start.effort) ? { effort: start.effort } : {}),
-    ...(start.approval && start.approval !== 'full' ? { approval: start.approval } : {}),
+    ...(start.approval && start.approval !== 'full' && start.approval !== 'inherit' ? { approval: start.approval } : {}),
     mode: start.mode === 'warm' ? 'warm' : 'turn',
     browser: start.browser === true,
     worktree: start.worktree === true,

@@ -8,6 +8,7 @@ import type { ApprovalMode } from '../../../src/adapters/types.js'
 import { CLAUDE_DEFAULT_EFFORT, CLAUDE_DEFAULT_MODEL, CLAUDE_EFFORTS, CLAUDE_MODELS, CODEX_EFFORTS_FALLBACK, HOME_CWD_WARNING, modeBlocksBrowser } from '../../../src/sessions/settings.js'
 import type { LastUsed, NewSessionSettings, ProviderDefaults } from '../../../src/sessions/settings.js'
 import type { AgentProvider } from './types.js'
+import type { AccessSettings } from './access.js'
 import type { ProviderCatalog } from './types.js'
 
 export function providerPreset(provider: AgentProvider, model: string | null, catalog?: ProviderCatalog | null): ProviderPreset {
@@ -59,45 +60,63 @@ export interface NewAgentForm {
   mode: 'turn' | 'warm'
 }
 
-/** M8d: режимы подтверждений по порядку «тише → шире» и что они значат у каждого провайдера — одной строкой. */
+/**
+ * M8d: режимы подтверждений по порядку «тише → шире» и что они значат у каждого провайдера — одной строкой. Шаг A:
+ * пятый уровень `inherit` («Как в настройках Claude») — только у Claude, в меню отдельно, после четырёх.
+ */
 export const APPROVAL_ORDER: readonly ApprovalMode[] = ['read-only', 'ask', 'workspace', 'full']
+/** Уровни провайдера по порядку меню: у Claude — ещё «Как в настройках Claude». */
+export function approvalLevels(provider: AgentProvider): readonly ApprovalMode[] {
+  return provider === 'claude' ? [...APPROVAL_ORDER, 'inherit'] : APPROVAL_ORDER
+}
 export const APPROVAL_LABEL: Readonly<Record<ApprovalMode, string>> = {
   'read-only': 'Только чтение',
   ask: 'Спрашивать',
   workspace: 'Правки в папке без вопросов',
   full: 'Полный доступ',
+  inherit: 'Как в настройках Claude',
 }
+// Шаг A: пояснения сверены с кодом (ревью Codex № 7): Claude — src/adapters/claude/argv.ts, Codex — `codexThreadPolicy`.
+// Вопросы приходят в Inbox; без брокера разрешений всё, что спросило бы, получает отказ (инвариант 5).
 const APPROVAL_HINT: Readonly<Record<AgentProvider, Record<ApprovalMode, string>>> = {
   claude: {
-    'read-only': 'правки запрещены, каждую команду спросит (manual без Write/Edit)',
-    ask: 'по твоим настройкам Claude (defaultMode): что он спросит — придёт в Inbox',
-    workspace: 'правки файлов без вопросов (acceptEdits), команды — через Inbox',
-    full: 'что угодно без вопросов (bypassPermissions); браузер для агента не включается',
+    'read-only': 'правки запрещены; любая команда — вопрос в Inbox',
+    ask: 'правки и команды — вопрос в Inbox; что разрешено твоими правилами Claude — без вопроса',
+    workspace: 'правки файлов без вопросов; команды — вопрос в Inbox',
+    full: 'без вопросов и без песочницы, кроме твоих правил ask/deny; браузер для агента не включается',
+    inherit: 'Пульт режим не задаёт — действует твой defaultMode',
   },
   codex: {
-    'read-only': 'песочница read-only: читает папку, всё прочее — через Inbox',
-    ask: 'правит рабочую папку сам, всё шире — через Inbox',
-    workspace: 'правит рабочую папку без вопросов, шире песочница не пустит — не спрашивая; твои MCP-серверы тоже без вопросов (браузер выключен)',
-    full: 'что угодно без вопросов, песочницы нет (danger-full-access); твои MCP-серверы тоже без вопросов (браузер выключен)',
+    'read-only': 'песочница только на чтение; шаг за неё — вопрос в Inbox',
+    ask: 'правит папку сам; шаг за песочницу — вопрос в Inbox',
+    workspace: 'правит папку сам; шаг за песочницу — отказ без вопроса (браузер выключен)',
+    full: 'песочницы нет, разрешений не просит (danger-full-access; браузер выключен)',
+    // У Codex уровня нет: демон его не примет. Строка — на случай записи, пришедшей от Claude-формы.
+    inherit: 'у Codex такого уровня нет',
   },
   zcode: {
     'read-only': 'режим plan: только чтение и планирование, правки недоступны',
     ask: 'guarded: безопасное делает сам, опасное отклоняет; вопросов в Inbox не будет — ограничения объяснит в ответе',
     workspace: 'правки файлов применяются сами (edit); остальное — по правилам ZCode',
-    full: 'что угодно без вопросов (yolo)',
+    full: 'что угодно без вопросов (yolo); свой режим ZCode не сообщает — метка «не подтверждено»',
+    inherit: 'у ZCode такого уровня нет',
   },
 }
-/** Подсказка под выбором режима — для провайдера формы. */
-export function approvalHint(provider: AgentProvider, mode: ApprovalMode): string {
-  return APPROVAL_HINT[provider][mode]
+/**
+ * Подсказка под выбором режима — для провайдера формы. У `inherit` — действующий `defaultMode` словами
+ * («…: сейчас auto»), если он известен.
+ */
+export function approvalHint(provider: AgentProvider, mode: ApprovalMode, inheritMode?: string | null): string {
+  const base = APPROVAL_HINT[provider][mode]
+  return mode === 'inherit' && inheritMode ? `${base}: сейчас ${inheritMode}${inheritMode === 'bypassPermissions' ? ' — это полный доступ' : ''}` : base
 }
 /**
- * Подвал разговора: режим словами. У Claude в `ask` флага нет — решают его настройки, и демон присылает действующий
- * `defaultMode` (`claudeMode`): «спрашивать — у Claude по твоим настройкам: auto».
+ * Подвал разговора: режим словами. У Claude в `inherit` флага нет — решают его настройки, и демон присылает действующий
+ * `defaultMode` (`claudeMode`): «как в настройках Claude: auto».
  */
 export function approvalFooter(provider: AgentProvider, mode: ApprovalMode, claudeMode?: string): string {
   const label = APPROVAL_LABEL[mode].toLowerCase()
-  return provider === 'claude' && mode === 'ask' && claudeMode ? `${label} — у Claude по твоим настройкам: ${claudeMode}` : label
+  return provider === 'claude' && mode === 'inherit' && claudeMode ? `${label}: ${claudeMode}` : label
 }
 
 /** Красное предупреждение у `full` (одинаково у обоих провайдеров). */
@@ -149,6 +168,8 @@ export interface SettingsReply {
   }
   /** Правила «Всегда» Codex с меткой Пульта (план 16, № 11); нет — старый демон, раздела нет. */
   codexRules?: CodexRulesList
+  /** Шаг A: согласие на полный доступ и действующий `defaultMode` Claude владельца; нет — старый демон. */
+  access?: AccessSettings
 }
 
 /** Поля провайдера поверх формы: модель, усилие, режим, процесс, браузер, предложенная ветка. */
@@ -245,10 +266,16 @@ export function switchProviderPrefill(form: NewAgentForm, provider: AgentProvide
   return f
 }
 
-/** Смена провайдера: модель и усилие — из его пресета, остальное как было. */
+/**
+ * Смена провайдера: модель и усилие — из его пресета, остальное как было. «Как в настройках Claude» у Codex нет —
+ * становится явным «Спрашивать» (не «без флага» и не шире).
+ */
 export function switchProvider(form: NewAgentForm, provider: AgentProvider): NewAgentForm {
   const p = PRESETS[provider]
-  return { ...form, provider, model: p.defaultModel, effort: p.efforts.includes(form.effort) ? form.effort : p.defaultEffort }
+  return {
+    ...form, provider, model: p.defaultModel, effort: p.efforts.includes(form.effort) ? form.effort : p.defaultEffort,
+    ...(form.approval === 'inherit' && provider !== 'claude' ? { approval: 'ask' as const } : {}),
+  }
 }
 
 const TRANSLIT: Record<string, string> = {
@@ -296,8 +323,12 @@ export function validateForm(form: NewAgentForm, taken: readonly string[]): Form
   return err
 }
 
-/** Параметры `agent.start` из формы (без пустых полей). У ZCode модели и усилия нет — поля не шлются. */
-export function startParams(form: NewAgentForm): Record<string, unknown> {
+/**
+ * Параметры `agent.start` из формы (без пустых полей). У ZCode модели и усилия нет — поля не шлются. `consentRev` —
+ * номер согласия на полный доступ, который видело окно (шаг A): демон сверит его с файлом и, если согласие тем
+ * временем отозвали, ответит `consent_changed`.
+ */
+export function startParams(form: NewAgentForm, consentRev?: number): Record<string, unknown> {
   const b = form.worktree.trim()
   return {
     name: form.name,
@@ -309,8 +340,9 @@ export function startParams(form: NewAgentForm): Record<string, unknown> {
     ...(form.browser ? { browser: form.browserHeaded ? { headed: true } : true } : {}),
     // `ask` не шлём: так и старый демон (без M8d) примет параметры, и запись останется без поля.
     ...(form.approval !== 'ask' ? { approval: form.approval } : {}),
-    // «Полный доступ» демон заводит только с подтверждением: человек видел красное предупреждение в форме.
-    ...(form.approval === 'full' ? { confirm: true } : {}),
+    // «Полный доступ» демон заводит только с подтверждением и согласием (шаг A): человек дал согласие в диалоге и видел
+    // красное предупреждение в форме. `inherit` — то же: при bypass у владельца это полный доступ.
+    ...(form.approval === 'full' || form.approval === 'inherit' ? { confirm: true, ...(consentRev !== undefined ? { consentRev } : {}) } : {}),
     ...(form.mode === 'warm' ? { mode: 'warm' } : {}),
   }
 }

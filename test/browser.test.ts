@@ -369,6 +369,7 @@ describe('серверы сессии (mcpExtras)', () => {
         h: rec({ name: 'h', browser: { headed: true } }),
         c: rec({ name: 'c', provider: 'codex', browser: {} }),
         n: rec({ name: 'n' }),
+        i: rec({ name: 'i', approval: 'inherit', browser: {} }),
       }
       const drafts: EventDraft[] = []
       const extras = createMcpExtras({
@@ -389,8 +390,10 @@ describe('серверы сессии (mcpExtras)', () => {
       assert.deepEqual(await extras('нет', '/n/node'), { servers: {} })
 
       writeFileSync(settings, JSON.stringify({ permissions: { defaultMode: 'bypassPermissions' } }))
-      const by = await extras('w', '/n/node')
-      assert.equal(by.servers[B], undefined, 'в bypassPermissions браузера нет')
+      // Ревью PR #39, m4: у «Спрашивать» флаг явный (`manual`) — bypass владельца ему не мешает; у inherit — действует.
+      assert.ok((await extras('w', '/n/node')).servers[B], '«Спрашивать» — браузер есть и при bypass владельца')
+      const by = await extras('i', '/n/node')
+      assert.equal(by.servers[B], undefined, 'inherit в bypassPermissions — браузера нет')
       assert.equal(by.permissions, undefined)
       assert.equal(drafts.at(-1)?.data?.['state'], 'skipped')
       assert.match(String(drafts.at(-1)?.data?.['reason']), /bypassPermissions/)
@@ -570,7 +573,8 @@ describe('демон: agent.browser, mcp.list, mcp.select, ход с брауз�
 
       // bypassPermissions у владельца — браузер Claude не включается.
       writeFileSync(join(home.paths.home, 'claude-settings.json'), JSON.stringify({ permissions: { defaultMode: 'bypassPermissions' } }))
-      await assert.rejects(c.request('agent.start', { name: 'b', kind: 'claude', cwd, browser: true }), (e: { code?: string; message?: string }) => e.code === 'invalid_params' && /bypassPermissions/.test(e.message ?? ''))
+      // Ревью PR #39, m4: только у «как в настройках Claude» — остальные уровни идут с явным флагом.
+      await assert.rejects(c.request('agent.start', { name: 'b', kind: 'claude', cwd, browser: true, approval: 'inherit', confirm: true, grant: 'cli-once' }), (e: { code?: string; message?: string }) => e.code === 'invalid_params' && /bypassPermissions/.test(e.message ?? ''))
       writeFileSync(join(home.paths.home, 'claude-settings.json'), JSON.stringify({ permissions: { defaultMode: 'auto' } }))
 
       await assert.rejects(c.request('agent.start', { name: 'x', kind: 'claude', cwd, browser: 'yes' }), code('invalid_params'))
@@ -587,9 +591,9 @@ describe('демон: agent.browser, mcp.list, mcp.select, ход с брауз�
       assert.equal(off['browser'], undefined)
       assert.equal(off['browserDownloads'], undefined)
       writeFileSync(join(home.paths.home, 'claude-settings.json'), JSON.stringify({ permissions: { defaultMode: 'bypassPermissions' } }))
-      await assert.rejects(c.request('agent.browser', { name: 'w', on: true }), code('invalid_params'))
-      rmSync(join(home.paths.home, 'claude-settings.json'))
+      // m4: «Спрашивать» — явный `manual`, bypass владельца браузеру не мешает.
       assert.deepEqual(((await c.request('agent.browser', { name: 'w', on: true })) as Record<string, unknown>)['browser'], {})
+      rmSync(join(home.paths.home, 'claude-settings.json'))
 
       // mcp.list / mcp.select — только ~/.claude.json; .mcp.json папки не виден.
       const l = (await c.request('mcp.list', { name: 'w' })) as { servers: Array<{ name: string }>; selected: string[] }

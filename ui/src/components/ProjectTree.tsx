@@ -11,6 +11,7 @@ import { agentLabel, ago, shortPath } from '../model/agents.js'
 import { chatSections, chatStatus, projectChats, projectPreview } from '../model/navigation.js'
 import { projectName } from '../model/projects.js'
 import { contextRowView } from '../model/context.js'
+import { sidebarFull } from '../model/access.js'
 import type { ProjectGroup } from '../model/projects.js'
 import { projectRemoval } from '../model/projects.js'
 import { plural } from '../lib/ru.js'
@@ -273,6 +274,8 @@ function SessionRow({ a, project, selected, now, onSelect, onMenu, shortcut = fa
       <span className="ag-meta">
         {shortcut && <span className="chat-project" title={a.cwd}>{projectName(project)}</span>}
         <span className={`chat-provider who-${a.provider}`}>{a.provider === 'claude' ? 'Claude' : a.provider === 'codex' ? 'Codex' : a.provider}</span>
+        {/* Шаг A: щит «полный» — выбран полный доступ или ещё жив процесс с полными правами (та же метка, что в чате). */}
+        {sidebarFull(a) && <span className="row-access" data-testid="row-access-full" title="Полный доступ: агент работает без вопросов и без песочницы"><Icon name="shield" />полный</span>}
         {a.status === 'working' && <span className="chat-action" title={sv.detail}>{sv.detail}</span>}
         {a.background && <span className="bg" title={`фоновые задачи:\n${a.background.tasks.join('\n')}`} data-testid="row-background">фон · {a.background.count}</span>}
         {ctx && <span className={`ctx t-${ctx.tone}`} title={ctx.title} data-testid="row-context">ctx {ctx.short}</span>}

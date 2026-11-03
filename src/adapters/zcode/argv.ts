@@ -13,12 +13,18 @@
 
 import type { ApprovalMode } from '../types.js'
 
-/** M8d → `--mode` CLI. `ask` → `guarded`: безопасное выполняется, опасное отклоняется сам (замер спайка). */
+/**
+ * M8d → `--mode` CLI. `ask` → `guarded`: безопасное выполняется, опасное отклоняется сам (замер спайка).
+ * `full` → `yolo` — только когда демон его пропустил (согласие на полный доступ или `--yes`, src/daemon/server.ts
+ * `accessGate`): без разрешения снимок хода приходит без уровня, и CLI получает `guarded`.
+ * `inherit` у ZCode нет (`approvalFits` отказывает на входе); строка — на случай кривой записи: тише, а не шире.
+ */
 export const ZCODE_MODE: Readonly<Record<ApprovalMode, string>> = {
   'read-only': 'plan',
   ask: 'guarded',
   workspace: 'edit',
   full: 'yolo',
+  inherit: 'guarded',
 }
 
 export interface ZcodeArgvOptions {

@@ -32,7 +32,7 @@ describe('окно: настройки сессии M8f', () => {
     await h.win.locator(`[data-testid="conversation"][data-agent="${name}"]`).waitFor({ timeout: 10_000 })
   }
 
-  it('подвал: меню → усилие и модель со следующего хода, строка в ленте; «Полный доступ» — только после вопроса', async () => {
+  it('подвал: меню → усилие и модель со следующего хода, строка в ленте; «Полный доступ» — согласие один раз, дальше без вопроса', async () => {
     await c.request('agent.start', { name: 'sm', kind: 'claude', cwd: h.workDir('sm', { scenario: 'simple' }), model: 'haiku', effort: 'low' })
     await select('sm')
     const btn = h.win.getByTestId('conv-settings')
@@ -51,17 +51,27 @@ describe('окно: настройки сессии M8f', () => {
     await menu.waitFor({ timeout: 5000 })
     await h.win.getByTestId('settings-model-opus').click()
     assert.ok(await waitFor(async () => (await rec('sm'))?.model === 'opus', 5000))
-    // Полный доступ: вопрос; «Отмена» — ничего не меняется.
+    // Шаг A: полный доступ без согласия — диалог согласия (один раз на всё время); Esc — «Оставить как было».
     await btn.click()
     await h.win.getByTestId('settings-approval-full').click()
-    await h.win.getByTestId('confirm-configure').waitFor({ timeout: 5000 })
+    await h.win.getByTestId('consent-dialog').waitFor({ timeout: 5000 })
     await h.win.keyboard.press('Escape')
+    assert.ok(await waitFor(async () => (await h.win.getByTestId('consent-dialog').count()) === 0, 5000), 'Esc не закрыл диалог согласия')
     assert.equal((await rec('sm'))?.approval, undefined)
     await btn.click()
     await h.win.getByTestId('settings-approval-full').click()
-    await h.win.getByTestId('confirm-ok').click()
+    await h.win.getByTestId('consent-grant').click()
     assert.ok(await waitFor(async () => (await rec('sm'))?.approval === 'full', 5000))
     assert.ok(await waitFor(async () => (await h.win.getByTestId('conv-approval').getAttribute('data-approval')) === 'full', 5000))
+    // Согласие дано — обратно и снова в полный: ни диалога, ни модала «Полный доступ?».
+    await btn.click()
+    await h.win.getByTestId('settings-approval-ask').click()
+    assert.ok(await waitFor(async () => (await rec('sm'))?.approval === undefined, 5000))
+    await btn.click()
+    await h.win.getByTestId('settings-approval-full').click()
+    assert.ok(await waitFor(async () => (await rec('sm'))?.approval === 'full', 5000))
+    assert.equal(await h.win.getByTestId('consent-dialog').count(), 0)
+    assert.equal(await h.win.getByTestId('confirm-configure').count(), 0)
   })
 
   it('⌘, → «Настройки»: умолчания записаны в config.json; «Подставлять последний выбор» выключен — «+ Сессия» с умолчаниями', async () => {

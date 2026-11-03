@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { describe, it } from 'node:test'
 import { createZcodeAdapter } from '../dist/adapters/zcode/adapter.js'
 import { ZCODE_ENV_PASS } from '../dist/adapters/zcode/adapter.js'
-import type { ProviderAdapter } from '../dist/adapters/types.js'
+import type { AdapterDeps, AppliedInfo, ProviderAdapter } from '../dist/adapters/types.js'
 import { defaultConfig } from '../dist/core/config.js'
 import type { PultConfig } from '../dist/core/config.js'
 import type { EventDraft } from '../dist/core/events.js'
@@ -40,6 +40,8 @@ function rig(opts: {
   bin?: string
   deaf?: boolean
   hang?: number
+  /** Шаг A: швы демона — `applied`, `mayRunFull`. */
+  deps?: Pick<AdapterDeps, 'applied' | 'mayRunFull'>
 }): Rig {
   const dir = mkdtempSync(join(tmpdir(), 'pt-zc-'))
   const paths = layout(join(dir, 'h'))
@@ -60,6 +62,7 @@ function rig(opts: {
     emit: (d) => { drafts.push(d) },
     askPermission: async () => ({ behavior: 'deny', message: 'тест' }),
     ...(opts.net ? { netCheck: opts.net } : { netCheck: async () => okCheck() }),
+    ...(opts.deps ?? {}),
   })
   return {
     adapter, drafts, cwd, argvFile,
@@ -294,6 +297,28 @@ describe('адаптер zcode: контракт сессии', () => {
     const r = rig({ scenario: 'simple' })
     try {
       await assert.rejects(() => r.adapter.respondPermission('w', 'rq', { behavior: 'allow' }), (e: Error & { code?: string }) => e.code === 'invalid_params')
+    } finally { await r.adapter.shutdown(); r.remove() }
+  })
+})
+
+describe('адаптер zcode × доступ (шаг A, PR #39)', () => {
+  it('полный уровень без разрешения к моменту хода — guarded; с разрешением — yolo; applied: отправлено, не подтверждено', async () => {
+    let allowed = false
+    const applied: AppliedInfo[] = []
+    const r = rig({ scenario: 'simple', deps: { mayRunFull: () => allowed, applied: (_n, info) => { applied.push(info) } } })
+    try {
+      await r.adapter.startSession(spec(r, { approval: 'full' }))
+      const mode = (i: number): string | undefined => { const a = r.runs()[i]!.argv; return a[a.indexOf('--mode') + 1] }
+      const t1 = await r.adapter.send('w', 'раз', { approval: 'full' })
+      await t1.done
+      assert.equal(mode(0), 'guarded', 'согласие отозвали между снимком и спавном — тише, а не шире')
+      assert.deepEqual(applied[0], { approval: undefined, reported: null, fresh: true })
+      allowed = true
+      const t2 = await r.adapter.send('w', 'два', { approval: 'full' })
+      await t2.done
+      assert.equal(mode(1), 'yolo')
+      assert.deepEqual(applied[1], { approval: 'full', reported: null, fresh: true, full: true })
+      assert.equal(r.adapter.activeAccess?.('w'), null, 'процесс хода вышел — за работой никого')
     } finally { await r.adapter.shutdown(); r.remove() }
   })
 })

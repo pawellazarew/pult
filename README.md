@@ -265,17 +265,24 @@ update) for cards and memory-backed files. Each Claude session receives only its
 | mode (window label) | Claude | Codex |
 |---|---|---|
 | `read-only` ("Только чтение") | no edits; every command asks | `read-only` sandbox; anything wider asks |
-| `ask` ("Спрашивать", default) | your own Claude settings; its questions go to the Inbox | `workspace-write` sandbox; anything wider asks |
+| `ask` ("Спрашивать", default) | explicit `--permission-mode manual`: edits and commands ask, your allow rules still apply | `workspace-write` sandbox; anything wider asks |
 | `workspace` ("Правки в папке без вопросов") | `acceptEdits` | `workspace-write`, no questions |
 | `full` ("Полный доступ") | `bypassPermissions` | `danger-full-access`, no questions |
+| `inherit` ("Как в настройках Claude", Claude only) | no flag: your `defaultMode` applies; `bypassPermissions` there counts as `full` | — |
 
 Every turn includes an explanation of the selected mode, including after a live mode change. For Codex,
 `workspace` rejects requests to leave the sandbox; switch the session to `ask` and repeat the request when that access
 is needed. Nested CLIs inherit the sandbox, so `Not logged in` there alone does not establish that the terminal login
 has expired. Claude's `acceptEdits` follows its own permission rules for other tools.
 
-`full` means no sandbox and no questions: the agent can do anything your user can. It needs an explicit confirmation
-(`--yes` in the CLI).
+`full` means no sandbox and no questions: the agent can do anything your user can. The window asks once, for all
+providers (Claude, Codex, ZCode), and stores the consent in `PULT_HOME/consent.json`; after that `full` switches without a dialog and the chat is
+marked red (header, composer, sidebar). The daemon checks the consent itself at every start, mode change and turn:
+revoke it in Settings → Доступ and the next turn of every `full` session runs in explicit `ask`. The CLI keeps a one-off
+grant per session (`--yes`), which neither writes nor needs the consent. The red mark follows the mode the provider
+actually reports (Claude `system/init`, Codex `thread/start`; ZCode does not report its mode — `--mode yolo`
+is shown as «не подтверждено»), and stays on until a full-access process has finished.
+Claude sessions created before this version in `ask` keep their behaviour as `inherit`.
 
 ## Changing a session later
 
