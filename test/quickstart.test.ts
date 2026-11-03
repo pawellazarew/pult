@@ -5,10 +5,10 @@
 
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync, existsSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { describe, it } from 'node:test'
 import { connectClient } from '../dist/cli/client.js'
 import { createFolderStore, folderIdentity, FOLDERS_MAX, worktreeMainRepo } from '../dist/core/folders.js'
@@ -33,8 +33,8 @@ describe('шаг B: резолвер нового чата (§3.7, §3.8)', () =
     const mem = resolveNewChat({ ...base, defaults, folderAccess: 'read-only' })
     assert.deepEqual([mem.approval, mem.origin.approval], ['read-only', 'folder'], '«Только чтение» запоминается, как и остальные')
     assert.equal(resolveNewChat({ ...base, folderAccess: 'read-only', explicit: { approval: 'workspace' } }).approval, 'workspace', 'явный выбор сильнее')
-    const cli = resolveNewChat({ entry: 'cli', folderAccess: 'full', fullAllowed: yes })
-    assert.deepEqual([cli.approval, cli.origin.approval], ['ask', 'builtin'], 'CLI: память папки не применяется, встроенное — «Спрашивать»')
+    const cli = resolveNewChat({ entry: 'cli', folderAccess: 'full', defaults: { claude: { approval: 'workspace' }, codex: {}, zcode: {} }, fullAllowed: yes })
+    assert.deepEqual([cli.approval, cli.origin.approval], ['ask', 'builtin'], 'CLI: ни память папки, ни умолчание окна — «Спрашивать» (§3.8)')
   })
   it('полный доступ сам не включается: без согласия — «Спрашивать» и «отозвано»; по ссылке — «Включить для этого чата»', () => {
     const revoked = resolveNewChat({ entry: 'user', folderAccess: 'full', fullAllowed: no })
@@ -266,7 +266,7 @@ describe('шаг B: agent.start {requestId, prompt} — один RPC, идемп
       assert.ok(recent.folders.some((f) => f.path.endsWith('/a')), 'но в историю папка попала')
       await win.request('access.grantFull', GRANT)
       const b = mk('b')
-      await win.request('agent.start', { requestId: randomUUID(), kind: 'claude', cwd: b, approval: 'full', confirm: true, rememberAccess: true, origin: 'link' })
+      await win.request('agent.start', { requestId: randomUUID(), kind: 'claude', cwd: b, approval: 'full', confirm: true, rememberAccess: true, origin: 'link', approvalOrigin: 'explicit' })
       assert.equal(await recall(b), undefined, '«Включить для этого чата» из ссылки — не в память')
       const s = (await win.request('agent.start', { requestId: randomUUID(), kind: 'claude', cwd: b, approval: 'full', confirm: true, rememberAccess: true })) as Rec
       assert.equal(await recall(b), 'full', 'явный полный при согласии — в память')
@@ -313,13 +313,213 @@ describe('шаг B: agent.start {requestId, prompt} — один RPC, идемп
       assert.equal(put.draft.rev, 1)
       await assert.rejects(win.request('draft.put', { id, data: {}, baseRev: 0, owner: 'w1' }), code('draft_conflict'))
       await assert.rejects(win.request('draft.put', { id, data: {}, baseRev: 1, owner: 'w2' }), code('draft_owned'))
-      const list = (await win.request('draft.list')) as { drafts: Array<{ id: string; data: { text: string } }> }
-      assert.deepEqual(list.drafts.map((x) => [x.id, x.data.text]), [[id, 'черновик']])
+      const list = (await win.request('draft.list')) as { drafts: Array<{ id: string; rev: number }> }
+      assert.deepEqual(list.drafts.map((x) => [x.id, x.rev]), [[id, 1]])
+      assert.equal(((await win.request('draft.get', { id })) as { draft: { data: { text: string } } }).draft.data.text, 'черновик')
       await win.request('draft.claim', { id, owner: 'w2' })
       assert.deepEqual(await win.request('draft.remove', { id, owner: 'w2' }), { removed: true })
       const j = createStartJournal(join(home.paths.home, 'jtest'), () => Date.now() + 8 * 24 * 3600 * 1000)
       j.put({ requestId: id, phase: 'accepted', at: new Date().toISOString(), updatedAt: '' })
       assert.equal(j.prune(), 1)
     } finally { win.close(); await d.stop('конец теста'); home.remove() }
+  })
+})
+
+describe('ревью шага B: подделка .git и зависание на служебных файлах git (B1, M1)', () => {
+  const git = (cwd: string, ...a: string[]): void => {
+    execFileSync('git', ['-C', cwd, ...a], { stdio: 'ignore', env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x.example', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x.example' } })
+  }
+  it('поддельный .git (gitdir + commondir на чужой репозиторий) память не наследует; копия .git настоящего worktree — тоже', () => {
+    const root = mkdtempSync(join(tmpdir(), 'pt-forge-'))
+    try {
+      const trusted = join(root, 'trusted')
+      mkdirSync(trusted)
+      git(trusted, 'init', '-q')
+      writeFileSync(join(trusted, 'a'), 'a')
+      git(trusted, 'add', 'a'); git(trusted, 'commit', '-qm', 'a')
+      const store = createFolderStore(join(root, 'folders.json'))
+      store.remember(trusted, 'full')
+      // Сценарий Opus B1: агент пишет два файла в папку A.
+      const evil = join(root, 'evil')
+      mkdirSync(join(evil, 'x'), { recursive: true })
+      writeFileSync(join(evil, '.git'), 'gitdir: ./x\n')
+      writeFileSync(join(evil, 'x', 'commondir'), join(trusted, '.git') + '\n')
+      assert.equal(worktreeMainRepo(evil), null)
+      assert.equal(folderIdentity(evil)?.key, folderIdentity(evil)?.key && realpathSync(evil))
+      assert.equal(store.recall(evil)?.access, undefined, 'доступ trusted не перешёл')
+      // Сценарий Codex 4: скопировать .git настоящего worktree — обратная ссылка ведёт не сюда.
+      git(trusted, 'worktree', 'add', '-q', join(root, 'wt'), '-b', 'pult/wt')
+      const copy = join(root, 'copy')
+      mkdirSync(copy)
+      writeFileSync(join(copy, '.git'), readFileSync(join(root, 'wt', '.git')))
+      assert.equal(worktreeMainRepo(copy), null)
+      assert.equal(store.recall(copy)?.access, undefined)
+      // Настоящий worktree сопоставляется, но полный доступ через сопоставление не наследует; «Только чтение» — да.
+      assert.equal(worktreeMainRepo(join(root, 'wt')), realpathSync(trusted))
+      const wt = store.recall(join(root, 'wt'))
+      assert.deepEqual([wt?.key, wt?.mapped, wt?.access], [realpathSync(trusted), true, undefined])
+      store.remember(trusted, 'read-only')
+      assert.equal(store.recall(join(root, 'wt'))?.access, 'read-only')
+      // Полный, выбранный в worktree, основному репозиторию не передаётся.
+      store.remember(join(root, 'wt'), 'full')
+      assert.equal(store.recall(trusted)?.access, 'read-only')
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+  it('FIFO, /dev/zero и огромный .git не вешают: ответ сразу, папка — сама собой', () => {
+    const root = mkdtempSync(join(tmpdir(), 'pt-fifo-'))
+    try {
+      const fifo = join(root, 'fifo')
+      mkdirSync(join(fifo, 'x'), { recursive: true })
+      writeFileSync(join(fifo, '.git'), 'gitdir: ./x\n')
+      execFileSync('mkfifo', [join(fifo, 'x', 'commondir')])
+      const zero = join(root, 'zero')
+      mkdirSync(join(zero, 'x'), { recursive: true })
+      writeFileSync(join(zero, '.git'), 'gitdir: ./x\n')
+      symlinkSync('/dev/zero', join(zero, 'x', 'commondir'))
+      const fifoGit = join(root, 'fifogit')
+      mkdirSync(fifoGit)
+      execFileSync('mkfifo', [join(fifoGit, '.git')])
+      const huge = join(root, 'huge')
+      mkdirSync(huge)
+      writeFileSync(join(huge, '.git'), 'gitdir: ' + 'a'.repeat(5000))
+      // В дочернем процессе с таймаутом: зависни разбор — тест упадёт по времени, а не повесит прогон.
+      const script = `import('${new URL('../dist/core/folders.js', import.meta.url).href}').then((m) => { for (const d of process.argv.slice(1)) process.stdout.write(String(m.folderIdentity(d)?.key) + '\\n') })`
+      const out = execFileSync(process.execPath, ['-e', script, fifo, zero, fifoGit, huge], { timeout: 10_000, encoding: 'utf8' })
+      assert.deepEqual(out.trim().split('\n'), [fifo, zero, fifoGit, huge].map((d) => realpathSync(d)))
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+})
+
+describe('ревью шага B: старт после сбоев, повтор с другим текстом, черновик и папка на старте', () => {
+  type Ctl = { request(m: string, p?: Record<string, unknown>): Promise<unknown> }
+  it('сессия записана, журнал — нет (упал между ними): повтор находит её по requestId, а не заводит заново', async () => {
+    const home = tempHome()
+    const root = mkdtempSync(join(tmpdir(), 'pt-crash-'))
+    const d = await startTestDaemon(home)
+    const win = await connectClient(home.paths, { client: 'shell' }) as unknown as Ctl
+    try {
+      const cwd = join(root, 'app')
+      mkdirSync(cwd)
+      const j = createStartJournal(home.paths.startJournal)
+      const rid = randomUUID()
+      const a = (await win.request('agent.start', { requestId: rid, kind: 'claude', cwd })) as Rec
+      // Демон «упал» до записи registered: журнал откатываем на бронь имени.
+      j.put({ requestId: rid, phase: 'name-reserved', name: a.name, at: new Date().toISOString(), updatedAt: '' })
+      const b = (await win.request('agent.start', { requestId: rid, kind: 'claude', cwd, prompt: 'раз' })) as Rec & { promptSent?: boolean }
+      assert.deepEqual([b.name, b.phase, b.promptSent], [a.name, 'running', true])
+      await win.request('agent.wait', { name: a.name, timeoutMs: 10_000 })
+      assert.equal(((await win.request('agent.list')) as { sessions: Rec[] }).sessions.length, 1)
+
+      // Упал после записи `prompt-accepted`, реплика дошла: повтор не шлёт, а другой текст — `promptDiffers`.
+      j.put({ requestId: rid, phase: 'prompt-accepted', name: a.name, at: new Date().toISOString(), updatedAt: '', promptHash: createHash('sha256').update('раз').digest('hex'), promptFrom: 0 })
+      const same = (await win.request('agent.start', { requestId: rid, kind: 'claude', cwd, prompt: 'раз' })) as Rec & { duplicate?: boolean; promptSent?: boolean; promptDiffers?: boolean }
+      assert.deepEqual([same.duplicate, same.promptSent, same.promptDiffers], [true, true, undefined])
+      const edited = (await win.request('agent.start', { requestId: rid, kind: 'claude', cwd, prompt: 'два' })) as Rec & { duplicate?: boolean; promptDiffers?: boolean }
+      assert.deepEqual([edited.duplicate, edited.promptDiffers], [true, true])
+      assert.equal(await userMessages(win, a.name), 1, 'реплика одна')
+
+      // Упал после `prompt-accepted`, но до записи реплики: повтор её отдаёт (одну).
+      const rid2 = randomUUID()
+      const c = (await win.request('agent.start', { requestId: rid2, kind: 'claude', cwd })) as Rec
+      j.put({ requestId: rid2, phase: 'prompt-accepted', name: c.name, at: new Date().toISOString(), updatedAt: '', promptHash: createHash('sha256').update('три').digest('hex'), promptFrom: 1e9 })
+      const c2 = (await win.request('agent.start', { requestId: rid2, kind: 'claude', cwd, prompt: 'три' })) as Rec & { promptSent?: boolean }
+      assert.equal(c2.promptSent, true)
+      await win.request('agent.wait', { name: c.name, timeoutMs: 10_000 })
+      assert.equal(await userMessages(win, c.name), 1)
+    } finally { (win as unknown as { close(): void }).close(); await d.stop('конец теста'); home.remove(); rmSync(root, { recursive: true, force: true }) }
+  })
+
+  it('имя переиспользовали: повтор старого запроса не попадает в чужую сессию; бронь имени заняли — новое имя', async () => {
+    const home = tempHome()
+    const root = mkdtempSync(join(tmpdir(), 'pt-reuse-'))
+    const d = await startTestDaemon(home)
+    const win = await connectClient(home.paths, { client: 'shell' }) as unknown as Ctl
+    const cli = await connectClient(home.paths, { client: 'cli' }) as unknown as Ctl
+    try {
+      const cwd = join(root, 'app')
+      mkdirSync(cwd)
+      const rid = randomUUID()
+      const a = (await win.request('agent.start', { requestId: rid, kind: 'claude', cwd })) as Rec
+      await win.request('agent.rm', { name: a.name })
+      await cli.request('agent.start', { name: a.name, kind: 'claude', cwd })
+      await assert.rejects(win.request('agent.start', { requestId: rid, kind: 'claude', cwd, prompt: 'чужому не уйдёт' }), code('not_found'))
+      assert.equal(await userMessages(win, a.name), 0)
+      // Бронь `reserveOnly` заняла сессия из терминала с тем же именем — повтор берёт новое имя.
+      const r2 = randomUUID()
+      const res = (await win.request('agent.start', { requestId: r2, kind: 'claude', cwd, reserveOnly: true })) as Rec
+      await cli.request('agent.start', { name: res.name, kind: 'claude', cwd })
+      const s2 = (await win.request('agent.start', { requestId: r2, kind: 'claude', cwd })) as Rec
+      assert.notEqual(s2.name, res.name)
+    } finally { (win as unknown as { close(): void }).close(); (cli as unknown as { close(): void }).close(); await d.stop('конец теста'); home.remove(); rmSync(root, { recursive: true, force: true }) }
+  })
+
+  it('черновик на старте: чужая ревизия и чужое живое окно — отказ; отправленный черновик демон убирает; папку подменили — folder_changed', async () => {
+    const home = tempHome()
+    const root = mkdtempSync(join(tmpdir(), 'pt-dref-'))
+    const d = await startTestDaemon(home)
+    const win = await connectClient(home.paths, { client: 'shell' }) as unknown as Ctl
+    try {
+      const cwd = join(root, 'app')
+      mkdirSync(cwd)
+      const id = randomUUID()
+      await win.request('draft.put', { id, data: { text: 'x' }, baseRev: 0, owner: 'wa' })
+      await win.request('draft.put', { id, data: { text: 'xy' }, baseRev: 1, owner: 'wa' })
+      await assert.rejects(win.request('agent.start', { requestId: id, kind: 'claude', cwd, draft: { id, rev: 1, owner: 'wa' } }), code('draft_conflict'))
+      await assert.rejects(win.request('agent.start', { requestId: id, kind: 'claude', cwd, draft: { id, rev: 2, owner: 'wb' } }), code('draft_owned'))
+      const pre = (await win.request('agent.preflight', { cwd })) as { folder: { key: string; dev: string; ino: string } }
+      const folder = { key: pre.folder.key, dev: pre.folder.dev, ino: pre.folder.ino }
+      // Папку заменили после проверки окна.
+      renameSync(cwd, join(root, 'app-old'))
+      mkdirSync(cwd)
+      await assert.rejects(win.request('agent.start', { requestId: id, kind: 'claude', cwd, folder, draft: { id, rev: 2, owner: 'wa' } }), code('folder_changed'))
+      const pre2 = (await win.request('agent.preflight', { cwd })) as { folder: { key: string; dev: string; ino: string } }
+      const ok = (await win.request('agent.start', { requestId: id, kind: 'claude', cwd, folder: { key: pre2.folder.key, dev: pre2.folder.dev, ino: pre2.folder.ino }, draft: { id, rev: 2, owner: 'wa' } })) as Rec
+      assert.equal(ok.phase, 'registered')
+      assert.equal(existsSync(join(home.paths.drafts, `${id}.json`)), false, 'отправленный черновик убран демоном')
+    } finally { (win as unknown as { close(): void }).close(); await d.stop('конец теста'); home.remove(); rmSync(root, { recursive: true, force: true }) }
+  })
+
+  it('ссылка: полный доступ (и «как в настройках» при bypass в проекте) — только явным выбором; preflight отдаёт режим папки', async () => {
+    const home = tempHome()
+    const root = mkdtempSync(join(tmpdir(), 'pt-link-'))
+    const d = await startTestDaemon(home)
+    const win = await connectClient(home.paths, { client: 'shell' }) as unknown as Ctl
+    try {
+      await win.request('access.grantFull', GRANT)
+      const cwd = join(root, 'proj')
+      mkdirSync(join(cwd, '.claude'), { recursive: true })
+      writeFileSync(join(cwd, '.claude', 'settings.json'), JSON.stringify({ permissions: { defaultMode: 'bypassPermissions' } }))
+      const pre = (await win.request('agent.preflight', { cwd })) as { inheritMode: string }
+      assert.equal(pre.inheritMode, 'bypassPermissions', 'режим ЭТОЙ папки, с её .claude/settings.json')
+      for (const approval of ['full', 'inherit']) {
+        await assert.rejects(win.request('agent.start', { requestId: randomUUID(), kind: 'claude', cwd, approval, confirm: true, origin: 'link' }), code('link_full_refused'), approval)
+      }
+      const ok = (await win.request('agent.start', { requestId: randomUUID(), kind: 'claude', cwd, approval: 'inherit', confirm: true, origin: 'link', approvalOrigin: 'explicit' })) as Rec
+      assert.equal(ok.approval, 'inherit')
+    } finally { (win as unknown as { close(): void }).close(); await d.stop('конец теста'); home.remove(); rmSync(root, { recursive: true, force: true }) }
+  })
+
+  it('draft.list — без тел и страницами; draft.get — тело; удалённый черновик снимает бронь имени', async () => {
+    const home = tempHome()
+    const root = mkdtempSync(join(tmpdir(), 'pt-dlist-'))
+    const d = await startTestDaemon(home)
+    const win = await connectClient(home.paths, { client: 'shell' }) as unknown as Ctl
+    try {
+      const big = 'я'.repeat(100_000)
+      const ids = [randomUUID(), randomUUID(), randomUUID()]
+      for (const id of ids) await win.request('draft.put', { id, data: { text: big }, baseRev: 0, owner: 'w' })
+      const page = (await win.request('draft.list', { limit: 2 })) as { drafts: Array<Record<string, unknown>>; total: number }
+      assert.deepEqual([page.drafts.length, page.total, 'data' in (page.drafts[0] ?? {})], [2, 3, false])
+      assert.ok((page.drafts[0]?.['bytes'] as number) > 100_000)
+      const one = (await win.request('draft.get', { id: ids[0] })) as { draft: { data: { text: string } } }
+      assert.equal(one.draft.data.text.length, 100_000)
+      const cwd = join(root, 'app')
+      mkdirSync(cwd)
+      const res = (await win.request('agent.start', { requestId: ids[0], kind: 'claude', cwd, reserveOnly: true })) as Rec
+      await win.request('draft.remove', { id: ids[0], owner: 'w' })
+      await assert.rejects(win.request('agent.startStatus', { requestId: ids[0] }), code('not_found'), 'бронь снята')
+      const again = (await win.request('agent.start', { requestId: randomUUID(), kind: 'claude', cwd, reserveOnly: true })) as Rec
+      assert.equal(again.name, res.name, 'имя свободно снова')
+    } finally { (win as unknown as { close(): void }).close(); await d.stop('конец теста'); home.remove(); rmSync(root, { recursive: true, force: true }) }
   })
 })

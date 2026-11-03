@@ -10,8 +10,8 @@
 //     провайдера НЕ берёт (скрипт не должен молча сменить провайдера);
 //   * модель, усилие, режим процесса, браузер, ветка — явный выбор > умолчания ЭТОГО провайдера > встроенные;
 //   * доступ — явный выбор > память папки (`folders.json`, не у CLI) > «Доступ по умолчанию» провайдера в Настройках >
-//     «Правки в папке» (решение Павла 02.11.2026: умолчание для новой папки). У CLI последняя ступень — «Спрашивать»,
-//     как было.
+//     «Правки в папке» (решение Павла 02.11.2026: умолчание для новой папки). У CLI — только `--approval`, иначе
+//     «Спрашивать» (§3.8): ни памяти папки, ни умолчаний окна скрипт не получает.
 //
 // ПОПРАВКИ ДОСТУПА (сам полный доступ не включается никогда):
 //   * полный уровень (и «как в настройках Claude» при bypass) без действующего согласия → «Спрашивать», заметка
@@ -119,7 +119,8 @@ export function resolveNewChat(input: ResolveInput): Resolved {
   let aOrigin: FieldOrigin
   if (x.approval !== undefined) { approval = x.approval; aOrigin = 'explicit' }
   else if (!cli && input.folderAccess) { approval = input.folderAccess; aOrigin = 'folder' }
-  else if (d.approval !== undefined) { approval = d.approval; aOrigin = 'default' }
+  // CLI: `--approval` или «Спрашивать» (§3.8, ревью m11) — «Доступ по умолчанию» окна скрипту не передаётся.
+  else if (!cli && d.approval !== undefined) { approval = d.approval; aOrigin = 'default' }
   else { approval = cli ? 'ask' : FOLDER_DEFAULT_ACCESS; aOrigin = 'builtin' }
   // «Как в настройках Claude» есть только у Claude: у других — явный «Спрашивать», не шире.
   if (approval === 'inherit' && provider !== 'claude') approval = 'ask'

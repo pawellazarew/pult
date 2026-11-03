@@ -98,6 +98,7 @@ export const ALLOWED_METHODS = [
   'folders.forget',
   'folders.clearHistory',
   'draft.list',
+  'draft.get',
   'draft.put',
   'draft.claim',
   'draft.touch',

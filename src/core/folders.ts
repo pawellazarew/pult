@@ -15,8 +15,8 @@
 // ЗАПИСЬ ДОСТУПА — только реальный старт или смена доступа в живом чате (решает сервер, src/sessions/resolve.ts
 // `shouldRemember`); брошенный черновик сюда не пишет никогда.
 
-import { readFileSync, realpathSync, statSync } from 'node:fs'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import type { ApprovalMode } from '../adapters/types.js'
 import { isApprovalMode } from '../adapters/types.js'
 import { atomicWrite } from '../service/fsutil.js'
@@ -40,43 +40,98 @@ export interface FolderIdentity {
   display: string
   dev: string
   ino: string
+  /** Ключ получен сопоставлением git worktree → основной репозиторий (а не сама папка). */
+  mapped?: true
 }
 
-/** Основной репозиторий для папки git worktree; не worktree — `null`. */
-export function worktreeMainRepo(dir: string): string | null {
-  let gitFile: string
+/** Служебные файлы git, которые читаем: `.git` worktree и `commondir` — строка пути, байты, не килобайты. */
+const GIT_META_MAX = 4096
+
+/**
+ * Прочитать маленький ОБЫЧНЫЙ файл, не блокируясь (ревью M1): `lstat` — не симлинк и не FIFO/устройство, открытие с
+ * `O_NOFOLLOW | O_NONBLOCK` (подмену между `lstat` и `open` отсекает `fstat` по тому же дескриптору), не больше
+ * `GIT_META_MAX` байт. Всё прочее — `null`: FIFO, `/dev/zero`, многогигабайтный `.git` демон не повесят.
+ */
+function readSmallFile(file: string): string | null {
   try {
-    const st = statSync(join(dir, '.git'))
-    if (!st.isFile()) return null
-    gitFile = readFileSync(join(dir, '.git'), 'utf8')
+    const l = lstatSync(file)
+    if (!l.isFile() || l.size > GIT_META_MAX) return null
   } catch { return null }
-  const m = /^gitdir:\s*(.+)\s*$/m.exec(gitFile)
+  let fd: number | null = null
+  try {
+    fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+    const st = fstatSync(fd)
+    if (!st.isFile() || st.size > GIT_META_MAX) return null
+    const buf = Buffer.alloc(GIT_META_MAX + 1)
+    const n = readSync(fd, buf, 0, buf.length, 0)
+    return n > GIT_META_MAX ? null : buf.subarray(0, n).toString('utf8')
+  } catch { return null } finally { if (fd !== null) try { closeSync(fd) } catch { /* уже закрыт */ } }
+}
+
+const realOrNull = (p: string): string | null => { try { return realpathSync.native(p) } catch { return null } }
+
+/**
+ * Основной репозиторий для папки git worktree; не worktree (или метаданные не сходятся) — `null`.
+ *
+ * Ревью B1 (Opus) / 4 (Codex): `.git` и `commondir` может написать кто угодно с правом записи в папку, в том числе
+ * агент в «Правках в папке». Поэтому принадлежность проверяется так же, как её понимает сам git, и только целиком:
+ *   1. `.git` — маленький обычный файл `gitdir: <путь>`;
+ *   2. `<gitdir>` лежит ровно в `<common>/worktrees/<имя>`, где `<common>` — из `<gitdir>/commondir`, и это папка;
+ *   3. обратная ссылка `<gitdir>/gitdir` указывает на `.git` ЭТОЙ папки (после realpath с обеих сторон).
+ * Чего-то не хватает — папка остаётся сама собой (ключ — её realpath).
+ */
+export function worktreeMainRepo(dir: string): string | null {
+  const gitFile = readSmallFile(join(dir, '.git'))
+  if (gitFile === null) return null
+  const m = /^gitdir:[ \t]*(.+?)[ \t]*$/m.exec(gitFile)
   if (!m) return null
-  const gitdir = resolve(dir, (m[1] as string).trim())
-  let common: string
-  try { common = resolve(gitdir, readFileSync(join(gitdir, 'commondir'), 'utf8').trim()) } catch { return null }
+  const gitdir = realOrNull(resolve(dir, m[1] as string))
+  if (!gitdir) return null
+  const commonRaw = readSmallFile(join(gitdir, 'commondir'))
+  if (commonRaw === null) return null
+  const common = realOrNull(resolve(gitdir, commonRaw.trim()))
+  if (!common) return null
+  try { if (!statSync(common).isDirectory()) return null } catch { return null }
+  if (dirname(gitdir) !== join(common, 'worktrees')) return null
+  const back = readSmallFile(join(gitdir, 'gitdir'))
+  if (back === null) return null
+  const backReal = realOrNull(resolve(gitdir, back.trim()))
+  const dirReal = realOrNull(dir)
+  if (!backReal || !dirReal || backReal !== realOrNull(join(dirReal, '.git'))) return null
   // Обычная раскладка: `<repo>/.git` — основной репозиторий `<repo>`. Голый репозиторий — его папка и есть ключ.
-  return common.endsWith('/.git') ? dirname(common) : common
+  return basename(common) === '.git' ? dirname(common) : common
 }
 
 /** Ключ папки: настоящая папка (у worktree — основной репозиторий), её `(dev, ino)`; нет папки — `null`. */
 export function folderIdentity(path: string): FolderIdentity | null {
   if (typeof path !== 'string' || !isAbsolute(path) || path.includes('\0')) return null
-  const real = (p: string): string | null => { try { return realpathSync.native(p) } catch { return null } }
-  let key = real(path)
+  let key = realOrNull(path)
   if (!key) return null
+  let mapped = false
+  try { if (!statSync(key).isDirectory()) return null } catch { return null }
   const main = worktreeMainRepo(key)
-  if (main) key = real(main) ?? key
+  if (main) { const r = realOrNull(main); if (r) { key = r; mapped = true } }
   try {
     const st = statSync(key, { bigint: true })
     if (!st.isDirectory()) return null
-    return { key, display: resolve(path), dev: String(st.dev), ino: String(st.ino) }
+    return { key, display: resolve(path), dev: String(st.dev), ino: String(st.ino), ...(mapped ? { mapped: true as const } : {}) }
   } catch { return null }
 }
+
+/**
+ * Уровни, которые через сопоставление worktree → основной репозиторий НЕ наследуются (ревью B1): полный доступ и «как
+ * в настройках Claude» (при bypass у владельца это тот же полный). Worktree получает их только своим явным выбором.
+ */
+const NOT_THROUGH_MAPPING: ReadonlySet<ApprovalMode> = new Set<ApprovalMode>(['full', 'inherit'])
 
 export interface FolderRecall {
   key: string
   display: string
+  /** Идентичность папки (`dev`, `ino` ключа): окно кладёт её в снимок черновика, демон сверяет на старте. */
+  dev: string
+  ino: string
+  /** Ключ — основной репозиторий worktree: полный доступ через такое сопоставление не наследуется. */
+  mapped?: true
   /** Запомненный доступ; нет — памяти нет (или папка изменилась). */
   access?: ApprovalMode
   accessSetAt?: string
@@ -146,9 +201,10 @@ export function createFolderStore(file: string, now: () => Date = () => new Date
   }
   const view = (id: FolderIdentity, e: FolderEntry | undefined): FolderRecall => {
     const same = !!e && e.dev === id.dev && e.ino === id.ino
+    const access = e && same && e.access && !(id.mapped && NOT_THROUGH_MAPPING.has(e.access)) ? e.access : undefined
     return {
-      key: id.key, display: id.display,
-      ...(e && same && e.access ? { access: e.access, ...(e.accessSetAt ? { accessSetAt: e.accessSetAt } : {}) } : {}),
+      key: id.key, display: id.display, dev: id.dev, ino: id.ino, ...(id.mapped ? { mapped: true as const } : {}),
+      ...(access ? { access, ...(e?.accessSetAt ? { accessSetAt: e.accessSetAt } : {}) } : {}),
       ...(e && !same && e.access ? { changed: true as const } : {}),
       ...(e && same && e.lastUsedAt ? { lastUsedAt: e.lastUsedAt } : {}),
     }
@@ -175,14 +231,18 @@ export function createFolderStore(file: string, now: () => Date = () => new Date
     remember(path, access, at = now()) {
       const id = folderIdentity(path)
       if (!id) return null
+      // Полный доступ, выбранный в worktree, основному репозиторию не передаётся (ревью B1): только история.
+      if (id.mapped && NOT_THROUGH_MAPPING.has(access)) return this.use(path, at)
       data.folders[id.key] = { ...entryFor(id), access, accessSetAt: at.toISOString() }
       evict()
       save()
       return view(id, data.folders[id.key])
     },
     forget(path) {
+      // Ключ — realpath; папки уже нет — ищем по ключу и по показанному пути (`/tmp` против `/private/tmp`, ревью m12).
       const id = folderIdentity(path)
-      const key = id?.key ?? (isAbsolute(path) ? resolve(path) : null)
+      const abs = isAbsolute(path) ? resolve(path) : null
+      const key = id?.key ?? (abs && data.folders[abs] ? abs : Object.keys(data.folders).find((k) => data.folders[k]?.display === abs) ?? null)
       if (!key || !data.folders[key]) return false
       delete data.folders[key]
       save()

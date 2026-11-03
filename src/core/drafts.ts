@@ -34,12 +34,17 @@ export interface DraftView extends DraftRecord {
   ownerAlive: boolean
 }
 
+/** Строка списка черновиков без тела (ревью Codex 12): тело — отдельным `draft.get`, кадр NDJSON не переполнится. */
+export type DraftMeta = Omit<DraftView, 'data'> & { bytes: number }
+
 export class DraftError extends Error {
   constructor(readonly code: 'invalid_params' | 'not_found' | 'draft_conflict' | 'draft_owned', message: string, readonly rev?: number) { super(message) }
 }
 
 export interface DraftStore {
   list(): DraftView[]
+  /** Список без тел, новые первыми, страницами. */
+  meta(offset?: number, limit?: number): { drafts: DraftMeta[]; total: number }
   get(id: string): DraftView | null
   put(id: string, data: unknown, baseRev: number, owner: string, force?: boolean): DraftView
   claim(id: string, owner: string): DraftView
@@ -87,6 +92,15 @@ export function createDraftStore(dir: string, now: () => number = Date.now): Dra
     list() {
       return ids().flatMap((id) => { const r = read(id); return r ? [view(r)] : [] })
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    },
+    meta(offset = 0, limit = 50) {
+      const all = ids().flatMap((id) => {
+        const r = read(id)
+        if (!r) return []
+        const { data, ...rest } = view(r)
+        return [{ ...rest, bytes: Buffer.byteLength(JSON.stringify(data)) }]
+      }).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      return { drafts: all.slice(offset, offset + limit), total: all.length }
     },
     get(id) {
       const r = read(checkId(id))
