@@ -1158,7 +1158,7 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
       }
       const at = entry?.at ?? ours.createdAt
       if (!entry || !phaseAtLeast(entry.phase, 'registered')) entry = put({ ...(entry ?? {}), requestId, phase: 'registered', name: ours.name, at, shape })
-      return withDraftClaim(p, requestId, () => finishPrompt(requestId, entry as StartEntry, withBrowser(publicRecord(ours)), prompt, put))
+      return withDraftClaim(p, requestId, () => finishPrompt(requestId, entry as StartEntry, withBrowser(publicRecord(ours)), prompt, put), true)
     }
     if (entry?.name && phaseAtLeast(entry.phase, 'registered')) {
       throw new ManagerError(ERROR_CODES.notFound, `сессию ${entry.name}, заведённую по этому запросу, уже удалили — отправь черновик заново`)
@@ -1198,7 +1198,7 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
    * идёт, другое окно черновик не запишет, не заберёт и не удалит. Удаляется черновик, только когда реплика ПРИНЯТА
    * (recheck 7): отказ `say` — черновик с текстом остаётся у демона.
    */
-  const withDraftClaim = async (p: Record<string, unknown>, requestId: string, run: () => Promise<Record<string, unknown>>): Promise<Record<string, unknown>> => {
+  const withDraftClaim = async (p: Record<string, unknown>, requestId: string, run: () => Promise<Record<string, unknown>>, existing = false): Promise<Record<string, unknown>> => {
     const d = p['draft']
     if (d === undefined) return run()
     const o = d !== null && typeof d === 'object' && !Array.isArray(d) ? d as Record<string, unknown> : null
@@ -1206,10 +1206,14 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
       throw new ManagerError(ERROR_CODES.invalidParams, 'agent.start: draft — {id, rev, owner}')
     }
     const id = o['id']
+    // Повтор старта, чат которого уже заведён (`existing`), а черновика нет — его убрала принятая реплика, ответ окну
+    // потерялся (финальное ревью шага B): это идемпотентный повтор — `finishPrompt` ответит `duplicate`, а не
+    // `draft_conflict` («черновик удалили в другом окне» и «Оставить копию» вели ко второй отправке).
+    let claimed = false
     try {
-      if (o['rev'] > 0 || drafts.get(id)) drafts.beginStart(id, o['rev'] as number, o['owner'], requestId)
-      else return await run()
+      if (drafts.get(id) || (o['rev'] > 0 && !existing)) { drafts.beginStart(id, o['rev'] as number, o['owner'], requestId); claimed = true }
     } catch (e) { if (e instanceof DraftError) throw new ManagerError(e.code, e.message); throw e }
+    if (!claimed) return run()
     let consumed = false
     try {
       const r = await run()
