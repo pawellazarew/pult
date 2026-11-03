@@ -348,6 +348,9 @@ describe('codex: запросы сервера, которых Пульт не �
         await r.adapter.startSession(spec(r, 'w'))
         const turn = await r.adapter.send('w', 'спроси [[tool-user-input]]')
         assert.ok(await waitFor(() => r.broker.list('w').length === 1, 5000))
+        const thread = r.client().find((m) => m.method === 'thread/start')
+        assert.equal((thread?.params?.config as Record<string, unknown>)?.['features.default_mode_request_user_input'], true,
+          'в обычном режиме Codex должен иметь возможность задать вопрос')
         const question = r.broker.list('w')[0]!
         assert.equal(question.toolName, 'requestUserInput')
         r.broker.resolve(question.id, behavior === 'allow' ? { behavior, answers: { q1: { answers: ['8080'] } } } : { behavior })

@@ -1713,7 +1713,12 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
       sandbox: policy.sandbox,
       approvalPolicy: policy.approvalPolicy,
       ...(flags.model ? { model: flags.model } : {}),
-      ...(mcpKey ? { config: { mcp_servers: servers } } : {}),
+      // В Default mode Codex скрывает request_user_input без этого feature flag.
+      // Вопросы обслуживает Inbox независимо от режима разрешений.
+      config: {
+        'features.default_mode_request_user_input': true,
+        ...(mcpKey ? { mcp_servers: servers } : {}),
+      },
     }
     await attachThread(l, c, common, mcpKey, policy)
   }
