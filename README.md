@@ -29,8 +29,8 @@ shown as written; changing the interface language does not translate your conver
 - **More reliable event delivery.** The window recovers ended subscriptions, large histories replay in small
   pages, and storage failures trigger an error exit so the installed service can restart the daemon.
   Diagnostic logs rotate, and low disk space produces a warning in the daemon log.
-- **Codex fixes.** Questions work in the default mode. Changing the network profile waits for background
-  tasks, server turns and permission questions to finish before replacing the shared process.
+- **Codex fixes.** Questions work in the default mode. A network profile change is rejected while background
+  tasks, server turns or permission questions still need the shared process; retry after they finish.
 
 See the [release notes](docs/releases/0.3.19.md) for details. Update with `pult update` or the update button in the window.
 
