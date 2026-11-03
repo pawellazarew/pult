@@ -69,6 +69,7 @@ export class DaemonLink {
   private closed = false
   /** Демона остановили кнопкой: повторов нет до «запустить». */
   private stoppedByUser = false
+  private daemonStopReason: string | null = null
   private readonly subs = new Map<string, Sub>()
   private readonly timers: Timers
 
@@ -217,8 +218,9 @@ export class DaemonLink {
     this.busy = false
     if (this.closed) { client.close(); return }
     this.client = client
-    this.attempt = 0
+    if (this.subs.size === 0) this.attempt = 0
     this.stoppedByUser = false
+    this.daemonStopReason = null
     client.onClose(() => this.onLost(client))
     this.setState({ state: 'up', daemon: client.daemon })
     for (const [key, sub] of this.subs) void this.attachSub(client, key, sub)
@@ -229,7 +231,7 @@ export class DaemonLink {
     this.client = null
     for (const sub of this.subs.values()) { sub.daemonSub = null; sub.client = null }
     if (this.closed) return
-    this.scheduleRetry(this.stoppedByUser ? tr('остановлен кнопкой') : tr('соединение с демоном закрыто'))
+    this.scheduleRetry(this.stoppedByUser ? tr('остановлен кнопкой') : this.daemonStopReason ?? tr('соединение с демоном закрыто'))
   }
 
   private async attachSub(client: Client, key: string, sub: Sub): Promise<void> {
@@ -237,18 +239,39 @@ export class DaemonLink {
     sub.daemonSub = null
     const deliver = (ev: PultEvent): void => {
       // Кадр чужого (старого) соединения или отписанной подписки — мимо.
-      if (this.subs.get(key) !== sub || sub.client !== client) return
+      if (this.closed || this.client !== client || this.subs.get(key) !== sub || sub.client !== client) return
       if (!Number.isInteger(ev.id) || ev.id <= sub.lastId) return
       sub.lastId = ev.id
+      // История содержит остановки старых процессов: причиной текущего обрыва может
+      // быть только событие, записанное после старта подключённого демона.
+      if (ev.kind === 'daemon.stopping' && Date.parse(ev.ts) >= Date.parse(client.daemon.startedAt)) {
+        const reason = ev.data['reason']
+        if (typeof reason === 'string') this.daemonStopReason = tr`демон остановлен: ${reason}`
+      }
       try { sub.onEvent(ev) } catch (e) { this.deps.log?.(tr('обработчик события упал'), { error: (e as Error).message }) }
     }
+    const failed = (): void => {
+      if (this.closed || this.client !== client || this.subs.get(key) !== sub || sub.client !== client) return
+      // Конец подписки не обязательно закрывает сокет. Без этой ветки окно навсегда
+      // оставалось «подключено», но больше не получало событий. Закрытие восстанавливает
+      // все подписки с их курсоров через единственный таймер с растущей паузой.
+      this.onLost(client)
+      client.close()
+    }
     try {
-      const { sub: n } = await client.subscribe({ since: sub.lastId }, deliver)
-      if (this.subs.get(key) === sub && sub.client === client) sub.daemonSub = n
+      const { sub: n } = await client.subscribe({ since: sub.lastId }, deliver, (end) => {
+        this.deps.log?.(tr('подписка завершена'), { code: end.code, message: end.message })
+        failed()
+      })
+      if (this.client === client && this.subs.get(key) === sub && sub.client === client) {
+        sub.daemonSub = n
+        this.attempt = 0
+      }
       else client.request('events.unsubscribe', { sub: n }).catch(() => { /* неважно */ })
     } catch (e) {
-      // Соединение упало посреди подписки: onLost переподключит и подпишет заново.
+      // Ошибка RPC может прийти и по живому соединению: тоже восстанавливаем подписку.
       this.deps.log?.(tr('подписка не удалась'), { error: (e as Error).message })
+      failed()
     }
   }
 }
