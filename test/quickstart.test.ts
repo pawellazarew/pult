@@ -523,3 +523,109 @@ describe('ревью шага B: старт после сбоев, повтор 
     } finally { (win as unknown as { close(): void }).close(); await d.stop('конец теста'); home.remove(); rmSync(root, { recursive: true, force: true }) }
   })
 })
+
+describe('перепроверка Codex: настоящая папка сессии, захват черновика, отказ say, другие настройки повтора, файлы настроек', () => {
+  type Ctl = { request(m: string, p?: Record<string, unknown>): Promise<unknown>; close(): void }
+  const gitEnv = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x.example', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x.example' }
+  const git = (cwd: string, ...a: string[]): void => { execFileSync('git', ['-C', cwd, ...a], { stdio: 'ignore', env: gitEnv }) }
+
+  it('«как в настройках Claude» проверяется в папке worktree: там bypass (без settings.local.json исходной) — отказ access_changed', async () => {
+    const home = tempHome()
+    const root = mkdtempSync(join(tmpdir(), 'pt-wtmode-'))
+    const d = await startTestDaemon(home)
+    const win = await connectClient(home.paths, { client: 'shell' }) as unknown as Ctl
+    try {
+      await win.request('access.grantFull', GRANT)
+      const repo = join(root, 'repo')
+      mkdirSync(join(repo, '.claude'), { recursive: true })
+      git(repo, 'init', '-q')
+      writeFileSync(join(repo, '.claude', 'settings.json'), JSON.stringify({ permissions: { defaultMode: 'bypassPermissions' } }))
+      writeFileSync(join(repo, '.gitignore'), '.claude/settings.local.json\n')
+      git(repo, 'add', '.'); git(repo, 'commit', '-qm', 'a')
+      // Исходная папка перекрывает bypass локальным файлом — в worktree его нет.
+      writeFileSync(join(repo, '.claude', 'settings.local.json'), JSON.stringify({ permissions: { defaultMode: 'default' } }))
+      assert.equal(((await win.request('agent.preflight', { cwd: repo })) as { inheritMode: string }).inheritMode, 'default')
+      for (const origin of ['link', 'user']) {
+        await assert.rejects(win.request('agent.start', { requestId: randomUUID(), kind: 'claude', cwd: repo, approval: 'inherit', worktree: true, origin }), code('access_changed'), origin)
+      }
+      assert.equal(((await win.request('agent.list')) as { sessions: Rec[] }).sessions.length, 0, 'сессии нет')
+      // Без worktree — та же папка, что проверена: можно.
+      const ok = (await win.request('agent.start', { requestId: randomUUID(), kind: 'claude', cwd: repo, approval: 'inherit' })) as Rec
+      assert.equal(ok.approval, 'inherit')
+    } finally { win.close(); await d.stop('конец теста'); home.remove(); rmSync(root, { recursive: true, force: true }) }
+  })
+
+  it('старт держит черновик: «Забрать» и запись из другого окна во время старта — draft_starting; отказ say — черновик цел', async () => {
+    const home = tempHome()
+    const root = mkdtempSync(join(tmpdir(), 'pt-claim-'))
+    const d = await startTestDaemon(home)
+    const win = await connectClient(home.paths, { client: 'shell' }) as unknown as Ctl
+    const cli = await connectClient(home.paths, { client: 'cli' }) as unknown as Ctl
+    try {
+      const repo = join(root, 'repo')
+      mkdirSync(repo)
+      git(repo, 'init', '-q'); writeFileSync(join(repo, 'a'), 'a'); git(repo, 'add', 'a'); git(repo, 'commit', '-qm', 'a')
+      const id = randomUUID()
+      await win.request('draft.put', { id, data: { text: 'задача' }, baseRev: 0, owner: 'wa' })
+      const start = win.request('agent.start', { requestId: id, kind: 'claude', cwd: repo, worktree: true, prompt: 'задача', draft: { id, rev: 1, owner: 'wa' } })
+      // Пока идёт git worktree add (журнал уже на фазе worktree) — окно B пытается забрать и переписать.
+      const j = createStartJournal(home.paths.startJournal)
+      assert.ok(await waitFor(() => j.get(id)?.phase === 'worktree', 5000), 'старт не дошёл до worktree')
+      await assert.rejects(win.request('draft.claim', { id, owner: 'wb' }), code('draft_starting'))
+      await assert.rejects(win.request('draft.put', { id, data: { text: 'чужое' }, baseRev: 1, owner: 'wb' }), code('draft_starting'))
+      const r = (await start) as Rec & { promptSent?: boolean }
+      assert.equal(r.promptSent, true)
+      assert.equal(existsSync(join(home.paths.drafts, `${id}.json`)), false, 'принятая реплика — черновик убран')
+
+      // Отказ say (сессия занята ходом): реплика не принята — черновик остаётся, повтор возможен.
+      const cwd = join(root, 'busy')
+      mkdirSync(cwd)
+      writeFileSync(join(cwd, '.pult-fake.json'), JSON.stringify({ scenario: 'simple', speed: 0, hangAfterInit: 60_000 }))
+      const id2 = randomUUID()
+      const s = (await win.request('agent.start', { requestId: id2, kind: 'claude', cwd })) as Rec
+      await cli.request('agent.prompt', { name: s.name, text: 'висим' })
+      await win.request('draft.put', { id: id2, data: { text: 'вторая' }, baseRev: 0, owner: 'wa' })
+      const busy = (await win.request('agent.start', { requestId: id2, kind: 'claude', cwd, prompt: 'вторая', draft: { id: id2, rev: 1, owner: 'wa' } })) as Rec & { promptSent?: boolean; promptError?: { code: string } }
+      assert.deepEqual([busy.promptSent, !!busy.promptError], [false, true])
+      assert.equal(existsSync(join(home.paths.drafts, `${id2}.json`)), true, 'отказ say — черновик цел')
+      await cli.request('agent.stop', { name: s.name })
+    } finally { win.close(); cli.close(); await d.stop('конец теста'); home.remove(); rmSync(root, { recursive: true, force: true }) }
+  })
+
+  it('повтор того же requestId с другими настройками: после заведения — start_changed; до — новый старт', async () => {
+    const home = tempHome()
+    const root = mkdtempSync(join(tmpdir(), 'pt-shape-'))
+    const d = await startTestDaemon(home)
+    const win = await connectClient(home.paths, { client: 'shell' }) as unknown as Ctl
+    try {
+      const a = join(root, 'alpha'), b = join(root, 'beta')
+      mkdirSync(a); mkdirSync(b)
+      const rid = randomUUID()
+      await win.request('agent.start', { requestId: rid, kind: 'claude', cwd: a, approval: 'read-only' })
+      await assert.rejects(win.request('agent.start', { requestId: rid, kind: 'claude', cwd: a, approval: 'workspace', prompt: 'x' }), code('start_changed'))
+      await assert.rejects(win.request('agent.start', { requestId: rid, kind: 'claude', cwd: b, approval: 'read-only' }), code('start_changed'))
+      const r2 = randomUUID()
+      const res = (await win.request('agent.start', { requestId: r2, kind: 'claude', cwd: a, reserveOnly: true })) as Rec
+      assert.equal(res.name, 'alpha-2')
+      const moved = (await win.request('agent.start', { requestId: r2, kind: 'claude', cwd: b })) as Rec
+      assert.equal(moved.name, 'beta', 'до заведения другая папка — новый старт с её именем')
+    } finally { win.close(); await d.stop('конец теста'); home.remove(); rmSync(root, { recursive: true, force: true }) }
+  })
+
+  it('настройки Claude проекта: FIFO и /dev/zero не вешают, симлинк на обычный файл читается', () => {
+    const root = mkdtempSync(join(tmpdir(), 'pt-setfifo-'))
+    try {
+      const fifo = join(root, 'fifo.json')
+      execFileSync('mkfifo', [fifo])
+      const zero = join(root, 'zero.json')
+      symlinkSync('/dev/zero', zero)
+      const real = join(root, 'real.json')
+      writeFileSync(real, JSON.stringify({ permissions: { defaultMode: 'bypassPermissions' } }))
+      const link = join(root, 'link.json')
+      symlinkSync(real, link)
+      const script = `import('${new URL('../dist/mcp/browser.js', import.meta.url).href}').then((m) => process.stdout.write(String(m.claudeDefaultMode(process.argv.slice(1)))))`
+      assert.equal(execFileSync(process.execPath, ['-e', script, fifo, zero], { timeout: 10_000, encoding: 'utf8' }), 'null')
+      assert.equal(execFileSync(process.execPath, ['-e', script, fifo, link, zero], { timeout: 10_000, encoding: 'utf8' }), 'bypassPermissions')
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+})

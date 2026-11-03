@@ -15,7 +15,8 @@
 // ЗАПИСЬ ДОСТУПА — только реальный старт или смена доступа в живом чате (решает сервер, src/sessions/resolve.ts
 // `shouldRemember`); брошенный черновик сюда не пишет никогда.
 
-import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs'
+import { readFileSync, realpathSync, statSync } from 'node:fs'
+import { readRegularFile } from './safeRead.js'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import type { ApprovalMode } from '../adapters/types.js'
 import { isApprovalMode } from '../adapters/types.js'
@@ -47,26 +48,8 @@ export interface FolderIdentity {
 /** Служебные файлы git, которые читаем: `.git` worktree и `commondir` — строка пути, байты, не килобайты. */
 const GIT_META_MAX = 4096
 
-/**
- * Прочитать маленький ОБЫЧНЫЙ файл, не блокируясь (ревью M1): `lstat` — не симлинк и не FIFO/устройство, открытие с
- * `O_NOFOLLOW | O_NONBLOCK` (подмену между `lstat` и `open` отсекает `fstat` по тому же дескриптору), не больше
- * `GIT_META_MAX` байт. Всё прочее — `null`: FIFO, `/dev/zero`, многогигабайтный `.git` демон не повесят.
- */
-function readSmallFile(file: string): string | null {
-  try {
-    const l = lstatSync(file)
-    if (!l.isFile() || l.size > GIT_META_MAX) return null
-  } catch { return null }
-  let fd: number | null = null
-  try {
-    fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
-    const st = fstatSync(fd)
-    if (!st.isFile() || st.size > GIT_META_MAX) return null
-    const buf = Buffer.alloc(GIT_META_MAX + 1)
-    const n = readSync(fd, buf, 0, buf.length, 0)
-    return n > GIT_META_MAX ? null : buf.subarray(0, n).toString('utf8')
-  } catch { return null } finally { if (fd !== null) try { closeSync(fd) } catch { /* уже закрыт */ } }
-}
+/** Маленький обычный файл, не симлинк, без блокировки (ревью M1) — src/core/safeRead.ts. */
+const readSmallFile = (file: string): string | null => readRegularFile(file, { max: GIT_META_MAX, follow: false })
 
 const realOrNull = (p: string): string | null => { try { return realpathSync.native(p) } catch { return null } }
 
