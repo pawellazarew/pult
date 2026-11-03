@@ -20,7 +20,7 @@ devDependencies — только `typescript` и `@types/node`. Нужен Node 
 ```sh
 npm ci
 npm run build                 # tsc -> dist (продукт) и dist-test (тесты)
-npm test                      # node --test по собранным тестам
+npm test                      # node --test по собранным тестам, до двух файлов одновременно
 PULT_HOME=$(mktemp -d) node dist/cli/main.js doctor
 ```
 
@@ -2574,3 +2574,9 @@ pult.collapsed. При возвращении фокуса окно обновл
 
 Регрессии: `daemon-resilience.test.ts`, `history-pages.test.ts`, `log-rotation.test.ts`,
 `codex-safety.test.ts` и юнит-тесты `DaemonLink`.
+
+Тесты пакета запускает `scripts/test.mjs`: все `*.test.js` из `dist-test/` и `dist-ui-test/`,
+с прежним языковым bootstrap и максимум двумя файлами одновременно. Ограничение нужно для
+проверок задержек и отката: каждый CLI-тест запускает несколько дочерних процессов, а при
+массовом параллельном запуске они измеряли конкуренцию за ресурсы Mac. Набор тестов и временные
+пределы проверок не меняются.
