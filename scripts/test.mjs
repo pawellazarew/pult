@@ -7,7 +7,11 @@ import { fileURLToPath } from 'node:url'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const files = ['dist-test', 'dist-ui-test'].flatMap((dir) =>
-  readdirSync(join(root, dir)).filter((name) => name.endsWith('.test.js')).sort().map((name) => join(root, dir, name)),
+  {
+    const names = readdirSync(join(root, dir)).filter((name) => name.endsWith('.test.js')).sort()
+    if (!names.length) throw new Error(`No compiled tests in ${dir}`)
+    return names.map((name) => join(root, dir, name))
+  },
 )
 // CLI/installer tests start several children each. More files competing for CPU and disk
 // make latency assertions measure host contention rather than daemon responsiveness.
