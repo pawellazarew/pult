@@ -19,6 +19,21 @@ For a single CLI command, override the setting with `PULT_LANG=en pult --help` (
 The saved setting is `language: "auto" | "ru" | "en"` in `~/.pult/config.json`. Model responses and your own text are
 shown as written; changing the interface language does not translate your conversations.
 
+## New in 0.3.19
+
+- **Start with the task.** A new chat opens as a draft immediately. Pick a folder, write the task and send;
+  unsent drafts survive a window restart, and retrying a send does not create a duplicate session.
+- **Remember folder access.** Pult can remember access settings for a folder. Full access requires explicit
+  consent; you can also keep a choice for the current chat only.
+- **English and Russian throughout.** Choose the language for the window, notifications and CLI in Settings.
+- **More reliable event delivery.** The window recovers ended subscriptions, large histories replay in small
+  pages, and storage failures trigger an error exit so the installed service can restart the daemon.
+  Diagnostic logs rotate, and low disk space produces a warning in the daemon log.
+- **Codex fixes.** Questions work in the default mode. A network profile change is rejected while background
+  tasks, server turns or permission questions still need the shared process; retry after they finish.
+
+See the [release notes](docs/releases/0.3.19.md) for details. Update with `pult update` or the update button in the window.
+
 ## What it does
 
 - **Agents keep working when you walk away.** Start a Claude Code or Codex agent in a project folder; it keeps
