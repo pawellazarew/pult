@@ -29,7 +29,7 @@ import { CMD, Icon, IS_MAC, Kbd } from './common.js'
 export interface RecentFolder { path: string; at: string; source: 'pult' | 'claude' | 'codex' }
 
 /** Строка под полем о сбое или расхождении: «Повторить», «Вернуть мой текст», «Оставить копию». */
-export interface DraftNotice { text: string; retry: boolean; restoreText?: string; fork?: boolean }
+export interface DraftNotice { text: string; retry: boolean; restoreText?: string; fork?: boolean; openChat?: string }
 
 /** Ключ вложений черновика в хранилище окна и папка `attachments/<ключ>` — переживают уход из черновика и перезагрузку. */
 export const draftAttachmentSession = (id: string): string => `draft-${id.replace(/-/g, '').slice(0, 20)}`
@@ -70,6 +70,7 @@ export interface DraftViewProps {
   onAttachments?(items: SavedAttachment[]): void
   onRestoreText?(text: string): void
   onFork?(): void
+  onOpenChat?(name: string): void
   onChange(d: DraftChat): void
   /** Текст поля — отдельно: вставка вложений приходит позже, и снимок черновика к тому времени мог смениться. */
   onText(text: string): void
@@ -522,7 +523,8 @@ export function DraftView(p: DraftViewProps): ReactElement {
     notes.push({ tone: er.retry ? 'fail' : 'warn', testId: 'draft-error', text: <>{er.text}
       {er.retry ? <> · <button type="button" className="link-btn" onClick={send} data-testid="draft-retry">{t('Повторить')}</button></> : null}
       {er.restoreText !== undefined ? <> · <button type="button" className="link-btn" onClick={() => p.onRestoreText?.(er.restoreText as string)} data-testid="draft-restore-text">{t('Вернуть мой текст')}</button></> : null}
-      {er.fork ? <> · <button type="button" className="link-btn" onClick={() => p.onFork?.()} data-testid="draft-fork">{t('Оставить копию')}</button></> : null}</> })
+      {er.openChat ? <> · <button type="button" className="link-btn" onClick={() => p.onOpenChat?.(er.openChat as string)} data-testid="draft-open-chat">{t('Открыть чат')}</button></> : null}
+      {er.fork ? <> · <button type="button" className="link-btn" onClick={() => p.onFork?.()} data-testid="draft-fork">{er.openChat ? t('Завести новый') : t('Оставить копию')}</button></> : null}</> })
   }
   const stats = linkPromptStats(d)
   if (stats) notes.push({ tone: 'plain', testId: 'draft-prompt-stats', text: t`Текст из ссылки: ${stats.lines} ${plural(stats.lines, t('строка'), t('строки'), t('строк'))} · ${stats.chars} ${plural(stats.chars, t('знак'), t('знака'), t('знаков'))} — прокрути поле, прежде чем отправлять.` })

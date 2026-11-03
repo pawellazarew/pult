@@ -141,9 +141,11 @@ export function resolveDraft(d: DraftChat, env: DraftEnv): DraftChat {
   if (r.blockedApproval) next.blockedApproval = r.blockedApproval
   else delete next.blockedApproval
   // Явный полный доступ, а согласие тем временем отозвали (или дали снова под другим номером) — «Спрашивать» (§3.2).
-  // Ревью m2 / Codex 3: и если согласие с тех пор дали ЗАНОВО (другой номер) — выбор, сделанный при прежнем, не переносится.
+  // Ревью m2 / Codex 3 и перепроверка 3: согласие с тех пор дали ЗАНОВО (другой номер) — полный доступ, выбранный ИЛИ
+  // унаследованный при прежнем, не переносится: «Спрашивать» и «Включить снова». Номера ещё не было — берём текущий.
   const revMoved = d.consentRev !== null && env.consent !== null && env.consent.rev !== d.consentRev
-  if (d.picked.approval && isFullLevel(next.provider, next.approval, env.inheritMode) && (!consentGrants(env.consent, next.provider) || revMoved)) {
+  if (d.consentRev === null && env.consent) next.consentRev = env.consent.rev
+  if (isFullLevel(next.provider, next.approval, env.inheritMode) && (revMoved || (d.picked.approval && !consentGrants(env.consent, next.provider)))) {
     next.blockedApproval = next.approval
     next.approval = 'ask'
     next.picked = { ...next.picked }
@@ -249,9 +251,9 @@ export function remembersAccess(d: DraftChat, inheritMode: string | null): boole
  */
 export function draftStartParams(d: DraftChat, opts: { prompt: string; consentRev?: number | null; inheritMode: string | null; owner?: string }): Record<string, unknown> {
   const full = d.approval === 'full' || d.approval === 'inherit'
-  // Явный выбор полного доступа — с номером согласия, при котором его сделали (ревью m2): демон сверит и скажет
-  // `consent_changed`, если его отозвали и дали снова. Полный из памяти папки — с текущим номером окна.
-  const rev = d.picked.approval && d.consentRev !== null ? d.consentRev : opts.consentRev
+  // Полный доступ — с номером согласия, при котором черновик его получил (выбором или из памяти папки; ревью m2,
+  // перепроверка 3): демон сверит и скажет `consent_changed`, если согласие с тех пор отозвали и дали снова.
+  const rev = d.consentRev !== null ? d.consentRev : opts.consentRev
   return {
     requestId: d.id,
     kind: d.provider,
@@ -428,8 +430,13 @@ export function refreshBeforeStart(d: DraftChat, env: DraftEnv): { draft: DraftC
   const stale = !!d.folder && !!fresh && !sameStamp(d.folder, fresh)
   if (d.restored && !stale) return { draft: { ...d, ...(fresh ? { folder: fresh } : {}) }, changed: false }
   const { restored: _r, ...rest } = d
-  const next = resolveDraft(stale && rest.approvalOrigin === 'folder' ? { ...rest, folder: null } : rest, env)
-  return { draft: next, changed: next.approval !== d.approval || (stale && d.approvalOrigin === 'folder') }
+  // Папку подменили (перепроверка Codex 2): полный уровень не переносится на другую папку, даже выбранный явно, —
+  // человек увидит пересчитанный доступ и выберет снова. Прочий явный выбор остаётся.
+  const fullBefore = isFullLevel(rest.provider, rest.approval, env.inheritMode)
+  const base = stale && fullBefore ? { ...rest, folder: null, picked: { ...rest.picked, approval: undefined } } : stale ? { ...rest, folder: null } : rest
+  if (base.picked.approval === undefined) delete base.picked.approval
+  const next = resolveDraft(base, env)
+  return { draft: next, changed: stale || next.approval !== d.approval }
 }
 
 /** Короткие подписи чипа доступа (ревью: полные — в меню). «Как в настройках Claude» — с действующим режимом папки. */

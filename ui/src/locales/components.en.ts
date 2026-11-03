@@ -789,5 +789,10 @@ export const componentsEn: Readonly<Record<string, string>> = {
   "Текст из ссылки: {0} {1} · {2} {3} — прокрути поле, прежде чем отправлять.": "Text from the link: {0} {1} · {2} {3} — scroll the field before sending.",
   "Правки в папке": "Folder edits",
   "Настройки Claude · {0}": "Claude settings · {0}",
-  "Настройки Claude": "Claude settings"
+  "Настройки Claude": "Claude settings",
+  "Завести новый": "Start a new one",
+  "Открыть чат": "Open chat",
+  "Чата {0} уже нет": "Chat {0} no longer exists",
+  "Этот черновик уже заведён как чат с прежними настройками. Открой его или заведи новый с нынешними.": "This draft was already started as a chat with the earlier settings. Open it or start a new one with the current settings.",
+  "Этот черновик уже отправляется (в другом окне или прошлой попыткой) — подожди чат.": "This draft is already being sent (in another window or by the previous attempt) — wait for the chat."
 }

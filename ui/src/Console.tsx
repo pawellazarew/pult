@@ -1039,6 +1039,14 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
       }
       if (code === 'folder_changed') { void preflight(cwd); fail({ text: tr('Папку заменили или перенаправили с тех пор, как черновик её видел — доступ пересчитан. Проверь его и отправь снова.'), retry: false }); return }
       if (code === 'draft_conflict' || code === 'draft_owned') { fail({ text: errorText(e), retry: false }); void rereadDraft(id); return }
+      if (code === 'draft_starting') { fail({ text: tr('Этот черновик уже отправляется (в другом окне или прошлой попыткой) — подожди чат.'), retry: true }); return }
+      if (code === 'start_changed') {
+        // Черновик уже заведён чатом с другими настройками (ответ терялся, потом их поменяли): не повтор — выбор человека.
+        let chat: string | undefined
+        try { chat = ((await bridge.call('agent.startStatus', { requestId: id })) as { name?: string }).name } catch { /* журнала нет */ }
+        fail({ text: tr('Этот черновик уже заведён как чат с прежними настройками. Открой его или заведи новый с нынешними.'), retry: false, fork: true, ...(chat ? { openChat: chat } : {}) })
+        return
+      }
       fail({ text: errorText(e), retry: true })
     }
   }
@@ -1575,6 +1583,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
             onAttachments={(items) => updateDraft(draft.id, (x) => ({ ...x, attachments: items }))}
             onRestoreText={(text) => { updateDraft(draft.id, (x) => ({ ...x, text })) }}
             onFork={() => forkDraft(draft.id)}
+            onOpenChat={(name) => { if (records.some((r) => r.name === name)) select(name); else setBannerError(tr`Чата ${name} уже нет`) }}
             onChange={(d) => updateDraft(d.id, () => d)} onText={(text) => updateDraft(draft.id, (x) => ({ ...x, text }))}
             onFolder={(cwd) => setDraftFolder(draft.id, cwd)} onPickSystemFolder={() => void pickDraftFolder(draft.id)}
             onApproval={(a) => draftApproval(draft.id, a)} onSend={(f) => void startDraft(draft.id, f)} onDiscard={() => discardDraft(draft.id)}

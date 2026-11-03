@@ -265,3 +265,29 @@ describe('ревью шага B: окно', () => {
     assert.match(out, /data-testid="draft-fork"/)
   })
 })
+
+describe('перепроверка Codex: окно', () => {
+  const stamp = { key: '/w/acme-api', dev: '1', ino: '2' }
+  it('явный полный после подмены папки не переносится: доступ пересчитан, отправка остановлена (recheck 2)', () => {
+    const e = env({ consent: CONSENT, folder: { cwd: '/w/acme-api', ok: true, folder: { ...stamp } } })
+    const d = pickApproval(createDraft({ cwd: '/w/acme-api' }, e), 'full', CONSENT.rev)
+    const snap = draftFromSnapshot(d.id, 1, JSON.parse(JSON.stringify(draftSnapshot(d))), e)!
+    assert.equal(snap.approval, 'full')
+    const swapped = env({ consent: CONSENT, folder: { cwd: '/w/acme-api', ok: true, folder: { ...stamp, ino: '9' } } })
+    const r = refreshBeforeStart(snap, swapped)
+    assert.deepEqual([r.changed, r.draft.approval, r.draft.picked.approval], [true, 'workspace', undefined])
+  })
+  it('унаследованный полный из памяти папки при новом номере согласия — «Спрашивать»; на старт — номер разрешения черновика (recheck 3)', () => {
+    const folder = { cwd: '/w/acme-api', ok: true, folder: { ...stamp, access: 'full' as const } }
+    const d = createDraft({ cwd: '/w/acme-api' }, env({ consent: CONSENT, folder }))
+    assert.deepEqual([d.approval, d.approvalOrigin, d.consentRev], ['full', 'folder', CONSENT.rev])
+    assert.equal(draftStartParams(d, { prompt: '', consentRev: 6, inheritMode: null })['consentRev'], CONSENT.rev, 'не текущий номер окна')
+    const after = resolveDraft(d, env({ consent: { ...CONSENT, rev: 6 }, folder }))
+    assert.deepEqual([after.approval, after.notes.includes('full-revoked')], ['ask', true])
+  })
+  it('черновик уже заведён с другими настройками: «Открыть чат» и «Завести новый»', () => {
+    const out = html(DraftView, draftProps({ error: { text: 'x', retry: false, fork: true, openChat: 'acme-api' } }))
+    assert.match(out, /data-testid="draft-open-chat"/)
+    assert.match(text(out), /Открыть чат · Завести новый/)
+  })
+})
