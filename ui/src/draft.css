@@ -1,0 +1,106 @@
+/* Черновик нового чата (быстрый старт, шаг B; design/2026-11-02-quick-start, кадры 01, 08, 09, 12). Позиция поля
+   закреплена: верх колонки — на 26% высоты окна, поле растёт вниз; ввод и открытые меню её не двигают. */
+
+.draft-view { position: relative; }
+.draft-view[data-drop="1"] .draft-box { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.draft-title { color: var(--mut); }
+.conv-title h2.draft-title { font-weight: 500; }
+.draft-pill { flex: none; display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: 5px; background: var(--queued-soft); color: var(--queued); font: 11.5px/1.6 var(--body); white-space: nowrap; }
+.draft-pill.link { background: var(--run-soft); color: var(--run); }
+.draft-pill .ic { width: 11px; height: 11px; }
+
+.draft-wrap { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; align-items: center; padding: 26vh 24px 64px; }
+.draft-wrap.picking { padding-top: 12vh; }
+.draft-col { width: 100%; max-width: 860px; display: flex; flex-direction: column; gap: 16px; }
+.draft-h { margin: 0 0 2px 4px; font: 500 24px/1.3 var(--disp); letter-spacing: -.02em; color: var(--ink); }
+.draft-h .fold { color: var(--accent); }
+.draft-sub { margin: -8px 0 4px 4px; color: var(--faint); font-size: 13px; }
+
+.draft-box { border: 1px solid var(--line); border-radius: 13px; background: var(--panel); padding: 12px; display: flex; flex-direction: column; gap: 10px; box-shadow: 0 2px 8px rgba(20,25,20,.025); }
+.draft-box:focus-within { border-color: var(--accent-edge); box-shadow: 0 0 0 2px var(--accent-soft); }
+.draft-box.full { border-color: var(--fail-edge); }
+.draft-box.full:focus-within { border-color: var(--fail); box-shadow: 0 0 0 2px var(--fail-soft); }
+.draft-box textarea { width: 100%; min-height: 78px; max-height: 240px; resize: none; border: 0; outline: 0; background: transparent; color: var(--ink); font: 15px/1.6 var(--body); padding: 3px 5px; }
+.draft-box textarea:focus { border: 0; background: transparent; }
+.draft-box textarea::placeholder { color: var(--faint); }
+.draft-tb { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.draft-tb .draft-send { margin-left: auto; height: 34px; border-radius: 8px; }
+.draft-tb .attach-picker { height: 34px; }
+
+.dchips { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; flex: 1; }
+.dchip { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 9px; border-radius: 7px; border: 1px solid transparent; background: var(--sunk); color: var(--mut); font: 12px/1 var(--body); cursor: pointer; white-space: nowrap; transition: background-color 140ms, border-color 140ms, color 140ms; }
+.dchip:hover { color: var(--ink); }
+.dchip[aria-expanded="true"] { background: var(--panel); border-color: var(--line); color: var(--ink); }
+.dchip .ic { width: 13px; height: 13px; }
+.dchip .ic.chev { width: 10px; height: 10px; color: var(--faint); }
+.dchip .dim { color: var(--faint); font-weight: 400; }
+.dchip .pn { font-weight: 500; }
+.dchip.fold { color: var(--ink); background: transparent; border-color: var(--hair); }
+.dchip.danger { color: var(--fail); background: var(--fail-soft); border-color: var(--fail-edge); font-weight: 600; }
+.dchip.warn { color: var(--wait); background: var(--wait-soft); border-color: transparent; font-weight: 500; }
+.dchip.extra { background: transparent; border: 1px dashed var(--line); }
+.dchip.icon-only { width: 30px; padding: 0; justify-content: center; }
+.dchips .vsep { width: 1px; height: 18px; background: var(--hair); margin: 0 2px; }
+
+.draft-hint { display: flex; align-items: center; gap: 14px; margin: 7px 0 0; padding: 0 6px; color: var(--faint); font-size: 11.5px; }
+.draft-hint .kbd { margin-right: 4px; }
+.draft-hint .grow { flex: 1; }
+.inline-note { display: flex; align-items: center; gap: 8px; margin: 8px 0 0; padding: 7px 10px; border-radius: 8px; font-size: 12.5px; background: var(--sunk); color: var(--mut); }
+.inline-note .ic { width: 14px; height: 14px; flex: none; }
+.inline-note.ok { color: var(--ok); background: var(--ok-soft); }
+.inline-note.warn { color: var(--wait); background: var(--wait-soft); }
+.inline-note.fail { color: var(--fail); background: var(--fail-soft); }
+.inline-note code { font-size: 12px; }
+.link-btn { border: 0; padding: 0; background: none; color: inherit; font: inherit; font-weight: 600; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+
+/* «Где работаем?» — недавние папки (кадр 08). */
+.draft-pick { display: flex; flex-direction: column; gap: 6px; }
+.draft-pick .pick-l { margin: 4px 4px 2px; color: var(--faint); font: 500 11.5px var(--body); }
+.fold-row { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--hair); border-radius: 10px; background: var(--panel); color: var(--ink); cursor: pointer; text-align: left; font: 13px/1.4 var(--body); }
+.fold-row:hover, .fold-row:focus-visible { border-color: var(--accent-edge); }
+.fold-row .ic { color: var(--faint); }
+.fold-row .fr-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fold-row .n { font-weight: 500; }
+.fold-row .p { color: var(--faint); font-size: 11.5px; margin-left: 8px; }
+.fold-row .src { font-size: 11.5px; color: var(--faint); white-space: nowrap; }
+.draft-pick .pick-actions { display: flex; align-items: center; gap: 12px; margin-top: 4px; }
+.draft-pick .pick-actions .kbd { margin-left: 4px; }
+.draft-pick .drop { color: var(--faint); font-size: 12.5px; }
+
+/* Меню чипа — у своего чипа (позицию считает ChipMenu). */
+.dmenu { position: fixed; z-index: 60; min-width: 280px; max-width: 380px; overflow: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 11px; box-shadow: var(--shadow); padding: 6px; font: 13px/1.4 var(--body); color: var(--ink); }
+.dmh { padding: 8px 8px 4px; color: var(--faint); font: 500 11px var(--body); display: flex; gap: 6px; align-items: center; }
+.dmh .rd { margin-left: auto; font-weight: 400; }
+.dmh .rd-ready, .dmh .rd-stale { color: var(--ok); }
+.dmh .rd-login-required, .dmh .rd-unavailable { color: var(--fail); }
+.dmh .rd-catalog-error { color: var(--wait); }
+.dmi { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; column-gap: 8px; align-items: center; width: 100%; padding: 7px 8px; border: 0; border-radius: 7px; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.dmi:hover, .dmi:focus-visible { background: var(--sunk); outline: none; }
+.dmi .ck { display: inline-flex; color: var(--accent); }
+.dmi .ck .ic { width: 14px; height: 14px; }
+.dmi .l { min-width: 0; display: flex; align-items: center; gap: 7px; }
+.dmi .l b { font-weight: 500; }
+.dmi .r { color: var(--faint); font-size: 11px; display: inline-flex; align-items: center; }
+.dmi .d { grid-column: 2 / 4; font-size: 11.5px; color: var(--faint); margin-top: 1px; }
+.dmi.danger .l, .dmi.danger .ck { color: var(--fail); }
+.dmi.danger .d { color: var(--fail); opacity: .85; }
+.dmi.disabled { opacity: .5; cursor: default; }
+.dmsep { height: 1px; background: var(--hair); margin: 5px 4px; }
+.dmenu-foot { display: flex; align-items: center; gap: 6px; padding: 7px 8px 4px; color: var(--faint); font-size: 11.5px; }
+.dmenu-foot .grow { flex: 1; }
+.dmi-input { padding: 0 8px 6px 34px; display: flex; flex-direction: column; gap: 4px; }
+.dmi-input input { width: 100%; height: 28px; padding: 0 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--ground); color: var(--ink); font: 12px var(--mono); }
+.dmi-input .bad { color: var(--fail); font-size: 11.5px; }
+.dtoggle { width: 28px; height: 16px; border-radius: 8px; background: var(--line); position: relative; flex: none; }
+.dtoggle::after { content: ''; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: var(--panel); transition: left 140ms; }
+.dtoggle.on { background: var(--accent); }
+.dtoggle.on::after { left: 14px; }
+
+/* Строка черновика в сайдбаре: курсив, «черновик» справа. */
+.draft-list { margin: 4px 8px 6px; padding: 0; }
+.draft-row .draft-name { color: var(--mut); font-style: italic; font-weight: 400; }
+
+@media (max-width: 1100px) {
+  .draft-wrap { padding: 18vh 16px 48px; }
+  .draft-tb .draft-send { margin-left: auto; }
+}

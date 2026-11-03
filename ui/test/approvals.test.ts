@@ -8,7 +8,7 @@ import { createElement } from 'react'
 import type { ComponentType } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { Conversation } from '../src/components/Conversation.js'
-import { ApprovalField } from '../src/components/Panels.js'
+import { DraftView } from '../src/components/Draft.js'
 import { PermCard } from '../src/components/PermCard.js'
 import type { AgentView } from '../src/model/agents.js'
 import { buildAgents } from '../src/model/agents.js'
@@ -16,7 +16,9 @@ import { applyConversation, EMPTY_CONVERSATION, netBlockedText } from '../src/mo
 import type { PermItem } from '../src/model/conversation.js'
 import { composerCmdEnter, hotkeyAction } from '../src/model/hotkeys.js'
 import { applyInbox, composerApproves, EMPTY_INBOX, focusedRequest, reconcileInbox } from '../src/model/inbox.js'
-import { approvalBlocksBrowser, approvalHint, cwdCoversHome, defaultForm, homeWarning, startParams, switchProvider, validateForm } from '../src/model/newAgent.js'
+import { approvalBlocksBrowser, approvalHint, cwdCoversHome } from '../src/model/newAgent.js'
+import { draftStartParams, pickApproval, pickModel, toggleBrowser } from '../src/model/draft.js'
+import { draft, draftProps, env } from './draftFixture.js'
 import { byHuman, parseOffers, scopeButtons, scopeText } from '../src/model/permissions.js'
 import { busySessions, groupByProject, projectRemoval } from '../src/model/projects.js'
 import type { PultEvent } from '../src/model/types.js'
@@ -112,39 +114,39 @@ describe('M8d: модель Inbox и ленты', () => {
 })
 
 describe('M8d: «Как подтверждать действия»', () => {
-  it('поле: подсказка своя у каждого провайдера; «Полный доступ» — красное предупреждение', () => {
-    const ask = html(ApprovalField, { provider: 'claude', approval: 'ask', onChange: noop })
-    assert.match(ask, /<option value="ask" selected="">Спрашивать<\/option>/)
+  it('меню доступа черновика: подсказка своя у каждого провайдера; «Полный доступ» — красный и «спрошу один раз»', () => {
+    const access = (d = draft(), inheritMode = 'default'): string => html(DraftView, draftProps({ draft: d, env: env({ inheritMode }), initialMenu: 'access' }))
+    const ask = access(pickApproval(draft(), 'ask', null))
+    assert.match(ask, /data-testid="draft-access-item"[^>]*aria-checked="true"[^>]*data-value="ask"|aria-checked="true"[^>]*data-testid="draft-access-item" data-value="ask"/)
     // Шаг A: тексты сверены с кодом (ревью Codex № 6, 7): «Спрашивать» у Claude — явный manual, правила владельца в силе.
     assert.match(text(ask), /правки и команды — вопрос в Inbox; что разрешено твоими правилами Claude — без вопроса/)
-    assert.match(text(html(ApprovalField, { provider: 'claude', approval: 'read-only', onChange: noop })), /правки запрещены; любая команда — вопрос в Inbox/)
-    const cw = text(html(ApprovalField, { provider: 'codex', approval: 'workspace', onChange: noop }))
+    assert.match(text(ask), /правки запрещены; любая команда — вопрос в Inbox/)
+    const codex = pickModel(draft(), 'codex', null, env(), null)
+    const cw = text(access(codex))
     assert.match(cw, /шаг за песочницу — отказ без вопроса/)
     assert.doesNotMatch(cw, /MCP-серверы тоже без вопросов/, '«MCP тоже без вопросов» — неправда (ревью Codex № 6)')
-    // «Как в настройках Claude» — только у Claude, с действующим режимом словами; при bypass — красное предупреждение.
-    assert.match(ask, /<option value="inherit">Как в настройках Claude<\/option>/)
-    assert.doesNotMatch(html(ApprovalField, { provider: 'codex', approval: 'ask', onChange: noop }), /value="inherit"/)
-    assert.match(text(html(ApprovalField, { provider: 'claude', approval: 'inherit', inheritMode: 'auto', onChange: noop })), /действует твой defaultMode: сейчас auto/)
-    assert.doesNotMatch(html(ApprovalField, { provider: 'claude', approval: 'inherit', inheritMode: 'auto', onChange: noop }), /new-agent-approval-warning/)
-    assert.match(html(ApprovalField, { provider: 'claude', approval: 'inherit', inheritMode: 'bypassPermissions', onChange: noop }), /new-agent-approval-warning/)
-    assert.doesNotMatch(ask, /new-agent-approval-warning/)
-    const full = html(ApprovalField, { provider: 'codex', approval: 'full', onChange: noop })
-    assert.match(full, /data-testid="new-agent-approval-warning"/)
-    assert.match(text(full), /агент делает что угодно без вопросов, песочницы нет/)
-    assert.match(text(full), /danger-full-access/)
+    // «Как в настройках Claude» — только у Claude, с действующим режимом словами; при bypass — красный пункт.
+    assert.match(ask, /data-value="inherit"/)
+    assert.doesNotMatch(access(codex), /data-value="inherit"/)
+    assert.match(text(access(draft(), 'auto')), /действует твой defaultMode: сейчас auto/)
+    assert.match(access(draft(), 'bypassPermissions'), /class="dmi danger"[^>]*data-testid="draft-access-item" data-value="inherit"/)
+    assert.match(ask, /class="dmi danger"[^>]*data-testid="draft-access-item" data-value="full"/)
+    assert.match(text(ask), /спрошу один раз/, 'без согласия — один вопрос при первом выборе')
+    assert.match(text(access(codex)), /danger-full-access/)
     assert.notEqual(approvalHint('claude', 'workspace'), approvalHint('codex', 'workspace'))
   })
-  it('форма: по умолчанию ask и поля в agent.start нет; смена провайдера режим не сбрасывает; браузер в «без вопросов» — ошибка формы', () => {
-    const f = { ...defaultForm('claude'), name: 'w', cwd: '/x' }
-    assert.equal(f.approval, 'ask')
-    assert.equal('approval' in startParams(f), false)
-    assert.equal(startParams({ ...f, approval: 'read-only' })['approval'], 'read-only')
-    assert.equal('confirm' in startParams({ ...f, approval: 'workspace' }), false)
-    assert.equal(startParams({ ...f, approval: 'full' })['confirm'], true, 'full — с подтверждением: человек видел предупреждение')
-    assert.equal(switchProvider({ ...f, approval: 'workspace' }, 'codex').approval, 'workspace')
-    assert.equal(validateForm({ ...f, browser: true, approval: 'full' }, []).approval !== undefined, true)
-    assert.equal(validateForm({ ...f, browser: true, approval: 'workspace' }, []).approval, undefined, 'Claude acceptEdits — браузер можно')
-    assert.equal(validateForm({ ...f, provider: 'codex', browser: true, approval: 'workspace' }, []).approval !== undefined, true)
+  it('черновик: доступ шлётся явно; full — с confirm; браузер в «без вопросов» гаснет, а не уходит в демон', () => {
+    const f = draft('/x')
+    assert.equal(f.approval, 'workspace', 'новая папка — «Правки в папке» (решение Павла)')
+    assert.equal(draftStartParams(pickApproval(f, 'ask', null), { prompt: '', inheritMode: null })['approval'], 'ask')
+    assert.equal('confirm' in draftStartParams(f, { prompt: '', inheritMode: null }), false)
+    assert.equal(draftStartParams(pickApproval(f, 'full', 1), { prompt: '', consentRev: 1, inheritMode: null })['confirm'], true)
+    const w = pickApproval(f, 'workspace', null)
+    assert.equal(pickModel(w, 'codex', null, env(), null).approval, 'workspace', 'смена провайдера явный режим не сбрасывает')
+    const b = toggleBrowser(pickApproval(f, 'ask', null), true)
+    assert.equal(pickApproval(b, 'full', 1).browser, false)
+    assert.deepEqual(pickApproval(b, 'full', 1).notes, ['browser-off'])
+    assert.equal(toggleBrowser(pickModel(w, 'codex', null, env(), null), true).browser, false, 'Codex «Правки в папке» — браузер не включается')
     assert.equal(approvalBlocksBrowser('codex', 'read-only'), false)
   })
   it('подвал сессии показывает режим; full — тоном ошибки; запись без поля — «спрашивать»', () => {
@@ -238,16 +240,16 @@ describe('после #13: «показано не всё» словами кар
     assert.equal(composerCmdEnter({ busy: true, needsYou: false, permFocused: composerApproves(f, 'a') !== null, queueable: true, hasText: true, blocked: false }), 'interrupt')
   })
 
-  it('папка — дом или выше: предупреждение в форме (не отказ); «Только чтение» и worktree — без него', () => {
+  it('папка — дом или выше: в черновике отказ до отправки; с worktree — можно', () => {
     for (const p of ['/', '/Users', '/Users/you', '/Users/you/', '/home', '/home/user']) assert.equal(cwdCoversHome(p), true, p)
     for (const p of ['/Users/you/proj', '/home/user/w/x', '/tmp', '/opt/pult']) assert.equal(cwdCoversHome(p), false, p)
-    const f = { ...defaultForm('claude'), cwd: '/Users/you', name: 'w' }
-    assert.match(homeWarning(f) ?? '', /агент сможет менять ~\/\.claude, ~\/\.codex, ~\/\.zcode, ~\/\.zshrc и др\. без вопросов в режимах «Правки в папке без вопросов» и «Полный доступ»/)
-    assert.equal(homeWarning({ ...f, approval: 'read-only' }), null)
-    assert.equal(homeWarning({ ...f, worktree: 'feat/x' }), null)
-    assert.equal(homeWarning({ ...f, cwd: '/Users/you/proj' }), null)
-    assert.equal(homeWarning({ ...f, cwd: '' }), null)
-    assert.deepEqual(validateForm(f, []), {}, 'предупреждение не мешает завести')
+    // Шаг B: в черновике вместо предупреждения — настоящий отказ демона до отправки (`agent.preflight`, §4).
+    const home = html(DraftView, draftProps({ draft: draft('/Users/you'), env: env({ folder: { cwd: '/Users/you', ok: false, refusal: 'covers_pult_home', home: '/Users/you/.pult' } }) }))
+    assert.match(home, /data-testid="draft-folder-home"/)
+    assert.match(text(home), /Здесь нельзя: внутри лежит ~\/\.pult — возьми папку проекта/)
+    assert.match(home, /data-testid="draft-send"[^>]*disabled=""/)
+    const wt = html(DraftView, draftProps({ draft: draft('/Users/you', { worktree: true }), env: env({ folder: { cwd: '/Users/you', ok: false, refusal: 'covers_pult_home' } }) }))
+    assert.doesNotMatch(wt, /draft-folder-home/, 'с worktree разрешено, как в коде')
   })
 
   it('сеть: `no_proxy` — своими словами и что делать', () => {

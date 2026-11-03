@@ -12,7 +12,8 @@ import { accessChip, consentGrants, consentLine, headerPill, needsConsent, pendi
 import type { AccessView, ConsentView } from '../src/model/access.js'
 import type { AgentView } from '../src/model/agents.js'
 import { buildAgents } from '../src/model/agents.js'
-import { startParams, defaultForm, switchProvider } from '../src/model/newAgent.js'
+import { draftStartParams, pickApproval, pickModel } from '../src/model/draft.js'
+import { draft, env } from './draftFixture.js'
 import { configureParams, confirmNeeded, settingsMenu } from '../src/model/sessionSettings.js'
 import type { MenuRow } from '../src/model/sessionSettings.js'
 
@@ -44,10 +45,12 @@ describe('шаг A: согласие в окне', () => {
     // confirm: true демон требует по-прежнему; consentRev — номер, который видело окно.
     assert.deepEqual(configureParams('w', { kind: 'approval', approval: 'full' }, true, 3), { name: 'w', approval: 'full', confirm: true, consentRev: 3 })
     assert.deepEqual(configureParams('w', { kind: 'model', model: 'opus' }, true, 3), { name: 'w', model: 'opus', confirm: true })
-    const f = { ...defaultForm('claude'), name: 'w', cwd: '/w' }
-    assert.deepEqual([startParams({ ...f, approval: 'full' }, 3)['confirm'], startParams({ ...f, approval: 'full' }, 3)['consentRev']], [true, 3])
-    assert.equal('consentRev' in startParams({ ...f, approval: 'workspace' }, 3), false)
-    assert.equal(switchProvider({ ...f, approval: 'inherit' }, 'codex').approval, 'ask', '«как в настройках Claude» у Codex — явный «Спрашивать»')
+    // Шаг B: черновик шлёт тот же confirm и номер согласия, который видело окно.
+    const f = draft('/w')
+    const full = draftStartParams(pickApproval(f, 'full', 3), { prompt: 'x', consentRev: 3, inheritMode: null })
+    assert.deepEqual([full['confirm'], full['consentRev']], [true, 3])
+    assert.equal('consentRev' in draftStartParams(pickApproval(f, 'workspace', 3), { prompt: 'x', consentRev: 3, inheritMode: null }), false)
+    assert.equal(pickModel(pickApproval(f, 'inherit', 3), 'codex', null, env(), null).approval, 'ask', '«как в настройках Claude» у Codex — явный «Спрашивать»')
   })
   it('диалог: оба провайдера, честные границы (MCP, браузер Пульта), «Оставить как было» и «Разрешить»', () => {
     const out = html(ConsentDialog, { onGrant: noop, onKeep: noop })

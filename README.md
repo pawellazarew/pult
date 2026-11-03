@@ -243,12 +243,45 @@ Every question from every session goes to the Inbox (⌘I in the window, `pult p
 - **Silence is a no.** Nobody answered within 10 minutes, the daemon went away, the agent was stopped — the answer is
   "deny".
 
-**Approval mode** is chosen when a session is created (`--approval`, or the "Подтверждения" field in "Новая сессия"):
+## Starting a chat
+
+There is no "New session" dialog. **⌘N**, the **New chat** button or **+** next to a project opens an empty
+**draft** right away, with the cursor in the input: type the task and press **↵** — the chat is created and gets
+the message in one step. The settings are chips under the input: **folder · provider and model · effort · access · ⋯**
+(a separate worktree branch, the agent browser). Each menu opens next to its chip; ⌘⇧I, ⌘⇧E and ⌘⇧M open the model,
+effort and access menus, ⌘⇧O the folder menu and ⌘O the system folder picker.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/new-session-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="docs/images/new-session-light.png">
-  <img alt="The New session dialog: provider (claude or codex), session name, project folder, optional worktree branch, browser for the agent, approval mode, model and effort" src="docs/images/new-session-light.png" width="720">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/new-chat-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/images/new-chat-light.png">
+  <img alt="A new chat draft: the question “What are we doing in mobile-app?”, the task in the input and chips below it — folder, Claude opus, effort high, access, more — with the Send button" src="docs/images/new-chat-light.png" width="720">
+</picture>
+
+- **Folder.** The draft starts in the folder of the open chat, otherwise in the last folder you used. With neither it
+  asks "Where are we working?" and lists recent folders from Pult, Claude Code and Codex chats; you can type first,
+  ↵ then opens the folder menu. Dropping a folder onto the draft picks it.
+- **Model and effort** come from Settings (⌘,) → New chat defaults. The draft does not reuse the "last choice" any more.
+- **Access is remembered per folder.** The level you pick when sending, or change later in that chat, becomes the
+  folder's access, "Только чтение" (read-only) included; the next ⌘N there starts with it. A new folder starts with
+  "Правки в папке без вопросов" (folder edits) or the default from Settings. "Только этот чат" (this chat only) in the
+  access menu keeps the folder's memory untouched, and an abandoned draft never writes it. The key is the real folder
+  (`realpath` plus device and inode): a symlink is the same folder, a replaced folder loses its memory, a worktree
+  writes to its main repository, and parent or nested folders inherit nothing. Memory lives in `~/.pult/folders.json`.
+- **Full access** is never turned on by itself: without a valid consent a remembered `full` becomes "Спрашивать" (ask)
+  with "Включить снова" (turn on again), and a draft from a `pult://new` link always starts at "Спрашивать" with
+  "Включить для этого чата" (turn on for this chat) — that click is not remembered for the folder.
+- **Drafts.** An empty draft disappears when you leave it (or press Esc). A draft with text stays in the sidebar and is
+  kept by the daemon (`~/.pult/drafts/`), so it survives a window restart. Sending is idempotent: if the reply is lost,
+  "Повторить" (retry) uses the same request and never creates a second chat or sends the message twice.
+- **Readiness.** The draft opens at once and checks the provider in the background; only "not signed in" and "CLI does
+  not start" block sending, with the fix command and "Проверить" (check).
+
+**Approval mode** of a new chat is the access chip (`--approval` in the CLI):
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/new-chat-access-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/images/new-chat-access-light.png">
+  <img alt="The access menu of a draft, opened under its chip: read-only, ask, folder edits, full access (red, asked once) and “as in Claude settings”, with the “This chat only” switch" src="docs/images/new-chat-access-light.png" width="720">
 </picture>
 
 **Attachments in the composer** (window 0.1.21). Drop files, paste files copied in Finder, paste a screenshot,
@@ -258,10 +291,10 @@ the input. You can send an attachment without text. A screenshot without a disk 
 Pult immediately saves file copies under `~/.pult/attachments/<session>/<date>/`, so deleting the original temporary
 file does not break the attachment. Limits: 20 files per message, 25 MB per file and 1 GB per day. Copies expire
 after 30 days; originals remain unchanged. Removing a card only removes it from the draft, keeping copies used by
-messages. Draft attachments survive reopening; saved files are checked before sending. In New session you can
-attach files before choosing a name; creation copies them into the final session's folder. Directories remain
-explicitly labelled references rather than recursive copies. Dropping a folder outside the prompt selects the
-session folder. Pasting text from Office still pastes text.
+messages. Draft attachments survive reopening; saved files are checked before sending. In a new chat draft you can
+attach files before the chat has a name; sending copies them into the final session's folder. Directories remain
+explicitly labelled references rather than recursive copies. Dropping a folder outside the input selects the
+chat folder. Pasting text from Office still pastes text.
 
 Older windows retain path insertion. Update the window (Settings → Updates → «Перезапустить и обновить», Restart and
 update) for cards and memory-backed files. Each Claude session receives only its own attachment directory; Codex uses its normal sandbox access rules.
@@ -269,8 +302,8 @@ update) for cards and memory-backed files. Each Claude session receives only its
 | mode (window label) | Claude | Codex |
 |---|---|---|
 | `read-only` ("Только чтение") | no edits; every command asks | `read-only` sandbox; anything wider asks |
-| `ask` ("Спрашивать", default) | explicit `--permission-mode manual`: edits and commands ask, your allow rules still apply | `workspace-write` sandbox; anything wider asks |
-| `workspace` ("Правки в папке без вопросов") | `acceptEdits` | `workspace-write`, no questions |
+| `ask` ("Спрашивать") | explicit `--permission-mode manual`: edits and commands ask, your allow rules still apply | `workspace-write` sandbox; anything wider asks |
+| `workspace` ("Правки в папке без вопросов", default for a new folder) | `acceptEdits` | `workspace-write`, no questions |
 | `full` ("Полный доступ") | `bypassPermissions` | `danger-full-access`, no questions |
 | `inherit` ("Как в настройках Claude", Claude only) | no flag: your `defaultMode` applies; `bypassPermissions` there counts as `full` | — |
 
@@ -301,8 +334,10 @@ composer, or run `pult agent set <name> [--model M] [--effort E] [--approval A] 
 
 - The change applies from the next turn; the running turn and pending Inbox questions are untouched.
 - The first turn after a model change costs more: each model has its own prompt cache.
-- Defaults for new sessions live in Settings (⌘,). `pult agent start` uses only the defaults of the provider given by
-  `--kind` (`config.json` → `newSession.defaults`), never the window's "last choice", so scripts stay predictable.
+- Changing access in a live chat from the window also becomes the folder's access for the next ⌘N.
+- Defaults for new chats live in Settings (⌘,). `pult agent start` uses the same resolver as the window but only the
+  defaults of the provider given by `--kind` (`config.json` → `newSession.defaults`), never folder memory, so scripts
+  stay predictable.
 
 ## Updates
 
@@ -488,6 +523,7 @@ Everything Pult keeps is in `~/.pult` (or `PULT_HOME`), readable only by you:
 |---|---|
 | `events/` | the event journal: every message, answer, tool call and question |
 | `sessions.json`, `projects.json` | your sessions and the project folders in the window |
+| `folders.json`, `drafts/`, `start/` | folder history and remembered access, unsent drafts, the start journal (kept 7 days) |
 | `config.json` | settings (network, updates, defaults for new sessions) |
 | `versions/`, `current` | installed Pult versions and the active one |
 | `runtime/` | Pult's own Node.js, if the installer downloaded it |

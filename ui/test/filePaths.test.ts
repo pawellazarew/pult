@@ -7,12 +7,13 @@ import { describe, it } from 'node:test'
 import { createElement } from 'react'
 import type { ComponentType } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { NewAgentDialog } from '../src/components/Panels.js'
+import { DraftView } from '../src/components/Draft.js'
 import { FOLDER_DROP_HINT, folderFromDrop, hasFiles, OLD_WINDOW_IMAGE_HINT, pasteFallback, pasteKind, pathsInputHandlers } from '../src/model/filePathsInput.js'
 import type { Caret, DragLike, PasteLike, PathsField } from '../src/model/filePathsInput.js'
 import { insertPaths, insertText } from '../src/model/paths.js'
 import type { FilePathSource, SavedClipboardImage } from '../src/model/paths.js'
-import { defaultForm, withFolder } from '../src/model/newAgent.js'
+import { withDraftFolder } from '../src/model/draft.js'
+import { draft, draftProps, env } from './draftFixture.js'
 
 /** Поле из стейта, как у компонента: `put` вставляет `insertPaths` от текущего текста. */
 function field(value: string, caret = value.length, src: FilePathSource | null = source([])): { el: Caret; t: PathsField; puts: Array<[string[], number, number]> } {
@@ -306,11 +307,12 @@ describe('«+ Сессия»: папка перетаскиванием', () => 
     assert.deepEqual(await folderFromDrop({ files: [file('нет-пути')], items: [entry(true)] }, src), { kind: 'none' })
   })
 
-  it('папка из броска ставится как из системного выбора: cwd и имя из папки, пока имя не трогали', () => {
-    const f = defaultForm('claude')
-    assert.deepEqual([withFolder(f, '/w/my-proj', false, []).cwd, withFolder(f, '/w/my-proj', false, []).name], ['/w/my-proj', 'my-proj'])
-    assert.equal(withFolder(f, '/w/my-proj', false, ['my-proj']).name, 'my-proj-2')
-    assert.equal(withFolder({ ...f, name: 'mine' }, '/w/my-proj', true, []).name, 'mine')
+  it('папка из броска ставится как из системного выбора: неявные поля — по памяти новой папки, явный выбор остаётся', () => {
+    const f = draft(null)
+    const e = env({ folder: { cwd: '/w/my-proj', ok: true, folder: { access: 'read-only' } } })
+    assert.deepEqual([withDraftFolder(f, '/w/my-proj', e).cwd, withDraftFolder(f, '/w/my-proj', e).approval], ['/w/my-proj', 'read-only'])
+    const picked = { ...f, approval: 'ask' as const, picked: { approval: true as const } }
+    assert.equal(withDraftFolder(picked, '/w/my-proj', e).approval, 'ask')
   })
 
   it('подсказка про файлы говорит, куда их тащить', () => {
@@ -318,13 +320,12 @@ describe('«+ Сессия»: папка перетаскиванием', () => 
     assert.match(FOLDER_DROP_HINT, /первая реплика/)
   })
 
-  it('диалог с мостом путей рисуется как раньше: поле реплики и папка на месте, подсветки нет', () => {
-    const out = renderToStaticMarkup(createElement(NewAgentDialog as ComponentType<Record<string, unknown>>, {
-      taken: [], pickFolder: async () => null, onCreate: async () => null, onClose: () => {}, filePaths: src,
-    }))
-    assert.match(out, /data-testid="new-agent-prompt"/)
-    assert.match(out, /data-testid="new-agent-cwd"/)
+  it('черновик с мостом путей: поле и чип папки на месте, подсветки нет', () => {
+    const out = renderToStaticMarkup(createElement(DraftView as unknown as ComponentType<Record<string, unknown>>, { ...draftProps(), filePaths: src }))
+    assert.match(out, /data-testid="draft-input"/)
+    assert.match(out, /data-testid="draft-chip-folder"/)
     assert.doesNotMatch(out, /data-drop=/)
-    assert.doesNotMatch(out, /data-testid="new-agent-drop-hint"/)
+    assert.doesNotMatch(out, /data-testid="draft-drop-hint"/)
   })
+
 })

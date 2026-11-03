@@ -1,5 +1,5 @@
 // e2e ноги 2 (docs/12 §3, §5): окно как рабочий инструмент на фальшивых CLI. Завести агента
-// диалогом и получить ответ; разрешение из Inbox — «разрешить» (⌘Enter) и «отказать» с причиной;
+// черновиком (⌘N → текст → ↵, шаг B быстрого старта) и получить ответ; разрешение из Inbox — «разрешить» (⌘Enter) и «отказать» с причиной;
 // «Стоп» посреди хода; закрыть окно посреди хода — ход дошёл, после открытия история на месте.
 
 import assert from 'node:assert/strict'
@@ -44,20 +44,29 @@ describe('окно: рабочие сценарии', () => {
   }
   const inboxCount = async (): Promise<string> => (await h.win.getByTestId('inbox-count').textContent()) ?? ''
 
-  it('⌘N → диалог: папка системным выбором, модель и усилие, первая реплика → ответ в ленте', async () => {
+  it('⌘N → черновик: печатать сразу; без папки ↵ — меню папки; модель и усилие чипами; ↵ → чат и ответ в ленте', async () => {
     const dir = h.workDir('alpha', { scenario: 'simple' })
     await h.stubPickFolder(dir)
     await h.win.keyboard.press('Meta+N')
-    const dlg = h.win.getByTestId('new-agent-dialog')
-    await dlg.waitFor({ timeout: 5000 })
-    await dlg.getByTestId('pick-folder').click()
-    assert.ok(await waitFor(async () => (await dlg.getByTestId('new-agent-cwd').getAttribute('data-path')) === dir, 5000), 'папка не выбралась')
-    assert.equal(await dlg.getByTestId('new-agent-name').inputValue(), 'alpha', 'имя берётся из папки')
-    await dlg.getByRole('group', { name: 'Модель' }).getByRole('button', { name: 'haiku' }).click()
-    await dlg.getByRole('group', { name: 'Усилие' }).getByRole('button', { name: 'low' }).click()
-    await dlg.getByTestId('new-agent-prompt').fill('Скажи одно слово')
-    await dlg.getByTestId('new-agent-submit').click()
-    await dlg.waitFor({ state: 'detached', timeout: 10_000 })
+    await h.win.getByTestId('draft').waitFor({ timeout: 5000 })
+    // Фокус уже в поле: модала нет, ⌘N → текст.
+    await h.win.keyboard.type('Скажи одно слово')
+    assert.equal(await h.win.getByTestId('draft-input').inputValue(), 'Скажи одно слово')
+    assert.match((await h.win.getByTestId('draft-heading').textContent()) ?? '', /Где работаем\?/)
+    // Без папки ↵ не отправляет, а открывает меню папки у её чипа.
+    await h.win.keyboard.press('Enter')
+    await h.win.getByTestId('draft-menu-folder').waitFor({ timeout: 3000 })
+    await h.win.getByTestId('draft-folder-other').click()
+    assert.ok(await waitFor(async () => (await h.win.getByTestId('draft-chip-folder').getAttribute('data-path')) === dir, 5000), 'папка не выбралась')
+    assert.match((await h.win.getByTestId('draft-heading').textContent()) ?? '', /Что делаем в alpha\?/)
+    await h.win.getByTestId('draft-chip-model').click()
+    await h.win.locator('[data-testid="draft-model-item"][data-value="claude:haiku"]').click()
+    await h.win.getByTestId('draft-chip-effort').click()
+    await h.win.locator('[data-testid="draft-effort-item"][data-value="low"]').click()
+    // Меню закрылось — фокус снова в поле, ↵ отправляет.
+    assert.ok(await waitFor(async () => await h.win.getByTestId('draft-input').evaluate((el) => el === document.activeElement), 3000), 'фокус не вернулся в поле')
+    await h.win.keyboard.press('Enter')
+    await h.win.getByTestId('draft').waitFor({ state: 'detached', timeout: 10_000 })
 
     await h.win.locator('[data-testid="conversation"][data-agent="alpha"]').waitFor({ timeout: 10_000 })
     assert.ok(await waitFor(async () => (await feedText()).includes('PULT'), 15_000), 'ответ модели не появился в ленте')
@@ -115,7 +124,7 @@ describe('окно: рабочие сценарии', () => {
     }
   })
 
-  it('⌘V скриншота без файла сохраняет PNG в Пульте и показывает превью, в том числе до выбора имени новой сессии', async () => {
+  it('⌘V скриншота без файла сохраняет PNG в Пульте и показывает превью, в том числе в черновике до имени чата', async () => {
     // File из памяти содержит настоящий PNG: не требует ручного сохранения скриншота или пути на диске.
     const pasteImage = async (testId: string): Promise<void> => {
       await h.win.getByTestId(testId).evaluate((el, b64) => {
@@ -126,7 +135,7 @@ describe('окно: рабочие сценарии', () => {
     }
     const box = h.win.getByTestId('composer')
     const cards = h.win.locator('.composer').getByTestId('attachment-card')
-    const dlg = h.win.getByTestId('new-agent-dialog')
+    const dlg = h.win.getByTestId('draft')
     try {
       await box.fill('глянь ')
       await pasteImage('composer')
@@ -143,37 +152,37 @@ describe('окно: рабочие сценарии', () => {
 
       await h.win.keyboard.press('Meta+N')
       await dlg.waitFor({ timeout: 5000 })
-      const prompt = dlg.getByTestId('new-agent-prompt')
-      // До выбора имени используется собственная папка черновика. Переименование не теряет карточку.
-      await dlg.getByTestId('new-agent-name').fill('')
+      const prompt = dlg.getByTestId('draft-input')
+      // Имя чата выдаст демон при отправке — до неё вложение живёт в собственной папке черновика.
       await prompt.fill('глянь ')
-      await pasteImage('new-agent-prompt')
+      await pasteImage('draft-input')
       const draftCards = dlg.getByTestId('attachment-card')
-      assert.ok(await waitFor(async () => await draftCards.count() === 1, 5000), 'вложение без имени не сохранилось')
+      assert.ok(await waitFor(async () => await draftCards.count() === 1, 5000), 'вложение черновика не сохранилось')
       assert.equal(await prompt.inputValue(), 'глянь ')
       const p2 = await draftCards.first().getAttribute('data-path')
       assert.ok(p2 && p2.startsWith(path.join(h.home, 'attachments', 'draft-')), `папка черновика: ${p2}`)
       assert.ok(existsSync(p2) && p2 !== p1, `второй файл: ${p2}`)
-      await dlg.getByTestId('new-agent-name').fill('pic')
-      assert.equal(await draftCards.count(), 1, 'выбор имени убрал вложение')
       await draftCards.getByTestId('attachment-remove').click()
       assert.equal(await draftCards.count(), 0)
+      await prompt.fill('')
       await h.win.keyboard.press('Escape')
       await dlg.waitFor({ state: 'detached', timeout: 5000 })
     } finally {
       if (await dlg.count()) {
         const removeDraft = dlg.getByTestId('attachment-remove')
         while (await removeDraft.count()) await removeDraft.first().click()
+        await dlg.getByTestId('draft-input').fill('')
         await h.win.keyboard.press('Escape')
         await dlg.waitFor({ state: 'detached', timeout: 5000 })
       }
+      await h.win.locator('[data-testid="agent-row"][data-agent="alpha"]').click()
       const remove = h.win.locator('.composer').getByTestId('attachment-remove')
       while (await remove.count()) await remove.first().click()
       await box.fill('')
     }
   })
 
-  it('«+ Сессия»: файлы становятся вложениями; папка на форму — папка сессии; файл на папку — подсказка', async () => {
+  it('черновик: файлы в поле — вложения; папка в окно — папка чата; файл мимо поля — подсказка', async () => {
     // Настоящий бросок из Finder: CDP `Input.dispatchDragEvent` с путями на диске — Chromium строит из них
     // DataTransfer как от системы (File с путём, webkitGetAsEntry), чего синтетический DragEvent не умеет.
     const dir = h.workDir('drop proj')
@@ -182,12 +191,10 @@ describe('окно: рабочие сценарии', () => {
     writeFileSync(fileA, 'a')
     writeFileSync(fileB, 'b')
     const cdp = await h.win.context().newCDPSession(h.win)
-    const dlg = h.win.getByTestId('new-agent-dialog')
-    // На маленьком экране (раннер CI) тело диалога прокручивается: цель сначала — в видимую часть, иначе точка
-    // броска попадёт мимо неё (boundingBox отдаёт и спрятанное прокруткой).
+    const dlg = h.win.getByTestId('draft')
     const at = async (testId: string): Promise<{ x: number; y: number }> => {
-      await dlg.getByTestId(testId).scrollIntoViewIfNeeded()
-      const box = await dlg.getByTestId(testId).boundingBox()
+      await h.win.getByTestId(testId).scrollIntoViewIfNeeded()
+      const box = await h.win.getByTestId(testId).boundingBox()
       assert.ok(box, `${testId}: нет на экране`)
       return { x: box.x + box.width / 2, y: box.y + box.height / 2 }
     }
@@ -198,55 +205,51 @@ describe('окно: рабочие сценарии', () => {
     const hover = async (p: { x: number; y: number }, files: string[], until: () => Promise<boolean>, what: string): Promise<void> => {
       assert.ok(await waitFor(async () => { await drag('dragOver', p, files); return until() }, 5000, 100), what)
     }
-    const lit = async (testId: string): Promise<string | null> => dlg.getByTestId(testId).getAttribute('data-drop')
-    /** Бросок: вход, наведение до подсветки цели, бросок. */
-    const dropAt = async (testId: string, files: string[]): Promise<void> => {
-      const p = await at(testId)
-      await drag('dragEnter', p, files)
-      await hover(p, files, async () => (await lit(testId)) === '1', `${testId}: цель броска не подсвечена`)
-      await drag('drop', p, files)
-    }
+    const litDraft = async (): Promise<string | null> => dlg.getAttribute('data-drop')
     try {
       await h.win.keyboard.press('Meta+N')
       await dlg.waitFor({ timeout: 5000 })
-      const prompt = dlg.getByTestId('new-agent-prompt')
+      const prompt = dlg.getByTestId('draft-input')
       await prompt.fill('глянь ')
-      // Наведение подсвечивает цель: над репликой — поле, над остальной формой — папку; уход и бросок гасят подсветку.
-      const overPrompt = await at('new-agent-prompt')
+      // Наведение подсвечивает цель: над полем — поле (вложения), над остальным черновиком — папку.
+      const overPrompt = await at('draft-input')
       await drag('dragEnter', overPrompt, [fileA])
-      await hover(overPrompt, [fileA], async () => (await lit('new-agent-prompt')) === '1', 'поле реплики не подсвечено')
-      assert.equal(await lit('new-agent-cwd'), null)
-      await hover(await at('new-agent-cwd'), [fileA], async () => (await lit('new-agent-cwd')) === '1' && (await lit('new-agent-prompt')) === null, 'папка не подсвечена')
-      await hover({ x: 4, y: 4 }, [fileA], async () => (await lit('new-agent-cwd')) === null, 'подсветка папки не погасла вне диалога')
+      await hover(overPrompt, [fileA], async () => (await litDraft()) === null, 'над полем папка подсвечена')
+      const overHeading = await at('draft-heading')
+      await hover(overHeading, [fileA], async () => (await litDraft()) === '1', 'черновик не подсвечен для папки')
+      await hover({ x: 4, y: 4 }, [fileA], async () => (await litDraft()) === null, 'подсветка не погасла вне черновика')
       await drag('dragCancel', { x: 4, y: 4 }, [fileA])
 
-      await dropAt('new-agent-prompt', [fileA, fileB])
-      const want = 'глянь '
+      await drag('dragEnter', overPrompt, [fileA, fileB])
+      await hover(overPrompt, [fileA, fileB], async () => (await litDraft()) === null, 'поле не цель')
+      await drag('drop', overPrompt, [fileA, fileB])
       const cards = dlg.getByTestId('attachment-card')
       assert.ok(await waitFor(async () => await cards.count() === 2, 5000), 'оба брошенных файла не прикрепились')
-      assert.equal(await prompt.inputValue(), want, 'текст не заменяется путями файлов')
-      assert.ok(await waitFor(async () => (await lit('new-agent-prompt')) === null, 3000), 'подсветка поля не погасла после броска')
-      const cwd = dlg.getByTestId('new-agent-cwd')
-      const before = await cwd.getAttribute('data-path')
-      assert.notEqual(before, dir, 'бросок файлов в реплику папку не меняет')
+      assert.equal(await prompt.inputValue(), 'глянь ', 'текст не заменяется путями файлов')
+      const chip = dlg.getByTestId('draft-chip-folder')
+      const before = await chip.getAttribute('data-path')
+      assert.notEqual(before, dir, 'бросок файлов в поле папку не меняет')
 
-      await dropAt('new-agent-cwd', [fileB])
-      assert.ok(await waitFor(async () => (await dlg.getByTestId('new-agent-drop-hint').count()) === 1, 3000), 'нет подсказки про файл на папке')
-      assert.equal(await cwd.getAttribute('data-path'), before, 'файл не стал папкой сессии')
+      const p = await at('draft-heading')
+      await drag('dragEnter', p, [fileB])
+      await hover(p, [fileB], async () => (await litDraft()) === '1', 'цель папки не подсвечена')
+      await drag('drop', p, [fileB])
+      assert.ok(await waitFor(async () => (await dlg.getByTestId('draft-drop-hint').count()) === 1, 3000), 'нет подсказки про файл мимо поля')
+      assert.equal(await chip.getAttribute('data-path'), before, 'файл не стал папкой чата')
 
-      await dropAt('new-agent-cwd', [dir])
-      assert.ok(await waitFor(async () => (await cwd.getAttribute('data-path')) === dir, 3000), `папка: ${await cwd.getAttribute('data-path')}`)
-      assert.equal(await dlg.getByTestId('new-agent-name').inputValue(), 'drop-proj', 'имя из брошенной папки')
-      assert.equal(await dlg.getByTestId('new-agent-drop-hint').count(), 0, 'подсказка ушла')
-      assert.equal(await prompt.inputValue(), want, 'реплика не тронута')
+      await drag('dragEnter', p, [dir])
+      await hover(p, [dir], async () => (await litDraft()) === '1', 'цель папки не подсвечена')
+      await drag('drop', p, [dir])
+      assert.ok(await waitFor(async () => (await chip.getAttribute('data-path')) === dir, 3000), `папка: ${await chip.getAttribute('data-path')}`)
+      assert.equal(await prompt.inputValue(), 'глянь ', 'реплика не тронута')
       assert.equal(await cards.count(), 2, 'бросок папки не меняет вложения')
-      while (await dlg.getByTestId('attachment-remove').count()) await dlg.getByTestId('attachment-remove').first().click()
     } finally {
-      // Упал посреди — не оставлять следующим тестам ни перетаскивания, ни открытого диалога.
+      // Упал посреди — не оставлять следующим тестам ни перетаскивания, ни открытого черновика.
       await drag('dragCancel', { x: 4, y: 4 }, []).catch(() => {})
       await cdp.detach().catch(() => {})
       if (await dlg.count()) {
         while (await dlg.getByTestId('attachment-remove').count()) await dlg.getByTestId('attachment-remove').first().click()
+        await dlg.getByTestId('draft-input').fill('')
         await h.win.keyboard.press('Escape')
       }
       await dlg.waitFor({ state: 'detached', timeout: 5000 })
@@ -267,6 +270,8 @@ describe('окно: рабочие сценарии', () => {
     const betaRow = h.win.locator('[data-testid="agent-row"][data-agent="beta"]')
     assert.ok(await waitFor(async () => (await betaRow.getAttribute('data-needs')) === '1', 5000), 'строка beta не подсвечена как ждущая')
 
+    // ⌘Enter вне поля ввода: из поля открытой сессии (после ухода из черновика фокус там) он разрешает только её запрос.
+    await h.win.evaluate(() => (document.activeElement as HTMLElement | null)?.blur())
     await h.win.keyboard.press('Meta+Enter')
     assert.ok(await waitFor(async () => (await inboxCount()) === '0', 10_000), 'Inbox не опустел')
     assert.ok(await waitFor(async () => (await statusOf('beta')) === 'idle', 15_000))
@@ -558,11 +563,11 @@ describe('окно: рабочие сценарии', () => {
     assert.equal(await proj.getAttribute('data-pinned'), '1')
     await proj.hover()
     await proj.getByTestId('project-new-session').click()
-    const dlg = h.win.getByTestId('new-agent-dialog')
+    const dlg = h.win.getByTestId('draft')
     await dlg.waitFor({ timeout: 5000 })
-    assert.equal(await dlg.getByTestId('new-agent-cwd').getAttribute('data-path'), dir, 'папка проекта не подставилась')
-    assert.equal(await dlg.getByTestId('new-agent-name').inputValue(), 'proj')
-    await dlg.getByTestId('new-agent-submit').click()
+    assert.equal(await dlg.getByTestId('draft-chip-folder').getAttribute('data-path'), dir, 'папка проекта не подставилась')
+    await dlg.getByTestId('draft-input').fill('Привет')
+    await dlg.getByTestId('draft-send').click()
     await dlg.waitFor({ state: 'detached', timeout: 10_000 })
     const row = h.win.locator('.chat-section [data-testid="agent-row"][data-agent="proj"]')
     await row.waitFor({ timeout: 10_000 })

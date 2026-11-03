@@ -7,14 +7,16 @@ import { createElement } from 'react'
 import type { ComponentType } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { Conversation } from '../src/components/Conversation.js'
-import { DoctorPanel, McpServersDialog, NewAgentDialog } from '../src/components/Panels.js'
+import { DoctorPanel, McpServersDialog } from '../src/components/Panels.js'
+import { DraftView } from '../src/components/Draft.js'
 import { browserItems } from '../src/components/ProjectTree.js'
 import type { AgentView } from '../src/model/agents.js'
 import { buildAgents } from '../src/model/agents.js'
 import { applyConversation, EMPTY_CONVERSATION } from '../src/model/conversation.js'
 import { mcpRows, toggleServer } from '../src/model/mcp.js'
 import type { McpListing } from '../src/model/mcp.js'
-import { defaultForm, startParams } from '../src/model/newAgent.js'
+import { draftStartParams, pickApproval, toggleBrowser } from '../src/model/draft.js'
+import { draft, draftProps } from './draftFixture.js'
 import type { AgentRecord, PultEvent } from '../src/model/types.js'
 
 const html = (c: unknown, props: Record<string, unknown>): string =>
@@ -26,22 +28,26 @@ const agent = (over: Partial<AgentView> = {}): AgentView => ({
   name: 'w', provider: 'claude', status: 'idle', cwd: '/w/pult', pending: 0, lastActivity: '2026-10-14T09:59:50Z', ...over,
 })
 
-describe('«+ Сессия»: браузер для агента', () => {
-  it('по умолчанию выключен; галочка есть; «показывать окно» — только при включённом', () => {
-    const out = html(NewAgentDialog, { taken: [], pickFolder: async () => null, onCreate: async () => null, onClose: noop })
-    assert.match(out, /data-testid="new-agent-browser"/)
-    assert.doesNotMatch(out, /data-testid="new-agent-browser"[^>]*checked/)
-    assert.doesNotMatch(out, /new-agent-browser-headed/, 'окно — только когда браузер включён')
-    assert.match(text(out), /Браузер для агента/)
+describe('черновик: браузер для агента', () => {
+  it('по умолчанию выключен; пункт в «⋯»; «показывать окно» — только при включённом', () => {
+    const out = html(DraftView, draftProps({ draft: pickApproval(draft(), 'ask', null), initialMenu: 'more' }))
+    assert.match(out, /data-testid="draft-more-browser"[^>]*/)
+    assert.match(out, /aria-checked="false"[^>]*data-testid="draft-more-browser"/)
+    assert.doesNotMatch(out, /draft-more-headed/, 'окно — только когда браузер включён')
+    assert.match(text(out), /Встроенный браузер Пульта/)
     assert.match(text(out), /через Inbox/)
+    const on = html(DraftView, draftProps({ draft: toggleBrowser(pickApproval(draft(), 'ask', null), true), initialMenu: 'more' }))
+    assert.match(on, /draft-more-headed/)
+    assert.match(on, /data-testid="draft-chip-browser"/, 'включённое — пунктирным чипом')
   })
 
-  it('startParams: браузер — true или {headed: true}; выключен — поля нет', () => {
-    const f = { ...defaultForm('claude'), name: 'w', cwd: '/x' }
-    assert.equal(startParams(f)['browser'], undefined)
-    assert.equal(startParams({ ...f, browser: true })['browser'], true)
-    assert.deepEqual(startParams({ ...f, browser: true, browserHeaded: true })['browser'], { headed: true })
-    assert.equal(startParams({ ...f, browser: false, browserHeaded: true })['browser'], undefined)
+  it('agent.start: браузер — true или {headed: true}; выключен — поля нет', () => {
+    const f = pickApproval(draft('/x'), 'ask', null)
+    const p = (d: typeof f): unknown => draftStartParams(d, { prompt: '', inheritMode: null })['browser']
+    assert.equal(p(f), undefined)
+    assert.equal(p(toggleBrowser(f, true)), true)
+    assert.deepEqual(p(toggleBrowser(f, true, true)), { headed: true })
+    assert.equal(p({ ...f, browser: false, browserHeaded: true }), undefined)
   })
 })
 

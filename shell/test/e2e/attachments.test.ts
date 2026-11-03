@@ -70,24 +70,25 @@ describe('вложения: карточки, временные файлы и �
     assert.equal(await cards().count(), 0)
   })
 
-  it('новый диалог: вложить до имени, переименовать, создать — путь в папке итоговой сессии', async () => {
+  it('черновик: вложить до имени чата, отправить — путь в папке итоговой сессии (имя выдал демон)', async () => {
     const dir = h.workDir('new-project', { scenario: 'simple' })
     await h.stubPickFolder(dir)
     await h.win.keyboard.press('Meta+N')
-    const dlg = h.win.getByTestId('new-agent-dialog')
+    const dlg = h.win.getByTestId('draft')
     await dlg.waitFor()
-    await dlg.getByTestId('new-agent-name').fill('')
-    await dropMemory('new-agent-prompt', 'draft.txt', Buffer.from('draft contents').toString('base64'), 'text/plain')
+    await dropMemory('draft-input', 'draft.txt', Buffer.from('draft contents').toString('base64'), 'text/plain')
     assert.ok(await waitFor(async () => await dlg.getByTestId('attachment-card').count() === 1))
     const stage = await dlg.getByTestId('attachment-card').getAttribute('data-path')
     assert.match(stage!, /attachments\/draft-/)
-    await dlg.getByTestId('pick-folder').click()
-    await dlg.getByTestId('new-agent-name').fill('final-chat')
-    await dlg.getByTestId('new-agent-submit').click()
+    await dlg.getByTestId('draft-chip-folder').click()
+    await h.win.getByTestId('draft-folder-other').click()
+    assert.ok(await waitFor(async () => (await dlg.getByTestId('draft-chip-folder').getAttribute('data-path')) === dir, 5000))
+    // Только вложение, без текста — отправка всё равно доступна.
+    await dlg.getByTestId('draft-send').click()
     await dlg.waitFor({ state: 'detached', timeout: 15_000 })
-    assert.ok(await waitFor(async () => (await users('final-chat')).length > 0, 15_000))
-    const text = (await users('final-chat'))[0]!
-    assert.ok(text.includes(path.join(h.home, 'attachments', 'final-chat')))
+    assert.ok(await waitFor(async () => (await users('new-project')).length > 0, 15_000))
+    const text = (await users('new-project'))[0]!
+    assert.ok(text.includes(path.join(h.home, 'attachments', 'new-project')))
     assert.ok(!text.includes(stage!))
     const final = text.slice(text.indexOf('- ') + 2).trim().replace(/^'|'$/g, '')
     assert.equal(readFileSync(final, 'utf8'), 'draft contents')

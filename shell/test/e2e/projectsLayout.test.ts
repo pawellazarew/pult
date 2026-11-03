@@ -74,12 +74,13 @@ describe('раскрытие проектов и размер недавних',
     assert.ok(Number(await h.win.getByTestId('recent-resize').getAttribute('aria-valuenow')) < 55)
   })
 
-  it('«+» в проекте открывает создание в его папке и не сворачивает проект', async () => {
+  it('«+» в проекте открывает черновик в его папке и не сворачивает проект', async () => {
     const project = h.win.getByTestId('project').first(), open = await project.getAttribute('open')
     await project.getByTestId('project-new-session').click()
-    await h.win.getByTestId('new-agent-dialog').waitFor()
-    assert.equal(await h.win.getByTestId('new-agent-cwd').getAttribute('data-path'), await project.getAttribute('data-project'))
+    await h.win.getByTestId('draft').waitFor()
+    assert.equal(await h.win.getByTestId('draft-chip-folder').getAttribute('data-path'), await project.getAttribute('data-project'))
     await h.win.keyboard.press('Escape')
+    await h.win.getByTestId('draft').waitFor({ state: 'detached' })
     assert.equal(await project.getAttribute('open'), open)
   })
 })
