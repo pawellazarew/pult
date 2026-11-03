@@ -5,6 +5,7 @@
 //
 // Коды выхода: 0 — штатная остановка · 1 — не смог стартовать · 3 — другой экземпляр жив.
 
+import { shutdownDeadline } from './shutdown.js'
 import { loadConfig } from '../core/config.js'
 import { createLogger } from '../core/log.js'
 import { ensureLayout, paths as resolvePaths } from '../core/paths.js'
@@ -48,37 +49,14 @@ export async function runDaemon(gate: SignalGate): Promise<void> {
   const shutdown = (signal: string): void => {
     if (stopping) return
     if (!daemon) { pendingSignal = signal; return }
-    stopping = true
-    const d = daemon
-    d.stop(`сигнал ${signal}`)
-      .then(() => {
-        logger.close()
-        process.exit(EXIT_OK)
-      })
-      .catch((e) => {
-        // Застрявшая остановка не должна оставлять полуживого демона: неудача — тоже выход,
-        // только с кодом ошибки, чтобы служба (KeepAlive по неуспеху) подняла процесс заново.
-        logger.error('мягкая остановка провалилась — выхожу с ошибкой', { error: (e as Error).message })
-        logger.close()
-        process.exit(EXIT_ERROR)
-      })
+    void daemon.stop(`сигнал ${signal}`).catch(() => process.exit(EXIT_ERROR))
   }
   gate.handler = shutdown
-  // Фатальная ошибка после готовности: остановку начинаем, но код выхода — ошибка, а не чистый ноль
-  // (launchd по `SuccessfulExit: false` должен понять, что это не «попросили и вышли»).
   gate.fatal = (origin, error) => {
-    if (stopping) return
-    if (!daemon) {
-      logger.error('фатальная ошибка до готовности демона — выхожу', { origin, error: error instanceof Error ? error.message : String(error) })
-      process.exit(EXIT_ERROR)
-      return
-    }
-    stopping = true
+    if (stopping) return // общий таймер остановки уже поставлен
     logger.error('фатальная ошибка — мягкая остановка', { origin, error: error instanceof Error ? error.message : String(error) })
-    const d = daemon
-    d.stop(`фатальная ошибка: ${origin}`)
-      .then(() => { logger.close(); process.exit(EXIT_ERROR) })
-      .catch(() => { logger.close(); process.exit(EXIT_ERROR) })
+    if (!daemon) { process.exit(EXIT_ERROR); return }
+    void daemon.stop(`фатальная ошибка: ${origin}`, 1).catch(() => process.exit(EXIT_ERROR))
   }
 
   let started
@@ -113,11 +91,20 @@ export async function runDaemon(gate: SignalGate): Promise<void> {
   // и что старт дошёл до конца, даже когда stdout уехал в файл журнала.
   process.stdout.write(JSON.stringify({ ready: true, pid: process.pid, sock: paths.sock }) + '\n')
 
-  daemon.onStopped(() => {
-    if (stopping) return
+  let cancelShutdownDeadline: (() => void) | null = null
+  daemon.onStopping((reason, exitCode) => {
     stopping = true
+    // Не unref: даже зависшая остановка без открытых сокетов должна завершиться кодом 1.
+    cancelShutdownDeadline = shutdownDeadline(() => {
+      process.stderr.write(`pultd: остановка превысила 20 секунд: ${reason}; exitCode=${exitCode}\n`)
+      logger.close()
+      process.exit(EXIT_ERROR)
+    })
+  })
+  daemon.onStopped((exitCode) => {
+    cancelShutdownDeadline?.()
     logger.close()
-    process.exit(EXIT_OK)
+    process.exit(exitCode)
   })
   if (pendingSignal !== null) shutdown(pendingSignal)
 }

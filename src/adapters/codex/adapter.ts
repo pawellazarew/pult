@@ -571,7 +571,7 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
   /** С какого момента перезапуск ждёт занятый Codex и напомнили ли уже (раз, через `RELOAD_REMIND_MS`). */
   let reloadSince = 0
   let reloadReminded = false
-  const retired = new Set<AppServerClient>()
+  const retired = new Map<AppServerClient, 'policy_reload' | 'network_change'>()
   /**
    * Снятый процесс ещё гасится (до TERM_WAIT_MS + KILL_WAIT_MS): `ensureClient` ждёт его, чтобы новый процесс не поднялся,
    * пока старый жив с тем же загруженным тредом. Ревью #30.
@@ -679,8 +679,12 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
    * два агента, у которых страж одновременно откатился на другой профиль, видели друг у друга
    * `starting` и ОБА уходили в `provider_unavailable` вместо одного бесплатного перезапуска.
    */
+  // Фон и серверные ходы держат процесс даже у текущей сессии: сетевой рестарт не должен
+  // терять их концы и оставлять ожидающих в старом поколении процесса.
   const anyBusy = (except: string): boolean =>
-    [...live.values()].some((l) => l.spec.name !== except && (l.turn !== null || l.usingProcess))
+    [...live.values()].some((l) => (l.spec.name !== except && (l.turn !== null || l.usingProcess))
+      || l.serverTurn !== null || l.bg.pending())
+    || [...approvals.values()].some((p) => !p.answered)
 
   /**
    * Сессия взяла общий процесс. Зовётся В САМОМ `ensureClient`, на каждом его успешном выходе,
@@ -850,12 +854,12 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
   }
 
   /** Выход процесса, снятого ради перечитывания правил: след в журнале, без похорон ходов (их не было). */
-  const retiredGone = (c: AppServerClient, code: number | null, signal: NodeJS.Signals | null): void => {
+  const retiredGone = (c: AppServerClient, code: number | null, signal: NodeJS.Signals | null, reason: 'policy_reload' | 'network_change'): void => {
     emit({
       sessionId: DAEMON_SESSION,
       provider: 'codex',
       kind: 'provider.restarted',
-      data: { provider: 'codex', event: 'exited', pid: c.pid ?? null, code, signal, intentional: true, reason: 'policy_reload', sessions: live.size },
+      data: { provider: 'codex', event: 'exited', pid: c.pid ?? null, code, signal, intentional: true, reason, sessions: live.size },
     })
   }
 
@@ -937,7 +941,7 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
     reloadAccess = false
     const old = client as AppServerClient
     client = null
-    retired.add(old)
+    retired.set(old, 'policy_reload')
     freeRespawn = true
     detachAll()
     logger.info(forRule ? 'перезапуск app-server: отозвано правило «Всегда» — codex перечитает правила' : 'перезапуск app-server: выгрузить тред с полными правами, которые больше не разрешены', { why, pid: old.pid })
@@ -1013,7 +1017,8 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
         })
       },
       onExit: (code, signal) => {
-        if (retired.delete(c)) { retiredGone(c, code, signal); return }
+        const reason = retired.get(c)
+        if (reason) { retired.delete(c); retiredGone(c, code, signal, reason); return }
         onProcessGone(code, signal)
       },
       onSpawnError: (e) => { logger.error('codex app-server не запустился', { bin: opts.bin, error: e.message }) },
@@ -1138,7 +1143,12 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
         if (client && !(client.alive() && key === clientNetKey)) {
           const old = client
           client = null
-          if (old.alive()) logger.info('перезапуск app-server: сменился профиль сети', { from: clientNetKey, to: key })
+          if (old.alive()) {
+            retired.set(old, 'network_change')
+            freeRespawn = true
+            detachAll()
+            logger.info('перезапуск app-server: сменился профиль сети', { from: clientNetKey, to: key, reason: 'network_change' })
+          }
           await killClient(old)
         }
         let c: AppServerClient

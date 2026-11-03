@@ -529,6 +529,30 @@ describe('codex: гонки вокруг общего процесса и сня
       assert.equal(r.boots(), 2, 'перезапуск ОДИН на двоих, а не по одному на каждого')
       const boots = r.raw().filter((rec) => rec.ev === 'boot')
       assert.ok(boots[1]?.env?.['ALL_PROXY'], 'второй процесс обязан жить под НОВЫМ профилем сети')
+      const exited = r.drafts.filter((d) => d.kind === 'provider.restarted' && d.data?.['event'] === 'exited')
+      assert.equal(exited.length, 1)
+      assert.equal(exited[0]?.data?.['intentional'], true)
+      assert.equal(exited[0]?.data?.['reason'], 'network_change')
+      assert.ok(!readFileSync(join(r.home, 'logs/pultd.log'), 'utf8').includes('общий процесс codex умер'))
+    } finally { await r.adapter.shutdown(); r.remove() }
+  })
+
+  it('смена сети не убивает фон простаивающей сессии; после конца фона перезапуск разрешён', async () => {
+    let proxied = false
+    const r = rig({ net: async () => proxied ? proxyCheck() : okCheck(), fake: { bgPauseMs: 700 } })
+    try {
+      await r.adapter.startSession(spec(r, 'w'))
+      await (await r.adapter.send('w', '[[background]] начни')).done
+      assert.ok(r.drafts.some((d) => d.kind === 'background.changed' && Number(d.data?.['count']) > 0))
+      proxied = true
+      await r.adapter.startSession(spec(r, 'other'))
+      const blocked = await (await r.adapter.send('other', 'новая сеть')).done
+      assert.equal(blocked.ok, false, 'перезапуск не должен убить фон')
+      assert.equal(blocked.errorCode, 'provider_unavailable')
+      assert.equal(r.boots(), 1)
+      assert.ok(await waitFor(() => r.drafts.some((d) => d.kind === 'background.changed' && d.data?.['count'] === 0), 5000), 'фон должен закончиться в старом процессе')
+      assert.equal((await (await r.adapter.send('other', 'после фона')).done).ok, true)
+      assert.equal(r.boots(), 2)
     } finally { await r.adapter.shutdown(); r.remove() }
   })
 
@@ -641,6 +665,25 @@ describe('codex: фоновая работа после хода — «фон ·
 
 describe('codex: ход, начатый сервером (сообщение субагента будит родителя)', () => {
   const st = (r: Rig): string[] => r.drafts.filter((d) => d.kind === 'status.changed').map((d) => `${String(d.data?.['status'])}:${String(d.data?.['reason'] ?? '')}`)
+
+  it('смена сети ждёт хода сервера в соседней сессии', async () => {
+    let proxied = false
+    const r = rig({ net: async () => proxied ? proxyCheck() : okCheck(), fake: { bgPauseMs: 700 } })
+    try {
+      await r.adapter.startSession(spec(r, 'w'))
+      await (await r.adapter.send('w', '[[server-turn]] начни')).done
+      assert.ok(await waitFor(() => st(r).includes('working:server_turn'), 3000))
+      proxied = true
+      await r.adapter.startSession(spec(r, 'other'))
+      const blocked = await (await r.adapter.send('other', 'смена сети')).done
+      assert.equal(blocked.ok, false)
+      assert.equal(blocked.errorCode, 'provider_unavailable')
+      assert.equal(r.boots(), 1)
+      assert.ok(await waitFor(() => st(r).includes('idle:server_turn_done'), 3000), 'серверный ход должен завершиться в старом процессе')
+      assert.equal((await (await r.adapter.send('other', 'после сервера')).done).ok, true)
+      assert.equal(r.boots(), 2)
+    } finally { await r.adapter.shutdown(); r.remove() }
+  })
 
   it('working {server_turn} → idle {server_turn_done}; реплика человека ждёт его конца, а не сталкивается', async () => {
     const r = rig({ fake: { bgPauseMs: 400 } })

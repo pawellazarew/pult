@@ -1,3 +1,4 @@
+import { createDiskMonitor } from '../core/disk.js'
 import { fileURLToPath } from 'node:url'
 import { createRuntimeService, RuntimeError } from '../runtimes/service.js'
 import { discoverMobile, performMobile, installMobileSetup } from '../runtimes/mobile.js'
@@ -193,8 +194,9 @@ export interface DaemonHandle {
   readonly startedAt: string
   status(): DaemonStatus
   emit(draft: EventDraft): PultEvent
-  stop(reason: string): Promise<void>
-  onStopped(fn: () => void): void
+  stop(reason: string, exitCode?: 0 | 1): Promise<void>
+  onStopping(fn: (reason: string, exitCode: 0 | 1) => void): void
+  onStopped(fn: (exitCode: 0 | 1) => void): void
 }
 
 export type StartResult =
@@ -274,7 +276,8 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
   const startedAt = new Date().toISOString()
   const startedAtMs = Date.now()
   const connections = new Map<number, Connection>()
-  const stoppedHandlers: Array<() => void> = []
+  const stoppedHandlers: Array<(exitCode: 0 | 1) => void> = []
+  const stoppingHandlers: Array<(reason: string, exitCode: 0 | 1) => void> = []
   let connSeq = 0
   let stopping = false
 
@@ -294,7 +297,7 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
         logger.error('журнал событий не пишется — останавливаю демон', { error: journalBroken })
         // Через таймер, не сразу: `stop` объявлен ниже по файлу, а сюда можно попасть и из
         // синхронного участка сборки демона. Повторный вызов безвреден — `stop` идемпотентен.
-        setTimeout(() => { void stop(`журнал событий не пишется: ${journalBroken}`).catch((stopErr) => { logger.error('мягкая остановка не удалась', { error: (stopErr as Error).message }) }) }, 0).unref?.()
+        setTimeout(() => { void stop(`журнал событий не пишется: ${journalBroken}`, 1).catch((stopErr) => { logger.error('мягкая остановка не удалась', { error: (stopErr as Error).message }) }) }, 0).unref?.()
       }
       throw e
     }
@@ -2365,49 +2368,54 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
   const attachmentsTimer = setInterval(sweepAttachmentsNow, ATTACHMENTS_SWEEP_MS)
   attachmentsTimer.unref?.()
 
-  const stop = async (reason: string): Promise<void> => {
-    if (stopping) return
+  const checkDisk = createDiskMonitor(paths.home, logger)
+  checkDisk()
+  const diskTimer = setInterval(checkDisk, 60_000)
+  diskTimer.unref()
+
+  let stopPromise: Promise<void> | null = null
+  const stop = (reason: string, exitCode: 0 | 1 = 0): Promise<void> => {
+    if (stopPromise) return stopPromise
     stopping = true
-    runtimes.stop()
-    logger.info('остановка демона', { reason })
-    clearInterval(attachmentsTimer)
-    clearInterval(pruneTimer)
-    updater.stop()
-    // Сначала ОТКАЗ всем, кто ждёт решения, и только потом закрытие сокета: заглушка
-    // `pult mcp-ask` иначе повисла бы на мёртвом сокете, а `claude` — на ней (инвариант 5).
-    const denied = broker.shutdown('демон останавливается')
-    if (denied) logger.warn('отказано ожидающим запросам разрешений', { count: denied })
-    try { await manager.shutdown() } catch (e) { logger.error('адаптеры не погасились', { error: (e as Error).message }) }
-    // Обновление окна, уже меняющее бандл, — после отказов и адаптеров и ненадолго (≤ 3 с): launchd добивает службу
-    // SIGKILL через 5 с; оборванную замену доведёт или откатит следующий старт по журналу apps/swap.json.
-    await appUpdater.stop()
-    notifyRunner?.close()
-    try { await rules.close() } catch (e) { logger.warn('правила codex: ожидания меток не закрыты', { error: (e as Error).message }) }
-    // Журнал мог сломаться (диск кончился) — это не повод не доводить остановку до конца.
-    try {
-      emit({ sessionId: DAEMON_SESSION, provider: 'pult', kind: 'daemon.stopping', data: { reason } })
-    } catch (e) {
-      logger.error('daemon.stopping не записался', { error: (e as Error).message })
-    }
-    for (const conn of [...connections.values()]) {
-      conn.subs.dispose({ code: 'daemon_stopping', message: 'демон останавливается' })
-      try { conn.socket.end() } catch { /* уже закрыт */ }
-      try { conn.socket.destroy() } catch { /* уже закрыт */ }
-    }
-    connections.clear()
-    liveChannel.close()
-    await new Promise<void>((resolve) => server.close(() => resolve()))
-    store.close()
-    // LOCK СНИМАЕТСЯ ПОСЛЕДНИМ. Он — единственный арбитр «демон здесь один», и пока он держан,
-    // второй демон не начнёт занимать сокет и токен. Обратный порядок (сокет последним) я
-    // однажды поставил ради удобства теста — и это была ошибка: между `lock.release()` и
-    // `unlink(sock)` новый демон успевал взять lock и снести ЧУЖОЙ, уже свежий сокет.
-    // Тест, который из-за этого моргал, теперь ждёт исчезновения САМОГО lock-файла.
-    try { unlinkSync(paths.sock) } catch { /* уже нет */ }
-    try { unlinkSync(paths.token) } catch { /* уже нет */ }
-    lock.release()
-    logger.info('демон остановлен', { home: paths.home })
-    for (const fn of stoppedHandlers) { try { fn() } catch { /* неважно */ } }
+    // Уведомление до первого await: процесс ставит общий предел ожидания остановки.
+    for (const fn of stoppingHandlers) { try { fn(reason, exitCode) } catch { /* независимые слушатели */ } }
+    stopPromise = (async () => {
+      let result: 0 | 1 = exitCode
+      const cleanup = async (name: string, action: () => unknown): Promise<void> => {
+        try { await action() } catch (e) {
+          result = 1
+          logger.error('этап остановки провалился', { stage: name, error: (e as Error).message })
+        }
+      }
+      logger.info('остановка демона', { reason, exitCode })
+      clearInterval(attachmentsTimer)
+      clearInterval(pruneTimer)
+      clearInterval(diskTimer)
+      await cleanup('runtimes', () => runtimes.stop())
+      await cleanup('updater', () => updater.stop())
+      await cleanup('permissions', () => broker.shutdown('демон останавливается'))
+      await cleanup('agents', () => manager.shutdown())
+      await cleanup('appUpdater', () => appUpdater.stop())
+      await cleanup('notifications', () => notifyRunner?.close())
+      await cleanup('rules', () => rules.close())
+      // Невозможность записать прощальное событие тоже означает аварийный выход.
+      await cleanup('journal', () => emit({ sessionId: DAEMON_SESSION, provider: 'pult', kind: 'daemon.stopping', data: { reason, exitCode: result } }))
+      for (const conn of [...connections.values()]) {
+        await cleanup('subscription', () => conn.subs.dispose({ code: 'daemon_stopping', message: 'демон останавливается' }))
+        try { conn.socket.destroy() } catch { /* уже закрыт */ }
+      }
+      connections.clear()
+      await cleanup('live', () => liveChannel.close())
+      await cleanup('server', () => new Promise<void>((resolve) => server.close(() => resolve())))
+      await cleanup('store', () => store.close())
+      // Lock снимается последним: новый процесс не должен удалить наш ещё живой сокет.
+      try { unlinkSync(paths.sock) } catch { /* уже нет */ }
+      try { unlinkSync(paths.token) } catch { /* уже нет */ }
+      await cleanup('lock', () => lock.release())
+      logger.info('демон остановлен', { home: paths.home, exitCode: result })
+      for (const fn of stoppedHandlers) { try { fn(result) } catch { /* независимые слушатели */ } }
+    })()
+    return stopPromise
   }
 
   emit({ sessionId: DAEMON_SESSION, provider: 'pult', kind: 'daemon.started', data: { version: VERSION, pid: process.pid } })
@@ -2428,6 +2436,7 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
       status,
       emit,
       stop,
+      onStopping: (fn) => { stoppingHandlers.push(fn) },
       onStopped: (fn) => { stoppedHandlers.push(fn) },
     },
   }

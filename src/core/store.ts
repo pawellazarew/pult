@@ -50,8 +50,12 @@ export interface StoreStats {
 export interface EventStore {
   readonly lastId: number
   append(draft: EventDraft): PultEvent
-  /** События строго после `cursor`, при необходимости отфильтрованные по сессии. */
-  readFrom(cursor: number, opts?: { sessionId?: string; limit?: number }): PultEvent[]
+  /**
+   * События строго после `cursor`, при необходимости отфильтрованные по сессии.
+   * `maxBytes` ограничивает порцию по размеру строк; хотя бы одна запись возвращается
+   * даже при превышении бюджета, чтобы потребитель мог продвигать курсор.
+   */
+  readFrom(cursor: number, opts?: { sessionId?: string; limit?: number; maxBytes?: number }): PultEvent[]
   /** Снимок для окна на старте (0.2.19): последние события SNAPSHOT_KINDS по сессиям и время активности. */
   snapshot(): StoreSnapshot
   /** Все события одной сессии из её файла `events/<session>.jsonl` — без прохода по общему журналу. */
@@ -249,11 +253,16 @@ export function createStore(paths: PultPaths, deps: StoreDeps = {}): EventStore 
   const writeAll = deps.writeAll ?? writeAllSync
   // Снимок для окна копится в том же проходе, что и индекс: строки и так разбираются целиком.
   const latest = new Map<string, Map<string, PultEvent>>()
+  // Номера по сессиям: фильтр не должен читать мегабайты соседних разговоров.
+  const sessionIds = new Map<string, number[]>()
   const activity = new Map<string, string>()
   // Внимание (О2) — там же: «непрочитано» в `agent.list` иначе требовало бы прохода по журналу на
   // каждый вызов, а окно зовёт список раз в 4 с.
   const attention = new Map<string, Attention>()
   const note = (ev: PultEvent): void => {
+    let ids = sessionIds.get(ev.sessionId)
+    if (!ids) { ids = []; sessionIds.set(ev.sessionId, ids) }
+    ids.push(ev.id)
     // Сессия удалена: имя свободно, и новая сессия с тем же именем не должна унаследовать фон,
     // контекст, активность и непрочитанное прежней (полное доигрывание окна сбрасывало их тем же событием).
     if (ev.kind === 'session.ended' && ev.data?.['reason'] === 'rm') {
@@ -414,33 +423,45 @@ export function createStore(paths: PultPaths, deps: StoreDeps = {}): EventStore 
       return out
     },
 
-    readFrom(cursor: number, opts: { sessionId?: string; limit?: number } = {}): PultEvent[] {
-      const from = offsetAfter(index, cursor)
-      const length = index.size - from
-      if (length <= 0) return []
+    readFrom(cursor: number, opts: { sessionId?: string; limit?: number; maxBytes?: number } = {}): PultEvent[] {
       const fd = openRead()
-      if (fd === null) return []
-      const buf = Buffer.allocUnsafe(length)
-      let got = 0
-      try {
-        // `readSync` обычного файла почти всегда читает всё, но «почти» — не гарантия: короткое
-        // чтение молча отдавало бы ОБРЕЗАННЫЙ хвост журнала. Дочитываем до конца диапазона.
-        while (got < length) {
-          const n = readSync(fd, buf, got, length - got, from + got)
-          if (!(n > 0)) break
-          got += n
-        }
-      } catch {
-        return []
+      if (fd === null || (opts.limit !== undefined && opts.limit <= 0)) return []
+      const ids = opts.sessionId === undefined ? index.ids : (sessionIds.get(opts.sessionId) ?? [])
+      let lo = 0
+      let hi = ids.length
+      while (lo < hi) {
+        const mid = (lo + hi) >>> 1
+        if ((ids[mid] as number) <= cursor) lo = mid + 1
+        else hi = mid
       }
-      reads += 1
-      bytesRead += got
       const out: PultEvent[] = []
-      for (const line of buf.toString('utf8', 0, got).split('\n')) {
-        if (!line.trim()) continue
-        const ev = parseEventLine(line)
-        if (!ev || ev.id <= cursor) continue
-        if (opts.sessionId !== undefined && ev.sessionId !== opts.sessionId) continue
+      let pageBytes = 0
+      // Читаем только индексированные строки и прекращаем I/O сразу после limit.
+      // Временный буфер ограничен одной записью, а не всем оставшимся журналом.
+      for (let i = lo; i < ids.length; i++) {
+        const id = ids[i] as number
+        const pos = opts.sessionId === undefined ? i : positionOf(index, id)
+        if (pos < 0) continue
+        const from = index.offsets[pos] as number
+        const to = index.offsets[pos + 1] ?? index.size
+        // Одна большая запись допустима: иначе курсор никогда не сдвинется.
+        if (out.length && opts.maxBytes !== undefined && pageBytes + to - from > opts.maxBytes) break
+        const buf = Buffer.allocUnsafe(to - from)
+        let got = 0
+        try {
+          while (got < buf.length) {
+            const n = readSync(fd, buf, got, buf.length - got, from + got)
+            if (!(n > 0)) break
+            got += n
+          }
+        } catch { return out }
+        reads += 1
+        bytesRead += got
+        pageBytes += got
+        const text = buf.toString('utf8', 0, got)
+        const nl = text.indexOf('\n')
+        const ev = parseEventLine(nl < 0 ? text : text.slice(0, nl))
+        if (!ev || ev.id !== id || (opts.sessionId !== undefined && ev.sessionId !== opts.sessionId)) continue
         out.push(ev)
         if (opts.limit !== undefined && out.length >= opts.limit) break
       }
