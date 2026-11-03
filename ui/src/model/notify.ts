@@ -1,3 +1,4 @@
+import { t as tr } from '../lib/i18n.js'
 // Правила системных уведомлений окна (О2, docs/14 «Правила уведомлений»). Чистые функции: какое событие
 // заслуживает уведомления и сколько их пускать подряд.
 //
@@ -65,7 +66,7 @@ export function notificationFor(ev: PultEvent, nowMs: number, label?: string, op
     const input = (ev.data['input'] ?? {}) as Record<string, unknown>
     const v = describePermission(str(ev.data['toolName']) ?? 'tool', input)
     return {
-      title: `${who} ждёт тебя`,
+      title: tr`${who} ждёт тебя`,
       body: `${v.title}${v.target ? `: ${v.target}` : ''}`,
       target: { ...target, ...(id ? { permId: id } : {}) },
       kind: 'ask',
@@ -77,20 +78,20 @@ export function notificationFor(ev: PultEvent, nowMs: number, label?: string, op
   if (!att) return null
   switch (att.kind) {
     case 'ask':
-      return { title: `${who} ждёт ответа`, body: att.text ?? 'вопрос в ленте', target, kind: 'ask' }
+      return { title: tr`${who} ждёт ответа`, body: att.text ?? tr('вопрос в ленте'), target, kind: 'ask' }
     case 'done': {
       const ms = ev.data['turnMs']
       if (typeof ms === 'number' && Number.isFinite(ms) && ms < (opts.minTurnMs ?? DEFAULT_NOTIFY_RULES.minTurnSeconds * 1000)) return null
-      return { title: `${who}: ход закончен`, body: 'сессия ждёт следующей реплики', target, kind: 'done' }
+      return { title: tr`${who}: ход закончен`, body: tr('сессия ждёт следующей реплики'), target, kind: 'done' }
     }
     case 'failed':
-      return { title: `${who}: ход не удался`, body: (att.text ?? 'причина — в ленте').slice(0, 200), target, kind: 'error' }
+      return { title: tr`${who}: ход не удался`, body: (att.text ?? tr('причина — в ленте')).slice(0, 200), target, kind: 'error' }
     case 'limit':
-      return { title: `${who}: лимит исчерпан`, body: (att.text ?? 'новая реплика до сброса не пойдёт').slice(0, 200), target, kind: 'error' }
+      return { title: tr`${who}: лимит исчерпан`, body: (att.text ?? tr('новая реплика до сброса не пойдёт')).slice(0, 200), target, kind: 'error' }
     case 'blocked':
-      return { title: `${who}: страж не пустил ход`, body: (att.text ?? 'проверь VPN и вход').slice(0, 200), target, kind: 'error' }
+      return { title: tr`${who}: страж не пустил ход`, body: (att.text ?? tr('проверь VPN и вход')).slice(0, 200), target, kind: 'error' }
     case 'stalled':
-      return { title: `${who}: похоже, завис`, body: `${att.text ?? 'ход давно молчит'} — прервать или ждать?`, target, kind: 'error' }
+      return { title: tr`${who}: похоже, завис`, body: tr`${att.text ?? tr('ход давно молчит')} — прервать или ждать?`, target, kind: 'error' }
   }
 }
 
@@ -130,8 +131,8 @@ export function flushThrottle(t: Throttle, nowMs: number): { t: Throttle; summar
   // Сводка звучит самым тревожным из придержанного: ошибка > вопрос > готово.
   const kind: NotifyKind = t.held.some((h) => h.kind === 'error') ? 'error' : t.held.some((h) => h.kind === 'ask') ? 'ask' : 'done'
   const summary: Notice = {
-    title: 'Пульт',
-    body: `ещё ${n} ${plural(n, 'сессия ждёт', 'сессии ждут', 'сессий ждут')} тебя`,
+    title: tr('Пульт'),
+    body: tr`ещё ${n} ${plural(n, tr('сессия ждёт'), tr('сессии ждут'), tr('сессий ждут'))} тебя`,
     target: names.length === 1 ? { sessionId: names[0] as string } : { inbox: true },
     kind,
   }

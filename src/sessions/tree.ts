@@ -1,3 +1,5 @@
+import { translator } from '../i18n/core.js'
+import { filesEn } from '../i18n/files.en.js'
 // Дерево агентов и инструментов. ЧИСТАЯ функция: вход — события сессии, выход — вложенное
 // дерево. Ни времени, ни процессов, ни файлов.
 //
@@ -13,6 +15,8 @@
 // `kind`, и CLI печатает их по-разному.
 
 import type { PultEvent } from '../core/events.js'
+
+const tr = translator(filesEn)
 
 export type TreeNodeKind = 'agent' | 'tool'
 export type TreeNodeStatus = 'running' | 'done' | 'failed'
@@ -128,7 +132,7 @@ export function formatTree(tree: AgentTree, indent = ''): string {
     const bits = [
       node.kind === 'agent' ? `Agent(${node.subagentType ?? '?'})` : node.name,
       node.model ? `· ${node.model}` : '',
-      node.durationMs !== undefined ? `· ${node.durationMs} мс` : '',
+      node.durationMs !== undefined ? tr`· ${node.durationMs} мс` : '',
     ].filter(Boolean)
     lines.push(`${prefix}${mark} ${bits.join(' ')}`)
     for (const child of node.children) walk(child, prefix + '  ')

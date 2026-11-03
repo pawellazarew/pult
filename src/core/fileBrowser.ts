@@ -1,9 +1,13 @@
+import { translator } from '../i18n/core.js'
+import { filesEn } from '../i18n/files.en.js'
 import { constants } from 'node:fs'
 import { open, opendir, realpath, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import path from 'node:path'
 import { imageMime } from './images.js'
 import type { FileEntry, FileListing, FilePreview, FileScope } from './fileBrowserTypes.js'
+
+const tr = translator(filesEn)
 
 export const MAX_FILE_ENTRIES = 400
 export const MAX_TEXT_PREVIEW_BYTES = 512 * 1024
@@ -20,7 +24,7 @@ const inside = (root: string, source: string): boolean => {
   const relative = path.relative(root, source)
   return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
 }
-const denied = (): Error => new Error('Файл недоступен в этом проекте')
+const denied = (): Error => new Error(tr('Файл недоступен в этом проекте'))
 const pathInput = (source: string): void => {
   if (typeof source !== 'string' || !source || source.length > 8192 || /[\u0000-\u001f\u007f]/.test(source)
     || source.startsWith('//') || /^[a-z][a-z0-9+.-]*:/i.test(source)) throw denied()
@@ -31,7 +35,7 @@ async function context(scope: FileScope): Promise<{ root: string; workspace: boo
   pathInput(scope.cwd)
   if (!path.isAbsolute(scope.cwd)) throw denied()
   const root = await realpath(scope.cwd)
-  if (!(await stat(root)).isDirectory()) throw new Error('Выбери папку проекта для просмотра файлов')
+  if (!(await stat(root)).isDirectory()) throw new Error(tr('Выбери папку проекта для просмотра файлов'))
   const userHome = await canonical(scope.userHome ?? homedir())
   const credentialRoots = await Promise.all(['.ssh', '.aws', '.gnupg', '.config', '.pult', '.codex', '.claude']
     .map((name) => canonical(path.join(userHome, name))))
@@ -45,7 +49,7 @@ export async function listWorkspaceFiles(scope: FileScope, source = '.', showHid
   if (source === '') source = '.'
   pathInput(source)
   const ctx = await context(scope)
-  if (!ctx.workspace) throw new Error('Выбери папку проекта для просмотра файлов')
+  if (!ctx.workspace) throw new Error(tr('Выбери папку проекта для просмотра файлов'))
   const directory = await realpath(path.resolve(ctx.root, source))
   if (!inside(ctx.root, directory) || ctx.sensitive(directory)) throw denied()
   const handle = await opendir(directory)
@@ -88,18 +92,18 @@ export async function readWorkspaceFile(scope: FileScope, source: string): Promi
   try {
     const info = await handle.stat()
     if (info.dev !== expected.dev || info.ino !== expected.ino) throw denied()
-    if (!info.isFile()) throw new Error('Выбери обычный файл')
+    if (!info.isFile()) throw new Error(tr('Выбери обычный файл'))
     const base: FilePreview = { path: resolved, name: path.basename(resolved), kind: 'unsupported', size: info.size, modifiedAt: info.mtime.toISOString() }
     const unsupported = (reason: string): FilePreview => ({ ...base, reason })
-    if (info.mode & 0o111) return unsupported('Исполняемый файл можно показать в Finder')
+    if (info.mode & 0o111) return unsupported(tr('Исполняемый файл можно показать в Finder'))
     const ext = path.extname(resolved).toLowerCase()
     const markdown = MARKDOWN.has(ext)
     const image = IMAGES[ext]
     const pdf = ext === '.pdf'
     const text = markdown || TEXT_EXTENSIONS.has(ext) || TEXT_NAMES.has(base.name.toLowerCase()) || TEXT_EXTENSIONS.has(base.name.toLowerCase())
-    if (!text && !image && !pdf) return unsupported('Предпросмотр этого формата пока недоступен')
+    if (!text && !image && !pdf) return unsupported(tr('Предпросмотр этого формата пока недоступен'))
     const limit = image || pdf ? MAX_BINARY_PREVIEW_BYTES : MAX_TEXT_PREVIEW_BYTES
-    if (info.size > limit) return unsupported(`Файл слишком большой для предпросмотра (максимум ${image || pdf ? '20 МБ' : '512 КБ'})`)
+    if (info.size > limit) return unsupported(tr`Файл слишком большой для предпросмотра (максимум ${image || pdf ? tr('20 МБ') : tr('512 КБ')})`)
     // Read at most limit + 1, even if another process grows the file after stat().
     const chunks: Buffer[] = []
     let total = 0
@@ -109,19 +113,19 @@ export async function readWorkspaceFile(scope: FileScope, source: string): Promi
       if (!bytesRead) break
       chunks.push(chunk.subarray(0, bytesRead)); total += bytesRead
     }
-    if (total > limit) return unsupported('Файл вырос и слишком большой для предпросмотра')
+    if (total > limit) return unsupported(tr('Файл вырос и слишком большой для предпросмотра'))
     const bytes = Buffer.concat(chunks, total)
     const current = { ...base, size: total }
     if (image) return imageMime(bytes) === image
       ? { ...current, kind: 'image', dataUrl: `data:${image};base64,${bytes.toString('base64')}` }
-      : unsupported('Файл не является поддерживаемым изображением')
+      : unsupported(tr('Файл не является поддерживаемым изображением'))
     if (pdf) return bytes.subarray(0, 5).toString('ascii') === '%PDF-'
       ? { ...current, kind: 'pdf', base64: bytes.toString('base64') }
-      : unsupported('Файл не является PDF-документом')
+      : unsupported(tr('Файл не является PDF-документом'))
     try {
       const content = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
-      if (/[\u0000-\u0008\u000b\u000e-\u001f]/.test(content)) return unsupported('Бинарный файл нельзя показать как текст')
+      if (/[\u0000-\u0008\u000b\u000e-\u001f]/.test(content)) return unsupported(tr('Бинарный файл нельзя показать как текст'))
       return { ...current, kind: markdown ? 'markdown' : 'text', text: content }
-    } catch { return unsupported('Файл не является текстом в UTF-8') }
+    } catch { return unsupported(tr('Файл не является текстом в UTF-8')) }
   } finally { await handle.close() }
 }

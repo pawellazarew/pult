@@ -1,3 +1,4 @@
+import { t as tr } from './i18n.js'
 // Подпись состояния связи с демоном для шапки и плашки. Чистые функции — тестируются без DOM.
 
 import type { ConnState } from '../../../shell/src/contract.js'
@@ -20,30 +21,30 @@ export interface ConnView {
   reasonVisible: boolean
 }
 
-export const DAEMON_DOWN = 'демон недоступен'
+export const DAEMON_DOWN = tr('демон недоступен')
 
 export function formatUptime(ms: number): string {
   if (!Number.isFinite(ms) || ms < 0) return '—'
   const s = Math.floor(ms / 1000)
-  if (s < 60) return `${s} с`
+  if (s < 60) return tr`${s} с`
   const m = Math.floor(s / 60)
-  if (m < 60) return `${m} мин`
+  if (m < 60) return tr`${m} мин`
   const h = Math.floor(m / 60)
-  if (h < 24) return `${h} ч ${m % 60} мин`
-  return `${Math.floor(h / 24)} дн ${h % 24} ч`
+  if (h < 24) return tr`${h} ч ${m % 60} мин`
+  return tr`${Math.floor(h / 24)} дн ${h % 24} ч`
 }
 
 export function connView(s: ConnState): ConnView {
   switch (s.state) {
     case 'up':
-      return { tone: 'ok', label: `демон ${s.daemon.version} · pid ${s.daemon.pid}`, banner: null, reason: null, reasonVisible: false }
+      return { tone: 'ok', label: tr`демон ${s.daemon.version} · pid ${s.daemon.pid}`, banner: null, reason: null, reasonVisible: false }
     case 'connecting':
-      return { tone: 'run', label: 'подключение…', banner: null, reason: null, reasonVisible: false }
+      return { tone: 'run', label: tr('подключение…'), banner: null, reason: null, reasonVisible: false }
     case 'down': {
       const banner = s.retryInMs === null
-        ? 'Сам не переподключаюсь — запусти его кнопкой.'
-        : `Переподключаюсь через ${Math.max(1, Math.round(s.retryInMs / 1000))} с.`
-      return { tone: 'fail', label: DAEMON_DOWN, banner, reason: s.reason, reasonVisible: /токен/i.test(s.reason) }
+        ? tr('Сам не переподключаюсь — запусти его кнопкой.')
+        : tr`Переподключаюсь через ${Math.max(1, Math.round(s.retryInMs / 1000))} с.`
+      return { tone: 'fail', label: DAEMON_DOWN, banner, reason: s.reason, reasonVisible: /токен|token/i.test(s.reason) }
     }
   }
 }

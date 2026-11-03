@@ -7,6 +7,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
+import { t } from '../lib/i18n.js'
 import { Icon, Kbd } from './common.js'
 import { consentLine } from '../model/access.js'
 import type { ConsentView } from '../model/access.js'
@@ -37,35 +38,31 @@ export function ConsentDialog({ onGrant, onKeep, busy = false, error = null }: {
   return (
     <div className="scrim scrim-top" onMouseDown={(e) => { if (e.target === e.currentTarget) onKeep() }}>
       <div className="dlg consent" role="alertdialog" aria-modal="true" aria-labelledby="consent-h" aria-describedby="consent-lead" data-testid="consent-dialog">
-        <div className="dlg-h"><span className="consent-icon" aria-hidden="true"><Icon name="shield" /></span><h2 id="consent-h">Полный доступ: Claude, Codex и ZCode</h2></div>
+        <div className="dlg-h"><span className="consent-icon" aria-hidden="true"><Icon name="shield" /></span><h2 id="consent-h">{t("Полный доступ: Claude, Codex и ZCode")}</h2></div>
         <div className="dlg-b">
-          <p id="consent-lead" className="consent-lead">Агент перестаёт спрашивать разрешения: правит и удаляет файлы где угодно, ставит пакеты, ходит в сеть
-            и запускает команды с твоими правами на этом Mac. Песочницы нет.</p>
+          <p id="consent-lead" className="consent-lead">{t("Агент перестаёт спрашивать разрешения: правит и удаляет файлы где угодно, ставит пакеты, ходит в сеть и запускает команды с твоими правами на этом Mac. Песочницы нет.")}</p>
           <dl className="consent-prov">
             <dt className="who-claude">Claude</dt>
-            <dd><code>bypassPermissions</code>. Спросит или откажет только по твоим правилам ask/deny в настройках Claude и по собственным
-              проверкам Claude. Папку с ключами Пульта агент не читает ни в каком режиме.</dd>
+            <dd><code>bypassPermissions</code>{t(". Спросит или откажет только по твоим правилам ask/deny в настройках Claude и по собственным проверкам Claude. Папку с ключами Пульта агент не читает ни в каком режиме.")}</dd>
             <dt className="who-codex">Codex</dt>
-            <dd><code>danger-full-access</code> + <code>never</code>: песочницы нет, разрешений не просит. Если Codex всё же потребует
-              подтверждение (например, для части MCP-вызовов), Пульт его сам не даст — оно придёт в Inbox.</dd>
+            <dd><code>danger-full-access</code> + <code>never</code>{t(": песочницы нет, разрешений не просит. Если Codex всё же потребует подтверждение (например, для части MCP-вызовов), Пульт его сам не даст — оно придёт в Inbox.")}</dd>
             <dt className="who-zcode">ZCode</dt>
-            <dd><code>--mode yolo</code>: что угодно без вопросов. Вопросов в Inbox у ZCode нет вовсе, а свой режим он не сообщает —
-              метка у его чата «не подтверждено».</dd>
+            <dd><code>--mode yolo</code>{t(": что угодно без вопросов. Вопросов в Inbox у ZCode нет вовсе, а свой режим он не сообщает — метка у его чата «не подтверждено».")}</dd>
           </dl>
           <ul className="consent-list">
-            <li>Встроенный браузер Пульта в этом режиме выключен. Твои MCP-серверы и shell — нет.</li>
-            <li>Разрешение одно на всех провайдеров. Дальше не спрашиваю: чаты с полным доступом помечены красным.</li>
-            <li>Сам он не включается: ссылка <span className="mono">pult://new</span> его не даёт — только твой выбор.</li>
-            <li>Вернуть — другой доступ в меню чата, со следующего хода. Отозвать разрешение — Настройки → Доступ.</li>
+            <li>{t("Встроенный браузер Пульта в этом режиме выключен. Твои MCP-серверы и shell — нет.")}</li>
+            <li>{t("Разрешение одно на всех провайдеров. Дальше не спрашиваю: чаты с полным доступом помечены красным.")}</li>
+            <li>{t("Сам он не включается: ссылка ")}<span className="mono">pult://new</span>{t(" его не даёт — только твой выбор.")}</li>
+            <li>{t("Вернуть — другой доступ в меню чата, со следующего хода. Отозвать разрешение — Настройки → Доступ.")}</li>
           </ul>
           {error && <span className="err" role="alert" data-testid="consent-error">{error}</span>}
         </div>
         <div className="dlg-f">
-          <span className="note">Спрашиваю один раз</span>
+          <span className="note">{t("Спрашиваю один раз")}</span>
           <span className="grow" />
-          <button ref={keep} type="button" className="btn" onClick={onKeep} data-testid="consent-keep">Оставить как было <Kbd>Esc</Kbd></button>
+          <button ref={keep} type="button" className="btn" onClick={onKeep} data-testid="consent-keep">{t("Оставить как было")} <Kbd>Esc</Kbd></button>
           <button type="button" className="btn btn-danger" onClick={onGrant} disabled={busy} data-testid="consent-grant">
-            {busy ? 'Записываю…' : 'Разрешить полный доступ'}
+            {busy ? t('Записываю…') : t('Разрешить полный доступ')}
           </button>
         </div>
       </div>
@@ -91,15 +88,13 @@ export function AccessSection({ consent, onRevoke }: {
   }
   return (
     <section className="settings-sec" aria-labelledby="settings-access-h" data-testid="settings-access">
-      <h3 id="settings-access-h">Доступ</h3>
+      <h3 id="settings-access-h">{t("Доступ")}</h3>
       <div className="upd-state">
         <span className="grow" data-testid="access-consent-line">{consentLine(consent)}</span>
         {consent?.granted && <button type="button" className="btn btn-sm" disabled={busy} onClick={() => void revoke()} data-testid="access-revoke">
-          {busy ? 'Отзываю…' : 'Отозвать'}</button>}
+          {busy ? t('Отзываю…') : t('Отозвать')}</button>}
       </div>
-      <span className="note">Одно разрешение на Claude, Codex и ZCode; его проверяет демон на каждом ходу. После отзыва идущий ход доживает с красной
-        меткой, следующий ход любой сессии с полным доступом идёт в «Спрашивать». Разовое <span className="mono">--yes</span> из терминала
-        действует только на свою сессию и сюда не пишется.</span>
+      <span className="note">{t("Одно разрешение на Claude, Codex и ZCode; его проверяет демон на каждом ходу. После отзыва идущий ход доживает с красной меткой, следующий ход любой сессии с полным доступом идёт в «Спрашивать». Разовое ")}<span className="mono">--yes</span>{t(" из терминала действует только на свою сессию и сюда не пишется.")}</span>
       {err && <span className="err" role="alert" data-testid="access-error">{err}</span>}
     </section>
   )

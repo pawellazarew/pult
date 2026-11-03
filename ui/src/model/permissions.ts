@@ -1,3 +1,4 @@
+import { t as tr } from '../lib/i18n.js'
 // Что просит агент — в человеческом виде: заголовок, цель (файл, команда, адрес), причина,
 // варианты и, для правок файлов, дифф. Чистые функции: вход — имя инструмента и его вход
 // (уже отредактированный брокером), выход — описание для карточки.
@@ -151,20 +152,20 @@ export function parseUnifiedDiff(text: string): DiffBlock {
 }
 
 const TITLES: Record<string, string> = {
-  Edit: 'Правка файла',
-  MultiEdit: 'Правка файла',
-  Write: 'Запись файла',
-  NotebookEdit: 'Правка блокнота',
-  Bash: 'Команда в терминале',
-  Read: 'Чтение файла',
-  Glob: 'Поиск файлов',
-  Grep: 'Поиск по файлам',
-  WebFetch: 'Запрос в сеть',
-  WebSearch: 'Поиск в сети',
-  commandExecution: 'Команда в терминале',
-  execCommand: 'Команда в терминале',
-  fileChange: 'Правка файлов',
-  applyPatch: 'Правка файлов',
+  Edit: tr('Правка файла'),
+  MultiEdit: tr('Правка файла'),
+  Write: tr('Запись файла'),
+  NotebookEdit: tr('Правка блокнота'),
+  Bash: tr('Команда в терминале'),
+  Read: tr('Чтение файла'),
+  Glob: tr('Поиск файлов'),
+  Grep: tr('Поиск по файлам'),
+  WebFetch: tr('Запрос в сеть'),
+  WebSearch: tr('Поиск в сети'),
+  commandExecution: tr('Команда в терминале'),
+  execCommand: tr('Команда в терминале'),
+  fileChange: tr('Правка файлов'),
+  applyPatch: tr('Правка файлов'),
 }
 
 const oneLine = (v: unknown): string => {
@@ -191,7 +192,7 @@ function codexChanges(changes: unknown): DiffBlock[] {
 }
 
 export function describePermission(toolName: string, input: Record<string, unknown>): PermView {
-  const title = TITLES[toolName] ?? `Инструмент ${toolName}`
+  const title = TITLES[toolName] ?? tr`Инструмент ${toolName}`
   const options = Array.isArray(input['availableDecisions'])
     ? (input['availableDecisions'] as unknown[]).filter((x): x is string => typeof x === 'string')
     : []
@@ -205,7 +206,7 @@ export function describePermission(toolName: string, input: Record<string, unkno
       view.target = str(take('file_path'))
       const d = lineDiff(String(take('old_string') ?? ''), String(take('new_string') ?? ''))
       view.diffs.push(view.target ? { ...d, path: view.target } : d)
-      if (take('replace_all') === true) view.reason = 'заменить все вхождения'
+      if (take('replace_all') === true) view.reason = tr('заменить все вхождения')
       break
     }
     case 'MultiEdit': {
@@ -286,10 +287,10 @@ export function describePermission(toolName: string, input: Record<string, unkno
 }
 
 const DECISIONS: Record<string, string> = {
-  accept: 'разрешить',
-  acceptForSession: 'разрешить до конца сессии',
-  decline: 'отказать',
-  cancel: 'отказать и прервать ход',
+  accept: tr('разрешить'),
+  acceptForSession: tr('разрешить до конца сессии'),
+  decline: tr('отказать'),
+  cancel: tr('отказать и прервать ход'),
 }
 /** Варианты, которые и так покрывают кнопки «Разрешить», «В этой сессии» (M8d) и «Отказать». */
 const PLAIN = new Set(['accept', 'acceptForSession', 'decline', 'cancel'])
@@ -318,7 +319,7 @@ export function parseOffers(x: unknown): PermissionOffers | undefined {
   const r = obj(o['rule'])
   const label = r ? str(r['label']) : undefined
   if (r && (r['kind'] === 'execpolicy' || r['kind'] === 'network') && label) {
-    out.rule = { kind: r['kind'], label, note: str(r['note']) ?? 'правило останется в настройках провайдера' }
+    out.rule = { kind: r['kind'], label, note: str(r['note']) ?? tr('правило останется в настройках провайдера') }
   }
   return out.session || out.rule ? out : undefined
 }
@@ -335,24 +336,24 @@ export interface ScopeButton {
 /** Кнопки шире «один раз» — только предложенные провайдером на этот запрос. */
 export function scopeButtons(offers: PermissionOffers | undefined): ScopeButton[] {
   const out: ScopeButton[] = []
-  if (offers?.session) out.push({ scope: 'session', label: 'В этой сессии' })
+  if (offers?.session) out.push({ scope: 'session', label: tr('В этой сессии') })
   if (offers?.rule) {
     out.push(offers.rule.kind === 'network'
-      ? { scope: 'rule', label: 'Всегда пускать в сеть к', code: offers.rule.label, note: offers.rule.note }
+      ? { scope: 'rule', label: tr('Всегда пускать в сеть к'), code: offers.rule.label, note: offers.rule.note }
       // Правда о поправке execpolicy (ревью M8d): это ПРЕФИКС — с любыми аргументами дальше, во всех сессиях Codex.
-      : { scope: 'rule', label: 'Всегда: команды, начинающиеся с', code: offers.rule.label, note: offers.rule.note })
+      : { scope: 'rule', label: tr('Всегда: команды, начинающиеся с'), code: offers.rule.label, note: offers.rule.note })
   }
   return out
 }
 
 /** Хвост решённой карточки: с какой шириной разрешили (`permission.resolved` → scope, rule). */
 export function scopeText(scope: unknown, rule: unknown): string | null {
-  if (scope === 'session') return 'в этой сессии'
+  if (scope === 'session') return tr('в этой сессии')
   if (scope !== 'rule') return null
   const r = obj(rule)
   const label = r ? str(r['label']) : undefined
-  if (!label) return 'всегда (правило провайдера)'
-  return r?.['kind'] === 'network' ? `всегда — сеть к ${label}` : `всегда: команды, начинающиеся с «${label}»`
+  if (!label) return tr('всегда (правило провайдера)')
+  return r?.['kind'] === 'network' ? tr`всегда — сеть к ${label}` : tr`всегда: команды, начинающиеся с «${label}»`
 }
 
 /**
@@ -363,13 +364,13 @@ export function scopeText(scope: unknown, rule: unknown): string | null {
 export function concealedNote(kind: PermKind | 'question'): { what: string; then: string } {
   if (kind === 'question') {
     return {
-      what: 'часть вопроса или вариантов',
-      then: 'Модель видит вопрос целиком — не уверен, о чём он, пропусти.',
+      what: tr('часть вопроса или вариантов'),
+      then: tr('Модель видит вопрос целиком — не уверен, о чём он, пропусти.'),
     }
   }
   return {
-    what: 'часть ввода',
-    then: kind === 'command' ? 'Исполнится исходная команда — не уверен, отказывай.' : 'Исполнится исходный ввод — не уверен, отказывай.',
+    what: tr('часть ввода'),
+    then: kind === 'command' ? tr('Исполнится исходная команда — не уверен, отказывай.') : tr('Исполнится исходный ввод — не уверен, отказывай.'),
   }
 }
 

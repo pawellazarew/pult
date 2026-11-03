@@ -1,3 +1,4 @@
+import { t as tr } from '../lib/i18n.js'
 // M8f: настройки сессии после заведения (меню в подвале «opus · high · спрашивать») и экран «Настройки» (⌘,).
 // Чистые функции: пункты меню, когда нужен вопрос, параметры `agent.configure`, черновик настроек и `settings.set`.
 // Проверки — те же, что у демона (src/sessions/settings.ts): окно лишь говорит заранее то, что демон и так скажет.
@@ -32,7 +33,7 @@ export type MenuRow =
 /** Подпись кнопки подвала: «opus · high · спрашивать». */
 export function footerParts(agent: Pick<AgentView, 'provider' | 'model' | 'effort' | 'approval'>): string[] {
   // Шаг A: `inherit` словами из того же словаря, что лента и CLI («как в настройках Claude»).
-  const model = agent.model ?? (agent.provider === 'zcode' ? 'GLM' : agent.provider === 'codex' ? 'модель codex' : 'модель по умолчанию')
+  const model = agent.model ?? (agent.provider === 'zcode' ? 'GLM' : agent.provider === 'codex' ? tr('модель codex') : tr('модель по умолчанию'))
   return [model, ...(agent.effort ? [agent.effort] : []), APPROVAL_WORDS[agent.approval ?? 'ask']]
 }
 
@@ -65,14 +66,14 @@ export function settingsMenu(agent: AgentView, catalog: ProviderCatalog | null |
   // полный доступ и у него под согласием).
   if (agent.provider === 'zcode') {
     const rows: MenuRow[] = [
-      { type: 'heading', label: 'модель' },
-      { type: 'note', label: 'модель и уровень продуманности задаёт аккаунт Z.AI — переключения нет', testId: 'settings-menu-no-models' },
+      { type: 'heading', label: tr('модель') },
+      { type: 'note', label: tr('модель и уровень продуманности задаёт аккаунт Z.AI — переключения нет'), testId: 'settings-menu-no-models' },
     ]
     accessRows(rows, agent, consent)
-    rows.push({ type: 'sep' }, { type: 'note', label: 'Действует со следующего хода: идущий ход не меняется.', testId: 'settings-menu-next-turn' })
+    rows.push({ type: 'sep' }, { type: 'note', label: tr('Действует со следующего хода: идущий ход не меняется.'), testId: 'settings-menu-next-turn' })
     return rows
   }
-  const rows: MenuRow[] = [{ type: 'heading', label: 'модель — со следующего хода', testId: 'settings-menu-models' }]
+  const rows: MenuRow[] = [{ type: 'heading', label: tr('модель — со следующего хода'), testId: 'settings-menu-models' }]
   const models = modelOptions(agent.provider, catalog, agent.model)
   const used = agent.context?.used ?? null
   for (const m of models) {
@@ -80,39 +81,39 @@ export function settingsMenu(agent: AgentView, catalog: ProviderCatalog | null |
     rows.push({
       type: 'item', label: `${m.label}${misfit ? ` — ${misfit}` : ''}`, checked: m.id === agent.model || (!agent.model && m.isDefault && agent.provider === 'codex'),
       pick: { kind: 'model', model: m.id, ...(misfit ? { misfit } : {}) }, testId: `settings-model-${m.id}`,
-      ...(misfit ? { title: `${misfit}: разговор не поместится в окно этой модели — спрошу перед сменой` } : {}),
+      ...(misfit ? { title: tr`${misfit}: разговор не поместится в окно этой модели — спрошу перед сменой` } : {}),
     })
   }
   if (agent.provider === 'codex' && !(catalog?.codex.models.length)) {
-    rows.push({ type: 'note', label: 'список моделей Codex не загружен — «Проверить» в «+ Сессия»', testId: 'settings-menu-no-models' })
+    rows.push({ type: 'note', label: tr('список моделей Codex не загружен — «Проверить» в «+ Сессия»'), testId: 'settings-menu-no-models' })
   }
-  rows.push({ type: 'sep' }, { type: 'heading', label: `усилие${agent.model ? ` · ${agent.model}` : ''}` })
+  rows.push({ type: 'sep' }, { type: 'heading', label: tr`усилие${agent.model ? ` · ${agent.model}` : ''}` })
   for (const e of effortOptions(agent.provider, catalog, agent.model)) {
     rows.push({ type: 'item', label: e, checked: e === agent.effort, pick: { kind: 'effort', effort: e }, testId: `settings-effort-${e}` })
   }
   accessRows(rows, agent, consent)
   rows.push({ type: 'sep' },
-    { type: 'note', label: 'Действует со следующего хода: идущий ход и вопросы в Inbox не меняются.', testId: 'settings-menu-next-turn' },
-    { type: 'note', label: 'Первый ход после смены модели дороже — кэш промпта у каждой модели свой.', testId: 'settings-menu-cache' })
+    { type: 'note', label: tr('Действует со следующего хода: идущий ход и вопросы в Inbox не меняются.'), testId: 'settings-menu-next-turn' },
+    { type: 'note', label: tr('Первый ход после смены модели дороже — кэш промпта у каждой модели свой.'), testId: 'settings-menu-cache' })
   return rows
 }
 
 
 /** Раздел «доступ агента» меню подвала — общий для всех провайдеров («Полный доступ» без согласия — «спрошу один раз»). */
 function accessRows(rows: MenuRow[], agent: AgentView, consent: ConsentView | null | undefined): void {
-  rows.push({ type: 'sep' }, { type: 'heading', label: 'доступ агента' })
+  rows.push({ type: 'sep' }, { type: 'heading', label: tr('доступ агента') })
   const cur = agent.approval ?? 'ask'
   const inheritMode = agent.access?.inheritMode ?? agent.claudeMode ?? null
   const granted = consentGrants(consent, agent.provider)
   for (const a of approvalLevels(agent.provider)) {
     const full = isFullLevel(agent.provider, a, inheritMode)
-    const label = a === 'inherit' && inheritMode ? `${APPROVAL_LABEL[a]} · сейчас ${inheritMode}`
-      : a === 'full' && !granted ? `${APPROVAL_LABEL[a]} · спрошу один раз` : APPROVAL_LABEL[a]
+    const label = a === 'inherit' && inheritMode ? tr`${APPROVAL_LABEL[a]} · сейчас ${inheritMode}`
+      : a === 'full' && !granted ? tr`${APPROVAL_LABEL[a]} · спрошу один раз` : APPROVAL_LABEL[a]
     rows.push({
       type: 'item', label, checked: a === cur, pick: { kind: 'approval', approval: a }, testId: `settings-approval-${a}`,
       title: approvalHint(agent.provider, a, inheritMode),
       ...(full ? { danger: true, title: `${approvalHint(agent.provider, a, inheritMode)} — ${APPROVAL_FULL_WARNING}` } : {}),
-      ...(!full && modeBlocksBrowser(agent.provider, a) && agent.browser ? { title: 'в этом режиме браузер для агента выключится' } : {}),
+      ...(!full && modeBlocksBrowser(agent.provider, a) && agent.browser ? { title: tr('в этом режиме браузер для агента выключится') } : {}),
     })
   }
 }
@@ -215,8 +216,8 @@ export function shellHasSettings(windowVersion: string | null): boolean {
 /** Отказ словами: старая оболочка отвечает `method_not_allowed` — подсказка про терминал. */
 export function settingsErrorText(code: string | null, message: string): string {
   if (code === 'guard_changed') return `${message.replace(/^settings\.set: /, '')}`
-  if (code === 'method_not_allowed' && /access\./.test(message)) return 'Это окно не умеет давать согласие на полный доступ — обнови Пульт (окно новее нужно); из терминала разово: pult agent set <имя> --approval full --yes'
-  if (code === 'method_not_allowed') return `Это окно не умеет менять настройки (оболочка старше ${SETTINGS_SHELL_VERSION}) — в терминале: pult agent set <имя> --model … / config.json → newSession`
-  if (code === 'not_found' && /неизвестный метод/.test(message)) return 'Демон старше 0.3.0 не умеет менять настройки — перезапусти его новой версией'
+  if (code === 'method_not_allowed' && /access\./.test(message)) return tr('Это окно не умеет давать согласие на полный доступ — обнови Пульт (окно новее нужно); из терминала разово: pult agent set <имя> --approval full --yes')
+  if (code === 'method_not_allowed') return tr`Это окно не умеет менять настройки (оболочка старше ${SETTINGS_SHELL_VERSION}) — в терминале: pult agent set <имя> --model … / config.json → newSession`
+  if (code === 'not_found' && /неизвестный метод/.test(message)) return tr('Демон старше 0.3.0 не умеет менять настройки — перезапусти его новой версией')
   return message
 }

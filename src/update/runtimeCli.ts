@@ -1,3 +1,4 @@
+import { t } from '../cli/i18n.js'
 // `pult runtime [--json]` и `pult runtime install [--from <node-x.y.z.tar.gz>]` — свой node Пульта
 // (src/update/runtime.ts) без смены версии: показать, на чём работает демон, и поставить node,
 // если при обновлении он не скачался.
@@ -26,11 +27,11 @@ function loadPin(pkgRoot: string, io: Io, what: string): RuntimePin | null | 'er
 }
 
 function daemonLine(st: DaemonStatus | null): string {
-  if (!st) return 'демон не отвечает'
-  if (!st.node) return `демон ${st.version} не сообщает свой node (версия старше 0.2.18)`
+  if (!st) return t('демон не отвечает')
+  if (!st.node) return t`демон ${st.version} не сообщает свой node (версия старше 0.2.18)`
   const n = st.node
-  if (!n.alive) return `node демона ${n.path} (${n.version}) удалён или заменён — перезапусти: ${RESTART_CMD}`
-  return n.own ? `демон на своём node ${n.version}: ${n.path}` : `демон на системном node ${n.path} (${n.version})`
+  if (!n.alive) return t`node демона ${n.path} (${n.version}) удалён или заменён — перезапусти: ${RESTART_CMD}`
+  return n.own ? t`демон на своём node ${n.version}: ${n.path}` : t`демон на системном node ${n.path} (${n.version})`
 }
 
 export async function runtimeShow(paths: PultPaths, io: Io, opts: { pkgRoot: string; json?: boolean; env?: NodeJS.ProcessEnv }): Promise<number> {
@@ -43,18 +44,18 @@ export async function runtimeShow(paths: PultPaths, io: Io, opts: { pkgRoot: str
     return 0
   }
   if (!report.key) {
-    io.out(`своего node под ${report.platform} нет — демон работает на системном node`)
+    io.out(t`своего node под ${report.platform} нет — демон работает на системном node`)
   } else if (!report.pinned) {
-    io.out(`в пакете нет ${PIN_FILE} — эта версия Пульта своего node не знает`)
+    io.out(t`в пакете нет ${PIN_FILE} — эта версия Пульта своего node не знает`)
   } else if (!report.active) {
-    io.out(`свой node ${report.pinned} не поставлен — поставить: pult runtime install`)
+    io.out(t`свой node ${report.pinned} не поставлен — поставить: pult runtime install`)
   } else if (!report.activeVersion) {
-    io.out(`свой node не отвечает: ${report.active} — поставить заново: pult runtime install`)
+    io.out(t`свой node не отвечает: ${report.active} — поставить заново: pult runtime install`)
   } else {
-    io.out(`свой node ${report.activeVersion}: ${report.active}${report.activeVersion === `v${report.pinned}` ? '' : ` (пин пакета — ${report.pinned}: pult runtime install)`}`)
+    io.out(t`свой node ${report.activeVersion}: ${report.active}${report.activeVersion === `v${report.pinned}` ? '' : t` (пин пакета — ${report.pinned}: pult runtime install)`}`)
   }
   io.out(daemonLine(st))
-  if (report.installed.length) io.out(`на диске: ${report.installed.join(', ')}`)
+  if (report.installed.length) io.out(t`на диске: ${report.installed.join(', ')}`)
   return 0
 }
 
@@ -64,7 +65,7 @@ export async function runtimeInstall(paths: PultPaths, io: Io, opts: { pkgRoot: 
     const pin = loadPin(opts.pkgRoot, io, 'pult runtime install')
     if (pin === 'error') return 1
     if (!pin) {
-      io.err(`pult runtime install: в пакете ${opts.pkgRoot} нет ${PIN_FILE} — эта версия Пульта своего node не знает`)
+      io.err(t`pult runtime install: в пакете ${opts.pkgRoot} нет ${PIN_FILE} — эта версия Пульта своего node не знает`)
       return 1
     }
     let r
@@ -75,10 +76,10 @@ export async function runtimeInstall(paths: PultPaths, io: Io, opts: { pkgRoot: 
       io.err(`pult runtime install: ${e.message}`)
       return 1
     }
-    io.out(r.fetched ? `свой node ${r.version} поставлен: ${r.node}` : `свой node ${r.version} уже стоит: ${r.node}`)
+    io.out(r.fetched ? t`свой node ${r.version} поставлен: ${r.node}` : t`свой node ${r.version} уже стоит: ${r.node}`)
     const st = await daemonStatusOnce(paths)
     const onIt = st?.node?.own === true && st.node.alive && st.node.version === `v${r.version}`
-    if (st && !onIt) io.out(`${daemonLine(st)} — свой node подхватит после перезапуска: ${RESTART_CMD}`)
+    if (st && !onIt) io.out(t`${daemonLine(st)} — свой node подхватит после перезапуска: ${RESTART_CMD}`)
     return 0
   })
 }

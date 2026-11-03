@@ -30,6 +30,9 @@
 
 set -eu
 
+# Pin human-readable regression output independently of the runner's system locale.
+export PULT_LANG=ru
+
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 

@@ -43,7 +43,7 @@
     "ui:watch": "node scripts/build-ui.mjs --watch",
     "ui:test": "node scripts/build-ui.mjs --tests && node --test dist-ui-test/*.test.js",
     "pretest": "npm run build",
-    "test": "node --test dist-test/*.test.js dist-ui-test/*.test.js",
+    "test": "node --import ./scripts/test-language.mjs --test dist-test/*.test.js dist-ui-test/*.test.js",
     "clean": "rm -rf dist dist-test dist-ui-test",
     "smoke:claude": "npm run build && node scripts/smoke-claude.mjs",
     "smoke:codex": "npm run build && node scripts/smoke-codex.mjs",

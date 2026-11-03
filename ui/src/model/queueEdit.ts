@@ -1,3 +1,4 @@
+import { t as tr } from '../lib/i18n.js'
 // Правка реплики в очереди под полем ввода (0.3.2). «Изменить» берёт реплику в правку у демона
 // (`agent.queue.move {hold: true}`): пока правка открыта, очередь на этой реплике стоит. Enter — сохранить,
 // Shift+Enter — новая строка, Esc — отмена. Реплика успела уйти или её убрали — исправленный текст уходит в поле
@@ -26,8 +27,8 @@ export interface QueueEditApi {
   release(id: string): void
 }
 
-export const QUEUE_EDIT_EXPIRED = 'Время правки вышло — реплика осталась как была'
-export const QUEUE_EDIT_EXPIRED_KEPT = 'Время правки вышло — реплика осталась как была, исправленный текст — в поле ввода'
+export const QUEUE_EDIT_EXPIRED = tr('Время правки вышло — реплика осталась как была')
+export const QUEUE_EDIT_EXPIRED_KEPT = tr('Время правки вышло — реплика осталась как была, исправленный текст — в поле ввода')
 
 /** Клавиша в поле правки: только «голый» Enter сохраняет (⌘Enter — горячая клавиша окна), Esc бросает правку. */
 export function queueEditKey(e: { key: string; shiftKey: boolean; altKey: boolean; metaKey: boolean; ctrlKey: boolean; isComposing?: boolean }): 'save' | 'cancel' | null {
@@ -39,8 +40,8 @@ export function queueEditKey(e: { key: string; shiftKey: boolean; altKey: boolea
 
 /** Реплики уже нет в очереди (код отказа демона) — что сказать человеку; `null` — другая ошибка. */
 export function queueGoneText(code: string | null): string | null {
-  if (code === 'queue_item_sent') return 'Реплика уже ушла — исправленный текст в поле ввода'
-  if (code === 'queue_item_removed') return 'Реплика уже удалена — исправленный текст в поле ввода'
+  if (code === 'queue_item_sent') return tr('Реплика уже ушла — исправленный текст в поле ввода')
+  if (code === 'queue_item_removed') return tr('Реплика уже удалена — исправленный текст в поле ввода')
   return null
 }
 
@@ -63,7 +64,7 @@ export async function saveQueueEdit(
   st: QueueEditState,
   io: { save(id: string, text: string): Promise<void>; release(id: string): void; toComposer(text: string): void; errorOf(e: unknown): { code: string | null; text: string } },
 ): Promise<QueueEditStep> {
-  if (!st.text.trim()) return { next: { ...st, error: 'Пустая реплика — убери её из очереди крестиком' }, notice: null }
+  if (!st.text.trim()) return { next: { ...st, error: tr('Пустая реплика — убери её из очереди крестиком') }, notice: null }
   if (st.text === st.original) { io.release(st.id); return { next: null, notice: null } }
   try {
     await io.save(st.id, st.text)

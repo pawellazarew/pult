@@ -1,3 +1,5 @@
+import { getLanguage } from '../../../src/i18n/core.js'
+import { t as tr } from '../lib/i18n.js'
 // План 16, № 11: раздел «Правила „Всегда“» в «Настройках». Данные — `settings.get` → `codexRules` (src/perm/codexRules.ts),
 // «Отозвать» — `settings.set {codexRules: {revoke: id}}`: оба метода уже в белом списке оболочки, Pult.app не меняется.
 
@@ -24,7 +26,7 @@ export interface CodexRulesList {
 
 /** Что разрешает правило — словами кнопки, которой его когда-то завели. */
 export function ruleTitle(r: Pick<CodexRule, 'kind' | 'label'>): string {
-  return r.kind === 'network' ? `Пускать в сеть к ${r.label}` : `Команды, начинающиеся с «${r.label}»`
+  return r.kind === 'network' ? tr`Пускать в сеть к ${r.label}` : tr`Команды, начинающиеся с «${r.label}»`
 }
 
 const pad = (n: number): string => String(n).padStart(2, '0')
@@ -34,23 +36,25 @@ export function ruleDate(iso: string): string {
   const t = Date.parse(iso)
   if (!Number.isFinite(t)) return iso
   const d = new Date(t)
+  if (getLanguage() === 'en') return new Intl.DateTimeFormat('en-GB', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }).format(d)
   return `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
 /** Строка под правилом: когда и из какой сессии; сессии уже нет — так и сказано. */
 export function ruleMeta(r: CodexRule, sessionLabel?: (name: string) => string | null): string {
   const known = sessionLabel?.(r.session)
-  const who = known ? `сессия ${known}` : `сессия ${r.session}${sessionLabel ? ' (удалена)' : ''}`
+  const who = known ? tr`сессия ${known}` : tr`сессия ${r.session}${sessionLabel ? tr(' (удалена)') : ''}`
   return [ruleDate(r.at), who, ...(r.cwd ? [r.cwd] : [])].join(' · ')
 }
 
 /** Сколько строк в файле без метки Пульта — честно, что они есть и что Пульт их не трогает. */
 export function unmarkedNote(n: number): string | null {
   if (n <= 0) return null
-  return `Ещё ${n} ${plural(n, 'строка', 'строки', 'строк')} правил в файле без метки Пульта (их завели руками, codex CLI или прежний Пульт без меток) — их Пульт не показывает и не отзывает; убрать можно только руками.`
+  return tr`Ещё ${n} ${plural(n, tr('строка'), tr('строки'), tr('строк'))} правил в файле без метки Пульта (их завели руками, codex CLI или прежний Пульт без меток) — их Пульт не показывает и не отзывает; убрать можно только руками.`
 }
 
 function plural(n: number, one: string, few: string, many: string): string {
+  if (getLanguage() === 'en') return Math.abs(n) === 1 ? one : many
   const m10 = n % 10
   const m100 = n % 100
   if (m10 === 1 && m100 !== 11) return one

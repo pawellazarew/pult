@@ -1,3 +1,4 @@
+import { t } from '../lib/i18n.js'
 import { createContext, useContext, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { ReactElement } from 'react'
@@ -35,19 +36,19 @@ export function ImagePreview({ source, label }: { source: string; label?: string
   const [note, setNote] = useState('')
   const trigger = useRef<HTMLButtonElement>(null)
   const viewer = useRef<HTMLDivElement>(null)
-  const caption = label || image?.name || source.split('/').pop() || 'Изображение'
+  const caption = label || image?.name || source.split('/').pop() || t('Изображение')
   const read = ctx?.bridge.readImage
   const sessionId = ctx?.sessionId
   useEffect(() => {
     if (!visible) return
     let alive = true
     setImage(null); setError(null)
-    if (!read || !sessionId) { setError('Для просмотра обнови окно Пульта.'); return }
+    if (!read || !sessionId) { setError(t('Для просмотра обнови окно Пульта.')); return }
     read(sessionId, source).then((value) => {
       if (!alive) return
-      if (!/^data:image\/(?:png|jpeg|gif|webp);base64,/.test(value.dataUrl)) { setError('Формат изображения не поддерживается.'); return }
+      if (!/^data:image\/(?:png|jpeg|gif|webp);base64,/.test(value.dataUrl)) { setError(t('Формат изображения не поддерживается.')); return }
       setImage(value)
-    }, () => { if (alive) setError('Изображение недоступно: файл удалён или находится вне папок этой сессии.') })
+    }, () => { if (alive) setError(t('Изображение недоступно: файл удалён или находится вне папок этой сессии.')) })
     return () => { alive = false }
   }, [read, sessionId, source, attempt, visible])
   useEffect(() => {
@@ -60,16 +61,16 @@ export function ImagePreview({ source, label }: { source: string; label?: string
     if (!ctx) return
     setNote('')
     try {
-      if (kind === 'save') { if (await ctx.bridge.saveImage?.(ctx.sessionId, source)) setNote('Сохранено') }
+      if (kind === 'save') { if (await ctx.bridge.saveImage?.(ctx.sessionId, source)) setNote(t('Сохранено')) }
       else await ctx.bridge.openImage?.(ctx.sessionId, source)
-    } catch { setNote('Не удалось открыть или сохранить файл.') }
+    } catch { setNote(t('Не удалось открыть или сохранить файл.')) }
   }
   return <span ref={card} className="image-card" data-testid="image-card">
-    {image ? <button ref={trigger} type="button" className="image-thumb" onClick={() => { setZoom(1); setExpanded(true) }} aria-label={`Увеличить: ${caption}`}>
-      <img src={image.dataUrl} alt={caption} loading="lazy" onError={() => { setImage(null); setError('Не удалось прочитать изображение.') }} />
-    </button> : <span className="image-placeholder" role="status">{error ?? 'Загружаю изображение…'}</span>}
+    {image ? <button ref={trigger} type="button" className="image-thumb" onClick={() => { setZoom(1); setExpanded(true) }} aria-label={t`Увеличить: ${caption}`}>
+      <img src={image.dataUrl} alt={caption} loading="lazy" onError={() => { setImage(null); setError(t('Не удалось прочитать изображение.')) }} />
+    </button> : <span className="image-placeholder" role="status">{error ?? t('Загружаю изображение…')}</span>}
     <span className="image-caption" title={source}>{caption}
-      {error && read && <button type="button" onClick={() => setAttempt(attempt + 1)}>Повторить</button>}
+      {error && read && <button type="button" onClick={() => setAttempt(attempt + 1)}>{t("Повторить")}</button>}
     </span>
     {expanded && image && createPortal(<div className="image-overlay" onClick={(e) => { if (e.target === e.currentTarget) setExpanded(false) }}>
       <div ref={viewer} className="image-viewer" role="dialog" aria-modal="true" aria-label={caption} tabIndex={-1}
@@ -85,12 +86,12 @@ export function ImagePreview({ source, label }: { source: string; label?: string
           }
         }}>
         <div className="image-toolbar"><strong>{caption}</strong>
-          <button type="button" onClick={() => setZoom(Math.max(.25, zoom - .25))} aria-label="Уменьшить масштаб">−</button>
+          <button type="button" onClick={() => setZoom(Math.max(.25, zoom - .25))} aria-label={t("Уменьшить масштаб")}>−</button>
           <button type="button" onClick={() => setZoom(1)}>{Math.round(zoom * 100)}%</button>
-          <button type="button" onClick={() => setZoom(Math.min(4, zoom + .25))} aria-label="Увеличить масштаб">+</button>
-          {ctx?.bridge.saveImage && <button type="button" onClick={() => void action('save')}>Сохранить…</button>}
-          {ctx?.bridge.openImage && <button type="button" onClick={() => void action('open')}>Открыть файл</button>}
-          <button type="button" onClick={() => setExpanded(false)} aria-label="Закрыть просмотр">×</button>
+          <button type="button" onClick={() => setZoom(Math.min(4, zoom + .25))} aria-label={t("Увеличить масштаб")}>+</button>
+          {ctx?.bridge.saveImage && <button type="button" onClick={() => void action('save')}>{t("Сохранить…")}</button>}
+          {ctx?.bridge.openImage && <button type="button" onClick={() => void action('open')}>{t("Открыть файл")}</button>}
+          <button type="button" onClick={() => setExpanded(false)} aria-label={t("Закрыть просмотр")}>×</button>
         </div>
         <div className="image-canvas"><img src={image.dataUrl} alt={caption} style={{ width: `${zoom * 100}%` }} /></div>
         {note && <div className="image-note" role="status">{note}</div>}

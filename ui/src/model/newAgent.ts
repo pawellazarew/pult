@@ -1,3 +1,4 @@
+import { t as tr } from '../lib/i18n.js'
 // Форма «+ Агент» (docs/12 §3 п.5): пресеты модели и усилия, имя из папки, проверка, параметры
 // `agent.start`. Чистые функции.
 
@@ -5,7 +6,7 @@ import type { GuardRule } from '../../../src/core/guard.js'
 import type { CodexRulesList } from './rules.js'
 import type { NewSessionPrefill } from '../../../shell/src/contract.js'
 import type { ApprovalMode } from '../../../src/adapters/types.js'
-import { CLAUDE_DEFAULT_EFFORT, CLAUDE_DEFAULT_MODEL, CLAUDE_EFFORTS, CLAUDE_MODELS, CODEX_EFFORTS_FALLBACK, HOME_CWD_WARNING, modeBlocksBrowser } from '../../../src/sessions/settings.js'
+import { CLAUDE_DEFAULT_EFFORT, CLAUDE_DEFAULT_MODEL, CLAUDE_EFFORTS, CLAUDE_MODELS, CODEX_EFFORTS_FALLBACK, homeCwdWarning, modeBlocksBrowser } from '../../../src/sessions/settings.js'
 import type { LastUsed, NewSessionSettings, ProviderDefaults } from '../../../src/sessions/settings.js'
 import type { AgentProvider } from './types.js'
 import type { AccessSettings } from './access.js'
@@ -70,36 +71,36 @@ export function approvalLevels(provider: AgentProvider): readonly ApprovalMode[]
   return provider === 'claude' ? [...APPROVAL_ORDER, 'inherit'] : APPROVAL_ORDER
 }
 export const APPROVAL_LABEL: Readonly<Record<ApprovalMode, string>> = {
-  'read-only': 'Только чтение',
-  ask: 'Спрашивать',
-  workspace: 'Правки в папке без вопросов',
-  full: 'Полный доступ',
-  inherit: 'Как в настройках Claude',
+  'read-only': tr('Только чтение'),
+  ask: tr('Спрашивать'),
+  workspace: tr('Правки в папке без вопросов'),
+  full: tr('Полный доступ'),
+  inherit: tr('Как в настройках Claude'),
 }
 // Шаг A: пояснения сверены с кодом (ревью Codex № 7): Claude — src/adapters/claude/argv.ts, Codex — `codexThreadPolicy`.
 // Вопросы приходят в Inbox; без брокера разрешений всё, что спросило бы, получает отказ (инвариант 5).
 const APPROVAL_HINT: Readonly<Record<AgentProvider, Record<ApprovalMode, string>>> = {
   claude: {
-    'read-only': 'правки запрещены; любая команда — вопрос в Inbox',
-    ask: 'правки и команды — вопрос в Inbox; что разрешено твоими правилами Claude — без вопроса',
-    workspace: 'правки файлов без вопросов; команды — вопрос в Inbox',
-    full: 'без вопросов и без песочницы, кроме твоих правил ask/deny; браузер для агента не включается',
-    inherit: 'Пульт режим не задаёт — действует твой defaultMode',
+    'read-only': tr('правки запрещены; любая команда — вопрос в Inbox'),
+    ask: tr('правки и команды — вопрос в Inbox; что разрешено твоими правилами Claude — без вопроса'),
+    workspace: tr('правки файлов без вопросов; команды — вопрос в Inbox'),
+    full: tr('без вопросов и без песочницы, кроме твоих правил ask/deny; браузер для агента не включается'),
+    inherit: tr('Пульт режим не задаёт — действует твой defaultMode'),
   },
   codex: {
-    'read-only': 'песочница только на чтение; шаг за неё — вопрос в Inbox',
-    ask: 'правит папку сам; шаг за песочницу — вопрос в Inbox',
-    workspace: 'правит папку сам; шаг за песочницу — отказ без вопроса (браузер выключен)',
-    full: 'песочницы нет, разрешений не просит (danger-full-access; браузер выключен)',
+    'read-only': tr('песочница только на чтение; шаг за неё — вопрос в Inbox'),
+    ask: tr('правит папку сам; шаг за песочницу — вопрос в Inbox'),
+    workspace: tr('правит папку сам; шаг за песочницу — отказ без вопроса (браузер выключен)'),
+    full: tr('песочницы нет, разрешений не просит (danger-full-access; браузер выключен)'),
     // У Codex уровня нет: демон его не примет. Строка — на случай записи, пришедшей от Claude-формы.
-    inherit: 'у Codex такого уровня нет',
+    inherit: tr('у Codex такого уровня нет'),
   },
   zcode: {
-    'read-only': 'режим plan: только чтение и планирование, правки недоступны',
-    ask: 'guarded: безопасное делает сам, опасное отклоняет; вопросов в Inbox не будет — ограничения объяснит в ответе',
-    workspace: 'правки файлов применяются сами (edit); остальное — по правилам ZCode',
-    full: 'что угодно без вопросов (yolo); свой режим ZCode не сообщает — метка «не подтверждено»',
-    inherit: 'у ZCode такого уровня нет',
+    'read-only': tr('режим plan: только чтение и планирование, правки недоступны'),
+    ask: tr('guarded: безопасное делает сам, опасное отклоняет; вопросов в Inbox не будет — ограничения объяснит в ответе'),
+    workspace: tr('правки файлов применяются сами (edit); остальное — по правилам ZCode'),
+    full: tr('что угодно без вопросов (yolo); свой режим ZCode не сообщает — метка «не подтверждено»'),
+    inherit: tr('у ZCode такого уровня нет'),
   },
 }
 /**
@@ -108,7 +109,7 @@ const APPROVAL_HINT: Readonly<Record<AgentProvider, Record<ApprovalMode, string>
  */
 export function approvalHint(provider: AgentProvider, mode: ApprovalMode, inheritMode?: string | null): string {
   const base = APPROVAL_HINT[provider][mode]
-  return mode === 'inherit' && inheritMode ? `${base}: сейчас ${inheritMode}${inheritMode === 'bypassPermissions' ? ' — это полный доступ' : ''}` : base
+  return mode === 'inherit' && inheritMode ? tr`${base}: сейчас ${inheritMode}${inheritMode === 'bypassPermissions' ? tr(' — это полный доступ') : ''}` : base
 }
 /**
  * Подвал разговора: режим словами. У Claude в `inherit` флага нет — решают его настройки, и демон присылает действующий
@@ -120,7 +121,7 @@ export function approvalFooter(provider: AgentProvider, mode: ApprovalMode, clau
 }
 
 /** Красное предупреждение у `full` (одинаково у обоих провайдеров). */
-export const APPROVAL_FULL_WARNING = 'агент делает что угодно без вопросов, песочницы нет'
+export const APPROVAL_FULL_WARNING = tr('агент делает что угодно без вопросов, песочницы нет')
 
 /**
  * Папка — домашняя или выше: `/`, `/Users`, `/home`, `/Users/<имя>`, `/home/<имя>`. Окну домашнюю папку никто не
@@ -137,7 +138,7 @@ export function cwdCoversHome(cwd: string): boolean {
  */
 export function homeWarning(form: Pick<NewAgentForm, 'cwd' | 'approval' | 'worktree'>): string | null {
   if (!form.cwd || form.approval === 'read-only' || form.worktree.trim()) return null
-  return cwdCoversHome(form.cwd) ? HOME_CWD_WARNING : null
+  return cwdCoversHome(form.cwd) ? homeCwdWarning() : null
 }
 
 /**
@@ -157,6 +158,7 @@ export function defaultForm(provider: AgentProvider = 'claude'): NewAgentForm {
 
 /** Ответ `settings.get` (M8f). */
 export interface SettingsReply {
+  language?: 'auto' | 'ru' | 'en'
   newSession: NewSessionSettings
   lastUsed: LastUsed
   /** Флаг автопроверки обновлений (с 0.3.3); нет — старый демон. */
@@ -279,9 +281,9 @@ export function switchProvider(form: NewAgentForm, provider: AgentProvider): New
 }
 
 const TRANSLIT: Record<string, string> = {
-  а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i', й: 'y', к: 'k', л: 'l', м: 'm',
-  н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f', х: 'h', ц: 'c', ч: 'ch', ш: 'sh', щ: 'sch',
-  ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya',
+  а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i', й: 'y', к: 'k', л: 'l', м: 'm', // i18n-ignore
+  н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f', х: 'h', ц: 'c', ч: 'ch', ш: 'sh', щ: 'sch', // i18n-ignore
+  ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya', // i18n-ignore
 }
 
 /** Имя агента из папки: латиница, `[a-z][a-z0-9_-]{0,31}`, свободное (суффикс -2, -3…). */
@@ -309,16 +311,16 @@ export type FormErrors = Partial<Record<'name' | 'cwd' | 'worktree' | 'approval'
 
 export function validateForm(form: NewAgentForm, taken: readonly string[]): FormErrors {
   const err: FormErrors = {}
-  if (!form.cwd) err.cwd = 'выбери папку'
-  if (!AGENT_NAME_RE.test(form.name)) err.name = 'латиница, цифры, - и _; с буквы; до 32 знаков'
-  else if (taken.includes(form.name)) err.name = 'такая сессия уже есть'
+  if (!form.cwd) err.cwd = tr('выбери папку')
+  if (!AGENT_NAME_RE.test(form.name)) err.name = tr('латиница, цифры, - и _; с буквы; до 32 знаков')
+  else if (taken.includes(form.name)) err.name = tr('такая сессия уже есть')
   const b = form.worktree.trim()
   if (b && (/[\s~^:?*[\\]/.test(b) || b.startsWith('-') || b.includes('..') || b.endsWith('/') || b.endsWith('.lock'))) {
-    err.worktree = 'недопустимое имя ветки git'
+    err.worktree = tr('недопустимое имя ветки git')
   }
   // Демон такой старт всё равно отверг бы — говорим заранее и по-человечески.
   if (form.browser && approvalBlocksBrowser(form.provider, form.approval)) {
-    err.approval = 'в этом режиме браузер для агента не включается — сними галочку браузера или выбери режим тише'
+    err.approval = tr('в этом режиме браузер для агента не включается — сними галочку браузера или выбери режим тише')
   }
   return err
 }

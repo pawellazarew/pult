@@ -1,3 +1,4 @@
+import { t } from '../cli/i18n.js'
 // Пункты доктора О3: браузер агента (Playwright MCP и Chrome) и свои MCP-серверы владельца.
 // Браузер — необязательная часть: пока ни одна сессия его не просит, «не поставлен» и «нет Chrome» — не
 // предупреждение, а справка. Желтеет, когда браузер включён хоть у одной сессии, а работать ему нечем.
@@ -21,9 +22,9 @@ export interface BrowserDoctorInput {
 /** Состояние установки из `daemon.status.browser` (CLI спрашивает демона, если он жив). */
 export function installStateOf(b: DaemonBrowser): InstallState {
   switch (b.state) {
-    case 'installing': return { state: 'installing', since: 'идёт сейчас' }
+    case 'installing': return { state: 'installing', since: t('идёт сейчас') }
     case 'installed': return { state: 'installed' }
-    case 'failed': return { state: 'failed', at: '', error: b.error ?? 'причина не сообщена' }
+    case 'failed': return { state: 'failed', at: '', error: b.error ?? t('причина не сообщена') }
     default: return { state: 'missing' }
   }
 }
@@ -33,25 +34,25 @@ export function browserDoctorItems(i: BrowserDoctorInput): DoctorItem[] {
   const want = (i.wanted ?? 0) > 0
   const pkg = `${PLAYWRIGHT_MCP_PACKAGE} ${PLAYWRIGHT_MCP_VERSION}`
   const mcp: DoctorItem = st.state === 'installed'
-    ? { id: 'browser.mcp', title: 'Браузер агента', status: 'ok', detail: `${pkg} стоит: ${browserPrefix(i.paths)}` }
+    ? { id: 'browser.mcp', title: t('Браузер агента'), status: 'ok', detail: t`${pkg} стоит: ${browserPrefix(i.paths)}` }
     : st.state === 'installing'
-      ? { id: 'browser.mcp', title: 'Браузер агента', status: 'ok', detail: `${pkg} ставится${st.since === 'идёт сейчас' ? '' : ` (с ${st.since})`}` }
+      ? { id: 'browser.mcp', title: t('Браузер агента'), status: 'ok', detail: t`${pkg} ставится${st.since === t('идёт сейчас') ? '' : t` (с ${st.since})`}` }
       : st.state === 'failed'
-        ? { id: 'browser.mcp', title: 'Браузер агента', status: 'warn', detail: `${pkg} не поставился: ${st.error.split('\n')[0] ?? ''}`, fix: 'pult browser install', fixCmd: 'pult browser install' }
+        ? { id: 'browser.mcp', title: t('Браузер агента'), status: 'warn', detail: t`${pkg} не поставился: ${st.error.split('\n')[0] ?? ''}`, fix: 'pult browser install', fixCmd: 'pult browser install' }
         : want
-          ? { id: 'browser.mcp', title: 'Браузер агента', status: 'warn', detail: `${pkg} не поставлен, а браузер включён у сессий: ${i.wanted}`, fix: 'pult browser install', fixCmd: 'pult browser install' }
-          : { id: 'browser.mcp', title: 'Браузер агента', status: 'ok', detail: `${pkg} не поставлен — поставится сам, когда сессии включат браузер (или: pult browser install)` }
+          ? { id: 'browser.mcp', title: t('Браузер агента'), status: 'warn', detail: t`${pkg} не поставлен, а браузер включён у сессий: ${i.wanted}`, fix: 'pult browser install', fixCmd: 'pult browser install' }
+          : { id: 'browser.mcp', title: t('Браузер агента'), status: 'ok', detail: t`${pkg} не поставлен — поставится сам, когда сессии включат браузер (или: pult browser install)` }
   const needChrome = want || st.state === 'installed'
   const chrome: DoctorItem = i.chrome
-    ? { id: 'browser.chrome', title: 'Chrome для браузера агента', status: 'ok', detail: i.chrome }
+    ? { id: 'browser.chrome', title: t('Chrome для браузера агента'), status: 'ok', detail: i.chrome }
     : {
         id: 'browser.chrome',
-        title: 'Chrome для браузера агента',
+        title: t('Chrome для браузера агента'),
         status: needChrome ? 'warn' : 'ok',
         detail: needChrome
-          ? 'Google Chrome не найден — браузер агента работает на системном Chrome, своих браузеров Пульт не качает'
-          : 'Google Chrome не найден (нужен только браузеру агента)',
-        ...(needChrome ? { fix: 'поставь Google Chrome (https://www.google.com/chrome/) в /Applications' } : {}),
+          ? t('Google Chrome не найден — браузер агента работает на системном Chrome, своих браузеров Пульт не качает')
+          : t('Google Chrome не найден (нужен только браузеру агента)'),
+        ...(needChrome ? { fix: t('поставь Google Chrome (https://www.google.com/chrome/) в /Applications') } : {}),
       }
   return [mcp, chrome]
 }
@@ -63,29 +64,29 @@ export function browserDoctorItems(i: BrowserDoctorInput): DoctorItem[] {
 export async function mcpDoctorItems(userFile: string, selected: readonly string[]): Promise<DoctorItem[]> {
   const r = await readServersFile(userFile)
   if (r.warning) {
-    return [{ id: 'mcp.servers', title: 'Свои MCP-серверы', status: 'warn', detail: r.warning, fix: `проверь ${userFile}: Пульт читает оттуда mcpServers (только чтение)` }]
+    return [{ id: 'mcp.servers', title: t('Свои MCP-серверы'), status: 'warn', detail: r.warning, fix: t`проверь ${userFile}: Пульт читает оттуда mcpServers (только чтение)` }]
   }
   const known = Object.keys(r.servers)
   const missing = selected.filter((n) => !Object.hasOwn(r.servers, n))
   if (missing.length) {
     return [{
-      id: 'mcp.servers', title: 'Свои MCP-серверы', status: 'warn',
-      detail: `выбраны, но в ~/.claude.json их нет — не подключаются: ${missing.join(', ')}`,
-      fix: 'добавь их (claude mcp add --scope user …) или сними выбор: окно → doctor → «MCP-серверы…» / pult mcp select',
+      id: 'mcp.servers', title: t('Свои MCP-серверы'), status: 'warn',
+      detail: t`выбраны, но в ~/.claude.json их нет — не подключаются: ${missing.join(', ')}`,
+      fix: t('добавь их (claude mcp add --scope user …) или сними выбор: окно → doctor → «MCP-серверы…» / pult mcp select'),
     }]
   }
   const detail = selected.length
-    ? `подключены к сессиям Claude: ${selected.join(', ')} · в ~/.claude.json: ${known.length}`
-    : `не выбраны (в ~/.claude.json: ${known.length}) — выбрать: окно → doctor → «MCP-серверы» или pult mcp select`
-  return [{ id: 'mcp.servers', title: 'Свои MCP-серверы', status: 'ok', detail }]
+    ? t`подключены к сессиям Claude: ${selected.join(', ')} · в ~/.claude.json: ${known.length}`
+    : t`не выбраны (в ~/.claude.json: ${known.length}) — выбрать: окно → doctor → «MCP-серверы» или pult mcp select`
+  return [{ id: 'mcp.servers', title: t('Свои MCP-серверы'), status: 'ok', detail }]
 }
 
 /** `defaultMode: bypassPermissions` в настройках Claude — браузер для сессий Claude не включается. */
 export function bypassDoctorItems(mode: string | null, wanted: number): DoctorItem[] {
   if (mode !== 'bypassPermissions') return []
   return [{
-    id: 'browser.permissions', title: 'Браузер агента и режим разрешений Claude', status: wanted > 0 ? 'warn' : 'ok',
-    detail: 'в ~/.claude/settings.json permissions.defaultMode = "bypassPermissions" — браузер для сессий Claude не включается (вызовы шли бы без вопроса)',
-    fix: 'поменяй defaultMode (например, на "auto") в ~/.claude/settings.json',
+    id: 'browser.permissions', title: t('Браузер агента и режим разрешений Claude'), status: wanted > 0 ? 'warn' : 'ok',
+    detail: t('в ~/.claude/settings.json permissions.defaultMode = "bypassPermissions" — браузер для сессий Claude не включается (вызовы шли бы без вопроса)'),
+    fix: t('поменяй defaultMode (например, на "auto") в ~/.claude/settings.json'),
   }]
 }

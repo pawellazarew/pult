@@ -1,3 +1,4 @@
+import { t as tr } from '../lib/i18n.js'
 import type { SavedAttachment } from '../../../shell/src/contract.js'
 import { quotePath } from './paths.js'
 import type { DraftStore } from './drafts.js'
@@ -9,7 +10,7 @@ export const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 
 export function attachmentPrompt(text: string, items: readonly SavedAttachment[]): string {
   if (!items.length) return text
-  return [text.trim(), `Прикреплённые файлы:\n${items.map((a) => `- ${quotePath(a.path)}`).join('\n')}`].filter(Boolean).join('\n\n')
+  return [text.trim(), tr`Прикреплённые файлы:\n${items.map((a) => `- ${quotePath(a.path)}`).join('\n')}`].filter(Boolean).join('\n\n')
 }
 
 export function mergeAttachments(a: readonly SavedAttachment[], b: readonly SavedAttachment[]): SavedAttachment[] {

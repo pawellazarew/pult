@@ -5,6 +5,8 @@
 // демон из-за одной опечатки в конфиге не падает.
 
 import { readFileSync, writeFileSync } from 'node:fs'
+import { isLanguageSetting } from '../i18n/core.js'
+import type { LanguageSetting } from '../i18n/core.js'
 import { atomicWrite } from '../service/fsutil.js'
 import { defaultNewSession, parseNewSession } from '../sessions/settings.js'
 import type { NewSessionSettings } from '../sessions/settings.js'
@@ -36,6 +38,7 @@ export interface NetworkProfile {
 
 export interface PultConfig {
   version: 1
+  language: LanguageSetting
   network: Record<ProviderName, NetworkProfile>
   /**
    * Страж страны выхода (0.3.6) — в файле `network.guard: {mode: 'deny'|'allow', countries}`, один на всех провайдеров.
@@ -131,6 +134,7 @@ export const MCP_SERVERS_MAX = 32
 export function defaultConfig(): PultConfig {
   return {
     version: 1,
+    language: 'auto',
     network: {
       claude: { ...DEFAULT_NETWORK_PROFILE },
       codex: { ...DEFAULT_NETWORK_PROFILE },
@@ -200,6 +204,11 @@ export function validateConfig(raw: unknown): { config: PultConfig; warnings: st
     return { config: cfg, warnings }
   }
   const o = raw as Record<string, unknown>
+
+  if (o['language'] !== undefined) {
+    if (isLanguageSetting(o['language'])) cfg.language = o['language']
+    else warnings.push('config.json: language must be auto, ru or en; using auto')
+  }
 
   const net = o['network']
   if (net !== undefined) {
@@ -386,10 +395,12 @@ export function writeMcpSelection(file: string, servers: readonly string[]): voi
   writeConfigSubtree(file, 'mcp', (prev) => ({ ...prev, servers: [...servers] }), 'выбор серверов не записан')
 }
 
-/**
- * M8f, `settings.set`: заменить раздел `newSession` целиком, НЕ трогая остального (сеть, прокси, команды
- * уведомлений окно не пишет никогда). Те же правила, что у выбора MCP-серверов.
- */
+/** Persist only the interface language; preserve unknown user configuration. */
+export function writeLanguage(file: string, value: LanguageSetting): void {
+  writeConfigSubtree(file, 'language', () => value, 'language was not saved')
+}
+
+/** Replace only new-session defaults without rewriting unrelated configuration. */
 export function writeNewSession(file: string, value: NewSessionSettings): void {
   writeConfigSubtree(file, 'newSession', () => JSON.parse(JSON.stringify(value)) as Record<string, unknown>, 'настройки новой сессии не записаны')
 }
@@ -429,7 +440,7 @@ export function writeMigrationMarker(file: string, name: string, at: string): vo
   writeConfigSubtree(file, 'migrations', (prev) => ({ ...prev, [name]: { at } }), `маркер миграции ${name} не записан`)
 }
 
-function writeConfigSubtree(file: string, key: string, next: (prev: Record<string, unknown>) => Record<string, unknown>, what: string, drop: readonly string[] = []): void {
+function writeConfigSubtree(file: string, key: string, next: (prev: Record<string, unknown>) => unknown, what: string, drop: readonly string[] = []): void {
   let raw: Record<string, unknown> = {}
   let text: string | null = null
   try {

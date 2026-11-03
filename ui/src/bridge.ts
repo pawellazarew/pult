@@ -1,3 +1,4 @@
+import { t as tr } from './lib/i18n.js'
 // Доступ к мосту `window.pult`. Интерфейс не знает ни про сокет, ни про токен демона — только
 // этот объект, который кладёт preload оболочки (shell/src/preload.ts).
 
@@ -12,9 +13,9 @@ declare global {
 /** Мост с проверкой версии: окно, открытое не в оболочке или в оболочке другой версии, должно это сказать, а не падать молча. */
 export function getBridge(expectedVersion: number): { bridge: PultBridge | null; problem: string | null } {
   const b = window.pult
-  if (!b) return { bridge: null, problem: 'мост window.pult не найден — окно открыто не в оболочке Пульта' }
+  if (!b) return { bridge: null, problem: tr('мост window.pult не найден — окно открыто не в оболочке Пульта') }
   if (b.version !== expectedVersion) {
-    return { bridge: null, problem: `версия моста ${b.version}, интерфейс ждёт ${expectedVersion} — обнови Пульт целиком` }
+    return { bridge: null, problem: tr`версия моста ${b.version}, интерфейс ждёт ${expectedVersion} — обнови Пульт целиком` }
   }
   return { bridge: b, problem: null }
 }

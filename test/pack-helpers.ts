@@ -97,7 +97,8 @@ export interface Run { code: number | null; stdout: string; stderr: string }
 
 /** Запуск процесса с захватом вывода; ChildProcess — наружу, чтобы тест мог его ждать или убить. */
 export function runProc(cmd: string, args: string[], env: Record<string, string>, cwd?: string): { child: ChildProcess; done: Promise<Run> } {
-  const child = spawn(cmd, args, { env, stdio: ['ignore', 'pipe', 'pipe'], ...(cwd ? { cwd } : {}) })
+  // Packed CLI fixtures assert Russian output; explicit per-test locale still takes precedence.
+  const child = spawn(cmd, args, { env: { PULT_LANG: 'ru', ...env }, stdio: ['ignore', 'pipe', 'pipe'], ...(cwd ? { cwd } : {}) })
   let stdout = ''
   let stderr = ''
   child.stdout?.setEncoding('utf8')

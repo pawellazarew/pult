@@ -1,3 +1,4 @@
+import { t as tr } from '../lib/i18n.js'
 // Шапка и панель doctor: страж сети, остановленные провайдеры, пункты доктора. Чистые функции.
 //
 // СТРАЖ (docs/12 §3 п.4): страна выхода и время проверки. Два источника, берётся свежий:
@@ -61,7 +62,7 @@ export function guardView(checks: readonly GuardCheck[]): GuardView {
     if (!had || Date.parse(c.checkedAt) >= Date.parse(had.checkedAt)) latest.set(c.provider, c)
   }
   const all = [...latest.values()]
-  if (!all.length) return { tone: 'queued', label: 'не проверен', checkedAt: null, detail: 'страж ещё не проверял сеть — открой doctor' }
+  if (!all.length) return { tone: 'queued', label: tr('не проверен'), checkedAt: null, detail: tr('страж ещё не проверял сеть — открой doctor') }
   const bad = all.filter((c) => !c.ok)
   const newest = all.reduce((a, b) => (Date.parse(b.checkedAt) > Date.parse(a.checkedAt) ? b : a))
   const locs = [...new Set(all.map((c) => c.loc ?? '??'))].join('/')
@@ -69,13 +70,13 @@ export function guardView(checks: readonly GuardCheck[]): GuardView {
     const b = bad[0] as GuardCheck
     return {
       tone: 'fail',
-      label: `выход ${b.loc ?? '??'} — стоп`,
+      label: tr`выход ${b.loc ?? '??'} — стоп`,
       checkedAt: b.checkedAt,
-      detail: `${bad.map((c) => c.provider).join(', ')}: ${b.reason === 'blocked_country' ? 'страна в списке-страже — подними VPN'
-        : b.reason === 'not_allowed_country' ? 'страны нет в списке разрешённых — смени выход или «Настройки» → «Страж сети»' : `${b.reason} — подними VPN`}`,
+      detail: `${bad.map((c) => c.provider).join(', ')}: ${b.reason === 'blocked_country' ? tr('страна в списке-страже — подними VPN')
+        : b.reason === 'not_allowed_country' ? tr('страны нет в списке разрешённых — смени выход или «Настройки» → «Страж сети»') : tr`${b.reason} — подними VPN`}`,
     }
   }
-  return { tone: 'ok', label: `выход ${locs}`, checkedAt: newest.checkedAt, detail: all.map((c) => `${c.provider}: ${c.loc ?? '??'}`).join(' · ') }
+  return { tone: 'ok', label: tr`выход ${locs}`, checkedAt: newest.checkedAt, detail: all.map((c) => `${c.provider}: ${c.loc ?? '??'}`).join(' · ') }
 }
 
 export interface ProviderBlock { provider: AgentProvider; reason?: string }
@@ -94,10 +95,10 @@ export function blockedProviders(providers: Record<string, { blocked: boolean; r
 export interface DoctorGroup { title: string; items: DoctorItem[] }
 
 const GROUPS: Array<[string, (id: string) => boolean]> = [
-  ['Требует внимания', () => false],
-  ['Сеть', (id) => id.startsWith('net.') || id === 'guard.rule'],
-  ['CLI, вход и подписки', (id) => id.startsWith('cli.') || id.startsWith('login.') || id.startsWith('subscription.') || id.startsWith('codex.')],
-  ['Демон, служба, версии', (id) => id.startsWith('daemon') || id.startsWith('service') || id.startsWith('version.') || id.startsWith('node.') || id.startsWith('home.')],
+  [tr('Требует внимания'), () => false],
+  [tr('Сеть'), (id) => id.startsWith('net.') || id === 'guard.rule'],
+  [tr('CLI, вход и подписки'), (id) => id.startsWith('cli.') || id.startsWith('login.') || id.startsWith('subscription.') || id.startsWith('codex.')],
+  [tr('Демон, служба, версии'), (id) => id.startsWith('daemon') || id.startsWith('service') || id.startsWith('version.') || id.startsWith('node.') || id.startsWith('home.')],
 ]
 
 /** Пункты доктора: сначала провалы и предупреждения (с командой «почини»), потом остальное по группам. */
@@ -113,7 +114,7 @@ export function doctorGroups(report: DoctorReport | null): DoctorGroup[] {
     if (items.length) out.push({ title, items })
     for (const i of items) rest.splice(rest.indexOf(i), 1)
   }
-  if (rest.length) out.push({ title: 'Прочее', items: rest })
+  if (rest.length) out.push({ title: tr('Прочее'), items: rest })
   return out
 }
 
@@ -130,14 +131,14 @@ export function doctorTone(report: DoctorReport | null): Tone {
  */
 export interface ProviderStatusView { label: string; tone: Tone | 'mut'; title: string }
 const READINESS: Record<ProviderReadiness['state'], { label: string; tone: Tone }> = {
-  ready: { label: 'готов', tone: 'ok' },
-  login_required: { label: 'нужен вход', tone: 'wait' },
-  unavailable: { label: 'нет CLI', tone: 'fail' },
-  error: { label: 'ошибка', tone: 'fail' },
+  ready: { label: tr('готов'), tone: 'ok' },
+  login_required: { label: tr('нужен вход'), tone: 'wait' },
+  unavailable: { label: tr('нет CLI'), tone: 'fail' },
+  error: { label: tr('ошибка'), tone: 'fail' },
 }
 export function providerStatusView(r: ProviderReadiness | undefined, checking: boolean): ProviderStatusView {
-  if (checking) return { label: 'проверяю', tone: 'mut', title: 'Проверяю вход и CLI…' }
-  if (!r) return { label: 'проверить', tone: 'mut', title: 'Проверить вход и CLI' }
+  if (checking) return { label: tr('проверяю'), tone: 'mut', title: tr('Проверяю вход и CLI…') }
+  if (!r) return { label: tr('проверить'), tone: 'mut', title: tr('Проверить вход и CLI') }
   const v = READINESS[r.state]
-  return { ...v, title: `${r.detail}${r.fixCmd ? ` — починить: ${r.fixCmd}` : ''}. Клик — проверить ещё раз` }
+  return { ...v, title: tr`${r.detail}${r.fixCmd ? tr` — починить: ${r.fixCmd}` : ''}. Клик — проверить ещё раз` }
 }

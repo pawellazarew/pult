@@ -12,7 +12,7 @@ import type { SessionMcpExtras, TurnSettings } from '../adapters/types.js'
 import type { SessionRecord } from '../sessions/registry.js'
 import type { BrowserInstaller } from './browser.js'
 import {
-  approvalBrowserRefusal, BROWSER_SERVER_NAME, browserCli, browserCodexSpec, browserPermissions, browserServerSpec, BYPASS_REFUSAL, claudeDefaultMode,
+  approvalBrowserRefusal, BROWSER_SERVER_NAME, browserCli, browserCodexSpec, browserPermissions, browserServerSpec, bypassRefusal, claudeDefaultMode,
   ensureBrowserDirs, findChrome,
 } from './browser.js'
 import { selectedServers } from './servers.js'
@@ -77,7 +77,7 @@ export function createMcpExtras(d: ComposeDeps): (name: string, nodeBin: string,
       // с явным `--permission-mode`, и bypass владельца браузеру не мешает.
       if (rec.provider === 'claude' && rec.approval === 'inherit' && claudeDefaultMode(d.claudeSettings(rec.cwd)) === 'bypassPermissions') {
         // Правило «спрашивать» в этом режиме может не сработать — браузер с куками без вопросов не даём.
-        skipped(rec, BYPASS_REFUSAL)
+        skipped(rec, bypassRefusal())
         return { servers }
       }
       // Нет пакета — ставим (или ждём идущую установку). Не вышло — ход идёт без браузера, а в ленте

@@ -1,3 +1,4 @@
+import { t } from '../lib/i18n.js'
 // Поиск по всем разговорам — ⌘⇧F (О2, docs/14 «Поиск, метки, экспорт»). Запрос уходит демону
 // (`events.search`) через 200 мс после последней буквы; выдача — по сессиям, новые первыми. ↑/↓ —
 // по результатам, Enter или клик — открыть сессию на этом месте ленты. Логика — model/search.ts.
@@ -24,11 +25,11 @@ export async function searchOnce(run: (q: string) => Promise<SearchReply>, q: st
       reply = await run(q)
     } catch (e) {
       const old = isBridgeError(e) && (e.code === 'method_not_allowed' || e.code === 'not_found')
-      return { ok: false, error: old ? 'Поиск не поддерживается: демон или окно старше — обнови Пульт.' : errorText(e) }
+      return { ok: false, error: old ? t('Поиск не поддерживается: демон или окно старше — обнови Пульт.') : errorText(e) }
     }
     if (!reply.superseded) return { ok: true, reply }
   }
-  return { ok: false, error: 'Поиск прерван — попробуй ещё раз.' }
+  return { ok: false, error: t('Поиск прерван — попробуй ещё раз.') }
 }
 
 /** Время результата: сегодня — часы, иначе ещё и дата. */
@@ -46,7 +47,7 @@ export function SearchResults({ groups, query, selected, now, onOpen }: {
 }): ReactElement {
   let i = -1
   return (
-    <div className="search-results" role="listbox" aria-label="Результаты поиска" data-testid="search-results">
+    <div className="search-results" role="listbox" aria-label={t("Результаты поиска")} data-testid="search-results">
       {groups.map((g) => (
         <section key={g.sessionId} className="search-group" data-testid="search-group" data-session={g.sessionId}>
           <div className="search-group-h" title={g.sessionId}>{g.label}<span className="n">{g.hits.length}</span></div>
@@ -123,20 +124,20 @@ export function SearchDialog({ run, labelOf, now, onOpen, onClose }: {
 
   const count = state.reply?.results.length ?? 0
   return (
-    <Dialog title="Поиск по разговорам" onClose={onClose} size="wide" testId="search-dialog"
+    <Dialog title={t("Поиск по разговорам")} onClose={onClose} size="wide" testId="search-dialog"
       footer={<>
         <span className="note" data-testid="search-status">
-          {state.status === 'loading' ? 'ищу…'
+          {state.status === 'loading' ? t('ищу…')
             : state.status === 'error' ? <span className="t-fail">{state.error}</span>
-            : state.status === 'done' ? (count ? `${count}${state.reply?.truncated ? '+' : ''} — самые новые первыми` : 'ничего не нашлось')
-            : 'реплики, ответы модели и вызовы инструментов всех сессий'}
+            : state.status === 'done' ? (count ? t`${count}${state.reply?.truncated ? '+' : ''} — самые новые первыми` : t('ничего не нашлось'))
+            : t('реплики, ответы модели и вызовы инструментов всех сессий')}
         </span>
         <span className="grow" />
-        <span className="note"><Kbd>↑↓</Kbd> выбрать · <Kbd>↵</Kbd> открыть · <Kbd>Esc</Kbd> закрыть</span>
+        <span className="note"><Kbd>↑↓</Kbd>{t(" выбрать · ")}<Kbd>↵</Kbd>{t(" открыть · ")}<Kbd>Esc</Kbd>{t(" закрыть")}</span>
       </>}>
       <label className="field search-field">
         <Icon name="search" />
-        <input ref={input} value={query} placeholder="что искать" aria-label="Что искать" data-testid="search-input"
+        <input ref={input} value={query} placeholder={t("что искать")} aria-label={t("Что искать")} data-testid="search-input"
           maxLength={200} onChange={(e) => setQuery(e.target.value)} onKeyDown={onKey} />
       </label>
       {groups.length > 0 && <SearchResults groups={groups} query={state.for} selected={selected} now={now} onOpen={open} />}

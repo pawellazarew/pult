@@ -1,3 +1,4 @@
+import { t as tr } from '../lib/i18n.js'
 // Фаза хода в окне (0.3.5): кадры живого канала → карта «сессия → фаза», строка под репликой и короткая подпись
 // в дереве. Выводит фазу демон (src/sessions/phaseTracker.ts) — окно только рисует. Чистые функции.
 
@@ -59,10 +60,10 @@ export function applyPhaseFrame(map: PhaseMap, ev: PultEvent): PhaseMap {
 /** Прошедшее время для строки: «0 с», «12 с», «1 мин 05 с», «1 ч 02 мин». */
 export function formatElapsed(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000))
-  if (s < 60) return `${s} с`
+  if (s < 60) return tr`${s} с`
   const m = Math.floor(s / 60)
-  if (m < 60) return `${m} мин ${String(s % 60).padStart(2, '0')} с`
-  return `${Math.floor(m / 60)} ч ${String(m % 60).padStart(2, '0')} мин`
+  if (m < 60) return tr`${m} мин ${String(s % 60).padStart(2, '0')} с`
+  return tr`${Math.floor(m / 60)} ч ${String(m % 60).padStart(2, '0')} мин`
 }
 
 /**
@@ -75,21 +76,21 @@ export function shortToolName(name: string): string {
   return m ? (m[1] as string) : name
 }
 
-function bgText(n: number): string { return `фоновые задачи: ${n}` }
+function bgText(n: number): string { return tr`фоновые задачи: ${n}` }
 
 /** Что сказать фазой — словами, без секунд (они идут отдельно). */
 export function phaseText(p: TurnPhase): string {
   const bg = p.background && p.phase !== 'background' ? ` · ${bgText(p.background)}` : ''
   switch (p.phase) {
-    case 'starting': return `запускается…${bg}`
-    case 'thinking': return `думает…${bg}`
-    case 'writing': return `пишет…${bg}`
+    case 'starting': return tr`запускается…${bg}`
+    case 'thinking': return tr`думает…${bg}`
+    case 'writing': return tr`пишет…${bg}`
     case 'tool': {
       const t = p.tool
-      const what = t ? `${t.name === 'commandExecution' ? shortToolName(t.name) : t.name}${t.detail ? ` ${t.detail}` : ''}` : 'инструмент'
-      return `выполняет: ${what}…${bg}`
+      const what = t ? `${t.name === 'commandExecution' ? shortToolName(t.name) : t.name}${t.detail ? ` ${t.detail}` : ''}` : tr('инструмент')
+      return tr`выполняет: ${what}…${bg}`
     }
-    case 'waiting': return `${p.waiting?.kind === 'question' ? 'ждёт ответа на вопрос' : 'ждёт тебя'}${bg}`
+    case 'waiting': return `${p.waiting?.kind === 'question' ? tr('ждёт ответа на вопрос') : tr('ждёт тебя')}${bg}`
     case 'background': return bgText(p.background ?? 0)
   }
 }
@@ -101,11 +102,11 @@ export function phaseText(p: TurnPhase): string {
 export function phaseAnnouncement(p: TurnPhase | null): string {
   if (!p) return ''
   switch (p.phase) {
-    case 'starting': return 'запускается'
-    case 'thinking': return 'думает'
-    case 'writing': return 'пишет'
-    case 'tool': return `выполняет ${p.tool ? shortToolName(p.tool.name) : 'инструмент'}`
-    case 'waiting': return p.waiting?.kind === 'question' ? 'ждёт ответа на вопрос' : 'ждёт твоего решения'
+    case 'starting': return tr('запускается')
+    case 'thinking': return tr('думает')
+    case 'writing': return tr('пишет')
+    case 'tool': return tr`выполняет ${p.tool ? shortToolName(p.tool.name) : tr('инструмент')}`
+    case 'waiting': return p.waiting?.kind === 'question' ? tr('ждёт ответа на вопрос') : tr('ждёт твоего решения')
     case 'background': return bgText(p.background ?? 0)
   }
 }
@@ -119,14 +120,14 @@ export function phaseElapsed(p: TurnPhase, now: number): string {
 export function treePhaseLabel(p: TurnPhase | undefined | null): string | null {
   if (!p) return null
   switch (p.phase) {
-    case 'starting': return 'запуск'
-    case 'thinking': return 'думает'
-    case 'writing': return 'пишет'
+    case 'starting': return tr('запуск')
+    case 'thinking': return tr('думает')
+    case 'writing': return tr('пишет')
     case 'tool': {
-      const n = p.tool ? shortToolName(p.tool.name) : 'инструмент'
+      const n = p.tool ? shortToolName(p.tool.name) : tr('инструмент')
       return n.length > 16 ? `${n.slice(0, 15)}…` : n
     }
-    case 'waiting': return 'ждёт тебя'
+    case 'waiting': return tr('ждёт тебя')
     case 'background': return null
   }
 }

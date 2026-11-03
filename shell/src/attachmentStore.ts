@@ -1,3 +1,4 @@
+import { t as tr } from './i18n.js'
 // Вложения — снимок файла, а не обещание прочитать исходник позже. Destination всегда выбирает main.
 // Папки остаются ссылками (не копируем дерево); обычные файлы/байты живут в session-scoped attachments.
 import { randomBytes } from 'node:crypto'
@@ -8,7 +9,7 @@ import type { AttachmentInput, AttachmentResult } from './contract.js'
 
 export const MAX_ATTACHMENT_BYTES = MAX_IMAGE_BYTES
 const fail = (error: string): { error: string } => ({ error })
-const tooLarge = (): { error: string } => fail('Файл больше 25 МБ. Прикрепи меньший файл или укажи путь к исходнику в тексте.')
+const tooLarge = (): { error: string } => fail(tr('Файл больше 25 МБ. Прикрепи меньший файл или укажи путь к исходнику в тексте.'))
 
 /** Имя служит только подписью/суффиксом: абсолютный путь и ../ не могут выбрать папку записи. */
 export function attachmentBaseName(raw: string): string {
@@ -50,7 +51,7 @@ function readFileBounded(source: string, maxBytes: number): Buffer | { error: st
     // O_NONBLOCK исключает блокировку FIFO; O_NOFOLLOW не даёт заменить исходник ссылкой перед open.
     fd = openSync(source, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
     const st = fstatSync(fd)
-    if (!st.isFile()) return fail('Можно прикрепить обычный файл или папку. Этот объект файловой системы не поддерживается.')
+    if (!st.isFile()) return fail(tr('Можно прикрепить обычный файл или папку. Этот объект файловой системы не поддерживается.'))
     if (st.size > maxBytes) return tooLarge()
     const out = Buffer.alloc(st.size + 1)
     let count = 0
@@ -59,14 +60,14 @@ function readFileBounded(source: string, maxBytes: number): Buffer | { error: st
       if (!n) break
       count += n
     }
-    if (count !== st.size) return fail('Файл изменился во время добавления. Перетащи его ещё раз.')
+    if (count !== st.size) return fail(tr('Файл изменился во время добавления. Перетащи его ещё раз.'))
     return out.subarray(0, count)
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code
-    if (code === 'ENOENT') return fail('Исходный файл уже исчез. Перетащи файл ещё раз или вставь скриншот из буфера.')
-    if (code === 'EACCES' || code === 'EPERM') return fail('Нет доступа к файлу. Проверь права или выбери доступную копию.')
-    if (code === 'ELOOP') return fail('Прикрепи сам файл: символические ссылки не копируются.')
-    return fail('Не удалось прочитать файл. Проверь, что он доступен, и попробуй ещё раз.')
+    if (code === 'ENOENT') return fail(tr('Исходный файл уже исчез. Перетащи файл ещё раз или вставь скриншот из буфера.'))
+    if (code === 'EACCES' || code === 'EPERM') return fail(tr('Нет доступа к файлу. Проверь права или выбери доступную копию.'))
+    if (code === 'ELOOP') return fail(tr('Прикрепи сам файл: символические ссылки не копируются.'))
+    return fail(tr('Не удалось прочитать файл. Проверь, что он доступен, и попробуй ещё раз.'))
   } finally { if (fd !== undefined) closeSync(fd) }
 }
 
@@ -78,8 +79,8 @@ export function importStoredAttachment(o: ImportAttachmentOptions): AttachmentRe
     const rel = path.relative(attachmentsDir(o.home), source).split(path.sep)
     const session = rel.length === 3 ? rel[0] ?? '' : ''
     if (!ownedAttachment(o.home, session, source)) return fail(session && SESSION_NAME_RE.test(session) && rel.length === 3
-      ? 'Сохранённое вложение исчезло или недоступно. Прикрепи файл ещё раз.'
-      : 'Этот путь не является сохранённым вложением Пульта. Перетащи файл или вставь его из буфера.')
+      ? tr('Сохранённое вложение исчезло или недоступно. Прикрепи файл ещё раз.')
+      : tr('Этот путь не является сохранённым вложением Пульта. Перетащи файл или вставь его из буфера.'))
   }
   return importAttachment(o)
 }
@@ -95,29 +96,29 @@ export interface ImportAttachmentOptions {
 }
 
 export function importAttachment(o: ImportAttachmentOptions): AttachmentResult {
-  if (!path.isAbsolute(o.home)) return fail('Пульт ещё не готов сохранять вложения.')
-  if (typeof o.session !== 'string' || !SESSION_NAME_RE.test(o.session)) return fail('Для вложений нужна сессия с корректным именем.')
-  if (!o.item || typeof o.item !== 'object' || Array.isArray(o.item)) return fail('Не удалось получить вложение.')
+  if (!path.isAbsolute(o.home)) return fail(tr('Пульт ещё не готов сохранять вложения.'))
+  if (typeof o.session !== 'string' || !SESSION_NAME_RE.test(o.session)) return fail(tr('Для вложений нужна сессия с корректным именем.'))
+  if (!o.item || typeof o.item !== 'object' || Array.isArray(o.item)) return fail(tr('Не удалось получить вложение.'))
   const item = o.item as AttachmentInput
-  if (item.name !== undefined && (typeof item.name !== 'string' || item.name.length > 4096)) return fail('Не удалось получить имя файла.')
-  if (item.path !== undefined && typeof item.path !== 'string') return fail('Не удалось получить путь к файлу.')
-  if (item.bytes !== undefined && !(item.bytes instanceof Uint8Array)) return fail('Не удалось получить содержимое файла.')
+  if (item.name !== undefined && (typeof item.name !== 'string' || item.name.length > 4096)) return fail(tr('Не удалось получить имя файла.'))
+  if (item.path !== undefined && typeof item.path !== 'string') return fail(tr('Не удалось получить путь к файлу.'))
+  if (item.bytes !== undefined && !(item.bytes instanceof Uint8Array)) return fail(tr('Не удалось получить содержимое файла.'))
   const hasPath = typeof item.path === 'string' && item.path.length > 0
   const hasBytes = item.bytes instanceof Uint8Array
-  if (hasPath === hasBytes) return fail('Нужно передать один файл или его содержимое.')
+  if (hasPath === hasBytes) return fail(tr('Нужно передать один файл или его содержимое.'))
   const maxBytes = o.maxBytes ?? MAX_ATTACHMENT_BYTES
   let data: Buffer
   let name: string
   if (hasPath) {
     const source = item.path!
-    if (!path.isAbsolute(source) || source.includes('\0') || source.length > 16_384) return fail('Нужен абсолютный путь к файлу.')
+    if (!path.isAbsolute(source) || source.includes('\0') || source.length > 16_384) return fail(tr('Нужен абсолютный путь к файлу.'))
     name = attachmentBaseName(item.name ?? source)
     try {
       const st = lstatSync(source)
-      if (st.isSymbolicLink()) return fail('Прикрепи сам файл: символические ссылки не копируются.')
+      if (st.isSymbolicLink()) return fail(tr('Прикрепи сам файл: символические ссылки не копируются.'))
       if (st.isDirectory()) return { path: realpathSync(source), name, bytes: 0, mime: 'inode/directory', kind: 'directory' }
-      if (!st.isFile()) return fail('Можно прикрепить обычный файл или папку. Этот объект файловой системы не поддерживается.')
-    } catch { return fail('Исходный файл уже исчез или недоступен. Перетащи его ещё раз.') }
+      if (!st.isFile()) return fail(tr('Можно прикрепить обычный файл или папку. Этот объект файловой системы не поддерживается.'))
+    } catch { return fail(tr('Исходный файл уже исчез или недоступен. Перетащи его ещё раз.')) }
     const read = readFileBounded(source, maxBytes)
     if (!Buffer.isBuffer(read)) return read
     data = read
@@ -131,7 +132,7 @@ export function importAttachment(o: ImportAttachmentOptions): AttachmentResult {
   const hex = (o.rand ?? (() => randomBytes(6)))().toString('hex')
   const { day, file } = attachmentName(now, hex)
   const root = attachmentsDir(o.home)
-  if (dayBytes(root, day) + data.length > (o.maxDayBytes ?? MAX_DAY_BYTES)) return fail('Сегодня сохранено больше 1 ГБ вложений. Укажи путь к исходнику в тексте или попробуй завтра.')
+  if (dayBytes(root, day) + data.length > (o.maxDayBytes ?? MAX_DAY_BYTES)) return fail(tr('Сегодня сохранено больше 1 ГБ вложений. Укажи путь к исходнику в тексте или попробуй завтра.'))
   const dir = path.join(root, o.session, day)
   const full = path.join(dir, `${file.slice(0, -4)}-${name}`)
   let fd: number | undefined
@@ -150,7 +151,7 @@ export function importAttachment(o: ImportAttachmentOptions): AttachmentResult {
     return { path: full, name, bytes: data.length, mime: mime(name, data), kind: 'file' }
   } catch {
     if (created) { try { unlinkSync(full) } catch { /* уже исчез */ } }
-    return fail('Не удалось сохранить вложение в папке Пульта. Проверь свободное место и права доступа.')
+    return fail(tr('Не удалось сохранить вложение в папке Пульта. Проверь свободное место и права доступа.'))
   } finally { if (fd !== undefined) closeSync(fd) }
 }
 
@@ -163,18 +164,18 @@ export interface ThumbnailImage {
 
 /** Превью только raster PNG/JPEG из собственного хранилища. HTML/SVG никогда не декодируются. */
 export function previewAttachment(o: { home: string; session: unknown; source: unknown; decode(bytes: Buffer): ThumbnailImage }): { dataUrl: string } | { error: string } {
-  if (typeof o.session !== 'string' || typeof o.source !== 'string' || !ownedAttachment(o.home, o.session, o.source)) return fail('Превью доступно только для сохранённого вложения этой сессии.')
+  if (typeof o.session !== 'string' || typeof o.source !== 'string' || !ownedAttachment(o.home, o.session, o.source)) return fail(tr('Превью доступно только для сохранённого вложения этой сессии.'))
   const data = readFileBounded(o.source, MAX_ATTACHMENT_BYTES)
   if (!Buffer.isBuffer(data)) return data
   const head = imageHeaderSize(data)
-  if (!head || head.width <= 0 || head.height <= 0 || head.width * head.height > MAX_IMAGE_PIXELS) return fail('Для этого файла нет превью изображения.')
+  if (!head || head.width <= 0 || head.height <= 0 || head.width * head.height > MAX_IMAGE_PIXELS) return fail(tr('Для этого файла нет превью изображения.'))
   try {
     const image = o.decode(data)
     const size = image.getSize()
-    if (image.isEmpty() || size.width <= 0 || size.height <= 0 || size.width * size.height > MAX_IMAGE_PIXELS) return fail('Изображение не читается.')
+    if (image.isEmpty() || size.width <= 0 || size.height <= 0 || size.width * size.height > MAX_IMAGE_PIXELS) return fail(tr('Изображение не читается.'))
     const scale = Math.min(1, 320 / size.width, 240 / size.height)
     const dataUrl = image.resize({ width: Math.max(1, Math.round(size.width * scale)), height: Math.max(1, Math.round(size.height * scale)), quality: 'good' }).toDataURL()
-    if (!dataUrl.startsWith('data:image/png;base64,') || dataUrl.length > 280_000) return fail('Не удалось подготовить небольшое превью.')
+    if (!dataUrl.startsWith('data:image/png;base64,') || dataUrl.length > 280_000) return fail(tr('Не удалось подготовить небольшое превью.'))
     return { dataUrl }
-  } catch { return fail('Изображение не читается.') }
+  } catch { return fail(tr('Изображение не читается.')) }
 }

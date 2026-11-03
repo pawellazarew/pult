@@ -5,6 +5,7 @@
 // Согласие и красную метку окно не решает само: согласие проверяет демон (`consent.json`), а метка строится по
 // `access` из `agent.list` — желаемый режим, применённый (что сказал провайдер) и живой ли процесс с этими правами.
 
+import { getLanguage, t as tr } from '../lib/i18n.js'
 import type { ApprovalMode } from '../../../src/adapters/types.js'
 import type { ConsentView } from '../../../src/core/consent.js'
 import type { AccessView } from '../../../src/sessions/access.js'
@@ -40,19 +41,20 @@ export function needsConsent(provider: AgentProvider, approval: ApprovalMode, in
   return isFullLevel(provider, approval, inheritMode) && !consentGrants(c, provider)
 }
 
-/** Дата согласия словами: «02.11.2026». */
+/** Дата согласия: «02.11.2026»; по-английски — «2 Nov 2026» (день и месяц не путаются). */
 export function consentDate(iso: string | undefined): string {
   const d = iso ? new Date(iso) : null
   if (!d || Number.isNaN(d.getTime())) return ''
+  if (getLanguage() === 'en') return new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }).format(d)
   const p = (n: number): string => String(n).padStart(2, '0')
   return `${p(d.getDate())}.${p(d.getMonth() + 1)}.${d.getFullYear()}`
 }
 
 /** Строка «Настройки → Доступ». */
 export function consentLine(c: ConsentView | null | undefined): string {
-  if (c && c.granted) return `Полный доступ разрешён ${consentDate(c.grantedAt)}`.trim()
-  if (c && c.revokedAt) return `Полный доступ отозван ${consentDate(c.revokedAt)}. Разрешение спрошу снова при первом выборе «Полного доступа».`
-  return 'Полный доступ не разрешён. Разрешение спрашивается один раз — при первом выборе «Полного доступа».'
+  if (c && c.granted) return tr`Полный доступ разрешён ${consentDate(c.grantedAt)}`.trim()
+  if (c && c.revokedAt) return tr`Полный доступ отозван ${consentDate(c.revokedAt)}. Разрешение спрошу снова при первом выборе «Полного доступа».`
+  return tr('Полный доступ не разрешён. Разрешение спрашивается один раз — при первом выборе «Полного доступа».')
 }
 
 // --- метки чата -----------------------------------------------------------------------------------
@@ -95,29 +97,29 @@ export function accessChip(a: AccessAgent): AccessChip {
   const red = v ? v.red : desired === 'full'
   let state: ChipState = 'plain'
   let suffix: string | null = null
-  if (v?.pending) { state = 'pending'; suffix = 'после хода' }
-  else if (v?.blocked) { state = 'blocked'; suffix = 'не разрешён' }
-  else if (v && !v.applied) { state = 'expected'; suffix = 'ожидается' }
-  else if (v?.applied && !v.applied.confirmed && a.provider !== 'claude') { state = 'unconfirmed'; suffix = 'не подтверждено' }
+  if (v?.pending) { state = 'pending'; suffix = tr('после хода') }
+  else if (v?.blocked) { state = 'blocked'; suffix = tr('не разрешён') }
+  else if (v && !v.applied) { state = 'expected'; suffix = tr('ожидается') }
+  else if (v?.applied && !v.applied.confirmed && a.provider !== 'claude') { state = 'unconfirmed'; suffix = tr('не подтверждено') }
   else if (red) state = 'full'
   const applied = v?.applied
-  const now = applied?.reported ? `сейчас процесс: ${applied.reported}${applied.confirmed ? '' : ' (не подтверждено)'}`
-    : applied ? `последний процесс запущен с «${APPROVAL_LABEL[applied.approval]}» (не подтверждено)` : 'ходов с этим режимом ещё не было'
+  const now = applied?.reported ? tr`сейчас процесс: ${applied.reported}${applied.confirmed ? '' : tr(' (не подтверждено)')}`
+    : applied ? tr`последний процесс запущен с «${APPROVAL_LABEL[applied.approval]}» (не подтверждено)` : tr('ходов с этим режимом ещё не было')
   const title = v?.blocked
-    ? 'Полный доступ выбран, но не разрешён (согласие отозвано или не дано): ходы идут в «Спрашивать». Разрешить — выбери «Полный доступ» снова.'
+    ? tr('Полный доступ выбран, но не разрешён (согласие отозвано или не дано): ходы идут в «Спрашивать». Разрешить — выбери «Полный доступ» снова.')
     : v?.pending
-      ? 'Текущий ход идёт с прежними правами — выбор применится, когда он закончится. Нужно сейчас — «Стоп».'
-      : `Доступ: ${label}; ${now}`
+      ? tr('Текущий ход идёт с прежними правами — выбор применится, когда он закончится. Нужно сейчас — «Стоп».')
+      : tr`Доступ: ${label}; ${now}`
   return { label, suffix, state, red, title }
 }
 
 /** Плашка в шапке чата: «полный доступ» или «полный доступ · до конца хода» при понижении (кадры 05, 11). */
 export function headerPill(a: AccessAgent): { label: string; state: 'full' | 'until-turn-end' } | null {
   const v = a.access
-  if (!v) return a.approval === 'full' ? { label: 'полный доступ', state: 'full' } : null
+  if (!v) return a.approval === 'full' ? { label: tr('полный доступ'), state: 'full' } : null
   if (!v.red) return null
   const desiredRed = v.desiredFull && !v.blocked
-  return desiredRed ? { label: 'полный доступ', state: 'full' } : { label: 'полный доступ · до конца хода', state: 'until-turn-end' }
+  return desiredRed ? { label: tr('полный доступ'), state: 'full' } : { label: tr('полный доступ · до конца хода'), state: 'until-turn-end' }
 }
 
 /** Щит «полный» в строке сайдбара — по той же красной метке. */
@@ -129,7 +131,7 @@ export function sidebarFull(a: AccessAgent): boolean {
 export function pendingStrip(a: AccessAgent): string | null {
   const v = a.access
   if (!v || !v.pending || !v.red || (v.desiredFull && !v.blocked)) return null
-  return 'Текущий ход идёт с полным доступом — метка снимется, когда он закончится. Нужно сейчас — «Стоп».'
+  return tr('Текущий ход идёт с полным доступом — метка снимется, когда он закончится. Нужно сейчас — «Стоп».')
 }
 
 /**
@@ -142,7 +144,7 @@ export function accessChangeLine(c: ConfigureChanges, pending: boolean, when: 'n
   const to = c.approval.to ?? 'ask'
   const full = to === 'full'
   // Тёплый процесс Claude держит фоновые задачи — смена ждёт их; иначе при понижении во время хода — его конца.
-  const tail = when === 'after_background' ? ' · применится, когда доделаются фоновые задачи'
-    : pending && !full ? ' · применится, когда закончится текущий ход' : ''
-  return { title: `Доступ: ${APPROVAL_LABEL[from]} → ${APPROVAL_LABEL[to]}${tail}`, full }
+  const tail = when === 'after_background' ? tr(' · применится, когда доделаются фоновые задачи')
+    : pending && !full ? tr(' · применится, когда закончится текущий ход') : ''
+  return { title: tr`Доступ: ${APPROVAL_LABEL[from]} → ${APPROVAL_LABEL[to]}${tail}`, full }
 }

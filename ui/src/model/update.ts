@@ -1,3 +1,5 @@
+import { getLanguage } from '../../../src/i18n/core.js'
+import { t as tr } from '../lib/i18n.js'
 // Плашка обновления (M8c): что сказать человеку по `daemon.status.update` и версии окна. Чистые функции.
 //
 // ВЕРСИЯ ОКНА: оболочка её мостом не отдаёт, но Electron кладёт имя и версию приложения в user agent:
@@ -42,13 +44,14 @@ export interface UpdateBannerView {
 }
 
 const turnsText = (n: number): string => {
+  if (getLanguage() === 'en') return `${n} ${n === 1 ? 'turn is running' : 'turns are running'}`
   const mod10 = n % 10
   const mod100 = n % 100
-  const word = mod10 === 1 && mod100 !== 11 ? 'идёт' : 'идут'
+  const word = mod10 === 1 && mod100 !== 11 ? tr('идёт') : tr('идут')
   return `${n} ${word}`
 }
 
-const RESTART: UpdateAction = { label: 'Перезапустить', force: false }
+const RESTART: UpdateAction = { label: tr('Перезапустить'), force: false }
 
 /** Последняя неудача окна, если её не заслонила вышедшая после неё версия. */
 function appFailure(a: AppUpdateStatus): AppUpdateStatus['last'] {
@@ -59,7 +62,7 @@ function appFailure(a: AppUpdateStatus): AppUpdateStatus['last'] {
 }
 
 /** «Вернуть <from>»: новое окно, заменённое закрытым, не заработало при первом запуске. */
-const backAction = (from: string): UpdateAction => ({ label: `Вернуть ${from}`, force: false, target: 'app', rollback: true })
+const backAction = (from: string): UpdateAction => ({ label: tr`Вернуть ${from}`, force: false, target: 'app', rollback: true })
 
 /** Что даст «Перезапустить» (0.3.16). null — нечего. */
 export interface PendingUpdate {
@@ -113,23 +116,23 @@ export function updateBanner(u: UpdateStatus | undefined | null, _windowVersion:
   if (u.apply.state === 'waiting') {
     return {
       kind: 'waiting',
-      text: `Обновлю до ${u.apply.to} после окончания ходов (${turnsText(u.apply.turns)})`,
-      notes, action: { label: 'Сейчас', force: true }, dismissKey: null,
+      text: tr`Обновлю до ${u.apply.to} после окончания ходов (${turnsText(u.apply.turns)})`,
+      notes, action: { label: tr('Сейчас'), force: true }, dismissKey: null,
     }
   }
-  if (restarting(u)) return { kind: 'applying', text: 'Перезапускаю…', notes: null, action: null, dismissKey: null }
+  if (restarting(u)) return { kind: 'applying', text: tr('Перезапускаю…'), notes: null, action: null, dismissKey: null }
   if (u.apply.state === 'failed') {
     return {
       kind: 'failed',
-      text: `Обновление не удалось: ${u.apply.error}`,
-      notes, action: pendingUpdate(u) ? { label: 'Повторить', force: false } : null, dismissKey: null,
+      text: tr`Обновление не удалось: ${u.apply.error}`,
+      notes, action: pendingUpdate(u) ? { label: tr('Повторить'), force: false } : null, dismissKey: null,
     }
   }
   const a = u.app
   if (a?.firstRun?.state === 'failed' && !dismissed.includes(`firstrun:${a.firstRun.to}`)) {
     return {
       kind: 'app-failed',
-      text: `Окно ${a.firstRun.to} не заработало при первом запуске — можно вернуть ${a.firstRun.from}`,
+      text: tr`Окно ${a.firstRun.to} не заработало при первом запуске — можно вернуть ${a.firstRun.from}`,
       notes: null, action: backAction(a.firstRun.from), dismissKey: `firstrun:${a.firstRun.to}`,
     }
   }
@@ -137,8 +140,8 @@ export function updateBanner(u: UpdateStatus | undefined | null, _windowVersion:
   if (a && af && !dismissed.includes(`app-failure:${af.at}`)) {
     return {
       kind: 'app-failed',
-      text: af.result === 'rolled_back' ? `Окно ${af.to} не встало: ${af.message}` : `Окно не обновилось: ${af.message}`,
-      notes: null, action: af.result === 'failed' && pendingUpdate(u) ? { label: 'Повторить', force: false } : null, dismissKey: `app-failure:${af.at}`,
+      text: af.result === 'rolled_back' ? tr`Окно ${af.to} не встало: ${af.message}` : tr`Окно не обновилось: ${af.message}`,
+      notes: null, action: af.result === 'failed' && pendingUpdate(u) ? { label: tr('Повторить'), force: false } : null, dismissKey: `app-failure:${af.at}`,
     }
   }
   // Проба не прошла и откат — после него это уже другой демон, и только update.json помнит, что было.
@@ -146,12 +149,12 @@ export function updateBanner(u: UpdateStatus | undefined | null, _windowVersion:
   // Старая неудача не заслоняет НОВУЮ версию: вышла версия новее не вставшей — показываем её.
   const newerThanFailure = f !== null && u.available && latest !== null && compareVersions(latest.version, f.to) > 0
   if (f && !newerThanFailure && !dismissed.includes(`failure:${f.at}`)) {
-    const details = f.log ? `подробности: ${f.log}` : 'подробности были в терминале'
+    const details = f.log ? tr`подробности: ${f.log}` : tr('подробности были в терминале')
     return {
       kind: 'rolledback',
       text: f.back !== null
-        ? `Обновление до ${f.to} не встало, вернул ${f.back} · ${details}`
-        : `Обновление до ${f.to} не встало: ${f.message} · ${details}`,
+        ? tr`Обновление до ${f.to} не встало, вернул ${f.back} · ${details}`
+        : tr`Обновление до ${f.to} не встало: ${f.message} · ${details}`,
       notes: null, action: null, dismissKey: `failure:${f.at}`,
     }
   }
@@ -160,7 +163,7 @@ export function updateBanner(u: UpdateStatus | undefined | null, _windowVersion:
   if (!p || p.downloading || dismissed.includes(p.key)) return null
   return {
     kind: 'available',
-    text: p.ready ? `Пульт ${p.to} готов` : `Доступен Пульт ${p.to}`,
+    text: p.ready ? tr`Пульт ${p.to} готов` : tr`Доступен Пульт ${p.to}`,
     notes: u.available ? notes : null, action: RESTART, dismissKey: p.key,
   }
 }
@@ -173,8 +176,8 @@ export function addDismissed(list: readonly string[], key: string): string[] {
 
 /** Отказ `update.apply` со старой оболочкой: метода нет в её белом списке — подсказка, как обновиться иначе. */
 export function applyErrorText(code: string | null, message: string, target?: 'app'): string {
-  if (code === 'method_not_allowed') return `Это окно не умеет запускать обновление (оболочка старше 0.1.14) — в терминале: pult update${target === 'app' ? ' --app' : ''}`
-  return target === 'app' ? `Окно не обновилось: ${message}` : `Обновление не запустилось: ${message}`
+  if (code === 'method_not_allowed') return tr`Это окно не умеет запускать обновление (оболочка старше 0.1.14) — в терминале: pult update${target === 'app' ? ' --app' : ''}`
+  return target === 'app' ? tr`Окно не обновилось: ${message}` : tr`Обновление не запустилось: ${message}`
 }
 
 // --- «Настройки» → «Обновления» (⌘,): версия, состояние канала, «Проверить сейчас», «Перезапустить и обновить» ----
@@ -191,16 +194,16 @@ export function focusCheckWanted(u: UpdateStatus | undefined | null, now: number
 
 /** «последняя проверка: 5 мин назад». */
 export function checkedAgoText(iso: string | null, now: number): string {
-  if (!iso) return 'последняя проверка: ещё не было'
+  if (!iso) return tr('последняя проверка: ещё не было')
   const t = Date.parse(iso)
-  if (!Number.isFinite(t)) return 'последняя проверка: —'
+  if (!Number.isFinite(t)) return tr('последняя проверка: —')
   const s = Math.max(0, Math.round((now - t) / 1000))
-  if (s < 45) return 'последняя проверка: только что'
+  if (s < 45) return tr('последняя проверка: только что')
   const m = Math.round(s / 60)
-  if (m < 60) return `последняя проверка: ${m} мин назад`
+  if (m < 60) return tr`последняя проверка: ${m} мин назад`
   const h = Math.floor(m / 60)
-  if (h < 24) return `последняя проверка: ${h} ч назад`
-  return `последняя проверка: ${Math.floor(h / 24)} дн назад`
+  if (h < 24) return tr`последняя проверка: ${h} ч назад`
+  return tr`последняя проверка: ${Math.floor(h / 24)} дн назад`
 }
 
 export interface UpdateSectionView {
@@ -219,7 +222,7 @@ export interface UpdateSectionView {
   note: string | null
 }
 
-const APPLY_ALL: UpdateAction = { label: 'Перезапустить и обновить', force: false }
+const APPLY_ALL: UpdateAction = { label: tr('Перезапустить и обновить'), force: false }
 
 /**
  * Что показать в разделе «Обновления». `local` — то, что знает только окно: идёт ли его «Проверить сейчас»
@@ -236,7 +239,7 @@ export function updateSection(
   if (!u) {
     return {
       ...base, state: local.checking ? 'checking' : local.error ? 'error' : 'unsupported',
-      text: local.checking ? 'Проверяю канал обновлений…' : local.error ? `Проверить не вышло: ${local.error}` : 'Демон не сообщает о канале обновлений — в терминале: pult update --check',
+      text: local.checking ? tr('Проверяю канал обновлений…') : local.error ? tr`Проверить не вышло: ${local.error}` : tr('Демон не сообщает о канале обновлений — в терминале: pult update --check'),
       checked: checkedAgoText(null, now),
     }
   }
@@ -244,35 +247,35 @@ export function updateSection(
   const latest = u.latest
   const notes = latest?.notes ?? null
   if (u.apply.state === 'waiting') {
-    return { ...base, state: 'waiting', text: `Обновлю до ${u.apply.to} после окончания ходов (${turnsText(u.apply.turns)})`, notes, action: { label: 'Сейчас', force: true }, canCheck: false, checked }
+    return { ...base, state: 'waiting', text: tr`Обновлю до ${u.apply.to} после окончания ходов (${turnsText(u.apply.turns)})`, notes, action: { label: tr('Сейчас'), force: true }, canCheck: false, checked }
   }
-  if (restarting(u)) return { ...base, state: 'applying', text: 'Перезапускаю… Демон и окно поднимутся сами, сессии продолжат работу', canCheck: false, checked }
+  if (restarting(u)) return { ...base, state: 'applying', text: tr('Перезапускаю… Демон и окно поднимутся сами, сессии продолжат работу'), canCheck: false, checked }
   const p = pendingUpdate(u)
   if (u.apply.state === 'failed') {
-    return { ...base, state: 'failed', text: `Обновление не удалось: ${u.apply.error}`, notes, action: p ? { label: 'Повторить', force: false } : null, checked }
+    return { ...base, state: 'failed', text: tr`Обновление не удалось: ${u.apply.error}`, notes, action: p ? { label: tr('Повторить'), force: false } : null, checked }
   }
   // Кнопку держит только СВОЙ вызов: `u.checking` из снимка статуса может устареть, а нажатие во время проверки
   // демона просто дождётся её итога.
-  if (local.checking || u.checking) return { ...base, state: 'checking', text: 'Проверяю канал обновлений…', canCheck: !local.checking, checked }
-  if (local.error) return { ...base, state: 'error', text: `Проверить не вышло: ${local.error}`, checked }
-  const errNote = u.error ? `Последняя проверка не удалась: ${u.error}` : null
+  if (local.checking || u.checking) return { ...base, state: 'checking', text: tr('Проверяю канал обновлений…'), canCheck: !local.checking, checked }
+  if (local.error) return { ...base, state: 'error', text: tr`Проверить не вышло: ${local.error}`, checked }
+  const errNote = u.error ? tr`Последняя проверка не удалась: ${u.error}` : null
   if (p) {
     const what = u.available ? notes : null
-    if (p.downloading) return { ...base, state: 'downloading', text: `Доступен Пульт ${p.to} · скачиваю в фоне…`, notes: what, action: APPLY_ALL, checked, note: errNote }
+    if (p.downloading) return { ...base, state: 'downloading', text: tr`Доступен Пульт ${p.to} · скачиваю в фоне…`, notes: what, action: APPLY_ALL, checked, note: errNote }
     return {
-      ...base, state: 'available', text: p.ready ? `Пульт ${p.to} готов` : `Доступен Пульт ${p.to}`, notes: what, action: APPLY_ALL, checked,
-      note: p.stageError ? `Заранее скачать не вышло: ${p.stageError} — скачаю при перезапуске` : errNote,
+      ...base, state: 'available', text: p.ready ? tr`Пульт ${p.to} готов` : tr`Доступен Пульт ${p.to}`, notes: what, action: APPLY_ALL, checked,
+      note: p.stageError ? tr`Заранее скачать не вышло: ${p.stageError} — скачаю при перезапуске` : errNote,
     }
   }
-  if (u.error) return { ...base, state: 'error', text: `Проверить не вышло: ${u.error}`, checked }
+  if (u.error) return { ...base, state: 'error', text: tr`Проверить не вышло: ${u.error}`, checked }
   if (latest && u.bad) {
-    return { ...base, state: 'bad', text: `В канале ${latest.version}, но на этой машине она уже не прошла пробу — сама не ставится; повторить: pult update --to ${latest.version}`, notes, checked }
+    return { ...base, state: 'bad', text: tr`В канале ${latest.version}, но на этой машине она уже не прошла пробу — сама не ставится; повторить: pult update --to ${latest.version}`, notes, checked }
   }
   if (latest && compareVersions(latest.version, u.current) > 0) {
-    return { ...base, state: 'local', text: `В канале ${latest.version}; эта установка — рабочая копия, канал её не обновляет`, notes, checked }
+    return { ...base, state: 'local', text: tr`В канале ${latest.version}; эта установка — рабочая копия, канал её не обновляет`, notes, checked }
   }
-  if (latest) return { ...base, state: 'uptodate', text: `Установлена последняя версия (${u.current})`, checked }
-  return { ...base, state: 'unknown', text: 'Ещё не проверял — «Проверить сейчас»', checked }
+  if (latest) return { ...base, state: 'uptodate', text: tr`Установлена последняя версия (${u.current})`, checked }
+  return { ...base, state: 'unknown', text: tr('Ещё не проверял — «Проверить сейчас»'), checked }
 }
 
 export interface AppUpdateView {
@@ -294,29 +297,29 @@ export function appUpdateView(u: UpdateStatus | undefined | null, windowVersion:
   const installed = a.installed ?? windowVersion
   const fr = a.firstRun ?? null
   if (fr?.state === 'failed') {
-    return { state: 'firstrun-failed', text: `Окно ${fr.to} не заработало при первом запуске — можно вернуть ${fr.from}`, action: backAction(fr.from) }
+    return { state: 'firstrun-failed', text: tr`Окно ${fr.to} не заработало при первом запуске — можно вернуть ${fr.from}`, action: backAction(fr.from) }
   }
   const f = appFailure(a)
   if (f) {
     return f.result === 'rolled_back'
-      ? { state: 'rolledback', text: `Окно ${f.to} не встало: ${f.message}`, action: null }
-      : { state: 'failed', text: `Окно не обновилось: ${f.message}`, action: null }
+      ? { state: 'rolledback', text: tr`Окно ${f.to} не встало: ${f.message}`, action: null }
+      : { state: 'failed', text: tr`Окно не обновилось: ${f.message}`, action: null }
   }
   if (fr?.state === 'waiting') {
     return {
       state: 'firstrun',
-      text: `Окно обновлено до ${fr.to}, ещё не запускалось (прежнее ${fr.from} держу до первого запуска) · если окно не запускается — pult update --app --rollback`,
-      action: { ...backAction(fr.from), confirm: `Вернуть окно ${fr.from}? Новое ${fr.to} ещё не запускалось; оно будет закрыто и больше не предложится само.` },
+      text: tr`Окно обновлено до ${fr.to}, ещё не запускалось (прежнее ${fr.from} держу до первого запуска) · если окно не запускается — pult update --app --rollback`,
+      action: { ...backAction(fr.from), confirm: tr`Вернуть окно ${fr.from}? Новое ${fr.to} ещё не запускалось; оно будет закрыто и больше не предложится само.` },
     }
   }
   // Окно отстало от канала, но этой кнопкой его не обновить — объяснить, почему и что делать.
   const behind = a.latest !== null && installed !== null && compareVersions(a.latest, installed) > 0
   if (!behind) return none
-  if (a.unsupported) return { state: 'unsupported', text: `Окно ${installed} · ${a.unsupported}`, action: null }
-  if (a.bad) return { state: 'bad', text: `Окно ${a.latest} уже не встало на этой машине — само не ставится; повторить: pult update --app --force`, action: null }
-  if (a.blocked) return { state: 'blocked', text: `Окно ${installed} не обновится само: ${a.blocked}`, action: null }
+  if (a.unsupported) return { state: 'unsupported', text: tr`Окно ${installed} · ${a.unsupported}`, action: null }
+  if (a.bad) return { state: 'bad', text: tr`Окно ${a.latest} уже не встало на этой машине — само не ставится; повторить: pult update --app --force`, action: null }
+  if (a.blocked) return { state: 'blocked', text: tr`Окно ${installed} не обновится само: ${a.blocked}`, action: null }
   if (a.here === false) {
-    return { state: 'elsewhere', text: `Окно ${installed} → ${a.latest} · закрой окно из ${a.hereFrom ?? 'этой копии'} и обнови из ${a.path ?? 'Pult.app'}`, action: null }
+    return { state: 'elsewhere', text: tr`Окно ${installed} → ${a.latest} · закрой окно из ${a.hereFrom ?? tr('этой копии')} и обнови из ${a.path ?? 'Pult.app'}`, action: null }
   }
   return none
 }
@@ -324,11 +327,11 @@ export function appUpdateView(u: UpdateStatus | undefined | null, windowVersion:
 /** Итог ручной проверки для короткой плашки: ставить нечего — «Установлена последняя версия (X)»; иначе null. */
 export function upToDateNote(u: UpdateStatus | undefined | null): string | null {
   if (!u || u.error || u.available || !u.latest || u.apply.state !== 'idle' || pendingUpdate(u)) return null
-  return compareVersions(u.latest.version, u.current) > 0 ? null : `Установлена последняя версия (${u.current})`
+  return compareVersions(u.latest.version, u.current) > 0 ? null : tr`Установлена последняя версия (${u.current})`
 }
 
 /** Отказ `update.check` словами: старая оболочка не пропускает метод — подсказка про терминал. */
 export function checkErrorText(code: string | null, message: string): string {
-  if (code === 'method_not_allowed') return 'это окно не умеет проверять обновления (оболочка старше 0.1.14) — в терминале: pult update --check'
+  if (code === 'method_not_allowed') return tr('это окно не умеет проверять обновления (оболочка старше 0.1.14) — в терминале: pult update --check')
   return message
 }

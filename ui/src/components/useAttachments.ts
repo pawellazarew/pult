@@ -1,3 +1,4 @@
+import { t } from '../lib/i18n.js'
 import { useEffect, useRef, useState } from 'react'
 import type { ClipboardEvent, DragEvent, RefObject } from 'react'
 import type { AttachmentInput, SavedAttachment } from '../../../shell/src/contract.js'
@@ -13,6 +14,11 @@ const store: DraftStore = {
   set: (k, v) => { try { window.localStorage.setItem(k, v) } catch { /* unavailable */ } },
 }
 const owners = new Map<string, AttachmentDraftOwner>()
+/** Let in-flight imports persist their draft before reloading the application. */
+export async function settleAttachmentDrafts(): Promise<void> {
+  await Promise.all([...owners.values()].map((owner) => owner.settled()))
+}
+
 function ownerFor(session: string, persist: boolean): AttachmentDraftOwner {
   const existing = persist ? owners.get(session) : null
   if (existing) return existing
@@ -22,7 +28,7 @@ function ownerFor(session: string, persist: boolean): AttachmentDraftOwner {
   if (persist) owners.set(session, owner)
   return owner
 }
-const errorOf = (e: unknown): string => e && typeof e === 'object' && 'message' in e ? String(e.message) : 'Файл не удалось прикрепить. Попробуй ещё раз.'
+const errorOf = (e: unknown): string => e && typeof e === 'object' && 'message' in e ? String(e.message) : t('Файл не удалось прикрепить. Попробуй ещё раз.')
 
 export function useAttachments({ source, box, text, setText, session, persist = true }: {
   source: FilePathSource | null; box: RefObject<HTMLTextAreaElement | null>; text: string; setText(s: string): void; session: string; persist?: boolean
@@ -63,7 +69,7 @@ export function useAttachments({ source, box, text, setText, session, persist = 
   const save = async (input: AttachmentInput): Promise<void> => {
     const bridge = source?.attachments
     if (!bridge) return
-    if (owner.items.length >= MAX_ATTACHMENTS) throw new Error(`К сообщению можно прикрепить до ${MAX_ATTACHMENTS} файлов. Убери лишние и попробуй снова.`)
+    if (owner.items.length >= MAX_ATTACHMENTS) throw new Error(t`К сообщению можно прикрепить до ${MAX_ATTACHMENTS} файлов. Убери лишние и попробуй снова.`)
     const r = await bridge.import(session, input)
     if ('error' in r) throw new Error(r.error)
     replace(mergeAttachments(owner.items, [r]))
@@ -73,8 +79,8 @@ export function useAttachments({ source, box, text, setText, session, persist = 
     if (!bridge) return
     for (const file of files) {
       enqueue(async () => {
-        if (owner.items.length >= MAX_ATTACHMENTS) throw new Error(`К сообщению можно прикрепить до ${MAX_ATTACHMENTS} файлов.`)
-        if (file.size > MAX_ATTACHMENT_BYTES) throw new Error(`${file.name}: файл больше 25 МБ. Выбери файл меньшего размера.`)
+        if (owner.items.length >= MAX_ATTACHMENTS) throw new Error(t`К сообщению можно прикрепить до ${MAX_ATTACHMENTS} файлов.`)
+        if (file.size > MAX_ATTACHMENT_BYTES) throw new Error(t`${file.name}: файл больше 25 МБ. Выбери файл меньшего размера.`)
         const results = await bridge.files(session, [file])
         for (const r of results) {
           if ('error' in r) throw new Error(r.error)
@@ -99,7 +105,7 @@ export function useAttachments({ source, box, text, setText, session, persist = 
         for (const r of board) {
           if ('error' in r) { if (alive.current) setNotice(r.error); continue }
           if (owner.items.length < MAX_ATTACHMENTS) replace(mergeAttachments(owner.items, [r]))
-          else if (alive.current) setNotice(`К сообщению можно прикрепить до ${MAX_ATTACHMENTS} файлов.`)
+          else if (alive.current) setNotice(t`К сообщению можно прикрепить до ${MAX_ATTACHMENTS} файлов.`)
         }
         return
       }
@@ -113,8 +119,8 @@ export function useAttachments({ source, box, text, setText, session, persist = 
       if (files.length) {
         for (const file of files) {
           try {
-            if (file.size > MAX_ATTACHMENT_BYTES) throw new Error(`${file.name}: файл больше 25 МБ`)
-            if (owner.items.length >= MAX_ATTACHMENTS) throw new Error(`К сообщению можно прикрепить до ${MAX_ATTACHMENTS} файлов.`)
+            if (file.size > MAX_ATTACHMENT_BYTES) throw new Error(t`${file.name}: файл больше 25 МБ`)
+            if (owner.items.length >= MAX_ATTACHMENTS) throw new Error(t`К сообщению можно прикрепить до ${MAX_ATTACHMENTS} файлов.`)
             const results = await source.attachments!.files(session, [file])
             for (const r of results) {
               if ('error' in r) throw new Error(r.error)
@@ -124,10 +130,10 @@ export function useAttachments({ source, box, text, setText, session, persist = 
         }
         return
       }
-      if (!source.image) throw new Error('Для вставки картинки обнови окно: Настройки → Обновления → «Перезапустить и обновить».')
+      if (!source.image) throw new Error(t('Для вставки картинки обнови окно: Настройки → Обновления → «Перезапустить и обновить».'))
       const r = await source.image(session)
       if ('error' in r) throw new Error(r.error)
-      await save({ path: r.path, name: 'Скриншот.png' })
+      await save({ path: r.path, name: t('Скриншот.png') })
     })
   }
   const onDragOver = (e: DragEvent<HTMLTextAreaElement>): void => {
@@ -143,7 +149,7 @@ export function useAttachments({ source, box, text, setText, session, persist = 
     addFiles(Array.from(e.dataTransfer.files))
   }
   const finalize = async (target: string, snapshot: readonly SavedAttachment[] = owner.items): Promise<SavedAttachment[]> => {
-    if (owner.pending) throw new Error('Дождись сохранения вложений.')
+    if (owner.pending) throw new Error(t('Дождись сохранения вложений.'))
     if (!source?.attachments) return [...snapshot]
     const next: SavedAttachment[] = []
     for (const item of snapshot) {

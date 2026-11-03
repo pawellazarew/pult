@@ -185,6 +185,11 @@ export interface PultBridge {
   readonly version: number
   /** PULT_TEST=1 у процесса оболочки: интерфейс включает отладочные крючки для e2e. */
   readonly testMode: boolean
+  /** Resolved language of this window; optional for compatibility with older shells. */
+  readonly language?: 'ru' | 'en'
+  readonly languageOverride?: 'auto' | 'ru' | 'en' | null
+  /** Reload only the current trusted application document. */
+  reloadWindow?(): void
   /** Position the isolated native browser surface; null hides it. */
   runtimeView?(sessionId: string, bounds: RuntimeBounds | null): Promise<void>
   /** Вызов метода демона из белого списка. Отказ — `BridgeError`. */
@@ -299,6 +304,8 @@ export const IPC = {
   openImage: 'pult:open-image',
   navigate: 'pult:navigate',
   testMode: 'pult:test-mode',
+  languageGet: 'pult:language-get',
+  reloadWindow: 'pult:reload-window',
 } as const
 
 /** Ответ main на `call`: конверт вместо исключения — код ошибки должен доехать до окна целым. */

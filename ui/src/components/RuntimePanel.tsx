@@ -3,13 +3,14 @@ import type { FormEvent, MouseEvent, ReactElement } from 'react'
 import type { PultBridge } from '../../../shell/src/contract.js'
 import type { RuntimeBounds, RuntimeDiscovery, RuntimeKind, RuntimeResult, RuntimeSetup } from '../../../src/runtimes/types.js'
 import { errorText } from '../bridge.js'
+import { t as tr } from '../lib/i18n.js'
 import { Icon } from './common.js'
 import '../runtime.css'
 
 type Discovery = RuntimeDiscovery & { attached?: string[]; controller?: 'agent' | 'human'; controllers?: Record<string, 'agent' | 'human'> }
 type SetupRequest = { id: string; setup: RuntimeSetup; status: 'pending' | 'approved' | 'denied' | 'installing' | 'failed'; sessionId: string; error?: string }
 type ViewBridge = PultBridge & { runtimeView?(sessionId: string, bounds: RuntimeBounds | null): Promise<void> }
-const KINDS: Array<{ id: RuntimeKind; label: string }> = [{ id: 'web', label: 'Браузер' }, { id: 'ios', label: 'iOS' }, { id: 'android', label: 'Android' }]
+const KINDS: Array<{ id: RuntimeKind; label: string }> = [{ id: 'web', label: tr('Браузер') }, { id: 'ios', label: 'iOS' }, { id: 'android', label: 'Android' }]
 
 /** Device coordinates refer to the original framebuffer, not the compressed preview. */
 export function runtimePoint(client: { x: number; y: number }, box: { left: number; top: number; width: number; height: number }, size: { width: number; height: number }): { x: number; y: number } | null {
@@ -85,7 +86,7 @@ export function RuntimePanel({ bridge, sessionId, obstructed, onClose }: { bridg
         const ready = next.targets.filter((t) => t.kind === 'android' && t.state === 'ready' && t.id.startsWith('android:') && !waitingAndroid.current!.has(t.id))
         if (ready.length === 1) {
           setKind('android'); setSelected(ready[0].id); waitingAndroid.current = null
-          setBootNote('Эмулятор запущен. Нажми «Подключить», чтобы открыть его экран.')
+          setBootNote(tr('Эмулятор запущен. Нажми «Подключить», чтобы открыть его экран.'))
         }
       }
       setDiscovery(next)
@@ -112,7 +113,7 @@ export function RuntimePanel({ bridge, sessionId, obstructed, onClose }: { bridg
     const epoch = lifetime.current
     setBusy(true); setError(null)
     if (action === 'attach') {
-      if (targetId.startsWith('android-avd:')) { waitingAndroid.current = new Set(discovery.targets.filter((t) => t.kind === 'android' && t.state === 'ready').map((t) => t.id)); setBootNote('Эмулятор запускается. Пульт найдёт его после загрузки Android.') }
+      if (targetId.startsWith('android-avd:')) { waitingAndroid.current = new Set(discovery.targets.filter((t) => t.kind === 'android' && t.state === 'ready').map((t) => t.id)); setBootNote(tr('Эмулятор запускается. Пульт найдёт его после загрузки Android.')) }
       else setBootNote(null)
     }
     try {
@@ -209,46 +210,46 @@ export function RuntimePanel({ bridge, sessionId, obstructed, onClose }: { bridg
     void perform('swipe', { x: Math.floor(size.width / 2), y: Math.floor(size.height * start), endX: Math.floor(size.width / 2), endY: Math.floor(size.height * end), duration: 350 })
   }
 
-  return <aside className="runtime-panel" aria-label="Превью и устройства" data-testid="runtime-panel">
-    <div className="runtime-title"><div><b>Превью</b><span>Одна среда у тебя и агента</span></div><button type="button" className="btn btn-ghost btn-sm" aria-label="Закрыть превью" onClick={onClose}><Icon name="x" /></button></div>
-    <div className="runtime-kinds" role="tablist" aria-label="Тип среды">{KINDS.map((k) => <button key={k.id} type="button" role="tab" aria-selected={kind === k.id} className={`btn btn-sm ${kind === k.id ? 'runtime-tab-active' : 'btn-ghost'}`} onClick={() => { setKind(k.id); setSelected('') }}>{k.label}</button>)}<button type="button" className="btn btn-ghost btn-sm runtime-refresh" disabled={busy} aria-label="Найти устройства заново" onClick={() => void refresh()}>↻</button></div>
+  return <aside className="runtime-panel" aria-label={tr("Превью и устройства")} data-testid="runtime-panel">
+    <div className="runtime-title"><div><b>{tr("Превью")}</b><span>{tr("Одна среда у тебя и агента")}</span></div><button type="button" className="btn btn-ghost btn-sm" aria-label={tr("Закрыть превью")} onClick={onClose}><Icon name="x" /></button></div>
+    <div className="runtime-kinds" role="tablist" aria-label={tr("Тип среды")}>{KINDS.map((k) => <button key={k.id} type="button" role="tab" aria-selected={kind === k.id} className={`btn btn-sm ${kind === k.id ? 'runtime-tab-active' : 'btn-ghost'}`} onClick={() => { setKind(k.id); setSelected('') }}>{k.label}</button>)}<button type="button" className="btn btn-ghost btn-sm runtime-refresh" disabled={busy} aria-label={tr("Найти устройства заново")} onClick={() => void refresh()}>↻</button></div>
     {error && <div className="runtime-error" role="alert">{error}</div>}
-    {loading && <div className="runtime-note" role="status">Ищу доступные среды…</div>}
-    {targets.length > 0 && <div className="runtime-device-row"><label className="runtime-select-label">Среда<select value={targetId} onChange={(e) => setSelected(e.target.value)} aria-label="Выбрать устройство">{targets.map((t) => <option key={t.id} value={t.id}>{t.name}{t.state === 'stopped' ? ' · выключено' : ''}</option>)}</select></label>{!attached && <button type="button" className="btn btn-primary" disabled={busy || target?.state === 'unavailable'} onClick={() => void perform('attach')} data-testid="runtime-attach">{busy ? 'Подключаю…' : 'Подключить'}</button>}</div>}
+    {loading && <div className="runtime-note" role="status">{tr("Ищу доступные среды…")}</div>}
+    {targets.length > 0 && <div className="runtime-device-row"><label className="runtime-select-label">{tr("Среда")}<select value={targetId} onChange={(e) => setSelected(e.target.value)} aria-label={tr("Выбрать устройство")}>{targets.map((t) => <option key={t.id} value={t.id}>{t.name}{t.state === 'stopped' ? tr(' · выключено') : ''}</option>)}</select></label>{!attached && <button type="button" className="btn btn-primary" disabled={busy || target?.state === 'unavailable'} onClick={() => void perform('attach')} data-testid="runtime-attach">{busy ? tr('Подключаю…') : tr('Подключить')}</button>}</div>}
     {target?.detail && <p className="runtime-note">{target.detail}</p>}
     {kind === 'android' && bootNote && <p className="runtime-note" role="status">{bootNote}</p>}
     {attached && <>
-      <div className="runtime-control"><span className={human ? 't-ok' : 't-run'}><span className="dot" />{human ? 'Ты управляешь' : 'Управляет агент'}</span><button type="button" className="btn btn-sm" disabled={busy} onClick={() => void control()} data-testid="runtime-control">{human ? 'Вернуть агенту' : 'Взять управление'}</button></div>
-      {web && <form className="runtime-address" onSubmit={navigate}><input ref={urlInput} aria-label="Адрес страницы" value={url} placeholder="http://localhost:3000" onChange={(e) => setUrl(e.target.value)} spellCheck={false} disabled={!human} /><button type="submit" className="btn btn-sm" disabled={busy || !human}>Открыть</button><button type="button" className="btn btn-ghost btn-sm" aria-label="Перезагрузить страницу" disabled={busy || !human} onClick={() => void perform('reload')}>↻</button></form>}
-      <div ref={slot} className={`runtime-screen${web ? ' runtime-screen-web' : ''}${human ? ' runtime-screen-human' : ''}`} data-testid="runtime-screen" aria-label={nativeWeb ? 'Интерактивная веб-страница' : 'Экран выбранной среды'}>
-        {!nativeWeb && (picture ? <img src={picture} alt={`Экран: ${target?.name ?? 'устройство'}`} draggable={false} onClick={tap} /> : <div className="runtime-placeholder">{targetId.startsWith('android-avd:') ? 'Эмулятор загружается. Затем выбери запущенное устройство и нажми «Подключить».' : target?.capabilities.includes('screenshot') ? 'Ожидаю первый кадр…' : 'Для показа экрана нужен дополнительный компонент.'}</div>)}
+      <div className="runtime-control"><span className={human ? 't-ok' : 't-run'}><span className="dot" />{human ? tr('Ты управляешь') : tr('Управляет агент')}</span><button type="button" className="btn btn-sm" disabled={busy} onClick={() => void control()} data-testid="runtime-control">{human ? tr('Вернуть агенту') : tr('Взять управление')}</button></div>
+      {web && <form className="runtime-address" onSubmit={navigate}><input ref={urlInput} aria-label={tr("Адрес страницы")} value={url} placeholder="http://localhost:3000" onChange={(e) => setUrl(e.target.value)} spellCheck={false} disabled={!human} /><button type="submit" className="btn btn-sm" disabled={busy || !human}>{tr("Открыть")}</button><button type="button" className="btn btn-ghost btn-sm" aria-label={tr("Перезагрузить страницу")} disabled={busy || !human} onClick={() => void perform('reload')}>↻</button></form>}
+      <div ref={slot} className={`runtime-screen${web ? ' runtime-screen-web' : ''}${human ? ' runtime-screen-human' : ''}`} data-testid="runtime-screen" aria-label={nativeWeb ? tr('Интерактивная веб-страница') : tr('Экран выбранной среды')}>
+        {!nativeWeb && (picture ? <img src={picture} alt={tr`Экран: ${target?.name ?? tr('устройство')}`} draggable={false} onClick={tap} /> : <div className="runtime-placeholder">{targetId.startsWith('android-avd:') ? tr('Эмулятор загружается. Затем выбери запущенное устройство и нажми «Подключить».') : target?.capabilities.includes('screenshot') ? tr('Ожидаю первый кадр…') : tr('Для показа экрана нужен дополнительный компонент.')}</div>)}
       </div>
-      {!web && human && kind === 'ios' && picture && !runtimeCoordinates(kind, frame) && <p className="runtime-note">Координаты экрана ещё недоступны. Нажатия по картинке отключены; агент может работать по названиям элементов.</p>}
-      {!nativeWeb && <div className="runtime-frame-status"><span>{web && human && !slotVisible ? 'Прокрути панель к экрану для ввода' : frameAt ? 'Кадры обновляются раз в секунду' : 'Подключено'}</span>{!human && <span>Для ввода возьми управление</span>}</div>}
-      {!web && human && <div className="runtime-mobile-input"><div className="runtime-device-buttons">{target?.capabilities.includes('button') && <><button type="button" className="btn btn-sm" disabled={busy} onClick={() => void perform('button', { button: kind === 'android' ? 'back' : 'home' })}>{kind === 'android' ? 'Назад' : 'Домой'}</button>{kind === 'android' && <button type="button" className="btn btn-sm" disabled={busy} onClick={() => void perform('button', { button: 'home' })}>Домой</button>}</>}{target?.capabilities.includes('swipe') && <><button type="button" className="btn btn-sm" disabled={busy || !runtimeCoordinates(kind, frame)} onClick={() => swipe('up')}>↑ Прокрутить</button><button type="button" className="btn btn-sm" disabled={busy || !runtimeCoordinates(kind, frame)} onClick={() => swipe('down')}>↓</button></>}</div>{target?.capabilities.includes('type') && <form onSubmit={mobileType}><input aria-label="Текст для устройства" value={text} onChange={(e) => setText(e.target.value)} placeholder="Ввести в активное поле" /><button className="btn btn-sm" type="submit" disabled={busy || !text}>Ввести</button></form>}</div>}
-      <div className="runtime-bottom-actions">{target?.capabilities.includes('inspect') && <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => void perform('inspect')}>Элементы экрана</button>}{target?.capabilities.includes('logs') && <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => void perform('logs')}>Ошибки и журнал</button>}<button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => void perform('detach')}>Отключить</button></div>
-      {details && <details className="runtime-details" open><summary>Состояние среды</summary><pre>{details}</pre></details>}
+      {!web && human && kind === 'ios' && picture && !runtimeCoordinates(kind, frame) && <p className="runtime-note">{tr("Координаты экрана ещё недоступны. Нажатия по картинке отключены; агент может работать по названиям элементов.")}</p>}
+      {!nativeWeb && <div className="runtime-frame-status"><span>{web && human && !slotVisible ? tr('Прокрути панель к экрану для ввода') : frameAt ? tr('Кадры обновляются раз в секунду') : tr('Подключено')}</span>{!human && <span>{tr("Для ввода возьми управление")}</span>}</div>}
+      {!web && human && <div className="runtime-mobile-input"><div className="runtime-device-buttons">{target?.capabilities.includes('button') && <><button type="button" className="btn btn-sm" disabled={busy} onClick={() => void perform('button', { button: kind === 'android' ? 'back' : 'home' })}>{kind === 'android' ? tr('Назад') : tr('Домой')}</button>{kind === 'android' && <button type="button" className="btn btn-sm" disabled={busy} onClick={() => void perform('button', { button: 'home' })}>{tr("Домой")}</button>}</>}{target?.capabilities.includes('swipe') && <><button type="button" className="btn btn-sm" disabled={busy || !runtimeCoordinates(kind, frame)} onClick={() => swipe('up')}>{tr("↑ Прокрутить")}</button><button type="button" className="btn btn-sm" disabled={busy || !runtimeCoordinates(kind, frame)} onClick={() => swipe('down')}>↓</button></>}</div>{target?.capabilities.includes('type') && <form onSubmit={mobileType}><input aria-label={tr("Текст для устройства")} value={text} onChange={(e) => setText(e.target.value)} placeholder={tr("Ввести в активное поле")} /><button className="btn btn-sm" type="submit" disabled={busy || !text}>{tr("Ввести")}</button></form>}</div>}
+      <div className="runtime-bottom-actions">{target?.capabilities.includes('inspect') && <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => void perform('inspect')}>{tr("Элементы экрана")}</button>}{target?.capabilities.includes('logs') && <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => void perform('logs')}>{tr("Ошибки и журнал")}</button>}<button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => void perform('detach')}>{tr("Отключить")}</button></div>
+      {details && <details className="runtime-details" open><summary>{tr("Состояние среды")}</summary><pre>{details}</pre></details>}
     </>}
-    {!loading && !targets.length && <div className="runtime-empty"><b>{web ? 'Браузер пока недоступен' : 'Устройства не найдены'}</b><p>{web ? 'Открой эту сессию в обновлённом desktop-приложении Пульта.' : 'Подключи существующий симулятор или настрой среду ниже. SDK и образы не входят в Пульт.'}</p></div>}
+    {!loading && !targets.length && <div className="runtime-empty"><b>{web ? tr('Браузер пока недоступен') : tr('Устройства не найдены')}</b><p>{web ? tr('Открой эту сессию в обновлённом desktop-приложении Пульта.') : tr('Подключи существующий симулятор или настрой среду ниже. SDK и образы не входят в Пульт.')}</p></div>}
     {requests.filter((r) => r.setup.kind === kind && r.status !== 'denied').slice(-6).map((request) => <div className={`runtime-setup runtime-setup-pending${request.status === 'failed' ? ' runtime-setup-failed' : ''}`} key={request.id}>
       <b>{runtimeSetupLabel(request.status, request.setup.installable)}</b>
-      {request.status !== 'approved' || !request.setup.installable ? <SetupInfo setup={request.setup} bridge={bridge} /> : <p>{request.setup.title}. Пульт перепроверил готовность среды.</p>}
-      {request.status === 'installing' && <p role="status">Установка выполняется на этом компьютере. Можно продолжать разговор; состояние обновляется автоматически.</p>}
-      {request.status === 'failed' && <><p className="t-fail" role="alert">{request.error ?? 'Компонент не удалось установить.'}</p><button type="button" className="btn btn-sm" disabled={busy} onClick={() => void requestSetup(request.setup)}>Попробовать снова</button></>}
-      {request.status === 'pending' && <div className="runtime-setup-actions"><button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={() => void resolve(request, true)}>{request.setup.installable ? 'Установить и продолжить' : 'Показать шаги настройки'}</button><button type="button" className="btn btn-sm" disabled={busy} onClick={() => void resolve(request, false)}>Пропустить</button></div>}
-      {!request.setup.installable && <p className="runtime-note">Эти шаги выполняются вручную. После настройки нажми ↻ — Пульт перепроверит готовность.</p>}
+      {request.status !== 'approved' || !request.setup.installable ? <SetupInfo setup={request.setup} bridge={bridge} /> : <p>{request.setup.title}{tr(". Пульт перепроверил готовность среды.")}</p>}
+      {request.status === 'installing' && <p role="status">{tr("Установка выполняется на этом компьютере. Можно продолжать разговор; состояние обновляется автоматически.")}</p>}
+      {request.status === 'failed' && <><p className="t-fail" role="alert">{request.error ?? tr('Компонент не удалось установить.')}</p><button type="button" className="btn btn-sm" disabled={busy} onClick={() => void requestSetup(request.setup)}>{tr("Попробовать снова")}</button></>}
+      {request.status === 'pending' && <div className="runtime-setup-actions"><button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={() => void resolve(request, true)}>{request.setup.installable ? tr('Установить и продолжить') : tr('Показать шаги настройки')}</button><button type="button" className="btn btn-sm" disabled={busy} onClick={() => void resolve(request, false)}>{tr("Пропустить")}</button></div>}
+      {!request.setup.installable && <p className="runtime-note">{tr("Эти шаги выполняются вручную. После настройки нажми ↻ — Пульт перепроверит готовность.")}</p>}
     </div>)}
-    {discovery.setup.filter((s) => s.kind === kind && !requests.some((r) => r.setup.id === s.id && (['pending', 'installing', 'failed'].includes(r.status) || (r.status === 'approved' && !s.installable)))).map((setup) => <details className="runtime-setup" key={setup.id} open={!targets.length || setup.installable}><summary>{setup.title}</summary><SetupInfo setup={setup} bridge={bridge} />{setup.installable && <div className="runtime-setup-actions"><button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={() => void requestSetup(setup)} data-testid="runtime-install-helper">Установить помощник</button></div>}</details>)}
+    {discovery.setup.filter((s) => s.kind === kind && !requests.some((r) => r.setup.id === s.id && (['pending', 'installing', 'failed'].includes(r.status) || (r.status === 'approved' && !s.installable)))).map((setup) => <details className="runtime-setup" key={setup.id} open={!targets.length || setup.installable}><summary>{setup.title}</summary><SetupInfo setup={setup} bridge={bridge} />{setup.installable && <div className="runtime-setup-actions"><button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={() => void requestSetup(setup)} data-testid="runtime-install-helper">{tr("Установить помощник")}</button></div>}</details>)}
   </aside>
 }
 
 export function runtimeSetupLabel(status: SetupRequest['status'], installable: boolean): string {
-  if (status === 'installing') return 'Устанавливаю компонент…'
-  if (status === 'failed') return 'Установка не завершена'
-  if (status === 'approved') return installable ? 'Компонент установлен' : 'Выполни шаги настройки'
-  return 'Для задачи нужна настройка'
+  if (status === 'installing') return tr('Устанавливаю компонент…')
+  if (status === 'failed') return tr('Установка не завершена')
+  if (status === 'approved') return installable ? tr('Компонент установлен') : tr('Выполни шаги настройки')
+  return tr('Для задачи нужна настройка')
 }
 
 function SetupInfo({ setup, bridge }: { setup: RuntimeSetup; bridge: PultBridge }): ReactElement {
-  return <><p>{setup.detail}</p>{setup.command && <div className="runtime-command"><code>{setup.command}</code><button className="btn btn-ghost btn-sm" type="button" aria-label="Скопировать команду настройки" onClick={() => void bridge.copyText(setup.command!)}>Копировать</button></div>}{setup.url && <button type="button" className="btn btn-ghost btn-sm" onClick={() => void bridge.openExternal?.(setup.url!)}>Открыть инструкцию ↗</button>}</>
+  return <><p>{setup.detail}</p>{setup.command && <div className="runtime-command"><code>{setup.command}</code><button className="btn btn-ghost btn-sm" type="button" aria-label={tr("Скопировать команду настройки")} onClick={() => void bridge.copyText(setup.command!)}>{tr("Копировать")}</button></div>}{setup.url && <button type="button" className="btn btn-ghost btn-sm" onClick={() => void bridge.openExternal?.(setup.url!)}>{tr("Открыть инструкцию ↗")}</button>}</>
 }

@@ -1,3 +1,4 @@
+import { t } from '../cli/i18n.js'
 // Канал обновлений (M8c): голый `pult update` и `pult update --check`.
 //
 //   latest.json (GitHub Releases) → подпись Ed25519 ключом из keys.ts → версия новее активной →
@@ -65,8 +66,8 @@ export function updateUrl(config: PultConfig | null, env: NodeJS.ProcessEnv): st
   const raw = (env['PULT_UPDATE_URL'] ?? '').trim()
   if (raw) {
     let u: URL
-    try { u = new URL(raw) } catch { throw new ChannelError(`PULT_UPDATE_URL=${raw.slice(0, 200)}: не адрес`) }
-    if (u.protocol !== 'https:') throw new ChannelError(`PULT_UPDATE_URL=${raw.slice(0, 200)}: только https`)
+    try { u = new URL(raw) } catch { throw new ChannelError(t`PULT_UPDATE_URL=${raw.slice(0, 200)}: не адрес`) }
+    if (u.protocol !== 'https:') throw new ChannelError(t`PULT_UPDATE_URL=${raw.slice(0, 200)}: только https`)
     return u.href
   }
   return config?.updates.url ?? DEFAULT_UPDATE_URL
@@ -109,7 +110,7 @@ export async function fetchManifest(opts: ChannelOptions & { url: string }): Pro
     return verifyEnvelope(bytes, opts.keys ?? trustedKeys(env))
   } catch (e) {
     if (e instanceof ManifestError || e instanceof FetchError) {
-      const hint = e instanceof FetchError && /HTTP 404/.test(e.message) ? ` — ${CHANNEL_404_HINT}` : ''
+      const hint = e instanceof FetchError && /HTTP 404/.test(e.message) ? ` — ${t(CHANNEL_404_HINT)}` : ''
       throw new ChannelError(e.message + hint)
     }
     throw e
@@ -206,23 +207,23 @@ export async function updateCheck(paths: PultPaths, io: Io, opts: ChannelOptions
   }
   const v = r.latest.version
   if (r.available) {
-    io.out(`доступна ${v} (сейчас ${r.current ?? 'ничего не стоит'}, выпущена ${day(r.latest.released)}) — поставить: pult update`)
+    io.out(t`доступна ${v} (сейчас ${r.current ?? t('ничего не стоит')}, выпущена ${day(r.latest.released)}) — поставить: pult update`)
   } else if (r.newer && r.bad) {
-    io.out(`в канале ${v}, но она уже не прошла пробу на этой машине (bad) — сама не ставится; повторить руками: pult update --to ${v}`)
+    io.out(t`в канале ${v}, но она уже не прошла пробу на этой машине (bad) — сама не ставится; повторить руками: pult update --to ${v}`)
   } else if (r.newer && r.dev) {
-    io.out(`в канале ${v}; активна рабочая копия ${r.current} (daemon install --dev) — канал её не трогает`)
+    io.out(t`в канале ${v}; активна рабочая копия ${r.current} (daemon install --dev) — канал её не трогает`)
   } else if (r.current !== null && compareVersions(v, r.current) < 0) {
-    io.out(`pult ${r.current} новее канала (${v}) — ставить нечего`)
+    io.out(t`pult ${r.current} новее канала (${v}) — ставить нечего`)
   } else {
-    io.out(`pult ${r.current ?? v} — последняя версия`)
+    io.out(t`pult ${r.current ?? v} — последняя версия`)
   }
-  io.out(`что нового: ${r.latest.notes}`)
+  io.out(t`что нового: ${r.latest.notes}`)
   // 0.3.16: у окна тот же номер, что у пакета, — строка про окно только когда оно отстало (обновится той же кнопкой).
   const w = r.window
   if (w.installed !== null && w.latest !== null && compareVersions(w.latest, w.installed) > 0) {
     io.out(w.bad
-      ? `окно: ${w.installed} → в канале ${w.latest}, но оно уже не встало на этой машине — повторить: pult update --app --force`
-      : `окно: ${w.installed} → доступно ${w.latest} — обновится вместе с Пультом («Перезапустить» в окне) или: pult update --app`)
+      ? t`окно: ${w.installed} → в канале ${w.latest}, но оно уже не встало на этой машине — повторить: pult update --app --force`
+      : t`окно: ${w.installed} → доступно ${w.latest} — обновится вместе с Пультом («Перезапустить» в окне) или: pult update --app`)
   }
   return r.available ? EXIT_UPDATE_AVAILABLE : 0
 }
@@ -254,7 +255,7 @@ async function downloadPackage(paths: PultPaths, io: Io, m: Manifest, env: NodeJ
     return null
   }
   renameSync(partial, tgz)
-  io.out(`скачано: ${m.package.size} байт, sha256 сходится с подписанным манифестом`)
+  io.out(t`скачано: ${m.package.size} байт, sha256 сходится с подписанным манифестом`)
   return tgz
 }
 
@@ -289,44 +290,44 @@ export async function updateLatest(paths: PultPaths, io: Io, opts: ChannelOption
       const inst = installedVersion(paths)
       const forward = exp !== undefined && isVersionName(exp) && (inst.version === null || compareVersions(exp, inst.version) > 0)
       if (exp !== undefined && forward && !inst.dev && !readState(paths).bad.includes(exp) && stagedReady(paths, exp)) {
-        io.err(`pult update: ${e.message} — ${exp} уже подготовлена заранее, ставлю её`)
+        io.err(t`pult update: ${e.message} — ${exp} уже подготовлена заранее, ставлю её`)
         return switchStaged(paths, io, exp, tail)
       }
       io.err(`pult update: ${e.message}`)
-      io.err('ничего не поставлено; поставить тарбол руками: pult update --from <pult-x.y.z.tgz>')
+      io.err(t('ничего не поставлено; поставить тарбол руками: pult update --from <pult-x.y.z.tgz>'))
       return 1
     }
     const r = report(paths, m, url, env)
     const v = m.version
     if (r.dev) {
-      io.err(`pult update: активна рабочая копия ${r.current} (daemon install --dev) — канал её не трогает; релиз ${v} руками: pult update --from <тарбол>`)
+      io.err(t`pult update: активна рабочая копия ${r.current} (daemon install --dev) — канал её не трогает; релиз ${v} руками: pult update --from <тарбол>`)
       return 1
     }
     if (!r.newer) {
       io.out(r.current !== null && compareVersions(v, r.current) < 0
-        ? `pult ${r.current} новее канала (${v}) — ставить нечего`
-        : `уже последняя: ${r.current ?? v}`)
+        ? t`pult ${r.current} новее канала (${v}) — ставить нечего`
+        : t`уже последняя: ${r.current ?? v}`)
       return 0
     }
     if (r.bad) {
-      io.err(`pult update: ${v} уже не прошла пробу на этой машине (bad) — сама не ставится; повторить: pult update --to ${v}`)
+      io.err(t`pult update: ${v} уже не прошла пробу на этой машине (bad) — сама не ставится; повторить: pult update --to ${v}`)
       return 1
     }
     if (opts.expect !== undefined && opts.expect !== v) {
       if (compareVersions(v, opts.expect) < 0) {
-        io.err(`pult update: в канале ${v}, а ставить просили ${opts.expect} — канал старше просимого; проверь заново (pult update --check) и повтори`)
+        io.err(t`pult update: в канале ${v}, а ставить просили ${opts.expect} — канал старше просимого; проверь заново (pult update --check) и повтори`)
         return 1
       }
       // Пока окно ждало конца ходов (или висело с прошлой проверки), вышла ещё одна версия — ставим её, а не старую.
-      io.out(`в канале уже ${v} (просили ${opts.expect}) — ставлю ${v}`)
+      io.out(t`в канале уже ${v} (просили ${opts.expect}) — ставлю ${v}`)
     }
     if (stagedReady(paths, v, m.package.sha256)) return switchStaged(paths, io, v, { ...tail, expectVersion: v })
-    io.out(`доступна ${v} (сейчас ${r.current ?? 'ничего не стоит'}) — скачиваю ${m.package.url}`)
+    io.out(t`доступна ${v} (сейчас ${r.current ?? t('ничего не стоит')}) — скачиваю ${m.package.url}`)
     // Тестовый шов: «долгая загрузка», чтобы сквозной тест окна застал состояние «ставится». Только под PULT_TEST.
     const hold = Number(env['PULT_TEST'] === '1' ? env['PULT_TEST_UPDATE_HOLD_MS'] : NaN)
     if (Number.isFinite(hold) && hold > 0) await new Promise((res) => setTimeout(res, hold))
     const tgz = await downloadPackage(paths, io, m, env, opts.http)
-    if (tgz === null) { io.err('ничего не поставлено: current и работающий демон прежние'); return 1 }
+    if (tgz === null) { io.err(t('ничего не поставлено: current и работающий демон прежние')); return 1 }
     try {
       return await installTarball(paths, io, tgz, { ...tail, expectVersion: v, channelSha: m.package.sha256 })
     } finally {
@@ -360,16 +361,16 @@ export async function updateStage(paths: PultPaths, io: Io, opts: ChannelOptions
     const r = report(paths, m, url, env)
     const v = m.version
     if (r.dev || !r.newer || r.bad) {
-      io.out(`pult update --stage: готовить нечего (${r.dev ? 'рабочая копия' : r.bad ? `${v} — bad` : `${r.current ?? v} — последняя`})`)
+      io.out(t`pult update --stage: готовить нечего (${r.dev ? t('рабочая копия') : r.bad ? `${v} — bad` : t`${r.current ?? v} — последняя`})`)
       return 0
     }
     // Прежние подготовленные убираются только ПОСЛЕ удачи: битый релиз не должен стереть годную подготовленную версию.
     const prune = (): void => {
       const removed = pruneStaged(paths, v)
-      if (removed.length) io.out(`убраны прежние подготовленные версии: ${removed.join(', ')}`)
+      if (removed.length) io.out(t`убраны прежние подготовленные версии: ${removed.join(', ')}`)
     }
-    if (stagedReady(paths, v, m.package.sha256)) { io.out(`${v} уже подготовлена`); prune(); return 0 }
-    io.out(`готовлю ${v}: скачиваю ${m.package.url}`)
+    if (stagedReady(paths, v, m.package.sha256)) { io.out(t`${v} уже подготовлена`); prune(); return 0 }
+    io.out(t`готовлю ${v}: скачиваю ${m.package.url}`)
     const tgz = await downloadPackage(paths, io, m, env, opts.http)
     if (tgz === null) return 1
     try {

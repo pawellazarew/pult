@@ -1,3 +1,4 @@
+import { t } from '../lib/i18n.js'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import type { PDFDocumentLoadingTask, PDFDocumentProxy, RenderTask, TextLayer } from 'pdfjs-dist'
@@ -12,9 +13,9 @@ const MAX_ZOOM = 2.5
 
 function pdfError(error: unknown): string {
   if (error && typeof error === 'object' && 'name' in error && error.name === 'PasswordException') {
-    return 'PDF защищён паролем. Открой его системным приложением.'
+    return t('PDF защищён паролем. Открой его системным приложением.')
   }
-  return 'Не удалось показать PDF. Файл может быть повреждён — попробуй открыть его системным приложением.'
+  return t('Не удалось показать PDF. Файл может быть повреждён — попробуй открыть его системным приложением.')
 }
 
 /** Only local bytes enter PDF.js; no URL from the PDF, forms, scripts or links are activated. */
@@ -60,7 +61,7 @@ export function PdfPreview({ base64, name }: { base64: string; name: string }): 
       const result = await task.promise
       if (!alive) return
       if (result.numPages > MAX_PAGES) {
-        setLoadError({ source: base64, message: 'В PDF больше 5000 страниц. Открой его системным приложением.' })
+        setLoadError({ source: base64, message: t('В PDF больше 5000 страниц. Открой его системным приложением.') })
         await task.destroy()
         return
       }
@@ -101,7 +102,7 @@ export function PdfPreview({ base64, name }: { base64: string; name: string }): 
       const canvas = window.document.createElement('canvas')
       canvas.dataset.testid = 'pdf-canvas'
       canvas.setAttribute('role', 'img')
-      canvas.setAttribute('aria-label', `${name}, страница ${page}`)
+      canvas.setAttribute('aria-label', t`${name}, страница ${page}`)
       canvas.width = Math.max(1, Math.floor(viewport.width * ratio))
       canvas.height = Math.max(1, Math.floor(viewport.height * ratio))
       canvas.style.width = `${viewport.width}px`; canvas.style.height = `${viewport.height}px`
@@ -144,23 +145,23 @@ export function PdfPreview({ base64, name }: { base64: string; name: string }): 
   }
   const state = error ? 'error' : document && !rendering ? 'ready' : 'loading'
   return <section className="pdf-preview" aria-label={`PDF: ${name}`} data-testid="pdf-preview" data-state={state}>
-    <div className="pdf-toolbar" aria-label="Просмотр PDF">
-      <button type="button" className="btn btn-sm" data-testid="pdf-prev" aria-label="Предыдущая страница" disabled={!document || page <= 1} onClick={() => move(page - 1)}>←</button>
+    <div className="pdf-toolbar" aria-label={t("Просмотр PDF")}>
+      <button type="button" className="btn btn-sm" data-testid="pdf-prev" aria-label={t("Предыдущая страница")} disabled={!document || page <= 1} onClick={() => move(page - 1)}>←</button>
       <span className="pdf-page-count" aria-live="polite">{document ? `${page} / ${document.numPages}` : 'PDF'}</span>
-      <button type="button" className="btn btn-sm" data-testid="pdf-next" aria-label="Следующая страница" disabled={!document || page >= document.numPages} onClick={() => move(page + 1)}>→</button>
+      <button type="button" className="btn btn-sm" data-testid="pdf-next" aria-label={t("Следующая страница")} disabled={!document || page >= document.numPages} onClick={() => move(page + 1)}>→</button>
       <span className="pdf-toolbar-space" />
-      <button type="button" className="btn btn-sm" data-testid="pdf-zoom-out" aria-label="Уменьшить PDF" disabled={!document || (!fit && zoom <= .25)} onClick={() => changeZoom(-1)}>−</button>
+      <button type="button" className="btn btn-sm" data-testid="pdf-zoom-out" aria-label={t("Уменьшить PDF")} disabled={!document || (!fit && zoom <= .25)} onClick={() => changeZoom(-1)}>−</button>
       <span className="pdf-zoom" data-testid="pdf-zoom">{Math.round(scale * 100)}%</span>
-      <button type="button" className="btn btn-sm" data-testid="pdf-zoom-in" aria-label="Увеличить PDF" disabled={!document || (!fit && zoom >= MAX_ZOOM)} onClick={() => changeZoom(1)}>+</button>
-      <button type="button" className="btn btn-sm btn-ghost" data-testid="pdf-fit" aria-pressed={fit} disabled={!document} onClick={() => setFit(true)}>По ширине</button>
+      <button type="button" className="btn btn-sm" data-testid="pdf-zoom-in" aria-label={t("Увеличить PDF")} disabled={!document || (!fit && zoom >= MAX_ZOOM)} onClick={() => changeZoom(1)}>+</button>
+      <button type="button" className="btn btn-sm btn-ghost" data-testid="pdf-fit" aria-pressed={fit} disabled={!document} onClick={() => setFit(true)}>{t("По ширине")}</button>
     </div>
     {error && <div className="pdf-error" role="alert">{error}</div>}
-    <div ref={stage} className="pdf-scroll" tabIndex={0} aria-label="Страница PDF" hidden={!!error}>
-      {state === 'loading' && <div className="pdf-loading" role="status">{document ? 'Показываю страницу…' : 'Загружаю PDF…'}</div>}
+    <div ref={stage} className="pdf-scroll" tabIndex={0} aria-label={t("Страница PDF")} hidden={!!error}>
+      {state === 'loading' && <div className="pdf-loading" role="status">{document ? t('Показываю страницу…') : t('Загружаю PDF…')}</div>}
       <div ref={pageHost} className="pdf-page-host" />
     </div>
     {document && !error && pageText && <details className="pdf-page-text">
-      <summary>Текст страницы</summary><pre>{pageText}</pre>
+      <summary>{t("Текст страницы")}</summary><pre>{pageText}</pre>
     </details>}
   </section>
 }

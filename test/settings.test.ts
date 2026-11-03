@@ -647,7 +647,8 @@ describe('M8f: демон — settings.get|set и последний выбор'
     const c = await connectClient(home.paths)
     try {
       const got = (await c.request('settings.get')) as Record<string, unknown>
-      const { network, codexRules, access, ...rest } = got
+      const { network, codexRules, access, language, ...rest } = got
+      assert.equal(language, 'auto')
       assert.deepEqual(rest, { newSession: { rememberLast: true, defaults: { claude: {}, codex: {}, zcode: {} } }, lastUsed: {}, updates: { check: true } })
       // Шаг A: согласия нет; действующий defaultMode владельца (тестовый дом — файла настроек нет).
       assert.deepEqual(access, { consent: { rev: 0, version: 0, current: 1, granted: false, providers: [] }, providers: ['claude', 'codex', 'zcode'], claudeDefaultMode: 'default' })
@@ -658,6 +659,10 @@ describe('M8f: демон — settings.get|set и последний выбор'
       // 0.3.6: правило стража и последние выходы; прокси и профили провайдеров окну не отдаются.
       assert.deepEqual((network as Record<string, unknown>)['guard'], { mode: 'deny', countries: ['RU', 'BY', 'CN', 'IR', 'KP', 'SY', 'CU'] })
       assert.deepEqual(Object.keys(network as Record<string, unknown>).sort(), ['exits', 'guard'])
+      await assert.rejects(c.request('settings.set', { language: 'de' }), code('invalid_params'))
+      await c.request('settings.set', { language: 'en' })
+      assert.equal(((await c.request('settings.get')) as Record<string, unknown>)['language'], 'en')
+      assert.equal(JSON.parse(readFileSync(home.paths.config, 'utf8')).custom, 42)
       await assert.rejects(c.request('settings.set', { network: { claude: { mode: 'off' } } }), code('invalid_params'))
       await assert.rejects(c.request('settings.set', { newSession: { rememberLast: true }, notifyCommand: 'curl x' }), code('invalid_params'))
       await assert.rejects(c.request('settings.set', { newSession: { defaults: { claude: { approval: 'full' } } } }), code('invalid_params'))
