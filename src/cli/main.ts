@@ -33,7 +33,9 @@ import { testLocate } from '../env/locate.js'
 import { contextShare, parseSessionContext } from '../sessions/context.js'
 import { isUnread, parseAttention } from '../sessions/attention.js'
 import { APPROVAL_LIST, isApprovalMode } from '../adapters/types.js'
-import { APPROVAL_WORDS, describeChanges, homeCwdWarning, modeBlocksBrowser, parseNewSession } from '../sessions/settings.js'
+import { APPROVAL_WORDS, describeChanges, homeCwdWarning, parseNewSession } from '../sessions/settings.js'
+import { resolveNewChat } from '../sessions/resolve.js'
+import type { ResolveProvider } from '../sessions/resolve.js'
 import type { ConfigureChanges, ConfigureWhen, NewSessionSettings } from '../sessions/settings.js'
 import type { PermissionOffers } from '../adapters/types.js'
 import { connectClient } from './client.js'
@@ -470,14 +472,31 @@ async function cmdAgent(paths: PultPaths, args: ParsedArgs): Promise<number> {
           defaults = parseNewSession(((await call('settings.get')) as { newSession?: unknown }).newSession, false).value.defaults
         } catch { defaults = null }
         const kind = flagStr(args, 'kind') ?? 'claude'
+        // Шаг B: тот же резолвер, что у черновика окна (src/sessions/resolve.ts), вход `cli`: провайдер — флаг или
+        // claude, память папки не применяется, встроенные умолчания не шлются (модель и усилие тогда выбирает сам CLI).
         // ZCode: модели и усилия у него нет (CLI без --model), браузера тоже — умолчания пусты.
-        const d = defaults ? (kind === 'codex' ? defaults.codex : kind === 'zcode' ? defaults.zcode : defaults.claude) : {}
-        const approval = flagStr(args, 'approval') ?? d.approval
+        const prov: ResolveProvider = kind === 'codex' ? 'codex' : kind === 'zcode' ? 'zcode' : 'claude'
+        const flagApproval = flagStr(args, 'approval')
+        const res = resolveNewChat({
+          entry: 'cli', provider: prov, defaults, fullAllowed: () => true,
+          explicit: {
+            ...(flagStr(args, 'model') !== undefined ? { model: flagStr(args, 'model') as string } : {}),
+            ...(flagStr(args, 'effort') !== undefined ? { effort: flagStr(args, 'effort') as string } : {}),
+            ...(isApprovalMode(flagApproval) ? { approval: flagApproval } : {}),
+          },
+        })
+        const fromDefaults = (o: string): boolean => o === 'default'
+        const d = {
+          ...(fromDefaults(res.origin.model) && res.model ? { model: res.model } : {}),
+          ...(fromDefaults(res.origin.effort) && res.effort ? { effort: res.effort } : {}),
+          ...(fromDefaults(res.origin.approval) ? { approval: res.approval } : {}),
+        } as { model?: string; effort?: string; approval?: string }
+        const approval = flagApproval ?? d.approval
         const used: string[] = []
         if (!args.flags.has('model') && d.model) used.push(tr`модель ${d.model}`)
         if (!args.flags.has('effort') && d.effort) used.push(tr`усилие ${d.effort}`)
         if (!args.flags.has('approval') && d.approval) used.push(tr`режим ${d.approval}`)
-        const browserDefault = !args.flags.has('browser') && d.browser === true && !modeBlocksBrowser(kind === 'codex' ? 'codex' : kind === 'zcode' ? 'zcode' : 'claude', isApprovalMode(approval) ? approval : undefined)
+        const browserDefault = !args.flags.has('browser') && res.origin.browser === 'default' && res.browser
         if (browserDefault) used.push(tr('браузер'))
         if (used.length && !asJson) err(tr`pult agent start: из настроек (newSession.defaults): ${used.join(', ')}`)
         // Ревью M8d: `full` — только с `--yes`, отказ до заведения чего-либо.

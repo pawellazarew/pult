@@ -718,7 +718,7 @@ function runCli(paths: PultPaths, args: string[], timeoutMs = 25_000): Promise<R
 }
 
 describe('M8f: CLI — pult agent set и умолчания pult agent start', () => {
-  it('флаги, --yes для full, строка «со следующего хода»; start без флагов — newSession.defaults, не последний выбор', async () => {
+  it('флаги, --yes для full, строка «со следующего хода»; start без флагов — модель и усилие из newSession.defaults, доступ — «Спрашивать»', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'pt-m8f-cli-'))
     const paths = layout(join(dir, 'h'))
     ensureLayout(paths)
@@ -731,10 +731,11 @@ describe('M8f: CLI — pult agent set и умолчания pult agent start', (
     try {
       const start = await runCli(paths, ['agent', 'start', 'w', '--cwd', work])
       assert.equal(start.code, 0, start.stderr)
-      assert.match(start.stderr, /из настроек \(newSession\.defaults\): модель opus, усилие high, режим read-only$/m)
+      // Шаг B (§3.8): доступ CLI — `--approval` или «Спрашивать»; «Доступ по умолчанию» окна скрипт не берёт.
+      assert.match(start.stderr, /из настроек \(newSession\.defaults\): модель opus, усилие high$/m)
       const list = JSON.parse((await runCli(paths, ['agent', 'list', '--json'])).stdout) as { sessions: Array<Record<string, unknown>> }
       const w = list.sessions.find((s) => s['name'] === 'w')!
-      assert.deepEqual([w['provider'], w['model'], w['effort'], w['approval'], w['mode']], ['claude', 'opus', 'high', 'read-only', 'turn'])
+      assert.deepEqual([w['provider'], w['model'], w['effort'], w['approval'], w['mode']], ['claude', 'opus', 'high', undefined, 'turn'])
       const flagWins = await runCli(paths, ['agent', 'start', 'v', '--cwd', work, '--model', 'haiku', '--approval', 'ask'])
       assert.equal(flagWins.code, 0, flagWins.stderr)
       const v = (JSON.parse((await runCli(paths, ['agent', 'list', '--json'])).stdout) as { sessions: Array<Record<string, unknown>> }).sessions.find((s) => s['name'] === 'v')!
@@ -750,7 +751,7 @@ describe('M8f: CLI — pult agent set и умолчания pult agent start', (
       assert.match(bad.stderr, /нет у claude/)
       const ok = await runCli(paths, ['agent', 'set', 'w', '--model', 'sonnet', '--effort', 'low', '--approval', 'ask'])
       assert.equal(ok.code, 0, ok.stderr)
-      assert.match(ok.stdout, /^w: модель: opus → sonnet · усилие: high → low · режим: только чтение → спрашивать — со следующего хода$/m)
+      assert.match(ok.stdout, /^w: модель: opus → sonnet · усилие: high → low — со следующего хода$/m)
       assert.match(ok.stderr, /кэш промпта у каждой модели свой/)
       const full = await runCli(paths, ['agent', 'set', 'w', '--approval', 'full', '--yes', '--json'])
       assert.equal(full.code, 0, full.stderr)

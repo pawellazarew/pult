@@ -38,6 +38,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { EventDraft } from '../core/events.js'
 import { DAEMON_SESSION } from '../core/events.js'
+import { readRegularFile } from '../core/safeRead.js'
 import { acquireLock, isAlive } from '../core/lock.js'
 import type { Logger } from '../core/log.js'
 import { redactString } from '../core/log.js'
@@ -284,7 +285,13 @@ function defaultModeOf(file: string): string | null {
   if (hit && hit.key === key) return hit.mode
   let mode: string | null = null
   try {
-    const v = (JSON.parse(readFileSync(file, 'utf8')) as { permissions?: { defaultMode?: unknown } }).permissions?.defaultMode
+    // Только обычный файл до 1 МБ, без блокировки (ревью шага B, Codex recheck 10): FIFO или `/dev/zero` под именем
+    // `.claude/settings.json` проекта не повесят демон. Симлинк на обычный файл — можно (dotfiles).
+    const raw = readRegularFile(file, { max: 1024 * 1024, follow: true })
+    // Файл есть, а прочитать его безопасно нельзя (больше 1 МБ, FIFO, устройство): режим неизвестен — считаем полным
+    // доступом (финальное ревью шага B): иначе JSON с набивкой и `bypassPermissions` прошёл бы ссылку как «не полный»,
+    // а Claude его прочитал бы. Человек увидит полный уровень и выберет явно.
+    const v = raw === null ? 'bypassPermissions' : (JSON.parse(raw) as { permissions?: { defaultMode?: unknown } }).permissions?.defaultMode
     if (typeof v === 'string') mode = v
   } catch { /* кривой — не наш */ }
   modeCache.set(file, { key, mode })

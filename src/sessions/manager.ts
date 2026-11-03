@@ -41,7 +41,7 @@ import { attentionOf, retryPrompt } from './attention.js'
 import type { Attention } from './attention.js'
 import { buildTree } from './tree.js'
 import type { AgentTree } from './tree.js'
-import { prepareWorktree, removeWorktree, WorktreeError } from './worktree.js'
+import { deleteBranch, prepareWorktree, removeWorktree, WorktreeError } from './worktree.js'
 import type { PreparedWorktree } from './worktree.js'
 import type { ExternalMessage } from './external.js'
 
@@ -93,6 +93,14 @@ export interface StartParams {
   approval?: ApprovalMode
   /** Шаг A: полный доступ дан разово из CLI (`--yes`) — живёт в записи вместе с режимом. */
   grant?: 'cli-once'
+  /** Шаг B: `requestId` старта из черновика — пишется в запись атомарно с ней (журнал стартов ищет сессию по нему). */
+  startRequest?: string
+  /**
+   * Шаг B (Codex recheck 1, 2): последняя проверка НАСТОЯЩЕЙ папки сессии прямо перед запуском адаптера — после
+   * worktree и всех `await`. Бросает — старт отменяется (новый worktree убирается). Синхронная: между ней и запуском
+   * адаптера нет ожиданий.
+   */
+  beforeSpawn?(sessionCwd: string): void
 }
 
 /** Ответ `agent.start`: запись реестра и — для `--worktree` — что сделано с папкой. */
@@ -884,6 +892,8 @@ export function createManager(opts: ManagerOptions): SessionManager {
         throw new ManagerError('invalid_params', `агент ${params.name} уже заводится`)
       }
       starting.add(params.name)
+      let prepared: PreparedWorktree | null = null
+      let created = false
       try {
         if (!params.cwd) throw new ManagerError('invalid_params', 'нужен --cwd')
         // Папку проверяем ЗДЕСЬ, а не у spawn: опечатка в `--cwd` иначе доходила до
@@ -911,7 +921,6 @@ export function createManager(opts: ManagerOptions): SessionManager {
         // worktree, и именно её запомнит реестр (ленивый resume после рестарта демона попадёт
         // туда же без особого случая). Проверка «провайдер остановлен» стоит выше — незачем
         // заводить ветку агенту, которого всё равно не пустят.
-        let prepared: PreparedWorktree | null = null
         if (params.worktree) {
           const branch = params.worktree
           const wtOpts = {
@@ -943,6 +952,8 @@ export function createManager(opts: ManagerOptions): SessionManager {
         try { await resetBrowserDirs(opts.paths, params.name) } catch (e) {
           throw new ManagerError('internal', `каталог браузера прежней сессии ${params.name} не убран: ${(e as Error).message}`)
         }
+        // Без ожиданий между проверкой и запуском: подмену папки или режим Claude настоящей папки (worktree) ловим здесь.
+        params.beforeSpawn?.(sessionCwd)
         const started = await adapter.startSession({
           name: params.name,
           cwd: sessionCwd,
@@ -978,6 +989,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
           ...(params.approval && params.approval !== 'ask' ? { approval: params.approval } : {}),
           ...(params.grant === 'cli-once' && (params.approval === 'full' || params.approval === 'inherit') ? { grant: 'cli-once' as const } : {}),
           createdAt: new Date().toISOString(),
+          ...(params.startRequest ? { startRequest: params.startRequest } : {}),
           lastStatus: 'cold',
           lastEventId: 0,
           // Отметка «видел» — сразу: без неё рестарт демона до первого показа отдал бы новую сессию
@@ -985,6 +997,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
           lastSeenEventId: opts.store.lastId,
         }
         if (!registry.create(rec)) throw new ManagerError('invalid_params', `агент ${params.name} уже есть`)
+        created = true
         statuses.set(rec.name, 'cold')
         // Имя переиспользуемо: действующий доступ прежней сессии с этим именем новой не достаётся.
         appliedNow.delete(rec.name)
@@ -992,6 +1005,22 @@ export function createManager(opts: ManagerOptions): SessionManager {
         return prepared
           ? { ...rec, worktreeAction: prepared.action, ...(prepared.baseIgnored ? { baseIgnored: true } : {}) }
           : rec
+      } catch (e) {
+        // Шаг B (design/2026-11-02-quick-start §3.3 п. 4): сбой до записи в реестр — новый worktree убирается, иначе
+        // «Повторить» упёрся бы в занятую папку. Чужой (`reused`) не трогаем; ветка остаётся — в ней ничего нет.
+        // Ревью m10: условие — «наша запись не создана», а не «имени нет в реестре» (имя могла занять другая сессия).
+        if (prepared && prepared.action !== 'reused' && !created) {
+          const wt = prepared.worktree
+          const newBranch = prepared.action === 'created'
+          await serialWorktree(async () => {
+            await removeWorktree(wt, opts.env)
+            // Ветку, которую этот старт сам и завёл (в ней ничего нет), — тоже: `branch -d` без силы, чужое не тронет.
+            if (newBranch) await deleteBranch(wt, opts.env)
+          }).catch((err: unknown) => {
+            opts.logger.warn('worktree несостоявшегося старта не убран', { session: params.name, path: wt.path, error: (err as Error).message })
+          })
+        }
+        throw e
       } finally {
         starting.delete(params.name)
         for (const [p, n] of pendingWorktrees) if (n === params.name) pendingWorktrees.delete(p)

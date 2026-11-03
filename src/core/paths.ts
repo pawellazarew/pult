@@ -80,6 +80,14 @@ export interface PultPaths {
    * НЕ внутри `run/`: та закрыта агентам правилами deny (0.3.7).
    */
   readonly attachments: string
+  /**
+   * Быстрый старт, шаг B (design/2026-11-02-quick-start §3.9): `folders.json` — история папок и запомненный доступ каждой
+   * (src/core/folders.ts), `drafts/<uuid>.json` — черновики новых чатов (src/core/drafts.ts), `start/<requestId>.json` —
+   * журнал фаз `agent.start` (src/core/startJournal.ts). Все 0600, каталоги 0700.
+   */
+  readonly folders: string
+  readonly drafts: string
+  readonly startJournal: string
 }
 
 /**
@@ -136,6 +144,9 @@ export function layout(home: string): PultPaths {
     updateApply: join(home, 'update-apply.json'),
     appUpdateState: join(home, 'app-update.json'),
     attachments: join(home, 'attachments'),
+    folders: join(home, 'folders.json'),
+    drafts: join(home, 'drafts'),
+    startJournal: join(home, 'start'),
   }
 }
 
