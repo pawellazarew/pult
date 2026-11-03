@@ -218,7 +218,13 @@ describe('окно: доступ — согласие один раз и мет�
     await row.waitFor({ timeout: 10_000 })
     await row.click()
     assert.equal(await draft().getByTestId('draft-input').inputValue(), 'черновик на потом')
-    assert.equal(await draft().getByTestId('draft-foreign').count(), 0, 'своё окно — не «другое»')
+    // Новое окно — новый владелец (id свой у каждого окна, ревью Codex 8): пока пульс прежнего не протух, черновик
+    // «открыт в другом окне», «Забрать» — сразу.
+    if (await draft().getByTestId('draft-foreign').count()) {
+      await draft().getByTestId('draft-claim').click()
+      assert.ok(await waitFor(async () => (await draft().getByTestId('draft-foreign').count()) === 0, 5000), '«Забрать» не сработало')
+    }
+    assert.equal(await draft().getByTestId('draft-input').inputValue(), 'черновик на потом')
     await row.click({ button: 'right' })
     await h.win.getByTestId('draft-menu-list').getByTestId('draft-remove').click()
     await draft().waitFor({ state: 'detached', timeout: 5000 })

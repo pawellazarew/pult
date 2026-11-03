@@ -261,6 +261,7 @@ effort and access menus, ⌘⇧O the folder menu and ⌘O the system folder pick
   asks "Where are we working?" and lists recent folders from Pult, Claude Code and Codex chats; you can type first,
   ↵ then opens the folder menu. Dropping a folder onto the draft picks it.
 - **Model and effort** come from Settings (⌘,) → New chat defaults. The draft does not reuse the "last choice" any more.
+  `pult agent start` takes access only from `--approval` (otherwise "Спрашивать"), never from the window's defaults.
 - **Access is remembered per folder.** The level you pick when sending, or change later in that chat, becomes the
   folder's access, "Только чтение" (read-only) included; the next ⌘N there starts with it. A new folder starts with
   "Правки в папке без вопросов" (folder edits) or the default from Settings. "Только этот чат" (this chat only) in the

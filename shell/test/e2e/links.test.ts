@@ -64,6 +64,8 @@ describe('ссылки pult://', () => {
     await d.getByTestId('draft-link-path-rejected').waitFor({ timeout: 2000 })
     assert.equal(await d.getByTestId('draft-chip-folder').getAttribute('data-path'), '')
     assert.equal(await d.getByTestId('draft-input').inputValue(), COLD_PROMPT, '`+` остался `+`')
+    // Длинный хвост реплики из ссылки не спрячется за краем поля: счётчик строк и знаков (ревью M5).
+    assert.equal(await d.getByTestId('draft-prompt-stats').textContent(), `Текст из ссылки: 2 строки · ${[...COLD_PROMPT].length} знаков — прокрути поле, прежде чем отправлять.`)
     assert.equal(await d.getByTestId('draft-chip-model').getAttribute('data-provider'), 'codex')
     assert.notEqual(await d.getByTestId('draft-input').evaluate((el) => el === document.activeElement), true, 'черновик из ссылки фокус не берёт')
     const seen = await links()
@@ -140,7 +142,7 @@ describe('ссылки pult://', () => {
     assert.equal(await submit.isDisabled(), true, 'кнопка заперта сразу после ссылки')
     // В черновик идёт путь проекта, как его хранит демон, а не путь из ссылки.
     assert.equal(await d.getByTestId('draft-chip-folder').getAttribute('data-path'), added.path)
-    assert.equal(await d.getByTestId('draft-location').getAttribute('title'), added.path, 'путь целиком — в подсказке')
+    assert.equal(await d.getByTestId('draft-location').textContent(), added.path, 'путь целиком, без сокращения')
     assert.equal(await d.getByTestId('draft-link-path-rejected').count(), 0)
     await sleep(500)
     assert.deepEqual((await list()).map((r) => r.name).sort(), ['alpha', 'beta'], 'ссылка сама ничего не завела')

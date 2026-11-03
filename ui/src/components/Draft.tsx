@@ -9,10 +9,11 @@ import type { DragEvent, KeyboardEvent as ReactKeyboardEvent, ReactElement, Reac
 import { t } from '../lib/i18n.js'
 import type { ApprovalMode } from '../../../src/adapters/types.js'
 import type { SavedAttachment } from '../../../shell/src/contract.js'
+import { plural } from '../lib/ru.js'
 import { consentGrants } from '../model/access.js'
 import { ago, shortPath } from '../model/agents.js'
 import {
-  branchError, draftEmpty, draftFull, escDecision, folderName, modelUnlisted, pickEffort, pickModel, readinessBlocks, readinessOf,
+  accessChipLabel, branchError, draftEmpty, draftFull, escDecision, folderName, linkPromptStats, remembersAccess, modelUnlisted, pickEffort, pickModel, readinessBlocks, readinessOf,
   submitDecision, toggleBrowser, toggleWorktree,
 } from '../model/draft.js'
 import type { DraftChat, DraftEnv, Readiness } from '../model/draft.js'
@@ -26,6 +27,12 @@ import { CMD, Icon, IS_MAC, Kbd } from './common.js'
 
 /** Недавняя папка (`folders.recent`): откуда Пульт её знает и когда в ней работали. */
 export interface RecentFolder { path: string; at: string; source: 'pult' | 'claude' | 'codex' }
+
+/** Строка под полем о сбое или расхождении: «Повторить», «Вернуть мой текст», «Оставить копию». */
+export interface DraftNotice { text: string; retry: boolean; restoreText?: string; fork?: boolean }
+
+/** Ключ вложений черновика в хранилище окна и папка `attachments/<ключ>` — переживают уход из черновика и перезагрузку. */
+export const draftAttachmentSession = (id: string): string => `draft-${id.replace(/-/g, '').slice(0, 20)}`
 
 /** Вложения черновика для старта: сколько их и как переложить в папку вложений сессии, когда демон выдаст имя. */
 export interface DraftFiles { count: number; finalize(name: string): Promise<SavedAttachment[]> }
@@ -45,7 +52,7 @@ export interface DraftViewProps {
   /** Папки проектов дерева (закреплённые и папки сессий) — первые в меню папки. */
   projects: readonly string[]
   sending: boolean
-  error: { text: string; retry: boolean } | null
+  error: DraftNotice | null
   /** Демон на связи: иначе черновик пишется, а отправка ждёт. */
   online: boolean
   /** Черновик держит другое окно (пульс свежий): «Забрать». */
@@ -57,6 +64,12 @@ export interface DraftViewProps {
   noAutoFocus?: boolean
   /** Меню, открытое сразу (тесты отрисовки и кадры README). */
   initialMenu?: MenuKind | null
+  /** Счётчик ⌘N на этом же черновике: сменился — открытое меню закрывается (§3.5). */
+  menuReset?: number
+  /** Вложения поменялись — их метаданные идут в снимок черновика (пустота, восстановление). */
+  onAttachments?(items: SavedAttachment[]): void
+  onRestoreText?(text: string): void
+  onFork?(): void
   onChange(d: DraftChat): void
   /** Текст поля — отдельно: вставка вложений приходит позже, и снимок черновика к тому времени мог смениться. */
   onText(text: string): void
@@ -190,6 +203,7 @@ function Toggle({ on }: { on: boolean }): ReactElement {
 export function DraftView(p: DraftViewProps): ReactElement {
   const d = p.draft
   const [menu, setMenu] = useState<MenuKind | null>(p.initialMenu ?? null)
+  const firstReset = useRef(p.menuReset)
   const box = useRef<HTMLTextAreaElement>(null)
   const refs = {
     folder: useRef<HTMLButtonElement>(null), model: useRef<HTMLButtonElement>(null), effort: useRef<HTMLButtonElement>(null),
@@ -200,8 +214,25 @@ export function DraftView(p: DraftViewProps): ReactElement {
   const folderInfo = d.cwd && p.env.folder?.cwd === d.cwd ? p.env.folder : null
   const readiness = readinessOf(p.catalog, d.provider, p.checking, p.now)
   const full = draftFull(d, inheritMode)
-  const [attachSession] = useState(() => `draft-${d.id.replace(/-/g, '').slice(0, 20)}`)
-  const files = useAttachments({ source: p.filePaths, box, text: d.text, setText: (v) => p.onText(v), session: attachSession, persist: false })
+  const [attachSession] = useState(() => draftAttachmentSession(d.id))
+  // Вложения живут в хранилище окна под ключом черновика (ревью Codex 11): уйти в чат и вернуться — карточки на месте.
+  const files = useAttachments({ source: p.filePaths, box, text: d.text, setText: (v) => p.onText(v), session: attachSession, persist: true })
+  const restoredFiles = useRef(false)
+  useEffect(() => {
+    if (restoredFiles.current) return
+    restoredFiles.current = true
+    if (!files.items.length && d.attachments?.length) files.restore(d.attachments)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+  const filesKey = files.items.map((x) => x.path).join('\n')
+  const reportedKey = useRef((d.attachments ?? []).map((x) => x.path).join('\n'))
+  useEffect(() => {
+    if (filesKey === reportedKey.current) return
+    reportedKey.current = filesKey
+    p.onAttachments?.(files.items)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filesKey])
+  useEffect(() => { if (p.menuReset !== firstReset.current) { firstReset.current = p.menuReset; setMenu(null) } }, [p.menuReset])
   // Черновик из ссылки: первую секунду отправка заперта — Enter, нажатый в другом приложении за миг до того, как окно
   // всплыло, не заведёт чат (§3.1, B3).
   const [armedAt] = useState(() => Date.now() + (d.origin.kind === 'link' ? LINK_SUBMIT_DELAY_MS : 0))
@@ -320,7 +351,7 @@ export function DraftView(p: DraftViewProps): ReactElement {
   const folderMenu = (
     <ChipMenu anchor={refs.folder} onClose={closeMenu} label={t('Папка')} testId="draft-menu-folder"
       footer={<><span>{t('Можно перетащить папку в окно')}</span><span className="grow" /><Kbd>{`${CMD}⇧O`}</Kbd></>}>
-      {folderRows().length > 0 && <div className="dmh">{t('Проекты и недавние')}</div>}
+      {folderRows().length > 0 && <div className="dmh" role="presentation">{t('Проекты и недавние')}</div>}
       {folderRows().map((f) => (
         <MenuItem key={f.path} testId="draft-folder-item" value={f.path} label={<b>{folderName(f.path)}</b>} note={f.note}
           checked={d.cwd === f.path} onSelect={() => pickFolderRow(f.path)} />
@@ -363,7 +394,7 @@ export function DraftView(p: DraftViewProps): ReactElement {
         return (
           <div key={prov} className="dmgroup">
             {i > 0 && <div className="dmsep" />}
-            <div className="dmh">{PROVIDER_NAME[prov]}<span className={`rd rd-${r}`} data-testid={`draft-readiness-${prov}`}>● {r === 'catalog-error' && prov !== 'codex' ? t('вход не проверен') : readinessWords(r)}</span></div>
+            <div className="dmh" role="presentation">{PROVIDER_NAME[prov]}<span className={`rd rd-${r}`} data-testid={`draft-readiness-${prov}`}>● {r === 'catalog-error' && prov !== 'codex' ? t('вход не проверен') : readinessWords(r)}</span></div>
             {modelRows(prov)}
           </div>
         )
@@ -375,7 +406,7 @@ export function DraftView(p: DraftViewProps): ReactElement {
   const effortMenu = (
     <ChipMenu anchor={refs.effort} onClose={closeMenu} label={t('Усилие')} testId="draft-menu-effort"
       footer={<><span>{t('Выше усилие — дольше и дороже ход')}</span><span className="grow" /><Kbd>{`${CMD}⇧E`}</Kbd></>}>
-      <div className="dmh">{t('Усилие')}{d.model ? ` · ${d.model}` : ''}</div>
+      <div className="dmh" role="presentation">{t('Усилие')}{d.model ? ` · ${d.model}` : ''}</div>
       {preset.efforts.map((e) => (
         <MenuItem key={e} testId="draft-effort-item" value={e} label={e} checked={d.effort === e}
           onSelect={() => { closeMenu(); p.onChange(pickEffort(d, e)) }} />
@@ -384,10 +415,19 @@ export function DraftView(p: DraftViewProps): ReactElement {
   )
 
   const folderLabel = d.cwd ? folderName(d.cwd) : t('папки')
+  // Текст «запомню» — по тому, что на самом деле уйдёт в память (ревью Codex 14): явный выбор, не «Только этот чат»,
+  // не полный из ссылки. Сейчас уровень из памяти или умолчаний — так и сказано.
+  const remembers = remembersAccess(d, inheritMode)
+  const linkFull = d.origin.kind === 'link' && full
+  const rememberLine = d.chatOnly ? t('Только этот чат — память папки не трогаю')
+    : linkFull ? t('Полный из ссылки — только этому чату, в память не пишу')
+    : remembers ? t`Запишу для ${folderLabel} при отправке`
+    : d.approvalOrigin === 'folder' ? t`Сейчас — из памяти ${folderLabel}; выбор здесь запомню`
+    : t`Сейчас — по умолчанию; выбор здесь запомню для ${folderLabel}`
   const accessMenu = (
     <ChipMenu anchor={refs.access} onClose={closeMenu} label={t('Доступ агента')} testId="draft-menu-access"
-      footer={<><span>{d.chatOnly ? t('В память папки не запишу') : t('Запишу при отправке')}</span><span className="grow" /><Kbd>{`${CMD}⇧M`}</Kbd></>}>
-      <div className="dmh">{t('Доступ агента')} · {PROVIDER_NAME[d.provider]}</div>
+      footer={<><span data-testid="draft-access-footer">{rememberLine}</span><span className="grow" /><Kbd>{`${CMD}⇧M`}</Kbd></>}>
+      <div className="dmh" role="presentation">{t('Доступ агента')} · {PROVIDER_NAME[d.provider]}</div>
       {approvalLevels(d.provider).map((a) => {
         const isFull = a === 'full' || (a === 'inherit' && inheritMode === 'bypassPermissions')
         const ask = isFull && !consentGrants(consent, d.provider) ? t(' · спрошу один раз') : ''
@@ -406,7 +446,7 @@ export function DraftView(p: DraftViewProps): ReactElement {
         <span className="ck" aria-hidden="true"><Icon name="pin" /></span>
         <span className="l">{t('Только этот чат')}</span>
         <span className="r"><Toggle on={d.chatOnly} /></span>
-        <span className="d">{d.chatOnly ? t`память ${folderLabel} не трогаю` : t`иначе запомню для ${folderLabel} — и чтение тоже`}</span>
+        <span className="d">{d.chatOnly ? t`память ${folderLabel} не трогаю` : d.origin.kind === 'link' ? t`иначе запомню для ${folderLabel} — кроме полного доступа` : t`иначе запомню для ${folderLabel} — и чтение тоже`}</span>
       </button>
     </ChipMenu>
   )
@@ -417,7 +457,7 @@ export function DraftView(p: DraftViewProps): ReactElement {
   const moreMenu = (
     <ChipMenu anchor={refs.more} onClose={closeMenu} label={t('Ещё: ветка, браузер')} testId="draft-menu-more"
       footer={<span>{t('Включённое появится чипом под полем')}</span>}>
-      <div className="dmh">{t('Редкое')}</div>
+      <div className="dmh" role="presentation">{t('Редкое')}</div>
       <button type="button" role="menuitemcheckbox" data-mi="1" aria-checked={d.worktree} className="dmi" data-testid="draft-more-worktree"
         onClick={() => p.onChange(toggleWorktree(d, !d.worktree))}>
         <span className="ck" aria-hidden="true"><Icon name="branch" /></span>
@@ -478,12 +518,18 @@ export function DraftView(p: DraftViewProps): ReactElement {
   if (dropHint) notes.push({ tone: 'plain', testId: 'draft-drop-hint', text: dropHint })
   if (files.notice) notes.push({ tone: 'warn', testId: 'draft-paste-notice', text: files.notice })
   if (p.error) {
-    notes.push({ tone: 'fail', testId: 'draft-error', text: <>{p.error.text}{p.error.retry ? <> · <button type="button" className="link-btn" onClick={send} data-testid="draft-retry">{t('Повторить')}</button></> : null}</> })
+    const er = p.error
+    notes.push({ tone: er.retry ? 'fail' : 'warn', testId: 'draft-error', text: <>{er.text}
+      {er.retry ? <> · <button type="button" className="link-btn" onClick={send} data-testid="draft-retry">{t('Повторить')}</button></> : null}
+      {er.restoreText !== undefined ? <> · <button type="button" className="link-btn" onClick={() => p.onRestoreText?.(er.restoreText as string)} data-testid="draft-restore-text">{t('Вернуть мой текст')}</button></> : null}
+      {er.fork ? <> · <button type="button" className="link-btn" onClick={() => p.onFork?.()} data-testid="draft-fork">{t('Оставить копию')}</button></> : null}</> })
   }
+  const stats = linkPromptStats(d)
+  if (stats) notes.push({ tone: 'plain', testId: 'draft-prompt-stats', text: t`Текст из ссылки: ${stats.lines} ${plural(stats.lines, t('строка'), t('строки'), t('строк'))} · ${stats.chars} ${plural(stats.chars, t('знак'), t('знака'), t('знаков'))} — прокрути поле, прежде чем отправлять.` })
 
   const unlisted = modelUnlisted(d, p.catalog)
   const modelLabel = d.provider === 'zcode' ? 'GLM' : d.model ?? t('по умолчанию')
-  const access = APPROVAL_LABEL[d.approval]
+  const access = accessChipLabel(d, inheritMode)
   const noFolder = !d.cwd
 
   return (
@@ -495,7 +541,7 @@ export function DraftView(p: DraftViewProps): ReactElement {
             <span className="draft-pill" data-testid="draft-pill">{t('черновик · ещё не заведён')}</span>
             {d.origin.kind === 'link' && <span className="draft-pill link" data-testid="draft-from-link"><Icon name="info" />{t('из ссылки')}</span>}
           </div>
-          <div className="conv-location" data-testid="draft-location" title={d.cwd ?? undefined}><Icon name="folder" />{d.cwd ? shortPath(d.cwd, 80) : t('папка не выбрана')}</div>
+          <div className="conv-location" data-testid="draft-location" title={d.cwd ?? undefined}><Icon name="folder" />{d.cwd ? (d.origin.kind === 'link' ? d.cwd : shortPath(d.cwd, 80)) : t('папка не выбрана')}</div>
         </div>
       </header>
       <div className={`draft-wrap${noFolder ? ' picking' : ''}`}>
@@ -534,12 +580,12 @@ export function DraftView(p: DraftViewProps): ReactElement {
                 <div className="dchips" data-testid="draft-chips" inert={p.sending}>
                   <button ref={refs.folder} type="button" className={`dchip${noFolder ? ' warn' : refusal ? ' danger' : ' fold'}`} aria-haspopup="menu" aria-expanded={menu === 'folder'}
                     data-testid="draft-chip-folder" data-path={d.cwd ?? ''} title={t`Папка ${CMD}⇧O`} onClick={() => toggle('folder')}>
-                    <Icon name="folder" />{noFolder ? t('Выбери папку') : fname}<Icon name="chevd" className="ic chev" />
+                    <Icon name="folder" /><span className="txt">{noFolder ? t('Выбери папку') : fname}</span><Icon name="chevd" className="ic chev" />
                   </button>
                   <span className="vsep" aria-hidden="true" />
                   <button ref={refs.model} type="button" className={`dchip${unlisted ? ' warn' : ''}`} aria-haspopup="menu" aria-expanded={menu === 'model'}
                     data-testid="draft-chip-model" data-provider={d.provider} data-model={d.model ?? ''} title={t`Модель ${CMD}⇧I`} onClick={() => toggle('model')}>
-                    <span className={`pn who-${d.provider}`}>{PROVIDER_NAME[d.provider]}</span>{modelLabel}{unlisted ? <span className="dim">{t(' · нет в списке')}</span> : null}<Icon name="chevd" className="ic chev" />
+                    <span className={`pn who-${d.provider}`}>{PROVIDER_NAME[d.provider]}</span><span className="txt">{modelLabel}</span>{unlisted ? <span className="dim">{t(' · нет в списке')}</span> : null}<Icon name="chevd" className="ic chev" />
                   </button>
                   {d.provider !== 'zcode' && (
                     <button ref={refs.effort} type="button" className="dchip" aria-haspopup="menu" aria-expanded={menu === 'effort'}
@@ -549,7 +595,7 @@ export function DraftView(p: DraftViewProps): ReactElement {
                   )}
                   <button ref={refs.access} type="button" className={`dchip${full ? ' danger' : ''}`} aria-haspopup="menu" aria-expanded={menu === 'access'}
                     data-testid="draft-chip-access" data-approval={d.approval} title={t`Доступ ${CMD}⇧M`} onClick={() => toggle('access')}>
-                    <Icon name="shield" />{access}{d.chatOnly ? <span className="dim">{t(' · этот чат')}</span> : null}<Icon name="chevd" className="ic chev" />
+                    <Icon name="shield" /><span className="txt">{access}</span>{d.chatOnly ? <span className="dim">{t(' · этот чат')}</span> : null}<Icon name="chevd" className="ic chev" />
                   </button>
                   {d.worktree && <button type="button" className="dchip extra" data-testid="draft-chip-worktree" onClick={() => toggle('more')}><Icon name="branch" />{t('ветка ')}{d.branch.trim() || 'pult/…'}</button>}
                   {d.browser && <button type="button" className="dchip extra" data-testid="draft-chip-browser" onClick={() => toggle('more')}><Icon name="globe" />{t('браузер')}</button>}

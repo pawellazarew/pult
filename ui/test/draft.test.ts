@@ -10,9 +10,10 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { DraftView } from '../src/components/Draft.js'
 import { ProjectTree } from '../src/components/ProjectTree.js'
 import {
-  createDraft, draftFromSnapshot, draftLabel, draftSnapshot, draftStartParams, escDecision, modelUnlisted, pickApproval, pickModel,
-  readinessBlocks, readinessOf, remembersAccess, resolveDraft, submitDecision, withDraftFolder,
+  accessChipLabel, createDraft, draftEmpty, draftFromSnapshot, draftLabel, draftSnapshot, draftStartParams, escDecision, linkPromptStats, modelUnlisted,
+  pickApproval, pickModel, readinessBlocks, readinessOf, refreshBeforeStart, remembersAccess, resolveDraft, submitDecision, withDraftFolder,
 } from '../src/model/draft.js'
+import type { DraftChat } from '../src/model/draft.js'
 import type { ProviderCatalog } from '../src/model/types.js'
 import { CONSENT, draft, draftProps, env, NO_CONSENT } from './draftFixture.js'
 
@@ -187,5 +188,80 @@ describe('шаг B: вид черновика (кадры 01, 08, 12)', () => {
     assert.match(out, /data-testid="draft-row"/)
     assert.match(text(out), /Почини импорт заказов черновик ⋯ acme-api/)
     assert.match(text(out), /Новый чат черновик ⋯ папка не выбрана/)
+  })
+})
+
+describe('ревью шага B: окно', () => {
+  const stamp = { key: '/w/acme-api', dev: '1', ino: '2' }
+  const info = (over: Record<string, unknown> = {}) => ({ cwd: '/w/acme-api', ok: true, folder: { ...stamp, access: 'full' as const }, ...over })
+  it('«как в настройках Claude» — режим ПАПКИ: bypass в проекте — чип красный, ссылка его не включает (M4, Codex 1)', () => {
+    const e = env({ consent: CONSENT, inheritMode: 'bypassPermissions', folder: { cwd: '/w/acme-api', ok: true, folder: { access: 'inherit' } } })
+    const user = createDraft({ cwd: '/w/acme-api' }, e)
+    assert.equal(user.approval, 'inherit')
+    const out = html(DraftView, draftProps({ draft: user, env: e }))
+    assert.match(out, /class="dchip danger"[^>]*data-testid="draft-chip-access"/)
+    assert.match(text(out), /Настройки Claude · bypassPermissions/)
+    const link = createDraft({ cwd: '/w/acme-api', origin: { kind: 'link' } }, e)
+    assert.deepEqual([link.approval, link.notes], ['ask', ['link-full-blocked']])
+    assert.equal('approvalOrigin' in draftStartParams(link, { prompt: '', inheritMode: 'bypassPermissions' }), false)
+    assert.equal(draftStartParams(pickApproval(link, 'inherit', CONSENT.rev), { prompt: '', inheritMode: 'bypassPermissions' })['approvalOrigin'], 'explicit')
+  })
+  it('восстановленный черновик: папку заменили — доступ пересчитан и отправка остановлена; та же папка — снимок как был (Codex 2)', () => {
+    const e = env({ consent: CONSENT, folder: info() })
+    const d = createDraft({ cwd: '/w/acme-api' }, e)
+    assert.deepEqual([d.approval, d.folder], ['full', stamp])
+    const snap = draftFromSnapshot(d.id, 2, JSON.parse(JSON.stringify(draftSnapshot(d))), e)!
+    assert.deepEqual(snap.folder, stamp)
+    assert.deepEqual(refreshBeforeStart(snap, e).changed, false)
+    const swapped = env({ consent: CONSENT, folder: { cwd: '/w/acme-api', ok: true, folder: { key: '/w/acme-api', dev: '1', ino: '9' } } })
+    const r = refreshBeforeStart(snap, swapped)
+    assert.deepEqual([r.changed, r.draft.approval], [true, 'workspace'], 'новая папка без памяти — «Правки в папке», не унаследованный полный')
+    assert.deepEqual(draftStartParams(d, { prompt: '', inheritMode: null })['folder'], stamp, 'демон сверит идентичность')
+  })
+  it('отправка быстрее памяти папки — пересчёт перед стартом (m3)', () => {
+    const early = createDraft({ cwd: '/w/acme-api' }, env())
+    assert.equal(early.approval, 'workspace')
+    const r = refreshBeforeStart(early, env({ folder: { cwd: '/w/acme-api', ok: true, folder: { ...stamp, access: 'read-only' } } }))
+    assert.deepEqual([r.changed, r.draft.approval], [true, 'read-only'])
+  })
+  it('согласие отозвали и дали снова (другой номер) — явный полный снимается; на старт — номер выбора (m2, Codex 3)', () => {
+    const d = pickApproval(draft(), 'full', 4)
+    assert.equal(draftStartParams(d, { prompt: '', consentRev: 6, inheritMode: null })['consentRev'], 4)
+    const after = resolveDraft(d, env({ consent: { ...CONSENT, rev: 6 } }))
+    assert.deepEqual([after.approval, after.notes.includes('full-revoked')], ['ask', true])
+  })
+  it('восстановленный снимок с опущенным полным в память не пишет (m1)', () => {
+    const d = pickApproval(draft(), 'full', 4)
+    const r = draftFromSnapshot(d.id, 1, draftSnapshot(d), env({ consent: NO_CONSENT }))!
+    assert.deepEqual([r.approval, r.approvalOrigin, remembersAccess(r, null)], ['ask', 'default', false])
+  })
+  it('черновик с одними вложениями — не пустой; вложения и текст ссылки — в снимке', () => {
+    const att = { path: '/h/attachments/draft-x/a.txt', name: 'a.txt', bytes: 1, mime: 'text/plain', kind: 'file' as const }
+    const d = { ...draft(), attachments: [att] }
+    assert.equal(draftEmpty(d), false)
+    const back = draftFromSnapshot(d.id, 1, JSON.parse(JSON.stringify(draftSnapshot(d))), env())!
+    assert.deepEqual(back.attachments, [att])
+  })
+  it('ссылка: счётчик строк и знаков, пока текст не трогали; полный путь в шапке (M5)', () => {
+    const link = createDraft({ cwd: '/Users/user/src/very/long/path/to/acme-api', origin: { kind: 'link' }, text: 'раз\nдва\nтри' }, env())
+    assert.deepEqual(linkPromptStats(link), { lines: 3, chars: 11 })
+    assert.equal(linkPromptStats({ ...link, text: 'раз' }), null)
+    const out = html(DraftView, draftProps({ draft: link }))
+    assert.match(text(out), /Текст из ссылки: 3 строки · 11 знаков/)
+    assert.match(out, /\/Users\/user\/src\/very\/long\/path\/to\/acme-api<\/div>/)
+  })
+  it('чип доступа — коротко; меню говорит правду о памяти (Codex 13, 14)', () => {
+    assert.deepEqual((['read-only', 'ask', 'workspace', 'full'] as const).map((a) => accessChipLabel({ approval: a }, null)), ['Только чтение', 'Спрашивать', 'Правки в папке', 'Полный доступ'])
+    const menu = (d: DraftChat): string => text(html(DraftView, draftProps({ draft: d, initialMenu: 'access' })))
+    assert.match(menu(draft()), /Сейчас — по умолчанию; выбор здесь запомню для acme-api/)
+    assert.match(menu(pickApproval(draft(), 'read-only', null)), /Запишу для acme-api при отправке/)
+    assert.match(menu({ ...pickApproval(draft(), 'read-only', null), chatOnly: true }), /Только этот чат — память папки не трогаю/)
+    const link = pickApproval(createDraft({ cwd: '/w/acme-api', origin: { kind: 'link' } }, env({ consent: CONSENT })), 'full', 4)
+    assert.match(text(html(DraftView, draftProps({ draft: link, env: env({ consent: CONSENT }), initialMenu: 'access' }))), /Полный из ссылки — только этому чату, в память не пишу/)
+  })
+  it('сбой с расхождением: «Вернуть мой текст», «Оставить копию»', () => {
+    const out = html(DraftView, draftProps({ error: { text: 'x', retry: false, restoreText: 'мой', fork: true } }))
+    assert.match(out, /data-testid="draft-restore-text"/)
+    assert.match(out, /data-testid="draft-fork"/)
   })
 })

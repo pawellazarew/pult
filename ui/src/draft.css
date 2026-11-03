@@ -23,7 +23,9 @@
 .draft-box textarea { width: 100%; min-height: 78px; max-height: 240px; resize: none; border: 0; outline: 0; background: transparent; color: var(--ink); font: 15px/1.6 var(--body); padding: 3px 5px; }
 .draft-box textarea:focus { border: 0; background: transparent; }
 .draft-box textarea::placeholder { color: var(--faint); }
-.draft-tb { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.draft-tb { display: flex; align-items: flex-end; gap: 8px; flex-wrap: nowrap; }
+/* Действия (вложение, «Отправить») прижаты к последней строке чипов, а не к середине двух (ревью Codex 13). */
+.draft-tb > .btn { flex: none; }
 .draft-tb .draft-send { margin-left: auto; height: 34px; border-radius: 8px; }
 .draft-tb .attach-picker { height: 34px; }
 
@@ -34,6 +36,9 @@
 .dchip .ic { width: 13px; height: 13px; }
 .dchip .ic.chev { width: 10px; height: 10px; color: var(--faint); }
 .dchip .dim { color: var(--faint); font-weight: 400; }
+/* Длинные папка и модель не разносят ряд: текст чипа — с многоточием (полное — в подсказке и меню). */
+.dchip .txt { min-width: 0; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dchip { min-width: 0; }
 .dchip .pn { font-weight: 500; }
 .dchip.fold { color: var(--ink); background: transparent; border-color: var(--hair); }
 .dchip.danger { color: var(--fail); background: var(--fail-soft); border-color: var(--fail-edge); font-weight: 600; }

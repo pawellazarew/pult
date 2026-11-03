@@ -15,6 +15,7 @@ import type { ConsentView } from './access.js'
 import { approvalBlocksBrowser, providerPreset } from './newAgent.js'
 import type { SettingsReply } from './newAgent.js'
 import type { AgentProvider, ProviderCatalog } from './types.js'
+import type { SavedAttachment } from '../../../shell/src/contract.js'
 
 export type { ResolveNote }
 
@@ -26,8 +27,22 @@ export interface FolderInfo {
   refusal?: 'missing' | 'covers_pult_home'
   /** PULT_HOME — для текста отказа. */
   home?: string
-  folder?: { access?: ApprovalMode; changed?: boolean } | null
+  /** Память папки и её идентичность (ключ realpath, `dev`, `ino`) — для снимка черновика и сверки демоном на старте. */
+  folder?: { access?: ApprovalMode; changed?: boolean; key?: string; dev?: string; ino?: string; mapped?: boolean } | null
+  /** Действующий `defaultMode` Claude ЭТОЙ папки (с её .claude/settings*.json) — уровень «Как в настройках Claude». */
+  inheritMode?: string | null
 }
+
+/** Идентичность папки, при которой собран черновик: заменили папку или перенаправили симлинк — снимок не годится. */
+export interface FolderStamp { key: string; dev: string; ino: string }
+
+export function folderStamp(info: FolderInfo | null | undefined): FolderStamp | null {
+  const f = info?.folder
+  return f && f.key && f.dev && f.ino ? { key: f.key, dev: f.dev, ino: f.ino } : null
+}
+
+export const sameStamp = (a: FolderStamp | null | undefined, b: FolderStamp | null | undefined): boolean =>
+  !!a && !!b && a.key === b.key && a.dev === b.dev && a.ino === b.ino
 
 export type DraftOrigin = { kind: 'user' } | { kind: 'link'; provider?: AgentProvider; pathRejected?: boolean }
 
@@ -64,6 +79,12 @@ export interface DraftChat {
   blockedApproval?: ApprovalMode
   /** Восстановлен из снимка демона: неявные поля не пересчитываются, пока человек не сменит папку или провайдера. */
   restored?: boolean
+  /** Папка, при которой собран доступ черновика (из `agent.preflight`); на старте демон сверяет её (`folder_changed`). */
+  folder?: FolderStamp | null
+  /** Метаданные вложений черновика (сами файлы — в `attachments/draft-…`): черновик с одними вложениями — не пустой. */
+  attachments?: SavedAttachment[]
+  /** Текст, пришедший по ссылке: пока его не трогали, под полем — счётчик строк и знаков (ревью M5). */
+  linkText?: string
   createdAt: string
 }
 
@@ -111,14 +132,18 @@ export function resolveDraft(d: DraftChat, env: DraftEnv): DraftChat {
     fullAllowed: (p) => consentGrants(env.consent, p),
     inheritMode: env.inheritMode,
   })
+  const stamp = d.cwd && env.folder?.cwd === d.cwd ? folderStamp(env.folder) : null
   const next: DraftChat = {
     ...d, provider: r.provider, model: r.model, effort: r.effort, approval: r.approval, browser: r.browser, worktree: r.worktree,
     mode: r.mode, approvalOrigin: r.origin.approval, notes: r.notes, browserHeaded: r.browser && d.browserHeaded,
+    ...(stamp ? { folder: stamp } : {}),
   }
   if (r.blockedApproval) next.blockedApproval = r.blockedApproval
   else delete next.blockedApproval
   // Явный полный доступ, а согласие тем временем отозвали (или дали снова под другим номером) — «Спрашивать» (§3.2).
-  if (d.picked.approval && isFullLevel(next.provider, next.approval, env.inheritMode) && !consentGrants(env.consent, next.provider)) {
+  // Ревью m2 / Codex 3: и если согласие с тех пор дали ЗАНОВО (другой номер) — выбор, сделанный при прежнем, не переносится.
+  const revMoved = d.consentRev !== null && env.consent !== null && env.consent.rev !== d.consentRev
+  if (d.picked.approval && isFullLevel(next.provider, next.approval, env.inheritMode) && (!consentGrants(env.consent, next.provider) || revMoved)) {
     next.blockedApproval = next.approval
     next.approval = 'ask'
     next.picked = { ...next.picked }
@@ -136,6 +161,7 @@ export function createDraft(ctx: { id?: string; cwd: string | null; origin?: Dra
     browser: false, browserHeaded: false, worktree: false, branch: '', mode: 'turn', text: ctx.text ?? '',
     origin: ctx.origin ?? { kind: 'user' }, picked: {}, chatOnly: false, consentRev: env.consent?.rev ?? null,
     approvalOrigin: 'builtin', notes: [], createdAt: (ctx.now ?? new Date()).toISOString(),
+    ...(ctx.origin?.kind === 'link' && ctx.text ? { linkText: ctx.text } : {}),
   }
   return resolveDraft(base, env)
 }
@@ -143,7 +169,7 @@ export function createDraft(ctx: { id?: string; cwd: string | null; origin?: Dra
 /** Сменить папку: неявные поля пересчитываются (память новой папки), явный выбор остаётся (§3.7). */
 export function withDraftFolder(d: DraftChat, cwd: string | null, env: DraftEnv): DraftChat {
   const origin = d.origin.kind === 'link' ? { ...d.origin, pathRejected: false } : d.origin
-  const { restored: _r, ...rest } = d
+  const { restored: _r, folder: _f, ...rest } = d
   return resolveDraft({ ...rest, cwd, origin }, env)
 }
 
@@ -221,8 +247,11 @@ export function remembersAccess(d: DraftChat, inheritMode: string | null): boole
  * Параметры `agent.start` (§3.3): `requestId` = id черновика, имя выделяет демон, первая реплика — в том же вызове.
  * Полный доступ — с `confirm` и номером согласия, который видело окно.
  */
-export function draftStartParams(d: DraftChat, opts: { prompt: string; consentRev?: number | null; inheritMode: string | null }): Record<string, unknown> {
+export function draftStartParams(d: DraftChat, opts: { prompt: string; consentRev?: number | null; inheritMode: string | null; owner?: string }): Record<string, unknown> {
   const full = d.approval === 'full' || d.approval === 'inherit'
+  // Явный выбор полного доступа — с номером согласия, при котором его сделали (ревью m2): демон сверит и скажет
+  // `consent_changed`, если его отозвали и дали снова. Полный из памяти папки — с текущим номером окна.
+  const rev = d.picked.approval && d.consentRev !== null ? d.consentRev : opts.consentRev
   return {
     requestId: d.id,
     kind: d.provider,
@@ -232,10 +261,13 @@ export function draftStartParams(d: DraftChat, opts: { prompt: string; consentRe
     ...(d.worktree ? { worktree: d.branch.trim() || true } : {}),
     ...(d.browser ? { browser: d.browserHeaded ? { headed: true } : true } : {}),
     approval: d.approval,
-    ...(full ? { confirm: true, ...(opts.consentRev !== undefined && opts.consentRev !== null ? { consentRev: opts.consentRev } : {}) } : {}),
+    ...(full ? { confirm: true, ...(rev !== undefined && rev !== null ? { consentRev: rev } : {}) } : {}),
     ...(d.mode === 'warm' ? { mode: 'warm' } : {}),
     ...(opts.prompt.trim() ? { prompt: opts.prompt } : {}),
     origin: d.origin.kind,
+    ...(d.approvalOrigin === 'explicit' ? { approvalOrigin: 'explicit' } : {}),
+    ...(d.folder ? { folder: d.folder } : {}),
+    ...(opts.owner && d.rev > 0 ? { draft: { id: d.id, rev: d.rev, owner: opts.owner } } : {}),
     ...(remembersAccess(d, opts.inheritMode) ? { rememberAccess: true } : {}),
   }
 }
@@ -248,6 +280,8 @@ export function draftSnapshot(d: DraftChat): Record<string, unknown> {
     v: 1, cwd: d.cwd, provider: d.provider, model: d.model, effort: d.effort, approval: d.approval, browser: d.browser,
     browserHeaded: d.browserHeaded, worktree: d.worktree, branch: d.branch, mode: d.mode, text: d.text, origin: d.origin,
     picked: d.picked, chatOnly: d.chatOnly, consentRev: d.consentRev, approvalOrigin: d.approvalOrigin, createdAt: d.createdAt,
+    ...(d.folder ? { folder: d.folder } : {}), ...(d.attachments?.length ? { attachments: d.attachments } : {}),
+    ...(d.linkText !== undefined ? { linkText: d.linkText } : {}),
   }
 }
 
@@ -275,19 +309,34 @@ export function draftFromSnapshot(id: string, rev: number, raw: unknown, env: Dr
   let approval: ApprovalMode = isApprovalMode(o['approval']) ? o['approval'] : 'ask'
   const notes: ResolveNote[] = []
   let blockedApproval: ApprovalMode | undefined
+  let downgraded = false
   if (isFullLevel(provider, approval, env.inheritMode) && (!consentGrants(env.consent, provider) || consentRev !== (env.consent?.rev ?? null))) {
     blockedApproval = approval
     approval = 'ask'
     notes.push('full-revoked')
     delete picked.approval
+    downgraded = true
   }
   const d: DraftChat = {
     id, rev, cwd, provider, model: typeof o['model'] === 'string' ? o['model'] : null, effort: str('effort'), approval,
     browser: o['browser'] === true && !approvalBlocksBrowser(provider, approval), browserHeaded: o['browserHeaded'] === true,
     worktree: o['worktree'] === true, branch: str('branch'), mode: o['mode'] === 'warm' ? 'warm' : 'turn', text: str('text'), origin, picked,
-    chatOnly: o['chatOnly'] === true, consentRev, approvalOrigin: ORIGINS.includes(o['approvalOrigin'] as FieldOrigin) ? o['approvalOrigin'] as FieldOrigin : 'default',
+    // Опущенный до «Спрашивать» уровень человек не выбирал (ревью m1): в память папки он не пойдёт.
+    chatOnly: o['chatOnly'] === true, consentRev,
+    approvalOrigin: downgraded ? 'default' : ORIGINS.includes(o['approvalOrigin'] as FieldOrigin) ? o['approvalOrigin'] as FieldOrigin : 'default',
     notes, restored: true, createdAt: str('createdAt', new Date(0).toISOString()),
   }
+  const fo = o['folder'] && typeof o['folder'] === 'object' ? o['folder'] as Record<string, unknown> : null
+  if (fo && typeof fo['key'] === 'string' && typeof fo['dev'] === 'string' && typeof fo['ino'] === 'string') d.folder = { key: fo['key'], dev: fo['dev'], ino: fo['ino'] }
+  if (Array.isArray(o['attachments'])) {
+    d.attachments = (o['attachments'] as unknown[]).flatMap((x): SavedAttachment[] => {
+      const a = x && typeof x === 'object' ? x as Record<string, unknown> : null
+      if (!a || typeof a['path'] !== 'string' || !a['path'].startsWith('/') || typeof a['name'] !== 'string') return []
+      if (typeof a['bytes'] !== 'number' || typeof a['mime'] !== 'string' || (a['kind'] !== 'file' && a['kind'] !== 'directory')) return []
+      return [{ path: a['path'], name: a['name'], bytes: a['bytes'], mime: a['mime'], kind: a['kind'] }]
+    }).slice(0, 20)
+  }
+  if (typeof o['linkText'] === 'string') d.linkText = o['linkText']
   if (blockedApproval) d.blockedApproval = blockedApproval
   return d
 }
@@ -366,4 +415,36 @@ export function escDecision(s: { menuOpen: boolean; dialogOpen: boolean; empty: 
 }
 
 /** Черновик пуст: ни текста, ни вложений. Пустой при уходе исчезает, с текстом — остаётся у демона. */
-export const draftEmpty = (d: Pick<DraftChat, 'text'>, attachments = 0): boolean => !d.text.trim() && attachments === 0
+export const draftEmpty = (d: Pick<DraftChat, 'text'> & { attachments?: DraftChat['attachments'] }, attachments = d.attachments?.length ?? 0): boolean =>
+  !d.text.trim() && attachments === 0
+
+/**
+ * Перед отправкой: черновик собран при этой же папке? Восстановленный снимок или черновик, отправленный быстрее, чем
+ * пришла память папки (ревью m3, Codex 2), пересчитывается по свежему `agent.preflight`. Если от этого сменился доступ —
+ * отправлять нельзя молча: человек должен увидеть новый уровень.
+ */
+export function refreshBeforeStart(d: DraftChat, env: DraftEnv): { draft: DraftChat; changed: boolean } {
+  const fresh = folderStamp(env.folder)
+  const stale = !!d.folder && !!fresh && !sameStamp(d.folder, fresh)
+  if (d.restored && !stale) return { draft: { ...d, ...(fresh ? { folder: fresh } : {}) }, changed: false }
+  const { restored: _r, ...rest } = d
+  const next = resolveDraft(stale && rest.approvalOrigin === 'folder' ? { ...rest, folder: null } : rest, env)
+  return { draft: next, changed: next.approval !== d.approval || (stale && d.approvalOrigin === 'folder') }
+}
+
+/** Короткие подписи чипа доступа (ревью: полные — в меню). «Как в настройках Claude» — с действующим режимом папки. */
+export function accessChipLabel(d: Pick<DraftChat, 'approval'>, inheritMode: string | null): string {
+  switch (d.approval) {
+    case 'read-only': return tr('Только чтение')
+    case 'ask': return tr('Спрашивать')
+    case 'workspace': return tr('Правки в папке')
+    case 'full': return tr('Полный доступ')
+    case 'inherit': return inheritMode ? tr`Настройки Claude · ${inheritMode}` : tr('Настройки Claude')
+  }
+}
+
+/** Строки «N строк · M знаков» для текста из ссылки — пока его не правили (ревью M5). */
+export function linkPromptStats(d: Pick<DraftChat, 'origin' | 'text' | 'linkText'>): { lines: number; chars: number } | null {
+  if (d.origin.kind !== 'link' || d.linkText === undefined || d.text !== d.linkText || !d.text) return null
+  return { lines: d.text.split('\n').length, chars: [...d.text].length }
+}

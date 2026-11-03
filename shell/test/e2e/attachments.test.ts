@@ -80,6 +80,13 @@ describe('вложения: карточки, временные файлы и �
     assert.ok(await waitFor(async () => await dlg.getByTestId('attachment-card').count() === 1))
     const stage = await dlg.getByTestId('attachment-card').getAttribute('data-path')
     assert.match(stage!, /attachments\/draft-/)
+    // Черновик с одними вложениями — не пустой: уйти в чат и вернуться — карточка на месте (ревью Codex 11).
+    const id = (await dlg.getAttribute('data-draft')) as string
+    await h.win.locator('[data-testid="agent-row"][data-agent="attached"]').click()
+    await dlg.waitFor({ state: 'detached', timeout: 5000 })
+    await h.win.locator(`[data-testid="draft-row"][data-draft="${id}"]`).click()
+    await dlg.waitFor({ timeout: 5000 })
+    assert.ok(await waitFor(async () => await dlg.getByTestId('attachment-card').count() === 1, 5000), 'вложение черновика потерялось при переключении')
     await dlg.getByTestId('draft-chip-folder').click()
     await h.win.getByTestId('draft-folder-other').click()
     assert.ok(await waitFor(async () => (await dlg.getByTestId('draft-chip-folder').getAttribute('data-path')) === dir, 5000))

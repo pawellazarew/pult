@@ -772,5 +772,22 @@ export const componentsEn: Readonly<Record<string, string>> = {
   "по умолчанию (claude)": "default (claude)",
   "список моделей Codex не загружен — «Проверить» в шапке окна": "Codex model list is not loaded — use Check in the window header",
   "по умолчанию ({0})": "default ({0})",
-  "вход не проверен": "sign-in not checked"
+  "вход не проверен": "sign-in not checked",
+  "Папка или её память изменились — доступ пересчитан. Проверь его и отправь снова.": "The folder or its memory changed — access was recalculated. Check it and send again.",
+  "Этот черновик уже отправлен — чат {0}. Исправленный текст не ушёл: он в поле ввода чата.": "This draft was already sent — chat {0}. Your edited text was not sent: it is in the chat's input.",
+  "Папку заменили или перенаправили с тех пор, как черновик её видел — доступ пересчитан. Проверь его и отправь снова.": "The folder was replaced or redirected since the draft saw it — access was recalculated. Check it and send again.",
+  "Черновик отправили или удалили в другом окне — здесь только копия.": "This draft was sent or deleted in another window — this is only a copy.",
+  "Черновик изменили в другом окне — показана их версия.": "This draft was changed in another window — showing that version.",
+  "Только этот чат — память папки не трогаю": "This chat only — folder memory stays untouched",
+  "Полный из ссылки — только этому чату, в память не пишу": "Full access from a link — this chat only, not saved for the folder",
+  "Запишу для {0} при отправке": "Saved for {0} when you send",
+  "Сейчас — из памяти {0}; выбор здесь запомню": "Now: remembered for {0}; a choice here will be saved",
+  "Сейчас — по умолчанию; выбор здесь запомню для {0}": "Now: the default; a choice here will be saved for {0}",
+  "иначе запомню для {0} — кроме полного доступа": "otherwise saved for {0} — except full access",
+  "Вернуть мой текст": "Restore my text",
+  "Оставить копию": "Keep a copy",
+  "Текст из ссылки: {0} {1} · {2} {3} — прокрути поле, прежде чем отправлять.": "Text from the link: {0} {1} · {2} {3} — scroll the field before sending.",
+  "Правки в папке": "Folder edits",
+  "Настройки Claude · {0}": "Claude settings · {0}",
+  "Настройки Claude": "Claude settings"
 }

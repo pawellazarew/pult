@@ -52,8 +52,14 @@ import type { InboxFilter } from './model/inbox.js'
 import { isSnoozed, nextWaiting, pruneSnoozed, snooze, unsnooze, waitingQueue } from './model/queue.js'
 import type { Snoozed } from './model/queue.js'
 import { linkPrefill } from './model/newAgent.js'
-import { createDraft, draftEmpty, draftFromSnapshot, draftSnapshot, draftStartParams, fitEffort, pickApproval, resolveDraft, withDraftFolder, READINESS_STALE_MS } from './model/draft.js'
+import { createDraft, draftEmpty, draftFromSnapshot, draftSnapshot, draftStartParams, fitEffort, newDraftId, pickApproval, refreshBeforeStart, resolveDraft, withDraftFolder, READINESS_STALE_MS } from './model/draft.js'
 import type { DraftChat, DraftEnv, FolderInfo } from './model/draft.js'
+import type { DraftNotice } from './components/Draft.js'
+import { draftAttachmentSession } from './components/Draft.js'
+import { readAttachmentDraft, saveAttachmentDraft } from './model/attachmentDrafts.js'
+import { saveDraft } from './model/drafts.js'
+import type { DraftStore } from './model/drafts.js'
+import type { SavedAttachment } from '../../shell/src/contract.js'
 import { attachmentPrompt } from './model/attachmentDrafts.js'
 import { needsConsent } from './model/access.js'
 import type { ApprovalMode } from '../../src/adapters/types.js'
@@ -93,6 +99,13 @@ type Modal = null | { type: 'external' } | { type: 'doctor' } | { type: 'mcp' } 
   | { type: 'consent'; name: string; pick: SettingsPick }
   /** Шаг B: полный доступ в черновике без согласия — тот же диалог; после «Разрешить» уровень встаёт в черновик. */
   | { type: 'consent-draft'; id: string; approval: ApprovalMode }
+
+/** Хранилище окна для полей ввода чатов и вложений черновиков (тот же `localStorage`, что у Conversation). */
+const draftsStore: DraftStore = {
+  get: (k) => { try { return window.localStorage.getItem(k) } catch { return null } },
+  set: (k, v) => { try { window.localStorage.setItem(k, v) } catch { /* хранилище недоступно */ } },
+}
+const attachmentStore = draftsStore
 
 const store = {
   get(k: string): string | null { try { return window.localStorage.getItem(k) } catch { return null } },
@@ -174,7 +187,15 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   const [activeDraft, setActiveDraft] = useState<string | null>(null)
   const activeDraftRef = useRef<string | null>(null)
   activeDraftRef.current = activeDraft
-  const [draftState, setDraftState] = useState<Record<string, { sending: boolean; error: { text: string; retry: boolean } | null }>>({})
+  const [draftState, setDraftState] = useState<Record<string, { sending: boolean; error: DraftNotice | null }>>({})
+  const draftStateRef = useRef(draftState)
+  draftStateRef.current = draftState
+  /** Черновики, которые отправили или удалили в другом окне: здесь — копия, сама она у демона не пишется (ревью Codex 9). */
+  const [goneDrafts, setGoneDrafts] = useState<ReadonlySet<string>>(() => new Set())
+  /** ⌘N на уже открытом пустом черновике закрывает его меню (§3.5, ревью m13). */
+  const [draftMenuReset, setDraftMenuReset] = useState(0)
+  /** Вложения, уже переложенные в папку сессии под выданное имя: повтор не копирует их второй раз (ревью m7). */
+  const finalized = useRef(new Map<string, { name: string; items: SavedAttachment[] }>())
   /** Черновики, которые держит другое окно (пульс свежий): «Забрать». */
   const [foreignDrafts, setForeignDrafts] = useState<ReadonlySet<string>>(() => new Set())
   /** Черновики из ссылки: поле не берёт фокус (окно всплыло без спроса). */
@@ -184,15 +205,17 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   /** Демон и оболочка знают `draft.*`; старая оболочка — черновики только в памяти окна. */
   const draftsRemote = useRef(true)
   /**
-   * Окно — владелец своих черновиков у демона. id живёт в localStorage: окно Пульта одно, и закрыть-открыть его не
-   * должно превращать свои черновики в «открыт в другом окне» на 30 секунд пульса. Второе окно с другим профилем
-   * хранилища (или чужой процесс) получит свой id — и увидит «Забрать».
+   * Окно — владелец своих черновиков у демона. id свой у каждого окна (ревью Codex 8): `sessionStorage` переживает
+   * перезагрузку страницы, но не делится между окнами. Новое окно видит черновики прежнего «открытыми в другом окне»,
+   * пока не протух пульс (30 с), — «Забрать» снимает это сразу.
    */
   const windowId = useMemo(() => {
     const fresh = `w${Math.random().toString(36).slice(2, 14)}`
-    const have = store.get('pult.windowId')
-    if (have && /^[A-Za-z0-9_-]{1,64}$/.test(have)) return have
-    store.set('pult.windowId', fresh)
+    try {
+      const have = window.sessionStorage.getItem('pult.windowId')
+      if (have && /^[A-Za-z0-9_-]{1,64}$/.test(have)) return have
+      window.sessionStorage.setItem('pult.windowId', fresh)
+    } catch { /* хранилище недоступно — id на эту загрузку */ }
     return fresh
   }, [])
   /** Уйти из черновика: открытый пустой черновик исчезает (§3.2). */
@@ -219,6 +242,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     { listing: null, loading: false, error: null, saving: false })
   // M8f: умолчания и последний выбор «+ Сессия» (`settings.get`); null — старый демон или оболочка.
   const [settings, setSettings] = useState<SettingsReply | null>(null)
+  const [settingsTried, setSettingsTried] = useState(false)
 
   // Отладочный журнал — мимо React: e2e сверяет порядок и отсутствие повторов по КАЖДОМУ
   // доставленному кадру и моменты смены связи, а не то, что успело отрисоваться.
@@ -326,7 +350,8 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     }
   }, [bridge])
   const refreshSettings = useCallback(async (): Promise<void> => {
-    try { setSettings(await bridge.call('settings.get') as SettingsReply) } catch { /* старый демон или оболочка — форма на встроенных умолчаниях */ }
+    try { setSettings(await bridge.call('settings.get') as SettingsReply) } catch { /* старый демон или оболочка — черновик на встроенных умолчаниях */ }
+    finally { setSettingsTried(true) }
   }, [bridge])
   const checkProviders = useCallback(async (): Promise<void> => {
     setProvidersChecking(true)
@@ -847,8 +872,11 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
 
   // --- шаг B: черновики --------------------------------------------------------------------------------------------
   const inheritNow = settings?.access?.claudeDefaultMode ?? null
-  const envFor = (cwd: string | null, info: Record<string, FolderInfo> = folderInfo): DraftEnv =>
-    ({ settings, consent: settings?.access?.consent ?? null, folder: cwd ? info[cwd] ?? null : null, inheritMode: inheritNow })
+  // «Как в настройках Claude» — режим ЭТОЙ папки (её .claude/settings*.json) из `agent.preflight` (ревью M4 / Codex 1).
+  const envFor = (cwd: string | null, info: Record<string, FolderInfo> = folderInfo): DraftEnv => {
+    const folder = cwd ? info[cwd] ?? null : null
+    return { settings, consent: settings?.access?.consent ?? null, folder, inheritMode: folder?.inheritMode ?? inheritNow }
+  }
   const updateDraft = (id: string, f: (d: DraftChat) => DraftChat): void => {
     setDrafts((ds) => ds.map((d) => (d.id === id ? f(d) : d)))
     setDraftState((m) => (m[id]?.error && !m[id]?.sending ? { ...m, [id]: { sending: false, error: null } } : m))
@@ -887,6 +915,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
       const same = drafts.find((x) => x.origin.kind === 'user' && x.cwd === cwd && draftEmpty(x) && !foreignDrafts.has(x.id))
       if (same) {
         if (activeDraft !== same.id) { leaveDraft(); setActiveDraft(same.id) }
+        setDraftMenuReset((n) => n + 1)
         focusDraftInput()
         return
       }
@@ -913,6 +942,9 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     setDrafts((ds) => ds.filter((x) => x.id !== id))
     if (activeDraftRef.current === id) setActiveDraft(null)
     setDraftState((m) => { const n = { ...m }; delete n[id]; return n })
+    // Вложения черновика уходят с ним: и из хранилища окна, и из памяти «уже переложено».
+    saveAttachmentDraft(attachmentStore, draftAttachmentSession(id), [], Date.now())
+    finalized.current.delete(id)
     const timer = saveTimers.current.get(id)
     if (timer !== undefined) { clearTimeout(timer); saveTimers.current.delete(id) }
     if (d && d.rev > 0 && draftsRemote.current) bridge.call('draft.remove', { id, owner: windowId }).catch(() => { /* уже нет */ })
@@ -932,7 +964,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   const draftApproval = (id: string, a: ApprovalMode): void => {
     const d = draftsRef.current.find((x) => x.id === id)
     if (!d) return
-    if (needsConsent(d.provider, a, inheritNow, settings?.access?.consent)) {
+    if (needsConsent(d.provider, a, envFor(d.cwd).inheritMode, settings?.access?.consent)) {
       setConsentState({ busy: false, error: null })
       setModal({ type: 'consent-draft', id, approval: a })
       return
@@ -954,67 +986,140 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
    * (`reserveOnly`). Успех — чат открыт, черновик убран; реплика не ушла — сессия есть, «Повторить» отдаёт её снова.
    */
   const startDraft = async (id: string, files: DraftFiles | null): Promise<void> => {
-    const d = draftsRef.current.find((x) => x.id === id)
-    if (!d || !d.cwd || draftState[id]?.sending) return
+    const d0 = draftsRef.current.find((x) => x.id === id)
+    if (!d0 || !d0.cwd || draftStateRef.current[id]?.sending || goneDrafts.has(id)) return
+    const cwd = d0.cwd
     setDraftState((m) => ({ ...m, [id]: { sending: true, error: null } }))
-    const fail = (text: string, retry: boolean): void => setDraftState((m) => ({ ...m, [id]: { sending: false, error: { text, retry } } }))
-    const consentRev = settings?.access?.consent.rev ?? null
+    const fail = (error: DraftNotice): void => setDraftState((m) => ({ ...m, [id]: { sending: false, error } }))
+    // Отложенная запись черновика больше не нужна: дальше демон сам сверит ревизию и уберёт отправленный.
+    const pending = saveTimers.current.get(id)
+    if (pending !== undefined) { clearTimeout(pending); saveTimers.current.delete(id) }
     try {
-      const pre = await preflight(d.cwd, d.worktree)
+      const pre = await preflight(cwd, d0.worktree)
       if (pre && !pre.ok) { setDraftState((m) => ({ ...m, [id]: { sending: false, error: null } })); return }
+      // Свежая память и идентичность папки (ревью m3, Codex 2): изменился доступ — не отправлять молча.
+      const env = envFor(cwd, pre ? { ...folderInfo, [cwd]: pre } : folderInfo)
+      const fresh = refreshBeforeStart(d0, env)
+      const d = fitEffort(fresh.draft, providers)
+      updateDraft(id, () => d)
+      if (fresh.changed) { fail({ text: tr('Папка или её память изменились — доступ пересчитан. Проверь его и отправь снова.'), retry: false }); return }
+      const consentRev = settings?.access?.consent.rev ?? null
+      const base = { consentRev, inheritMode: env.inheritMode, owner: windowId }
       let prompt = d.text
       if (files && files.count) {
-        const r = (await bridge.call('agent.start', { ...draftStartParams(d, { prompt: '', consentRev, inheritMode: inheritNow }), reserveOnly: true })) as { name: string }
-        prompt = attachmentPrompt(d.text, await files.finalize(r.name))
+        const r = (await bridge.call('agent.start', { ...draftStartParams(d, { ...base, prompt: '' }), reserveOnly: true })) as { name: string }
+        const done = finalized.current.get(id)
+        const items = done && done.name === r.name ? done.items : await files.finalize(r.name)
+        finalized.current.set(id, { name: r.name, items })
+        prompt = attachmentPrompt(d.text, items)
       }
-      const r = (await bridge.call('agent.start', draftStartParams(d, { prompt, consentRev, inheritMode: inheritNow }))) as { name: string; promptError?: { code: string; message: string } }
+      const r = (await bridge.call('agent.start', draftStartParams(d, { ...base, prompt }))) as
+        { name: string; promptError?: { code: string; message: string }; duplicate?: boolean; promptSent?: boolean; promptDiffers?: boolean }
       void refreshRecent()
       // Память папки могла смениться этим стартом — следующий ⌘N в ней сразу увидит новую (кэш `agent.preflight`).
-      void preflight(d.cwd)
+      void preflight(cwd)
       await refreshAgents()
-      if (r.promptError) { fail(tr`Чат ${r.name} заведён, но реплика не ушла: ${r.promptError.message} (${r.promptError.code})`, true); return }
+      if (r.promptError) { fail({ text: tr`Чат ${r.name} заведён, но реплика не ушла: ${r.promptError.message} (${r.promptError.code})`, retry: true }); return }
       discardDraft(id)
+      if (r.duplicate && r.promptDiffers && prompt.trim()) {
+        // Ответ на первую отправку потерялся, а текст с тех пор правили (ревью M3): правка не выбрасывается — она в поле чата.
+        saveDraft(draftsStore, r.name, d.text, Date.now())
+        setBannerError(tr`Этот черновик уже отправлен — чат ${r.name}. Исправленный текст не ушёл: он в поле ввода чата.`)
+      }
       select(r.name)
     } catch (e) {
-      if (isBridgeError(e) && (e.code === 'consent_changed' || e.code === 'consent_required')) void refreshSettings()
-      if (isBridgeError(e) && e.code === 'consent_required') {
-        // Демон знает настройки Claude владельца, а окно — нет: уровень оказался полным доступом без согласия.
+      const code = isBridgeError(e) ? e.code : null
+      if (code === 'consent_changed' || code === 'consent_required') void refreshSettings()
+      if (code === 'consent_required') {
+        // Демон знает настройки Claude папки, а окно могло не знать: уровень оказался полным доступом без согласия.
         setDraftState((m) => ({ ...m, [id]: { sending: false, error: null } }))
         setConsentState({ busy: false, error: null })
-        setModal({ type: 'consent-draft', id, approval: d.approval })
+        setModal({ type: 'consent-draft', id, approval: d0.approval })
         return
       }
-      fail(errorText(e), true)
+      if (code === 'folder_changed') { void preflight(cwd); fail({ text: tr('Папку заменили или перенаправили с тех пор, как черновик её видел — доступ пересчитан. Проверь его и отправь снова.'), retry: false }); return }
+      if (code === 'draft_conflict' || code === 'draft_owned') { fail({ text: errorText(e), retry: false }); void rereadDraft(id); return }
+      fail({ text: errorText(e), retry: true })
     }
+  }
+  /**
+   * Черновик у демона разошёлся с окном (ревью Codex 9): перечитать. Отправлен или удалён в другом окне — здесь остаётся
+   * копия без автозаписи; изменён там — показать их версию и дать вернуть свой текст.
+   */
+  const rereadDraft = async (id: string): Promise<void> => {
+    const local = draftsRef.current.find((x) => x.id === id)
+    type Got = { rev: number; owner: string | null; ownerAlive: boolean; data: unknown }
+    let got: Got | null = null
+    try { got = ((await bridge.call('draft.get', { id })) as { draft: Got }).draft } catch (e) {
+      if (isBridgeError(e) && e.code === 'not_found') {
+        setGoneDrafts((g) => new Set(g).add(id))
+        setDraftState((m) => ({ ...m, [id]: { sending: false, error: { text: tr('Черновик отправили или удалили в другом окне — здесь только копия.'), retry: false, fork: true } } }))
+      }
+      return
+    }
+    if (!got) return
+    if (got.owner && got.owner !== windowId && got.ownerAlive) setForeignDrafts((f) => new Set(f).add(id))
+    const remote = draftFromSnapshot(id, got.rev, got.data, envFor(null))
+    if (!remote) return
+    savedDrafts.current.set(id, JSON.stringify(draftSnapshot(remote)))
+    setDrafts((ds) => ds.map((x) => (x.id === id ? remote : x)))
+    if (local && local.text !== remote.text) {
+      setDraftState((m) => ({ ...m, [id]: { sending: false, error: { text: tr('Черновик изменили в другом окне — показана их версия.'), retry: false, restoreText: local.text } } }))
+    }
+  }
+  /** «Оставить копию»: черновик, ушедший в другом окне, продолжает жить здесь под новым id. */
+  const forkDraft = (id: string): void => {
+    const nid = newDraftId()
+    setDrafts((ds) => ds.map((x) => (x.id === id ? { ...x, id: nid, rev: 0 } : x)))
+    if (activeDraftRef.current === id) setActiveDraft(nid)
+    setGoneDrafts((g) => { const n = new Set(g); n.delete(id); return n })
+    setDraftState((m) => { const n = { ...m }; delete n[id]; return n })
   }
   // Черновики у демона: загрузка на связи, запись с задержкой, пульс владельца.
   const savedDrafts = useRef(new Map<string, string>())
   const saveTimers = useRef(new Map<string, number>())
   useEffect(() => () => { for (const t of saveTimers.current.values()) clearTimeout(t) }, [])
+  // Восстановление черновиков — когда пришли настройки (ревью m1): без согласия в руках окна каждый полный снимок
+  // спуталсь бы с «отозвано». Список — без тел, тела — по одному (`draft.get`, ревью Codex 12).
+  const settingsKnown = settings !== null || settingsTried
   useEffect(() => {
-    if (conn.state !== 'up') return
-    bridge.call('draft.list').then((r) => {
-      const list = (r as { drafts: Array<{ id: string; rev: number; owner: string | null; ownerAlive: boolean; data: unknown }> }).drafts
-      setDrafts((local) => {
-        const have = new Set(local.map((d) => d.id))
-        const add: DraftChat[] = []
-        for (const x of list) {
-          if (have.has(x.id)) continue
-          const d = draftFromSnapshot(x.id, x.rev, x.data, envFor(null))
-          if (!d) continue
-          savedDrafts.current.set(x.id, JSON.stringify(draftSnapshot(d)))
-          add.push(d)
+    if (conn.state !== 'up' || !settingsKnown) return
+    let gone = false
+    void (async () => {
+      let list: Array<{ id: string; rev: number; owner: string | null; ownerAlive: boolean }> = []
+      try {
+        for (let offset = 0; offset < 1000; offset += 50) {
+          const page = (await bridge.call('draft.list', { offset, limit: 50 })) as { drafts: typeof list; total: number }
+          list = [...list, ...page.drafts]
+          if (list.length >= page.total || !page.drafts.length) break
         }
-        return add.length ? [...local, ...add] : local
-      })
-      setForeignDrafts(new Set(list.filter((x) => x.owner && x.owner !== windowId && x.ownerAlive).map((x) => x.id)))
-    }, (e: unknown) => { if (isBridgeError(e) && (e.code === 'method_not_allowed' || e.code === 'not_found')) draftsRemote.current = false })
+      } catch (e) {
+        if (isBridgeError(e) && (e.code === 'method_not_allowed' || e.code === 'not_found')) draftsRemote.current = false
+        return
+      }
+      const have = new Set(draftsRef.current.map((d) => d.id))
+      for (const x of list) {
+        if (gone || have.has(x.id)) continue
+        let body: unknown
+        try { body = ((await bridge.call('draft.get', { id: x.id })) as { draft: { data: unknown } }).draft.data } catch { continue }
+        const d = draftFromSnapshot(x.id, x.rev, body, envFor(null))
+        if (!d || gone) continue
+        savedDrafts.current.set(x.id, JSON.stringify(draftSnapshot(d)))
+        if (d.attachments?.length && !readAttachmentDraft(attachmentStore, draftAttachmentSession(d.id), Date.now()).length) {
+          saveAttachmentDraft(attachmentStore, draftAttachmentSession(d.id), d.attachments, Date.now())
+        }
+        setDrafts((local) => (local.some((y) => y.id === d.id) ? local : [...local, d]))
+      }
+      if (!gone) setForeignDrafts(new Set(list.filter((x) => x.owner && x.owner !== windowId && x.ownerAlive).map((x) => x.id)))
+    })()
     void refreshRecent()
+    return () => { gone = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bridge, conn.state, windowId, refreshRecent])
+  }, [bridge, conn.state, windowId, refreshRecent, settingsKnown])
   const putDraft = (id: string): void => {
     const d = draftsRef.current.find((x) => x.id === id)
-    if (!d || draftEmpty(d) || !draftsRemote.current) return
+    // Не во время отправки (ревью m9: запись с baseRev 0 воскрешала убранный демоном черновик) и не копию ушедшего.
+    if (!d || draftEmpty(d) || !draftsRemote.current || draftStateRef.current[id]?.sending || goneDrafts.has(id)) return
     const json = JSON.stringify(draftSnapshot(d))
     bridge.call('draft.put', { id, data: draftSnapshot(d), baseRev: d.rev, owner: windowId }).then((r) => {
       const rev = (r as { draft: { rev: number } }).draft.rev
@@ -1024,21 +1129,14 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
       if (!isBridgeError(e)) return
       if (e.code === 'method_not_allowed' || e.code === 'not_found') { draftsRemote.current = false; return }
       if (e.code === 'draft_owned') { setForeignDrafts((f) => new Set(f).add(id)); return }
-      if (e.code === 'draft_conflict') {
-        // Чужая запись между нашими: забираем номер у демона (черновик наш — то же окно) и пишем поверх при следующем вводе.
-        bridge.call('draft.list').then((l) => {
-          const x = (l as { drafts: Array<{ id: string; rev: number; owner: string | null; ownerAlive: boolean }> }).drafts.find((y) => y.id === id)
-          if (x && x.owner && x.owner !== windowId && x.ownerAlive) setForeignDrafts((f) => new Set(f).add(id))
-          setDrafts((ds) => ds.map((y) => (y.id === id ? { ...y, rev: x?.rev ?? 0 } : y)))
-          savedDrafts.current.delete(id)
-        }, () => { /* связь — в следующий раз */ })
-      }
+      // Чужая запись между нашими — не затирать её (ревью Codex 9): перечитать и показать расхождение.
+      if (e.code === 'draft_conflict') void rereadDraft(id)
     })
   }
   useEffect(() => {
     if (conn.state !== 'up' || !draftsRemote.current) return
     for (const d of drafts) {
-      if (foreignDrafts.has(d.id) || draftState[d.id]?.sending) continue
+      if (foreignDrafts.has(d.id) || goneDrafts.has(d.id) || draftState[d.id]?.sending) continue
       if (draftEmpty(d)) {
         // Стёр до пустого — копия у демона больше не нужна (пустой черновик при уходе исчезает).
         if (d.rev > 0) {
@@ -1054,7 +1152,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
       saveTimers.current.set(d.id, window.setTimeout(() => { saveTimers.current.delete(d.id); putDraft(d.id) }, 400))
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [drafts, conn.state, foreignDrafts])
+  }, [drafts, conn.state, foreignDrafts, goneDrafts])
   useEffect(() => {
     if (conn.state !== 'up') return
     const timer = setInterval(() => {
@@ -1146,7 +1244,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     setModal(null)
     const full = pick.kind === 'approval' && isFullLevel(a.provider, pick.approval, inheritMode)
     // Шаг B (§3.7): смена доступа в живом чате пишет память папки — следующий ⌘N в ней начнётся с этого уровня.
-    bridge.call('agent.configure', { ...configureParams(name, pick, confirmed || full, consent?.rev), ...(pick.kind === 'approval' ? { rememberAccess: true } : {}) }).then(() => { void refreshAgents(); void refreshFolderOf(a.cwd) }, (e: unknown) => {
+    bridge.call('agent.configure', { ...configureParams(name, pick, confirmed || full, consent?.rev), ...(pick.kind === 'approval' ? { rememberAccess: true } : {}) }).then(() => { void refreshAgents(); void refreshFolderOf(a.repo ?? a.cwd) }, (e: unknown) => {
       // Окно не знало окна модели, а демон знает: спросить человека и повторить с подтверждением.
       if (isBridgeError(e) && e.code === 'needs_confirm') { setModal({ type: 'configure', name, pick, reason: 'misfit', text: e.message }); return }
       if (isBridgeError(e) && (e.code === 'consent_changed' || e.code === 'consent_required')) void refreshSettings()
@@ -1473,7 +1571,10 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
           <DraftView key={draft.id} draft={draft} env={envFor(draft.cwd)} catalog={providers} checking={providersChecking} now={now}
             recent={recent} projects={groups.map((g) => g.path)} sending={!!draftState[draft.id]?.sending} error={draftState[draft.id]?.error ?? null}
             online={conn.state === 'up'} foreign={foreignDrafts.has(draft.id)} obstructed={modal !== null} filePaths={filePaths}
-            noAutoFocus={quietDrafts.has(draft.id)}
+            noAutoFocus={quietDrafts.has(draft.id)} menuReset={draftMenuReset}
+            onAttachments={(items) => updateDraft(draft.id, (x) => ({ ...x, attachments: items }))}
+            onRestoreText={(text) => { updateDraft(draft.id, (x) => ({ ...x, text })) }}
+            onFork={() => forkDraft(draft.id)}
             onChange={(d) => updateDraft(d.id, () => d)} onText={(text) => updateDraft(draft.id, (x) => ({ ...x, text }))}
             onFolder={(cwd) => setDraftFolder(draft.id, cwd)} onPickSystemFolder={() => void pickDraftFolder(draft.id)}
             onApproval={(a) => draftApproval(draft.id, a)} onSend={(f) => void startDraft(draft.id, f)} onDiscard={() => discardDraft(draft.id)}
