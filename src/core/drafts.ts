@@ -38,7 +38,7 @@ export interface DraftView extends DraftRecord {
 export type DraftMeta = Omit<DraftView, 'data'> & { bytes: number }
 
 export class DraftError extends Error {
-  constructor(readonly code: 'invalid_params' | 'not_found' | 'draft_conflict' | 'draft_owned', message: string, readonly rev?: number) { super(message) }
+  constructor(readonly code: 'invalid_params' | 'not_found' | 'draft_conflict' | 'draft_owned' | 'draft_starting', message: string, readonly rev?: number) { super(message) }
 }
 
 export interface DraftStore {
@@ -50,10 +50,23 @@ export interface DraftStore {
   claim(id: string, owner: string): DraftView
   touch(ids: readonly string[], owner: string): number
   remove(id: string, owner?: string): boolean
+  /**
+   * Захват черновика стартом (ревью Codex 10, recheck 4) — compare-and-set по ревизии и владельцу: пока старт идёт,
+   * черновик нельзя ни записать, ни «Забрать», ни удалить из другого окна. Захват живёт в памяти демона: упал демон —
+   * захвата нет.
+   */
+  beginStart(id: string, rev: number, owner: string, requestId: string): DraftView
+  /** Конец старта: `consumed` — реплика принята, черновик удаляется; иначе захват снимается, черновик остаётся. */
+  endStart(id: string, requestId: string, consumed: boolean): void
 }
 
 export function createDraftStore(dir: string, now: () => number = Date.now): DraftStore {
   const beats = new Map<string, { owner: string; at: number }>()
+  /** Черновики, которые сейчас отправляет старт: id → requestId. */
+  const starting = new Map<string, string>()
+  const notStarting = (id: string): void => {
+    if (starting.has(id)) throw new DraftError('draft_starting', 'черновик сейчас отправляется — дождись чата или ошибки')
+  }
   const file = (id: string): string => join(dir, `${id}.json`)
   const ensure = (): void => { mkdirSync(dir, { recursive: true, mode: 0o700 }); chmodSync(dir, 0o700) }
   const read = (id: string): DraftRecord | null => {
@@ -113,6 +126,7 @@ export function createDraftStore(dir: string, now: () => number = Date.now): Dra
       const body = JSON.stringify(data)
       if (Buffer.byteLength(body) > DRAFT_MAX_BYTES) throw new DraftError('invalid_params', `черновик больше ${DRAFT_MAX_BYTES / 1024} КБ`)
       if (!Number.isSafeInteger(baseRev) || baseRev < 0) throw new DraftError('invalid_params', 'черновик: baseRev — целое ≥ 0')
+      notStarting(id)
       const cur = read(id)
       if (!cur && ids().length >= DRAFTS_MAX) throw new DraftError('invalid_params', `черновиков уже ${DRAFTS_MAX} — удали лишние`)
       if (cur && cur.rev !== baseRev) throw new DraftError('draft_conflict', `черновик изменился (сейчас — запись ${cur.rev}) — перечитай`, cur.rev)
@@ -125,9 +139,28 @@ export function createDraftStore(dir: string, now: () => number = Date.now): Dra
     claim(rawId, rawOwner) {
       const id = checkId(rawId)
       const owner = checkOwner(rawOwner)
+      notStarting(id)
       const cur = read(id)
       if (!cur) throw new DraftError('not_found', 'черновика нет — его отправили или удалили')
       return write({ ...cur, rev: cur.rev + 1, owner, updatedAt: new Date(now()).toISOString() }, owner)
+    },
+    beginStart(rawId, rev, rawOwner, requestId) {
+      const id = checkId(rawId)
+      const owner = checkOwner(rawOwner)
+      const busy = starting.get(id)
+      if (busy && busy !== requestId) throw new DraftError('draft_starting', 'черновик уже отправляется')
+      const cur = read(id)
+      if (!cur) throw new DraftError('draft_conflict', 'черновика уже нет — его отправили или удалили в другом окне', 0)
+      if (cur.owner && cur.owner !== owner && alive(cur)) throw new DraftError('draft_owned', 'черновик открыт в другом окне — «Забрать», чтобы отправить отсюда', cur.rev)
+      if (cur.rev !== rev) throw new DraftError('draft_conflict', `черновик изменился (сейчас — запись ${cur.rev}) — перечитай`, cur.rev)
+      starting.set(id, requestId)
+      return view(cur)
+    },
+    endStart(rawId, requestId, consumed) {
+      const id = checkId(rawId)
+      if (starting.get(id) !== requestId) return
+      starting.delete(id)
+      if (consumed) { try { unlinkSync(file(id)) } catch { /* уже нет */ } beats.delete(id) }
     },
     touch(list, rawOwner) {
       const owner = checkOwner(rawOwner)
@@ -141,6 +174,7 @@ export function createDraftStore(dir: string, now: () => number = Date.now): Dra
     },
     remove(rawId, owner) {
       const id = checkId(rawId)
+      notStarting(id)
       const cur = read(id)
       if (!cur) return false
       if (owner !== undefined && cur.owner && cur.owner !== checkOwner(owner) && alive(cur)) {

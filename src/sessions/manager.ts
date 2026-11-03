@@ -95,6 +95,12 @@ export interface StartParams {
   grant?: 'cli-once'
   /** Шаг B: `requestId` старта из черновика — пишется в запись атомарно с ней (журнал стартов ищет сессию по нему). */
   startRequest?: string
+  /**
+   * Шаг B (Codex recheck 1, 2): последняя проверка НАСТОЯЩЕЙ папки сессии прямо перед запуском адаптера — после
+   * worktree и всех `await`. Бросает — старт отменяется (новый worktree убирается). Синхронная: между ней и запуском
+   * адаптера нет ожиданий.
+   */
+  beforeSpawn?(sessionCwd: string): void
 }
 
 /** Ответ `agent.start`: запись реестра и — для `--worktree` — что сделано с папкой. */
@@ -946,6 +952,8 @@ export function createManager(opts: ManagerOptions): SessionManager {
         try { await resetBrowserDirs(opts.paths, params.name) } catch (e) {
           throw new ManagerError('internal', `каталог браузера прежней сессии ${params.name} не убран: ${(e as Error).message}`)
         }
+        // Без ожиданий между проверкой и запуском: подмену папки или режим Claude настоящей папки (worktree) ловим здесь.
+        params.beforeSpawn?.(sessionCwd)
         const started = await adapter.startSession({
           name: params.name,
           cwd: sessionCwd,

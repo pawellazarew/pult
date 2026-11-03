@@ -32,6 +32,8 @@ export interface StartEntry {
    * посреди — повтор смотрит, есть ли после этого номера `message.user` сессии; есть — реплика ушла, второй раз нет.
    */
   promptFrom?: number
+  /** Отпечаток настроек старта (папка, провайдер, модель, усилие, доступ, ветка, браузер, режим) — для `start_changed`. */
+  shape?: string
   at: string
   updatedAt: string
 }
@@ -65,6 +67,7 @@ export function createStartJournal(dir: string, now: () => number = Date.now): S
         ...(err && typeof err['code'] === 'string' && typeof err['message'] === 'string' ? { error: { code: err['code'], message: err['message'] } } : {}),
         ...(typeof o['promptHash'] === 'string' && /^[0-9a-f]{64}$/.test(o['promptHash']) ? { promptHash: o['promptHash'] } : {}),
         ...(typeof o['promptFrom'] === 'number' && Number.isSafeInteger(o['promptFrom']) ? { promptFrom: o['promptFrom'] } : {}),
+        ...(typeof o['shape'] === 'string' && /^[0-9a-f]{64}$/.test(o['shape']) ? { shape: o['shape'] } : {}),
         at: typeof o['at'] === 'string' ? o['at'] : new Date(0).toISOString(),
         updatedAt: typeof o['updatedAt'] === 'string' ? o['updatedAt'] : new Date(0).toISOString(),
       }
