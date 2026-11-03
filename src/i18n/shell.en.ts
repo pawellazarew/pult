@@ -1,4 +1,6 @@
 export const shellEn: Readonly<Record<string, string>> = {
+  "демон остановлен: {0}": "Daemon stopped: {0}",
+  "подписка завершена": "Subscription ended",
   "Файл больше 25 МБ. Прикрепи меньший файл или укажи путь к исходнику в тексте.": "File exceeds 25 MB. Attach a smaller file or include the source path in your message.",
   "Можно прикрепить обычный файл или папку. Этот объект файловой системы не поддерживается.": "Attach a regular file or folder. This filesystem object is not supported.",
   "Файл изменился во время добавления. Перетащи его ещё раз.": "File changed while being added. Drag it again.",

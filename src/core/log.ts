@@ -2,7 +2,7 @@
 // Инвариант 7: в журнал не попадают адреса почты и токены. Фильтр стоит НА ЗАПИСИ, а не
 // на вызывающем коде — иначе один забытый `log.info(err)` в адаптере сливает ключ.
 
-import { appendFileSync, closeSync, openSync, writeSync } from 'node:fs'
+import { closeSync, fstatSync, openSync, renameSync, unlinkSync, writeSync } from 'node:fs'
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 
@@ -63,26 +63,44 @@ export interface LoggerOptions {
   /** Дублировать строки в stdout — для запуска демона на переднем плане. */
   echo?: boolean
   pid?: number
+  /** Предел одного файла; сохраняются ещё backups предыдущих файлов. */
+  maxBytes?: number
+  backups?: number
 }
 
 export function createLogger(file: string, opts: LoggerOptions = {}): Logger {
-  // Один открытый fd на весь срок жизни демона: appendFileSync открывал бы файл на каждую
-  // строку, а строк в потоке событий много.
+  const maxBytes = Math.max(256, opts.maxBytes ?? 8 * 1024 * 1024)
+  const backups = Math.max(1, Math.min(10, Math.floor(opts.backups ?? 3)))
   let fd: number | null = null
-  try {
+  let size = 0
+  let closed = false
+  const open = (): void => {
     fd = openSync(file, 'a', 0o600)
-  } catch {
-    fd = null
+    size = fstatSync(fd).size
   }
+  try { open() } catch { fd = null }
   const pid = opts.pid ?? process.pid
 
-  const write = (line: string): void => {
-    if (fd !== null) {
-      try { writeSync(fd, line) } catch { /* диск пропал — демон из-за журнала не падает */ }
-    } else {
-      try { appendFileSync(file, line) } catch { /* см. выше */ }
+  const rotate = (): void => {
+    if (fd !== null) { closeSync(fd); fd = null }
+    try { unlinkSync(`${file}.${backups}`) } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e }
+    for (let n = backups - 1; n >= 1; n--) {
+      try { renameSync(`${file}.${n}`, `${file}.${n + 1}`) } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e }
     }
-    if (opts.echo) process.stdout.write(line)
+    try { renameSync(file, `${file}.1`) } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e }
+    open()
+  }
+  const write = (line: string): void => {
+    if (closed) return
+    try {
+      if (fd === null) open()
+      const bytes = Buffer.from(line)
+      if (size > 0 && size + bytes.length > maxBytes) rotate()
+      let offset = 0
+      while (offset < bytes.length) offset += writeSync(fd!, bytes, offset, bytes.length - offset)
+      size += bytes.length
+    } catch { /* Ошибка диагностического журнала не должна ронять демон. */ }
+    if (opts.echo) { try { process.stdout.write(line) } catch { /* stdout закрыт */ } }
   }
 
   const log = (level: LogLevel, msg: string, data?: Record<string, unknown>): void => {
@@ -93,7 +111,12 @@ export function createLogger(file: string, opts: LoggerOptions = {}): Logger {
       msg: redactString(msg),
       ...(data ? (redact(data) as Record<string, unknown>) : {}),
     }
-    write(JSON.stringify(rec) + '\n')
+    let line = JSON.stringify(rec) + '\n'
+    // Один stderr от CLI тоже не должен обходить предел файла.
+    if (Buffer.byteLength(line) > maxBytes) {
+      line = JSON.stringify({ ts: rec.ts, level, pid, msg: 'log entry truncated', truncated: true }) + '\n'
+    }
+    write(line)
   }
 
   return {
@@ -103,6 +126,7 @@ export function createLogger(file: string, opts: LoggerOptions = {}): Logger {
     warn: (m, d) => log('warn', m, d),
     error: (m, d) => log('error', m, d),
     close: () => {
+      closed = true
       if (fd !== null) { try { closeSync(fd) } catch { /* уже закрыт */ } fd = null }
     },
   }

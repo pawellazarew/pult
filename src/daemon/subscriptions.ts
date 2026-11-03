@@ -3,9 +3,9 @@
 // ГЛАВНАЯ ТРУДНОСТЬ — стык «доигрываем прошлое» и «отдаём живое». Наивно: сначала прочитать
 // журнал, потом подписаться — и события, случившиеся между чтением и подпиской, пропадут.
 // Наоборот — подписаться, потом читать — и они придут дважды.
-// Решение: сначала вешаем живого слушателя в БУФЕР, затем синхронно читаем журнал с курсора,
-// затем сливаем буфер, отбрасывая всё, что уже доиграно по номеру. Между этими шагами нет ни
-// одного await — Node однопоточен, значит новое событие вклиниться не может.
+// Решение: сначала вешаем живого слушателя в БУФЕР, затем читаем журнал порциями до зафиксированной верхней границы,
+// затем сливаем буфер, отбрасывая всё, что уже доиграно по номеру. Последняя проверка
+// буфера и переход к живому потоку синхронны — событие между ними вклиниться не может.
 //
 // ДОИГРЫВАНИЕ — ПОРЦИЯМИ. Журнал растёт без предела (08.10.2026: 24 тыс. событий, 8,4 МБ), а окно
 // подписывается с нуля. Отдать прошлое одним махом — переполнить буфер сокета: демон отцеплял
@@ -69,7 +69,7 @@ export interface SubscriptionHandle {
   /**
    * Доиграть прошлое и слить буфер. Вызывается ПОСЛЕ того, как клиенту ушёл ответ с номером
    * подписки: иначе кадры подписки приходят раньше ответа, и клиент не знает, куда их деть.
-   * Пока буфер сокета не разросся, всё идёт синхронно; дальше — порциями по `drained`.
+   * История идёт порциями с уступкой событийного цикла и ожиданием `drained`.
    */
   start(): Promise<{ replayed: number }>
 }
@@ -124,6 +124,7 @@ export function createSubscriptions(bus: EventBus, store: EventStore, live?: Liv
       }
 
       const unlisten = bus.on((ev) => {
+        if (params.sessionId !== undefined && ev.sessionId !== params.sessionId) return
         if (replaying) buffered.push(ev)
         else deliver(ev)
       })
@@ -140,25 +141,40 @@ export function createSubscriptions(bus: EventBus, store: EventStore, live?: Liv
       }
 
       const start = async (): Promise<{ replayed: number }> => {
-        const past = store.readFrom(since, params.sessionId !== undefined ? { sessionId: params.sessionId } : {})
-        for (const ev of past) {
-          deliver(ev)
-          if (!(await keepUp())) return { replayed: 0 }
+        // Фиксируем верхнюю границу: новые события уже собирает живой слушатель.
+        // Порции не удерживают весь хвост в памяти и дают RPC/таймерам выполняться между ними.
+        const until = store.lastId
+        let lastReplayed = since
+        let replayed = 0
+        while (lastReplayed < until && sinks.has(sub)) {
+          const past = store.readFrom(lastReplayed, {
+            ...(params.sessionId !== undefined ? { sessionId: params.sessionId } : {}), limit: 256, maxBytes: 1024 * 1024,
+          })
+          if (!past.length) break
+          for (const ev of past) {
+            if (ev.id > until) break
+            deliver(ev)
+            lastReplayed = ev.id
+            replayed++
+            if (!(await keepUp())) return { replayed }
+          }
+          if ((past[past.length - 1] as PultEvent).id >= until) break
+          await new Promise<void>((resolve) => setImmediate(resolve))
         }
-        const lastReplayed = past.length ? (past[past.length - 1] as PultEvent).id : since
+        if (!sinks.has(sub)) return { replayed }
 
-        // Буфер может расти, пока ждём `drained`, — поэтому по индексу, а не for…of по снимку.
-        // Последняя проверка длины и `replaying = false` идут без await между ними: живое
-        // событие не проскочит ни мимо буфера, ни дважды.
+        // Буфер растёт во время await. Последняя проверка длины и переход к live
+        // остаются синхронными, иначе событие могло бы потеряться на стыке.
         for (let i = 0; i < buffered.length; i++) {
           const ev = buffered[i] as PultEvent
           if (ev.id <= lastReplayed) continue
           deliver(ev)
-          if (!(await keepUp())) return { replayed: past.length }
+          if (!(await keepUp())) return { replayed }
+          if ((i + 1) % 256 === 0) await new Promise<void>((resolve) => setImmediate(resolve))
         }
         replaying = false
         buffered.length = 0
-        return { replayed: past.length }
+        return { replayed }
       }
 
       return { sub, start }

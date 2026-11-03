@@ -12,11 +12,12 @@ import type { Timers } from '../../src/link.js'
 class FakeDaemon {
   up = true
   journal: PultEvent[] = []
-  clients = new Set<{ closeFns: Array<() => void>; subs: Array<(ev: PultEvent) => void> }>()
+  clients = new Set<{ closeFns: Array<() => void>; subs: Array<(ev: PultEvent) => void>; ends: Array<(end: { code: string; message: string }) => void> }>()
   connects = 0
   ensures = 0
   replayDuplicates = false
   silent = false
+  failSubscriptions = false
 
   emit(n = 1): void {
     for (let i = 0; i < n; i++) {
@@ -34,18 +35,20 @@ class FakeDaemon {
   async connect(): Promise<Client> {
     this.connects++
     if (!this.up) throw Object.assign(new Error('сокет не отвечает'), { code: 'no_daemon' })
-    const conn = { closeFns: [] as Array<() => void>, subs: [] as Array<(ev: PultEvent) => void> }
+    const conn = { closeFns: [] as Array<() => void>, subs: [] as Array<(ev: PultEvent) => void>, ends: [] as Array<(end: { code: string; message: string }) => void> }
     this.clients.add(conn)
     const self = this
     let subNo = 0
     return {
-      daemon: { version: '0.1.0', pid: 1, startedAt: 'x' },
+      daemon: { version: '0.1.0', pid: 1, startedAt: '2026-11-03T00:00:00Z' },
       async request(method: string) {
         if (self.silent) throw Object.assign(new Error('timeout'), { code: 'timeout' })
         if (!self.clients.has(conn)) throw Object.assign(new Error('closed'), { code: 'connection_closed' })
         return { method }
       },
-      async subscribe(params, onEvent) {
+      async subscribe(params, onEvent, onEnd) {
+        if (self.failSubscriptions) throw new Error("subscription unavailable")
+        if (onEnd) conn.ends.push(onEnd)
         const since = params.since ?? 0
         // Демон может прислать хвост, который окно уже видело (гонка на переподключении).
         const from = self.replayDuplicates ? Math.max(0, since - 2) : since
@@ -92,6 +95,84 @@ function setup(): { d: FakeDaemon; timers: ManualTimers; link: DaemonLink; state
 }
 
 describe('DaemonLink', () => {
+  it('конец подписки при живом сокете переподключает и доигрывает курсор', async () => {
+    const { d, link, timers, got } = setup()
+    await link.start(); await flush()
+    d.emit(2)
+    const old = [...d.clients][0]!
+    old.ends[0]!({ code: 'slow_consumer', message: 'slow' })
+    assert.equal(link.current.state, 'down')
+    assert.equal(d.clients.size, 0)
+    d.emit(1)
+    await timers.fire()
+    assert.deepEqual(got, [1, 2, 3])
+    old.ends[0]!({ code: 'slow_consumer', message: 'stale' })
+    old.subs[0]!({ id: 100, ts: 't', sessionId: 's', provider: 'pult', kind: 'status.changed', data: {} })
+    assert.equal(link.current.state, 'up')
+    assert.deepEqual(got, [1, 2, 3])
+    assert.equal(timers.queue.length, 0)
+    link.close()
+  })
+
+  it('ошибка подписки при живом сокете повторяется с растущей паузой', async () => {
+    const { d, link, timers, got } = setup()
+    d.failSubscriptions = true
+    await link.start(); await flush()
+    assert.equal(link.current.state, 'down')
+    assert.equal(await timers.fire(), 100)
+    assert.equal(await timers.fire(), 200)
+    d.failSubscriptions = false
+    d.emit(2)
+    assert.equal(await timers.fire(), 400)
+    assert.equal(link.current.state, 'up')
+    assert.deepEqual(got, [1, 2])
+    assert.equal(d.ensures, 1)
+    link.close()
+  })
+
+  it('конец подписки после остановки кнопкой не планирует повтор', async () => {
+    const { d, link, timers } = setup()
+    await link.start(); await flush()
+    await link.stopDaemon()
+    const old = [...d.clients][0]!
+    old.ends[0]!({ code: 'daemon_stopping', message: 'stopping' })
+    assert.equal(timers.queue.length, 0)
+    assert.equal(d.ensures, 1)
+    link.close()
+  })
+
+  it('текущая ручная остановка объясняет обрыв; повтор не запускает демон', async () => {
+    const { d, link, timers } = setup()
+    await link.start(); await flush()
+    const stop: PultEvent = {
+      id: 1, ts: '2026-11-03T01:00:00Z', sessionId: 'daemon', provider: 'pult',
+      kind: 'daemon.stopping', data: { reason: 'запрошено через daemon.stop' },
+    }
+    for (const c of d.clients) for (const sub of c.subs) sub(stop)
+    d.down()
+    assert.deepEqual(link.current, {
+      state: 'down', reason: 'демон остановлен: запрошено через daemon.stop', attempt: 1, retryInMs: 100,
+    })
+    await timers.fire()
+    assert.equal(d.up, false)
+    assert.equal(d.ensures, 1)
+    link.close()
+  })
+
+  it('историческая остановка не меняет причину нового обрыва', async () => {
+    const { d, link } = setup()
+    d.journal.push({
+      id: 1, ts: '2026-11-02T01:00:00Z', sessionId: 'daemon', provider: 'pult',
+      kind: 'daemon.stopping', data: { reason: 'запрошено через daemon.stop' },
+    })
+    await link.start(); await flush()
+    d.down()
+    assert.deepEqual(link.current, {
+      state: 'down', reason: 'соединение с демоном закрыто', attempt: 1, retryInMs: 100,
+    })
+    link.close()
+  })
+
   it('возврат в окно немедленно переподключает и доигрывает курсор', async () => {
     const { d, link, timers, got } = setup()
     await link.start(); await flush()
