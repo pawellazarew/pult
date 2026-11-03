@@ -122,6 +122,67 @@ pult provider reset codex    # снять остановку провайдер�
 Фикстуры сырого протокола и их происхождение — `test/fixtures/codex/README.md`; перезаписываются
 `node scripts/record-codex-fixtures.mjs` (а `--probe` снимает часть из них вообще без ходов модели).
 
+## ZCode: третий провайдер, маршрут A
+
+Агент Z.AI на GLM. Спайк — [`17-SPIKE-zcode.md`](17-SPIKE-zcode.md); этот раздел — про реализацию Z1
+(«процесс на ход», как у claude) плюс проверки доктора. Z2 (app-server: Inbox-разрешения, живые фазы
+богаче, `setMode`/`setModel` на живую) — следующий этап, отдельным PR.
+
+```sh
+pult agent start z --kind zcode --cwd ~/проект
+pult agent prompt z "починить тест" --wait
+pult provider reset zcode
+```
+
+- **Маршрут A — процесс НА ХОД.** `zcode -p <реплика> --cwd <папка> --mode <режим> --surface
+  terminal --output-format stream-json`. Скрытый флаг `--output-format stream-json` (в `--help` его
+  нет, замерено 02.11.2026 на CLI 0.17.1) даёт ту же форму потока, что у claude: NDJSON-конверты
+  `{type, payload, seq, sessionId, turnId, …}` по ходу и одна итоговая строка `{"type":"result", …}` —
+  адаптер (`src/adapters/zcode/`) устроен как claude-адаптер, только без тёплых процессов, фоновой
+  работы и MCP-брокера: `-p`-процесс всегда умирает после ответа, держать нечего.
+- **Разговор заводит САМ CLI** (`sess_…`): флага `--session-id` нет. Первый поток событий несёт
+  sessionId — он и становится `providerSessionId`; вторая реплика идёт `--resume <sess_…>` (замер
+  спайка: состояние переживает границу процесса). `--resume` на несуществующий разговор — самолечение:
+  адаптер забывает разговор, следующая реплика заводит его заново.
+- **Режимы:** `read-only→plan` (замер спайка: файл не создаётся — честный read-only),
+  `ask→guarded`, `workspace→edit`, `full→yolo` (`inherit` у ZCode нет — `approvalFits`). `full` — под согласием
+  шага A, как у Claude и Codex (`CONSENT_PROVIDERS` включает `zcode`): без разрешения снимок хода приходит без уровня
+  (`guarded`), а адаптер перед спавном ещё раз спрашивает `mayRunFull`. Режим CLI в потоке не называет — `applied`
+  с `reported: null` (метка «не подтверждено»), `full: true` при `yolo`; `activeAccess` — процесс хода. Канала вопросов в Пульт у маршрута A НЕТ: «Спрашивать»
+  работает как guarded (безопасное — сам, опасное — автоматический отказ), и `approvalContext`
+  объясняет это модели на каждом ходу — вопросов в Inbox от zcode-сессий не бывает до Z2.
+- **Модели и усилия НЕ выбираются**: у CLI нет флага `--model` (парсер `parseArgs strict:true` падает
+  на незнакомом флаге), модель и уровень продуманности задаёт аккаунт Z.AI. Форма «+ Сессия» и меню
+  подвала это честно показывают, `agent set --model/--effort` отклоняет.
+- **Промпт идёт в argv** (`-p`): stdin-формата у CLI нет. ОГРАНИЧЕНИЕ: реплика видна в `ps` машины —
+  задокументировано и принято для маршрута A (у claude промпт в stdin именно поэтому).
+- **Ошибки CLI — не поток, а stderr** `Error: <текст>` + exit 1: отказ входа
+  (`not_authenticated` и родня) останавливает провайдера ЦЕЛИКОМ до `pult provider reset zcode`;
+  квота (`quota_exceeded`) валит ход и ставит `limited`, провайдер жив. Отмена — SIGINT: exit 130,
+  `turn.completed {resultType:"cancelled"}`, строки `result` нет вовсе (замер в фикстуре 04).
+- **Бинарь — node-скрипт с shebang внутри ZCode.app** (`/Applications/ZCode.app/Contents/Resources/
+  glm/zcode.cjs`) — запускается напрямую, но путь плывёт за обновлениями приложения (грабля
+  codex/ChatGPT.app). Поиск: симлинк `~/.local/bin/zcode` раньше app-пути; перебивает `PULT_ZCODE_BIN`
+  (её же пробрасывает CLI поднимаемому демону). Вход меряется по файлу кред `~/.zcode/v2/
+  credentials.json` (`src/env/zcodeLogin.ts`): есть ключ `oauth:*:access_token` или `zcodejwttoken` —
+  вход есть; содержимое токенов не читается и наружу не уходит. `pult doctor` показывает `cli.zcode`
+  (warn внутри .app) и `login.zcode`.
+- **Конфиг-переменные окружения.** Десктоп ZCode указывает CLI путь до его provider-конфига
+  переменной `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE` (бисекция живого прогона 02.11.2026: без неё и
+  родни CLI умирает «无法定位 CLI ZCode Built-in Provider Config» — бандл внутри .app конфига не
+  содержит). Белый список их режет, поэтому `ZCODE_ENV_PASS` (src/adapters/zcode/adapter.ts)
+  пробрасывает их ОСОЗНАННО в трёх местах: ребёнку zcode, поднимаемому демону (daemonSpawnEnv) и в
+  файл службы при `daemon install` (launchd демону ничего не наследует). Креды и токены туда не
+  входят никогда.
+- **Браузера и тёплого процесса нет** ни в каком режиме: у CLI нет канала MCP-конфига, `modeBlocksBrowser`
+  для zcode всегда истинен. Автоназвание сессий работает (общий haiku-титул).
+- **Дымовой прогон на настоящем CLI** — `npm run smoke:zcode` (3 крошечных хода + оборванный,
+  проверяет resume, честный plan и остановку). В CI не входит.
+
+Фикстуры живого потока — `test/fixtures/zcode/README.md` (записаны 02.11.2026, CLI 0.17.1); играет
+их `test/fakes/fake-zcode.mjs` (сценарии-ошибки вход/квота/нет-разговора фейк воспроизводит сам —
+их stderr не поток).
+
 ## Ф1 В4: служба
 
 Без службы демон живёт, пока его не остановят или не перезагрузят машину, и поднимается первой же
@@ -2319,3 +2380,74 @@ pult.collapsed. При возвращении фокуса окно обновл
   `rulesFile` — отзыв посреди хода: `deferred`, ход `idle`, после него `policy_reload`, две заметки, следующая реплика —
   второй процесс и `thread/resume`; отзыв без ходов — `restarted`; остановка до записи codex — заметка после рестарта; CLI),
   `ui/test/rules.test.ts`, e2e `shell/test/e2e/settings.test.ts` («Правила „Всегда“»: строка, «Отозвать», итог, файл, журнал).
+
+## Быстрый старт, шаг A: уровни доступа и согласие один раз
+
+Спецификация — `design/2026-11-02-quick-start/DESIGN-REVIEW.md` (v2, §3.6, §3.8, §5 п. 8). Модал «Новая сессия» остаётся;
+черновики, пресеты и память папок — следующие шаги.
+
+- **«Спрашивать» у Claude — явный `--permission-mode manual`** (`CLAUDE_PERMISSION_MODE.ask`, ревью Codex B1): без флага
+  действовал `defaultMode` владельца, вплоть до bypass. Прежнее «без флага» — пятый уровень `inherit` («Как в настройках
+  Claude», только Claude; `approvalFits`). Нет режима (`undefined`) — тоже `manual`.
+- **Миграция реестра** (`SESSIONS_VERSION = 2`, `migrateLegacyAsk`): в файле версии 1 запись Claude без `approval` → `inherit`
+  (поведение идущих и возобновлённых чатов не меняется); файл сразу переписывается версией 2, повтор ничего не делает.
+  Перед первой миграцией — копия `sessions.json.bak-v1` (одна, следующие миграции её не затирают) и маркер
+  `config.json → migrations.accessLevels {at}` (`ACCESS_MIGRATION`; не `quickStart` — то имя у миграции пресетов, §5).
+  Импорт «Существующие чаты» — явный «Спрашивать».
+- **Откат и возврат** (ревью PR #39, M2). Прежний демон читает `inherit` как незнакомое → `read-only` (тише), запись
+  без `approval` (новый «Спрашивать») — как своё «без флага», то есть по `defaultMode` владельца, и переписывает файл
+  версией 1. Маркер в `config.json` переживает откат: прежний демон пишет только своё поддерево (`writeConfigSubtree`).
+  При следующем обновлении файл версии 1 с маркером — след отката: `inherit` получают только записи с `createdAt`
+  раньше маркера, остальные Claude без режима остаются явным «Спрашивать» (`manual`), а не молча расширяются.
+- **Согласие** — `src/core/consent.ts`, `PULT_HOME/consent.json` (0600) `{version, rev, providers, grantedAt|revokedAt}`.
+  Пишут только `access.grantFull {confirm, version, providers: [claude, codex, zcode]}` (только клиент `shell`) и
+  `access.revokeFull`; `settings.set` их поля не принимает. Демон сверяет сам: `agent.start` и `agent.configure`
+  (полный уровень → `confirm: true` + согласие или `grant: 'cli-once'`, иначе `consent_required`; `consentRev` окна ≠
+  файлу → `consent_changed`), снимок каждого хода и resume — `accessGate` менеджера: нет разрешения → ход в явном
+  «Спрашивать», заметка `session.configured {access: 'downgraded'}` одна на сессию и `rev`. `inherit` при
+  `defaultMode: bypassPermissions` у владельца — полный уровень (`isFullLevel`). Модель угроз прежняя: это защита от
+  опечатки и устаревшего окна, не от локального процесса.
+- **CLI** `--yes` к `full`/`inherit` → `grant: 'cli-once'` в записи сессии: согласие не пишется и не нужно, снимается любой
+  сменой режима. Мост окна вырезает `grant` (`STRIPPED_PARAMS`), `access.*` — в `ALLOWED_METHODS` (окну старше — подсказка).
+- **Действующий режим** — `applied` записи и `AdapterDeps.applied`: Claude — спавн («отправлено») и `permissionMode`
+  каждого `system/init`; Codex — `<sandbox.type>/<approvalPolicy>` ответа `thread/start|resume` (`threadReportOf`), ход с
+  поправкой политики — «не подтверждено». Расхождение с `expectedReport` → заметка `{access: 'mismatch'}`, одна на пару.
+  Живой процесс — `ProviderAdapter.activeAccess` (Claude: ход, фоновые задачи или тёплый процесс с полными правами;
+  Codex: ход свой или сервера и фон — с самым широким уровнем ходов, чей фон жив, `bgApproval`).
+- **Полные права без разрешения — стоп** (ревью PR #39, M1 и блокер Codex 2). Прогноз `inherit` читает и управляемые
+  настройки Claude (`claudeManagedSettingsFiles`: `/Library/Application Support/ClaudeCode/managed-settings.json` и
+  `managed-settings.d/*.json`, на Linux `/etc/claude-code/`; тестовый демон — `PULT_HOME/claude-managed-settings.json`).
+  `CLAUDE_CONFIG_DIR` не нужен: окружение ребёнка — по белому списку. Если процесс всё же сказал «полные права»
+  (`system/init: bypassPermissions` — MDM-профиль; ход сервера Codex на треде `danger-full-access`, `AppliedInfo.full`),
+  а разрешения нет (`fullAllowed` менеджера) — менеджер останавливает ход (`stop`), пишет заметку `{access: 'downgraded'}`,
+  у `inherit` запоминает сказанное (`inheritSeen`) — дальше явное «Спрашивать» до нового выбора уровня.
+- **Сузили доступ — процессы** (`ProviderAdapter.retire`, `AdapterDeps.mayRunFull`). После `access.revokeFull` и смены
+  уровня тёплый Claude с полными правами без дела снимается сразу; на границе хода такой процесс не остаётся тёплым.
+  Занятые доживают ход (метка красная, «до конца хода»). Ход сервера Codex после понижения при живом согласии идёт по
+  прежней политике треда до следующей реплики человека — метка при этом красная (m2, осознанно).
+- **Повторный выбор полного уровня «не разрешён»** — не no-op (ревью M3): окно открывает диалог согласия, демон
+  принимает тот же уровень у заблокированной сессии и проверяет разрешение; `--yes` из CLI ставит `grant: 'cli-once'`.
+  `grant` от клиента `shell` — отказ `forbidden` (оболочка старше этой версии не вырезает его из вызовов окна).
+- **Ход сервера Codex и выгрузка треда** (перепроверка ревью). ИЗМЕРЕНО 02.11.2026 на codex 0.166: `thread/resume`
+  загруженного треда с другой `sandbox`/`approvalPolicy` политику не меняет, `thread/unsubscribe` тред не выгружает.
+  Поэтому `retire` Codex выгружает тред с `danger-full-access` перезапуском общего процесса (`tryReload`, причина
+  «доступ»): сразу, а если Codex занят — когда освободится. До выгрузки ход, начатый сервером, останавливает менеджер,
+  метка красная (`activeAccess`). Тёплый Claude, снятый сужением, отслеживается до выхода (`leaving`): SIGTERM, через
+  `INTERRUPT_KILL_MS` — SIGKILL; «Стоп» добивает сразу.
+- **Известное ограничение — токен владельца.** Агент, которому доступны файл `PULT_HOME/run/token` и сокет демона
+  (Codex `workspace-write` с сетью, Claude после «да» на интерпретатор или в `full` — таблица в разделе о токене выше),
+  может позвать CLI с ролью владельца и выдать сессии полный доступ (`agent.configure {approval: 'full', confirm: true,
+  grant: 'cli-once'}`) без согласия. Так было и до шага A (тогда хватало `confirm: true`): `0600` не разделяет процессы
+  одного пользователя. Согласие и `client: 'shell'` защищают от ошибки и устаревшего окна, не от локального процесса;
+  закрыть путь — отдельная задача (токен вне досягаемости песочниц или подтверждение в окне).
+  `agent.list` отдаёт `access` (`accessView`, src/sessions/access.ts): `desired`, `applied`, `live`, `pending`, `blocked`, `red`.
+- **Окно** (`ui/src/model/access.ts`, `components/Access.tsx`): диалог согласия (фокус на «Оставить как было», Esc и Enter —
+  оставить; поверх «Новой сессии» — свой слой и перехват Esc), без согласия — «Полный доступ · спрошу один раз»; с
+  согласием модала `confirm-configure` для полного доступа больше нет (остался для «не влезет»). Метки: красный чип и рамка,
+  плашка в шапке, щит в сайдбаре, строка ленты «Доступ: X → Y»; понижение во время хода — «после хода», «до конца хода»,
+  строка под полем со «Стоп». «Настройки → Доступ» — дата согласия и «Отозвать». Inbox в текстах — «Inbox» (в прототипе
+  «Ответы» — переименование позже).
+- Тесты: `test/access.test.ts` (чистые правила, файл согласия, миграция, отказ без согласия, только окно даёт согласие,
+  `consent_changed`, отзыв → `manual` и одна заметка, `cli-once`, `inherit` + bypass, расхождение init, Codex из
+  `thread/start`), `ui/test/access.test.ts`, e2e `shell/test/e2e/access.test.ts` (кадры `access-*-light.png`); фальшивые
+  CLI повторяют режим в `system/init` / `thread/start` (`reportMode`, `defaultMode`, `reportSandboxType` — подмены).

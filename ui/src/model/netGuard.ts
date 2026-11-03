@@ -15,8 +15,8 @@ export { guardOff, sameGuard }
 export const NET_CHECK_COOLDOWN_MS = 15_000
 
 /** Провайдеры, у которых строка выхода есть всегда (opencode — только если его уже проверяли). */
-const SHOWN: readonly string[] = ['claude', 'codex']
-const ORDER: readonly string[] = ['claude', 'codex', 'opencode']
+const SHOWN: readonly string[] = ['claude', 'codex', 'zcode']
+const ORDER: readonly string[] = ['claude', 'codex', 'zcode', 'opencode']
 
 const namesByLanguage = new Map<string, { of(code: string): string | undefined } | null>()
 
@@ -38,7 +38,7 @@ export function countryLabel(code: string): string {
   return n === code ? code : `${n} (${code})`
 }
 
-const norm = (s: string): string => s.toLocaleLowerCase(getLanguage()).replace(/ё/g, 'е').trim()
+const norm = (s: string): string => s.toLocaleLowerCase(getLanguage()).replace(/ё/g, 'е').trim() // i18n-ignore
 
 /**
  * Поиск страны по имени (начало слова и подстрока, «ё» = «е») или по коду. Выбранные не предлагаются. Порядок:

@@ -15,6 +15,7 @@ import { spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import { closeSync, openSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { zcodeExtraEnv } from '../adapters/zcode/adapter.js'
 import { ensureLayout } from '../core/paths.js'
 import type { PultPaths } from '../core/paths.js'
 import { buildChildEnv } from '../env/allowlist.js'
@@ -98,6 +99,11 @@ export function daemonSpawnEnv(paths: PultPaths, parentEnv: NodeJS.ProcessEnv): 
       // подставлял фальшивый app-server только в СВОЁМ процессе, а поднятый по требованию
       // демон находил настоящий `codex` и шёл с ним к модели. Поймано в В3.
       ...(parentEnv['PULT_CODEX_BIN'] ? { PULT_CODEX_BIN: parentEnv['PULT_CODEX_BIN'] } : {}),
+      // PULT_ZCODE_BIN — то же для третьего провайдера (маршрут A, процесс на ход).
+      ...(parentEnv['PULT_ZCODE_BIN'] ? { PULT_ZCODE_BIN: parentEnv['PULT_ZCODE_BIN'] } : {}),
+      // Конфиг zcode (ZCODE_BASE_URL и родня): без него CLI zcode не находит свой provider-конфиг
+      // в ~/.zcode и ходы падают (замер 02.11.2026); адаптер передаёт их дальше ребёнку.
+      ...zcodeExtraEnv(parentEnv),
       // PULT_TEST_NET работает ТОЛЬКО вместе с PULT_TEST=1 (см. daemon/server.ts) и делает
       // сквозные тесты герметичными: без неё демон звал настоящий `curl` к api.anthropic.com.
       ...(parentEnv['PULT_TEST_NET'] ? { PULT_TEST_NET: parentEnv['PULT_TEST_NET'] } : {}),

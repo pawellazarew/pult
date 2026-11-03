@@ -145,5 +145,6 @@ export const shellEn: Readonly<Record<string, string>> = {
   "ждёт": "needs",
   "ждут": "need",
   "идут": "running",
-  "всё спокойно": "all quiet"
+  "всё спокойно": "all quiet",
+  "provider не claude, codex и не zcode": "provider must be claude, codex or zcode"
 }

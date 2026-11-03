@@ -226,7 +226,9 @@ async function onRequest(id, method, params) {
         modelProvider: 'openai',
         cwd: params.cwd,
         approvalPolicy: params.approvalPolicy ?? 'never',
-        sandbox: { type: 'workspaceWrite', networkAccess: false },
+        // Как настоящий сервер (fixture 09): режим треда — тот, что попросили. `reportSandboxType` — подмена для теста
+        // расхождения «ожидалось/пришло» (шаг A).
+        sandbox: { type: cfg.reportSandboxType ?? (params.sandbox === 'read-only' ? 'readOnly' : params.sandbox === 'danger-full-access' ? 'dangerFullAccess' : 'workspaceWrite'), networkAccess: false },
         reasoningEffort: 'low',
       })
       return

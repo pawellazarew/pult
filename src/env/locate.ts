@@ -27,14 +27,15 @@ import { join } from 'node:path'
 import { buildChildEnv } from './allowlist.js'
 import { execAsync } from './exec.js'
 
-export type ToolName = 'claude' | 'codex' | 'opencode' | 'git' | 'gh' | 'node' | 'npm'
+export type ToolName = 'claude' | 'codex' | 'opencode' | 'zcode' | 'git' | 'gh' | 'node' | 'npm'
 
-export const TOOLS: readonly ToolName[] = ['claude', 'codex', 'opencode', 'git', 'gh', 'node', 'npm']
+export const TOOLS: readonly ToolName[] = ['claude', 'codex', 'opencode', 'zcode', 'git', 'gh', 'node', 'npm']
 
 export const VERSION_ARGV: Record<ToolName, string[]> = {
   claude: ['--version'],
   codex: ['--version'],
   opencode: ['--version'],
+  zcode: ['--version'],
   git: ['--version'],
   gh: ['--version'],
   node: ['-v'],
@@ -48,6 +49,17 @@ export const VERSION_ARGV: Record<ToolName, string[]> = {
 export const CHATGPT_CODEX_PATHS = [
   '/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex',
   '/Applications/ChatGPT.app/Contents/Resources/codex',
+] as const
+
+/**
+ * Где лежит `zcode` внутри ZCode.app: это node-скрипт с shebang (`#!/usr/bin/env node`), так что
+ * путь ЗАПУСКАЕТСЯ напрямую — без обёртки `node <bin>`. Путь плывёт за обновлениями ZCode.app
+ * (грабля ChatGPT.app/codex повторяется), поэтому симлинк `~/.local/bin/zcode` стоит первым,
+ * а прямой путь в .app — запасным: при повисшем симлинке Пульт находит бинарь сам.
+ */
+export const ZCODE_APP_PATHS = [
+  '/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs',
+  join(homedir(), 'Applications/ZCode.app/Contents/Resources/glm/zcode.cjs'),
 ] as const
 
 export function candidates(home: string, npmPrefix: string | null): Record<ToolName, string[]> {
@@ -73,6 +85,13 @@ export function candidates(home: string, npmPrefix: string | null): Record<ToolN
       join(home, '.opencode/bin/opencode'),
       ...prefixBin('opencode'),
       '/usr/local/bin/opencode',
+    ],
+    zcode: [
+      join(home, '.local/bin/zcode'),
+      '/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs',
+      join(home, 'Applications/ZCode.app/Contents/Resources/glm/zcode.cjs'),
+      '/opt/homebrew/bin/zcode',
+      '/usr/local/bin/zcode',
     ],
     git: ['/opt/homebrew/bin/git', '/usr/bin/git', '/usr/local/bin/git'],
     gh: ['/opt/homebrew/bin/gh', '/usr/local/bin/gh', join(home, '.local/bin/gh')],
@@ -216,6 +235,14 @@ export async function locateAllAsync(deps: LocateDeps = {}): Promise<Record<Tool
  */
 export function codexInsideChatGPTApp(tool: LocatedTool): boolean {
   return [tool.realpath, tool.path].some((p) => typeof p === 'string' && p.includes('/ChatGPT.app/Contents/Resources/'))
+}
+
+/**
+ * Бинарь zcode найден внутри ZCode.app: обновление приложения меняет его под ногами (а симлинк
+ * `~/.local/bin/zcode` может повиснуть) — доктор предупреждает при любой раскладке, как у codex.
+ */
+export function zcodeInsideApp(tool: LocatedTool): boolean {
+  return [tool.realpath, tool.path].some((p) => typeof p === 'string' && p.includes('/ZCode.app/Contents/Resources/'))
 }
 
 /**

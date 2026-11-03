@@ -14,6 +14,8 @@ const { PermCard } = await import('../src/components/PermCard.js')
 const { ProjectTree } = await import('../src/components/ProjectTree.js')
 const { groupByProject } = await import('../src/model/projects.js')
 const { foldConversation } = await import('../src/model/conversation.js')
+const { ConsentDialog, AccessSection } = await import('../src/components/Access.js')
+const { runtimeSetupLabel } = await import('../src/components/RuntimePanel.js')
 
 const html = (component: unknown, props: Record<string, unknown>): string =>
   renderToStaticMarkup(createElement(component as ComponentType<Record<string, unknown>>, props))
@@ -79,5 +81,21 @@ describe('English application screens', () => {
     const inbox = html(Inbox, { items: [], agents: [], focused: null, busy: new Set(), retrying: new Set(), now, onFocus: noop, onApprove: noop, onDeny: noop, onClose: noop })
     assert.match(inbox, /Nothing waiting/)
     assert.doesNotMatch(inbox, /[А-Яа-яЁё]/)
+  })
+
+  it('full-access consent dialog, Settings → Access and preview setup labels are English', () => {
+    const consent = html(ConsentDialog, { onGrant: noop, onKeep: noop })
+    assert.match(consent, /Full access: Claude, Codex and ZCode/)
+    assert.match(consent, />Allow full access</)
+    assert.match(consent, /Keep current access/)
+    assert.match(consent, /<code>bypassPermissions<\/code>\. It asks or refuses only/)
+    assert.doesNotMatch(consent, /[А-Яа-яЁё]/)
+    const granted = { rev: 1, version: 1, current: 1, granted: true, providers: ['claude', 'codex', 'zcode'], grantedAt: '2026-11-02T10:00:00Z' }
+    const section = html(AccessSection, { consent: granted, onRevoke: async () => null })
+    assert.match(section, /Full access allowed 2 Nov 2026/)
+    assert.match(section, />Revoke</)
+    assert.doesNotMatch(section, /[А-Яа-яЁё]/)
+    assert.equal(runtimeSetupLabel('pending', true), 'This task needs setup')
+    assert.equal(runtimeSetupLabel('approved', false), 'Complete the setup steps')
   })
 })

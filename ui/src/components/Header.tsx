@@ -29,6 +29,9 @@ export function Header(p: {
   onToggleSidebar?(): void
   onDoctor(): void
   onInbox(): void
+  runtimeOpen?: boolean
+  runtimeAvailable?: boolean
+  onRuntime?(): void
   filesOpen?: boolean
   filesAvailable?: boolean
   onFiles?(): void
@@ -75,7 +78,7 @@ export function Header(p: {
         </span>
       </div>
 
-      {(['claude', 'codex'] as const).map((provider) => {
+      {(['claude', 'codex', 'zcode'] as const).map((provider) => {
         const st = providerStatusView(p.providers?.[provider], p.providersChecking ?? false)
         return (
           <UsageCell key={provider} provider={provider} u={p.usage[provider]} now={p.now}>
@@ -92,6 +95,7 @@ export function Header(p: {
       {up && p.guard.tone !== 'ok' && <span className={`header-guard-alert t-${p.guard.tone}`} title={guardTitle}>{p.guard.label}</span>}
       <div className="hdr-spacer" />
       <div className="hdr-actions">
+        {p.onRuntime && <button type="button" className="btn" aria-pressed={p.runtimeOpen} disabled={!p.runtimeAvailable} onClick={p.onRuntime} data-testid="toggle-runtime" title={t("Браузер и мобильные устройства")}>{t("Превью")}</button>}
         {p.onFiles && <button type="button" className="btn" aria-pressed={p.filesOpen} disabled={!p.filesAvailable} onClick={p.onFiles} data-testid="toggle-files" title={t`Файлы проекта (${CMD}P)`}>
           <Icon name="folder" />{t("Файлы")}</button>}
         <button type="button" className="btn" onClick={p.onDoctor} data-testid="open-doctor" title={t("Проверка окружения")}>

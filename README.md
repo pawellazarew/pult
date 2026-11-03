@@ -2,7 +2,7 @@
 
 **English** · [Русский](README.ru.md)
 
-**Run several Claude Code and Codex agents in the background and answer all their permission questions in one place.**
+**Run several Claude Code, Codex and ZCode (GLM) agents in the background and answer all their permission questions in one place.**
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/hero-dark.png">
@@ -51,6 +51,16 @@ Everything it does is written to an event journal in `~/.pult`, so the CLI and t
 | **model / effort** | which model the CLI uses and how hard it thinks (`low` … `max`); passed to the CLI as is. |
 | **warm** | `--warm` keeps the `claude` process alive between messages (1–2 s faster per message). |
 | **worktree** | a separate git working copy on its own branch, so two agents don't edit the same files. |
+
+## Preview and devices
+
+Since 0.3.18, **Preview** opens a shared browser page, iOS Simulator or Android Emulator beside the chat. The browser uses Electron's existing Chromium. Mobile SDKs and system images are not bundled.
+
+Connect an installed device, watch screen updates about once a second, and select **Take control** to cancel queued agent input. Return control when ready; an already-running operation may finish during takeover. Claude and Codex share the `pult_runtime` MCP tools, including in full-access sessions. This is separate from the existing external Playwright browser.
+
+Xcode and an iOS runtime are required for iOS; Android needs its SDK, Emulator and an AVD. iOS input also needs AXe, reused from an existing installation or Homebrew XcodeBuildMCP when available. Missing AXe can be installed from the displayed setup proposal. **Installing an add-on requires explicit consent even in full access.** Missing Xcode and Android SDK components use guided manual setup. This does not sandbox an agent with full shell access.
+
+The built-in browser requires an open Pult window. Only virtual devices are supported. Model-requested screenshots are sent to the selected provider. Text-only models can use UI trees but cannot visually evaluate screenshots. iOS text input uses the simulator clipboard and supports Unicode; Android input currently supports ASCII only.
 
 ## Requirements
 
@@ -259,17 +269,24 @@ update) for cards and memory-backed files. Each Claude session receives only its
 | mode (window label) | Claude | Codex |
 |---|---|---|
 | `read-only` ("Только чтение") | no edits; every command asks | `read-only` sandbox; anything wider asks |
-| `ask` ("Спрашивать", default) | your own Claude settings; its questions go to the Inbox | `workspace-write` sandbox; anything wider asks |
+| `ask` ("Спрашивать", default) | explicit `--permission-mode manual`: edits and commands ask, your allow rules still apply | `workspace-write` sandbox; anything wider asks |
 | `workspace` ("Правки в папке без вопросов") | `acceptEdits` | `workspace-write`, no questions |
 | `full` ("Полный доступ") | `bypassPermissions` | `danger-full-access`, no questions |
+| `inherit` ("Как в настройках Claude", Claude only) | no flag: your `defaultMode` applies; `bypassPermissions` there counts as `full` | — |
 
 Every turn includes an explanation of the selected mode, including after a live mode change. For Codex,
 `workspace` rejects requests to leave the sandbox; switch the session to `ask` and repeat the request when that access
 is needed. Nested CLIs inherit the sandbox, so `Not logged in` there alone does not establish that the terminal login
 has expired. Claude's `acceptEdits` follows its own permission rules for other tools.
 
-`full` means no sandbox and no questions: the agent can do anything your user can. It needs an explicit confirmation
-(`--yes` in the CLI).
+`full` means no sandbox and no questions: the agent can do anything your user can. The window asks once, for all
+providers (Claude, Codex, ZCode), and stores the consent in `PULT_HOME/consent.json`; after that `full` switches without a dialog and the chat is
+marked red (header, composer, sidebar). The daemon checks the consent itself at every start, mode change and turn:
+revoke it in Settings → Доступ and the next turn of every `full` session runs in explicit `ask`. The CLI keeps a one-off
+grant per session (`--yes`), which neither writes nor needs the consent. The red mark follows the mode the provider
+actually reports (Claude `system/init`, Codex `thread/start`; ZCode does not report its mode — `--mode yolo`
+is shown as «не подтверждено»), and stays on until a full-access process has finished.
+Claude sessions created before this version in `ask` keep their behaviour as `inherit`.
 
 ## Changing a session later
 

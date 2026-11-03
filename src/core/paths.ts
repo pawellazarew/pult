@@ -58,6 +58,11 @@ export interface PultPaths {
   /** `new-session-last.json` — последний выбор «+ Сессия» окна (M8f): провайдер, модель, усилие, режим, папка. */
   readonly newSessionLast: string
   /**
+   * `consent.json` — согласие на полный доступ (быстрый старт, шаг A, src/core/consent.ts): одно на всех провайдеров,
+   * пишут только `access.grantFull` / `access.revokeFull`. 0600.
+   */
+  readonly consent: string
+  /**
    * `apps/` — окно на время своего обновления (0.3.4): `staging-<v>`, `previous-<v>` (прежнее окно, один цикл); с 0.3.16
    * ещё `ready-<v>` — окно, скачанное и проверенное заранее (фоновая подготовка), и `stage-<v>` — оно же, пока готовится.
    */
@@ -126,6 +131,7 @@ export function layout(home: string): PultPaths {
     updateCheck: join(home, 'update-check.json'),
     updateLog: join(logs, 'update.log'),
     newSessionLast: join(home, 'new-session-last.json'),
+    consent: join(home, 'consent.json'),
     apps: join(home, 'apps'),
     updateApply: join(home, 'update-apply.json'),
     appUpdateState: join(home, 'app-update.json'),

@@ -71,10 +71,12 @@ describe('backoff', () => {
 describe('белый список моста', () => {
   it('ровно методы docs/12 §2', () => {
     assert.deepEqual([...ALLOWED_METHODS].sort(), [
+      'access.grantFull', 'access.revokeFull',
       'agent.archive', 'agent.browser', 'agent.configure', 'agent.export', 'agent.import', 'agent.list', 'agent.prompt', 'agent.queue.move', 'agent.queue.remove', 'agent.queue.resume', 'agent.read', 'agent.rename', 'agent.retry', 'agent.rm', 'agent.seen', 'agent.start', 'agent.stop', 'agent.tree', 'agent.wait',
       'daemon.status', 'doctor.run', 'events.get', 'events.history', 'events.search', 'events.snapshot', 'events.subscribe', 'events.tail', 'events.unsubscribe',
-      'mcp.list', 'mcp.select', 'perm.list', 'perm.resolve', 'project.add', 'project.list', 'project.remove', 'provider.reset', 'providers.check', 'sessions.external.list', 'sessions.external.read',
-      'settings.get', 'settings.set',
+      'mcp.list', 'mcp.select', 'perm.list', 'perm.resolve', 'project.add', 'project.list', 'project.remove', 'provider.reset', 'providers.check',
+      'runtime.discover', 'runtime.perform', 'runtime.release', 'runtime.setup.list', 'runtime.setup.request', 'runtime.setup.resolve', 'runtime.takeover',
+      'sessions.external.list', 'sessions.external.read', 'settings.get', 'settings.set',
       'update.apply', 'update.check', 'update.status', 'usage.get',
     ])
   })
@@ -92,6 +94,11 @@ describe('параметры вызова из окна', () => {
       { id: 'p1-a', decision: 'allow' })
     assert.deepEqual(sanitizeParams('agent.start', { name: 'w', kind: 'claude', cwd: '/w', settingSources: 'user,project,local' }),
       { name: 'w', kind: 'claude', cwd: '/w' })
+    // Шаг A: разовое разрешение терминала окну не положено — полный доступ из окна только через согласие.
+    assert.deepEqual(sanitizeParams('agent.start', { name: 'w', kind: 'claude', cwd: '/w', approval: 'full', confirm: true, grant: 'cli-once' }),
+      { name: 'w', kind: 'claude', cwd: '/w', approval: 'full', confirm: true })
+    assert.deepEqual(sanitizeParams('agent.configure', { name: 'w', approval: 'full', confirm: true, grant: 'cli-once' }),
+      { name: 'w', approval: 'full', confirm: true })
     const same = { name: 'w', text: 'x' }
     assert.equal(sanitizeParams('agent.prompt', same), same)
     assert.equal(sanitizeParams('daemon.status', undefined), undefined)

@@ -19,6 +19,7 @@ import type { Client } from '../cli/client.js'
 import { connectClient } from '../cli/client.js'
 import { ensureLayout } from '../core/paths.js'
 import type { PultPaths } from '../core/paths.js'
+import { zcodeExtraEnv } from '../adapters/zcode/adapter.js'
 import type { DaemonStatus } from '../core/rpc.js'
 import { VERSION } from '../core/version.js'
 import { stableNodePath } from '../env/nodeBin.js'
@@ -158,6 +159,9 @@ function renderFor(ctx: ServiceContext, nodeExec: string): string {
     serviceLog: ctx.paths.serviceLog,
     home: ctx.home,
     nodeExec,
+    // Конфиг zcode из окружения установки: без ZCODE_BASE_URL и родни CLI zcode не находит свой
+    // provider-конфиг (замер 02.11.2026), а служба launchd демону ничего не наследует.
+    zcodeEnv: zcodeExtraEnv(),
   })
 }
 

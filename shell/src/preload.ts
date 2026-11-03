@@ -40,6 +40,10 @@ const bridge: PultBridge = {
   languageOverride: locale?.override === 'auto' || locale?.override === 'ru' || locale?.override === 'en' ? locale.override : null,
   reloadWindow(): void { ipcRenderer.send(IPC.reloadWindow) },
 
+  async runtimeView(sessionId, bounds) {
+    unwrap(await ipcRenderer.invoke(IPC.runtimeView, sessionId, bounds) as CallReply)
+  },
+
   async call(method: AllowedMethod, params?: Record<string, unknown>): Promise<unknown> {
     return unwrap((await ipcRenderer.invoke(IPC.call, method, params)) as CallReply)
   },

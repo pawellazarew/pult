@@ -53,7 +53,7 @@ function window(w: unknown): UsageWindow | null {
 
 export function applyUsage(state: UsageState, ev: PultEvent): UsageState {
   if (ev.kind !== 'usage.updated' && ev.kind !== 'limit.hit') return state
-  if (ev.provider !== 'claude' && ev.provider !== 'codex') return state
+  if (ev.provider !== 'claude' && ev.provider !== 'codex' && ev.provider !== 'zcode') return state
   const windows = obj(ev.data['windows'])
   if (!windows) return state
   const prev = state[ev.provider]

@@ -9,6 +9,7 @@ import type { ApprovalMode } from '../../../src/adapters/types.js'
 import { CLAUDE_DEFAULT_EFFORT, CLAUDE_DEFAULT_MODEL, CLAUDE_EFFORTS, CLAUDE_MODELS, CODEX_EFFORTS_FALLBACK, homeCwdWarning, modeBlocksBrowser } from '../../../src/sessions/settings.js'
 import type { LastUsed, NewSessionSettings, ProviderDefaults } from '../../../src/sessions/settings.js'
 import type { AgentProvider } from './types.js'
+import type { AccessSettings } from './access.js'
 import type { ProviderCatalog } from './types.js'
 
 export function providerPreset(provider: AgentProvider, model: string | null, catalog?: ProviderCatalog | null): ProviderPreset {
@@ -38,6 +39,8 @@ export interface ProviderPreset {
 export const PRESETS: Readonly<Record<AgentProvider, ProviderPreset>> = {
   claude: { models: CLAUDE_MODELS, efforts: CLAUDE_EFFORTS, defaultModel: CLAUDE_DEFAULT_MODEL, defaultEffort: CLAUDE_DEFAULT_EFFORT },
   codex: { models: [], efforts: CODEX_EFFORTS_FALLBACK, defaultModel: null, defaultEffort: 'medium' },
+  // ZCode (маршрут A): у CLI нет флага --model — модель задаёт аккаунт Z.AI, выбора в форме нет.
+  zcode: { models: [], efforts: [], defaultModel: null, defaultEffort: '' },
 }
 
 export interface NewAgentForm {
@@ -58,39 +61,63 @@ export interface NewAgentForm {
   mode: 'turn' | 'warm'
 }
 
-/** M8d: режимы подтверждений по порядку «тише → шире» и что они значат у каждого провайдера — одной строкой. */
+/**
+ * M8d: режимы подтверждений по порядку «тише → шире» и что они значат у каждого провайдера — одной строкой. Шаг A:
+ * пятый уровень `inherit` («Как в настройках Claude») — только у Claude, в меню отдельно, после четырёх.
+ */
 export const APPROVAL_ORDER: readonly ApprovalMode[] = ['read-only', 'ask', 'workspace', 'full']
+/** Уровни провайдера по порядку меню: у Claude — ещё «Как в настройках Claude». */
+export function approvalLevels(provider: AgentProvider): readonly ApprovalMode[] {
+  return provider === 'claude' ? [...APPROVAL_ORDER, 'inherit'] : APPROVAL_ORDER
+}
 export const APPROVAL_LABEL: Readonly<Record<ApprovalMode, string>> = {
   'read-only': tr('Только чтение'),
   ask: tr('Спрашивать'),
   workspace: tr('Правки в папке без вопросов'),
   full: tr('Полный доступ'),
+  inherit: tr('Как в настройках Claude'),
 }
+// Шаг A: пояснения сверены с кодом (ревью Codex № 7): Claude — src/adapters/claude/argv.ts, Codex — `codexThreadPolicy`.
+// Вопросы приходят в Inbox; без брокера разрешений всё, что спросило бы, получает отказ (инвариант 5).
 const APPROVAL_HINT: Readonly<Record<AgentProvider, Record<ApprovalMode, string>>> = {
   claude: {
-    'read-only': tr('правки запрещены, каждую команду спросит (manual без Write/Edit)'),
-    ask: tr('по твоим настройкам Claude (defaultMode): что он спросит — придёт в Inbox'),
-    workspace: tr('правки файлов без вопросов (acceptEdits), команды — через Inbox'),
-    full: tr('что угодно без вопросов (bypassPermissions); браузер для агента не включается'),
+    'read-only': tr('правки запрещены; любая команда — вопрос в Inbox'),
+    ask: tr('правки и команды — вопрос в Inbox; что разрешено твоими правилами Claude — без вопроса'),
+    workspace: tr('правки файлов без вопросов; команды — вопрос в Inbox'),
+    full: tr('без вопросов и без песочницы, кроме твоих правил ask/deny; браузер для агента не включается'),
+    inherit: tr('Пульт режим не задаёт — действует твой defaultMode'),
   },
   codex: {
-    'read-only': tr('песочница read-only: читает папку, всё прочее — через Inbox'),
-    ask: tr('правит рабочую папку сам, всё шире — через Inbox'),
-    workspace: tr('правит рабочую папку без вопросов, шире песочница не пустит — не спрашивая; твои MCP-серверы тоже без вопросов (браузер выключен)'),
-    full: tr('что угодно без вопросов, песочницы нет (danger-full-access); твои MCP-серверы тоже без вопросов (браузер выключен)'),
+    'read-only': tr('песочница только на чтение; шаг за неё — вопрос в Inbox'),
+    ask: tr('правит папку сам; шаг за песочницу — вопрос в Inbox'),
+    workspace: tr('правит папку сам; шаг за песочницу — отказ без вопроса (браузер выключен)'),
+    full: tr('песочницы нет, разрешений не просит (danger-full-access; браузер выключен)'),
+    // У Codex уровня нет: демон его не примет. Строка — на случай записи, пришедшей от Claude-формы.
+    inherit: tr('у Codex такого уровня нет'),
+  },
+  zcode: {
+    'read-only': tr('режим plan: только чтение и планирование, правки недоступны'),
+    ask: tr('guarded: безопасное делает сам, опасное отклоняет; вопросов в Inbox не будет — ограничения объяснит в ответе'),
+    workspace: tr('правки файлов применяются сами (edit); остальное — по правилам ZCode'),
+    full: tr('что угодно без вопросов (yolo); свой режим ZCode не сообщает — метка «не подтверждено»'),
+    inherit: tr('у ZCode такого уровня нет'),
   },
 }
-/** Подсказка под выбором режима — для провайдера формы. */
-export function approvalHint(provider: AgentProvider, mode: ApprovalMode): string {
-  return APPROVAL_HINT[provider][mode]
+/**
+ * Подсказка под выбором режима — для провайдера формы. У `inherit` — действующий `defaultMode` словами
+ * («…: сейчас auto»), если он известен.
+ */
+export function approvalHint(provider: AgentProvider, mode: ApprovalMode, inheritMode?: string | null): string {
+  const base = APPROVAL_HINT[provider][mode]
+  return mode === 'inherit' && inheritMode ? tr`${base}: сейчас ${inheritMode}${inheritMode === 'bypassPermissions' ? tr(' — это полный доступ') : ''}` : base
 }
 /**
- * Подвал разговора: режим словами. У Claude в `ask` флага нет — решают его настройки, и демон присылает действующий
- * `defaultMode` (`claudeMode`): «спрашивать — у Claude по твоим настройкам: auto».
+ * Подвал разговора: режим словами. У Claude в `inherit` флага нет — решают его настройки, и демон присылает действующий
+ * `defaultMode` (`claudeMode`): «как в настройках Claude: auto».
  */
 export function approvalFooter(provider: AgentProvider, mode: ApprovalMode, claudeMode?: string): string {
   const label = APPROVAL_LABEL[mode].toLowerCase()
-  return provider === 'claude' && mode === 'ask' && claudeMode ? tr`${label} — у Claude по твоим настройкам: ${claudeMode}` : label
+  return provider === 'claude' && mode === 'inherit' && claudeMode ? `${label}: ${claudeMode}` : label
 }
 
 /** Красное предупреждение у `full` (одинаково у обоих провайдеров). */
@@ -117,8 +144,10 @@ export function homeWarning(form: Pick<NewAgentForm, 'cwd' | 'approval' | 'workt
 /**
  * Режим, при котором браузер для агента не включается (тот же список, что у демона — src/mcp/browser.ts
  * `approvalBrowserRefusal`): Claude `full`; Codex `workspace` и `full` (спрашивать некого).
+ * ZCode (маршрут A) браузера не получает ни в одном режиме: у его CLI нет канала MCP-конфига.
  */
 export function approvalBlocksBrowser(provider: AgentProvider, mode: ApprovalMode): boolean {
+  if (provider === 'zcode') return true
   return provider === 'claude' ? mode === 'full' : mode === 'workspace' || mode === 'full'
 }
 
@@ -141,6 +170,8 @@ export interface SettingsReply {
   }
   /** Правила «Всегда» Codex с меткой Пульта (план 16, № 11); нет — старый демон, раздела нет. */
   codexRules?: CodexRulesList
+  /** Шаг A: согласие на полный доступ и действующий `defaultMode` Claude владельца; нет — старый демон. */
+  access?: AccessSettings
 }
 
 /** Поля провайдера поверх формы: модель, усилие, режим, процесс, браузер, предложенная ветка. */
@@ -166,6 +197,11 @@ function applyProviderDefaults(f: NewAgentForm, d: ProviderDefaults | undefined,
  * «Подставлять последний выбор») < явный контекст (папка проекта, ссылка). Реплика не подставляется никогда;
  * папка из последнего выбора — только когда форму открыли без папки. `full` из последнего выбора — никогда.
  */
+/** Умолчания/последний выбор конкретного провайдера из ответа `settings.get`. */
+function providerPick(x: { claude?: ProviderDefaults; codex?: ProviderDefaults; zcode?: ProviderDefaults } | undefined, provider: AgentProvider): ProviderDefaults | undefined {
+  return x ? x[provider] : undefined
+}
+
 export function prefillForm(ctx: { cwd?: string | null; prefill?: NewSessionPrefill | null }, settings: SettingsReply | null, taken: readonly string[]): NewAgentForm {
   const ns = settings?.newSession
   const last = ns?.rememberLast ? settings?.lastUsed : undefined
@@ -175,9 +211,9 @@ export function prefillForm(ctx: { cwd?: string | null; prefill?: NewSessionPref
   const cwd = ctx.prefill ? (ctx.prefill.pathRejected ? undefined : ctx.prefill.path) : ctx.cwd ?? (last?.cwd || undefined)
   if (cwd) f = { ...f, cwd, name: suggestName(cwd, taken) }
   if (ctx.prefill?.prompt) f = { ...f, prompt: ctx.prefill.prompt }
-  const defaults = ns ? (provider === 'codex' ? ns.defaults.codex : ns.defaults.claude) : undefined
+  const defaults = providerPick(ns?.defaults, provider)
   f = applyProviderDefaults(f, defaults, false, undefined)
-  if (last) f = applyProviderDefaults(f, provider === 'codex' ? last.codex : last.claude, true, defaults)
+  if (last) f = applyProviderDefaults(f, providerPick(last, provider), true, defaults)
   return f
 }
 
@@ -204,7 +240,7 @@ export function linkPrefill(x: unknown): NewSessionPrefill | null {
   // 10 000 знаков в main — до 20 000 единиц UTF-16 здесь.
   if (typeof t === 'string' && t.length <= 20_000 && !PROMPT_BAD_RE.test(t) && t.split('\n').length <= LINK_PROMPT_MAX_LINES) out.prompt = t
   const v = o['provider']
-  if (v === 'claude' || v === 'codex') out.provider = v
+  if (v === 'claude' || v === 'codex' || v === 'zcode') out.provider = v
   return out
 }
 
@@ -225,23 +261,29 @@ export function switchProviderPrefill(form: NewAgentForm, provider: AgentProvide
   let f = switchProvider(form, provider)
   const ns = settings?.newSession
   if (!ns) return f
-  const defaults = provider === 'codex' ? ns.defaults.codex : ns.defaults.claude
+  const defaults = providerPick(ns.defaults, provider)
   f = applyProviderDefaults(f, defaults, false, undefined)
   const last = ns.rememberLast ? settings?.lastUsed : undefined
-  if (last) f = applyProviderDefaults(f, provider === 'codex' ? last.codex : last.claude, true, defaults)
+  if (last) f = applyProviderDefaults(f, providerPick(last, provider), true, defaults)
   return f
 }
 
-/** Смена провайдера: модель и усилие — из его пресета, остальное как было. */
+/**
+ * Смена провайдера: модель и усилие — из его пресета, остальное как было. «Как в настройках Claude» у Codex нет —
+ * становится явным «Спрашивать» (не «без флага» и не шире).
+ */
 export function switchProvider(form: NewAgentForm, provider: AgentProvider): NewAgentForm {
   const p = PRESETS[provider]
-  return { ...form, provider, model: p.defaultModel, effort: p.efforts.includes(form.effort) ? form.effort : p.defaultEffort }
+  return {
+    ...form, provider, model: p.defaultModel, effort: p.efforts.includes(form.effort) ? form.effort : p.defaultEffort,
+    ...(form.approval === 'inherit' && provider !== 'claude' ? { approval: 'ask' as const } : {}),
+  }
 }
 
 const TRANSLIT: Record<string, string> = {
-  а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i', й: 'y', к: 'k', л: 'l', м: 'm',
-  н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f', х: 'h', ц: 'c', ч: 'ch', ш: 'sh', щ: 'sch',
-  ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya',
+  а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i', й: 'y', к: 'k', л: 'l', м: 'm', // i18n-ignore
+  н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f', х: 'h', ц: 'c', ч: 'ch', ш: 'sh', щ: 'sch', // i18n-ignore
+  ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya', // i18n-ignore
 }
 
 /** Имя агента из папки: латиница, `[a-z][a-z0-9_-]{0,31}`, свободное (суффикс -2, -3…). */
@@ -283,21 +325,26 @@ export function validateForm(form: NewAgentForm, taken: readonly string[]): Form
   return err
 }
 
-/** Параметры `agent.start` из формы (без пустых полей). */
-export function startParams(form: NewAgentForm): Record<string, unknown> {
+/**
+ * Параметры `agent.start` из формы (без пустых полей). У ZCode модели и усилия нет — поля не шлются. `consentRev` —
+ * номер согласия на полный доступ, который видело окно (шаг A): демон сверит его с файлом и, если согласие тем
+ * временем отозвали, ответит `consent_changed`.
+ */
+export function startParams(form: NewAgentForm, consentRev?: number): Record<string, unknown> {
   const b = form.worktree.trim()
   return {
     name: form.name,
     kind: form.provider,
     cwd: form.cwd,
-    ...(form.model ? { model: form.model } : {}),
-    ...(form.effort ? { effort: form.effort } : {}),
+    ...(form.provider !== 'zcode' && form.model ? { model: form.model } : {}),
+    ...(form.provider !== 'zcode' && form.effort ? { effort: form.effort } : {}),
     ...(b ? { worktree: b } : {}),
     ...(form.browser ? { browser: form.browserHeaded ? { headed: true } : true } : {}),
     // `ask` не шлём: так и старый демон (без M8d) примет параметры, и запись останется без поля.
     ...(form.approval !== 'ask' ? { approval: form.approval } : {}),
-    // «Полный доступ» демон заводит только с подтверждением: человек видел красное предупреждение в форме.
-    ...(form.approval === 'full' ? { confirm: true } : {}),
+    // «Полный доступ» демон заводит только с подтверждением и согласием (шаг A): человек дал согласие в диалоге и видел
+    // красное предупреждение в форме. `inherit` — то же: при bypass у владельца это полный доступ.
+    ...(form.approval === 'full' || form.approval === 'inherit' ? { confirm: true, ...(consentRev !== undefined ? { consentRev } : {}) } : {}),
     ...(form.mode === 'warm' ? { mode: 'warm' } : {}),
   }
 }

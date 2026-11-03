@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { t as tr } from './i18n.js'
 import { isLanguageSetting, resolveLanguage, setLanguage } from '../i18n/core.js'
+import { runRuntimeMcp } from '../runtimes/mcp.js'
 // `pult` — CLI. Разбор argv руками: зависимостей у пакета ноль, а нужных нам форм флагов
 // ровно две (`--флаг` и `--флаг значение`).
 //
@@ -31,7 +32,7 @@ import { packageRoot } from '../service/install.js'
 import { testLocate } from '../env/locate.js'
 import { contextShare, parseSessionContext } from '../sessions/context.js'
 import { isUnread, parseAttention } from '../sessions/attention.js'
-import { isApprovalMode } from '../adapters/types.js'
+import { APPROVAL_LIST, isApprovalMode } from '../adapters/types.js'
 import { APPROVAL_WORDS, describeChanges, homeCwdWarning, modeBlocksBrowser, parseNewSession } from '../sessions/settings.js'
 import type { ConfigureChanges, ConfigureWhen, NewSessionSettings } from '../sessions/settings.js'
 import type { PermissionOffers } from '../adapters/types.js'
@@ -63,7 +64,7 @@ export const EXIT = {
   updateAvailable: EXIT_UPDATE_AVAILABLE,
 } as const
 
-const HELP = tr`pult ${VERSION} — диспетчерская над claude, codex и opencode (веха В4)
+const HELP = tr`pult ${VERSION} — диспетчерская над claude, codex, zcode и opencode (веха В4)
 
   pult daemon start                 поднять демона (отсоединённым, переживает терминал)
   pult daemon status [--json]       состояние демона
@@ -98,7 +99,7 @@ const HELP = tr`pult ${VERSION} — диспетчерская над claude, co
 
   pult session …                    сессии (так они названы в окне); pult agent … — то же самое,
                                     прежнее имя команды
-  pult agent start <имя> --kind claude|codex --cwd <папка> [--model M] [--effort E] [--warm]
+  pult agent start <имя> --kind claude|codex|zcode --cwd <папка> [--model M] [--effort E] [--warm]
                     [--title "название"]
                     [--worktree <ветка> [--base <ref>]]   агент в своём git worktree
                                     (PULT_HOME/worktrees/…; ветки нет — заводится от --base или HEAD)
@@ -137,13 +138,13 @@ const HELP = tr`pult ${VERSION} — диспетчерская над claude, co
   pult perm rules [--json]          правила «Всегда» Codex, записанные Пультом (дата, сессия);
   pult perm rules revoke <id>       отозвать: метка и строка уходят из ~/.codex/rules/default.rules
   pult usage [--json]
-  pult provider reset [claude|codex]   снять остановку провайдера
+  pult provider reset [claude|codex|zcode]   снять остановку провайдера
   pult mcp-ask                         служебный режим: stdio-MCP-заглушка разрешений
   pult browser [--json]             браузер агента: стоит ли Playwright MCP, найден ли Chrome
   pult browser install              поставить Playwright MCP ${PLAYWRIGHT_MCP_VERSION} в PULT_HOME/mcp (npm ci по lock-файлу пакета)
   pult mcp list [--json]            свои MCP-серверы из ~/.claude.json (● — подключён); .mcp.json — позже
   pult mcp select <имя> [<имя>…] | --none   какие из них подключать к сессиям Claude
-  pult net guard [--json]           правило стража страны выхода (одно на claude, codex и opencode)
+  pult net guard [--json]           правило стража страны выхода (одно на claude, codex, zcode и opencode)
   pult net guard --deny RU,BY | --allow DE,FI   сменить: запрещать страны из списка / разрешать только их
                                     (коды ISO 3166-1; через демона — со следующего хода, без рестарта)
 
@@ -191,6 +192,7 @@ function approvalLabel(raw: unknown): string {
     ask: tr('ask (шире рабочей папки — через Inbox)'),
     workspace: tr('workspace (правки в папке без вопросов)'),
     full: tr('full (без вопросов и без песочницы)'),
+    inherit: tr('inherit (как в настройках Claude: действует твой defaultMode)'),
   }[mode]
 }
 
@@ -457,7 +459,7 @@ async function cmdAgent(paths: PultPaths, args: ParsedArgs): Promise<number> {
         if (emptyFlag('title')) { err(tr('pult agent start: --title требует название (начинается с «-» — пиши --title="-…")')); return done(EXIT.error) }
         if (emptyFlag('base')) { err(tr('pult agent start: --base требует ревизию')); return done(EXIT.error) }
         if (args.flags.has('approval') && (flagStr(args, 'approval') === undefined || !isApprovalMode(flagStr(args, 'approval')))) {
-          err('pult agent start: --approval — read-only | ask | workspace | full'); return done(EXIT.error)
+          err(`pult agent start: --approval — ${tr(APPROVAL_LIST)}`); return done(EXIT.error)
         }
         // M8f: умолчания `newSession.defaults` (окно → Настройки) — для того, что не задано флагом. Последний выбор
         // окна сюда не идёт: скрипт должен давать один и тот же результат. Старый демон без `settings.get` — без них.
@@ -468,23 +470,28 @@ async function cmdAgent(paths: PultPaths, args: ParsedArgs): Promise<number> {
           defaults = parseNewSession(((await call('settings.get')) as { newSession?: unknown }).newSession, false).value.defaults
         } catch { defaults = null }
         const kind = flagStr(args, 'kind') ?? 'claude'
-        const d = defaults ? (kind === 'codex' ? defaults.codex : defaults.claude) : {}
+        // ZCode: модели и усилия у него нет (CLI без --model), браузера тоже — умолчания пусты.
+        const d = defaults ? (kind === 'codex' ? defaults.codex : kind === 'zcode' ? defaults.zcode : defaults.claude) : {}
         const approval = flagStr(args, 'approval') ?? d.approval
         const used: string[] = []
         if (!args.flags.has('model') && d.model) used.push(tr`модель ${d.model}`)
         if (!args.flags.has('effort') && d.effort) used.push(tr`усилие ${d.effort}`)
         if (!args.flags.has('approval') && d.approval) used.push(tr`режим ${d.approval}`)
-        const browserDefault = !args.flags.has('browser') && d.browser === true && !modeBlocksBrowser(kind === 'codex' ? 'codex' : 'claude', isApprovalMode(approval) ? approval : undefined)
+        const browserDefault = !args.flags.has('browser') && d.browser === true && !modeBlocksBrowser(kind === 'codex' ? 'codex' : kind === 'zcode' ? 'zcode' : 'claude', isApprovalMode(approval) ? approval : undefined)
         if (browserDefault) used.push(tr('браузер'))
         if (used.length && !asJson) err(tr`pult agent start: из настроек (newSession.defaults): ${used.join(', ')}`)
         // Ревью M8d: `full` — только с `--yes`, отказ до заведения чего-либо.
         if (approval === 'full' && !args.flags.has('yes')) {
           err(tr('pult agent start: --approval full — агент делает что угодно без вопросов, песочницы нет; повтори с --yes')); return done(EXIT.error)
         }
+        // Быстрый старт, шаг A: `--yes` — разовое разрешение ЭТОЙ сессии (`grant: cli-once`). Согласие окна
+        // (`PULT_HOME/consent.json`) CLI не пишет и не требует. `inherit` с `--yes` — на случай, если у владельца
+        // `defaultMode: bypassPermissions`: тогда это тоже полный доступ, и демон без разрешения откажет.
+        const once = args.flags.has('yes') && (approval === 'full' || approval === 'inherit')
         const rec = await call('agent.start', {
           name,
           ...(approval !== undefined ? { approval } : {}),
-          ...(approval === 'full' ? { confirm: true } : {}),
+          ...(once ? { confirm: true, grant: 'cli-once' } : {}),
           ...(flagStr(args, 'title') !== undefined ? { title: flagStr(args, 'title') } : {}),
           kind,
           cwd: flagStr(args, 'cwd') ?? process.cwd(),
@@ -523,12 +530,12 @@ async function cmdAgent(paths: PultPaths, args: ParsedArgs): Promise<number> {
           if (args.flags.has(f) && flagStr(args, f) === undefined) { err(tr`pult agent set: --${f} требует значение`); return done(EXIT.error) }
         }
         const approval = flagStr(args, 'approval')
-        if (approval !== undefined && !isApprovalMode(approval)) { err('pult agent set: --approval — read-only | ask | workspace | full'); return done(EXIT.error) }
+        if (approval !== undefined && !isApprovalMode(approval)) { err(`pult agent set: --approval — ${tr(APPROVAL_LIST)}`); return done(EXIT.error) }
         if (approval === 'full' && !args.flags.has('yes')) {
           err(tr('pult agent set: --approval full — агент делает что угодно без вопросов, песочницы нет; повтори с --yes')); return done(EXIT.error)
         }
         if (flagStr(args, 'model') === undefined && flagStr(args, 'effort') === undefined && approval === undefined) {
-          err(tr('pult agent set <имя> [--model M] [--effort E] [--approval read-only|ask|workspace|full] [--yes]')); return done(EXIT.error)
+          err(tr('pult agent set <имя> [--model M] [--effort E] [--approval read-only|ask|workspace|full|inherit] [--yes]')); return done(EXIT.error)
         }
         let r: Record<string, unknown>
         try {
@@ -538,6 +545,8 @@ async function cmdAgent(paths: PultPaths, args: ParsedArgs): Promise<number> {
             ...(flagStr(args, 'effort') !== undefined ? { effort: flagStr(args, 'effort') } : {}),
             ...(approval !== undefined ? { approval } : {}),
             ...(args.flags.has('yes') ? { confirm: true } : {}),
+            // Шаг A: `--yes` к полному доступу — разовое разрешение этой сессии, согласие окна не пишется.
+            ...(args.flags.has('yes') && (approval === 'full' || approval === 'inherit') ? { grant: 'cli-once' } : {}),
           })) as Record<string, unknown>
         } catch (e) {
           if (e instanceof ClientError && e.code === 'needs_confirm') {
@@ -1186,6 +1195,8 @@ export async function run(argv: string[]): Promise<number> {
       return cmdUsage(paths, args)
     case 'provider':
       return cmdProvider(paths, args)
+    case 'mcp-runtime':
+      return runRuntimeMcp(paths)
     case 'mcp-ask':
       return cmdMcpAsk(paths)
     case 'doctor':

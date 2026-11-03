@@ -115,9 +115,18 @@ describe('M8d: «Как подтверждать действия»', () => {
   it('поле: подсказка своя у каждого провайдера; «Полный доступ» — красное предупреждение', () => {
     const ask = html(ApprovalField, { provider: 'claude', approval: 'ask', onChange: noop })
     assert.match(ask, /<option value="ask" selected="">Спрашивать<\/option>/)
-    assert.match(text(ask), /по твоим настройкам Claude/)
-    assert.match(text(html(ApprovalField, { provider: 'claude', approval: 'read-only', onChange: noop })), /правки запрещены, каждую команду спросит/)
-    assert.match(text(html(ApprovalField, { provider: 'codex', approval: 'workspace', onChange: noop })), /твои MCP-серверы тоже без вопросов/)
+    // Шаг A: тексты сверены с кодом (ревью Codex № 6, 7): «Спрашивать» у Claude — явный manual, правила владельца в силе.
+    assert.match(text(ask), /правки и команды — вопрос в Inbox; что разрешено твоими правилами Claude — без вопроса/)
+    assert.match(text(html(ApprovalField, { provider: 'claude', approval: 'read-only', onChange: noop })), /правки запрещены; любая команда — вопрос в Inbox/)
+    const cw = text(html(ApprovalField, { provider: 'codex', approval: 'workspace', onChange: noop }))
+    assert.match(cw, /шаг за песочницу — отказ без вопроса/)
+    assert.doesNotMatch(cw, /MCP-серверы тоже без вопросов/, '«MCP тоже без вопросов» — неправда (ревью Codex № 6)')
+    // «Как в настройках Claude» — только у Claude, с действующим режимом словами; при bypass — красное предупреждение.
+    assert.match(ask, /<option value="inherit">Как в настройках Claude<\/option>/)
+    assert.doesNotMatch(html(ApprovalField, { provider: 'codex', approval: 'ask', onChange: noop }), /value="inherit"/)
+    assert.match(text(html(ApprovalField, { provider: 'claude', approval: 'inherit', inheritMode: 'auto', onChange: noop })), /действует твой defaultMode: сейчас auto/)
+    assert.doesNotMatch(html(ApprovalField, { provider: 'claude', approval: 'inherit', inheritMode: 'auto', onChange: noop }), /new-agent-approval-warning/)
+    assert.match(html(ApprovalField, { provider: 'claude', approval: 'inherit', inheritMode: 'bypassPermissions', onChange: noop }), /new-agent-approval-warning/)
     assert.doesNotMatch(ask, /new-agent-approval-warning/)
     const full = html(ApprovalField, { provider: 'codex', approval: 'full', onChange: noop })
     assert.match(full, /data-testid="new-agent-approval-warning"/)
@@ -149,8 +158,8 @@ describe('M8d: «Как подтверждать действия»', () => {
       onSend: async () => true, onRename: async () => true, onStop: noop, onRemove: noop, onReveal: noop, onApprove: noop, onDeny: noop, onFocusPerm: noop,
     })
     assert.match(html(Conversation, props(plain!)), /data-testid="conv-approval" data-approval="ask"[^>]*>спрашивать</)
-    const [auto] = buildAgents([rec({ claudeMode: 'auto' }) as never], {})
-    assert.match(html(Conversation, props(auto!)), />по настройкам: auto</)
+    const [auto] = buildAgents([rec({ approval: 'inherit', claudeMode: 'auto' }) as never], {})
+    assert.match(html(Conversation, props(auto!)), />как в настройках claude: auto</)
     assert.match(html(Conversation, props(full!)), /class="approval t-fail" data-testid="conv-approval" data-approval="full"/)
   })
 })
@@ -233,7 +242,7 @@ describe('после #13: «показано не всё» словами кар
     for (const p of ['/', '/Users', '/Users/you', '/Users/you/', '/home', '/home/user']) assert.equal(cwdCoversHome(p), true, p)
     for (const p of ['/Users/you/proj', '/home/user/w/x', '/tmp', '/opt/pult']) assert.equal(cwdCoversHome(p), false, p)
     const f = { ...defaultForm('claude'), cwd: '/Users/you', name: 'w' }
-    assert.match(homeWarning(f) ?? '', /агент сможет менять ~\/\.claude, ~\/\.codex, ~\/\.zshrc и др\. без вопросов в режимах «Правки в папке без вопросов» и «Полный доступ»/)
+    assert.match(homeWarning(f) ?? '', /агент сможет менять ~\/\.claude, ~\/\.codex, ~\/\.zcode, ~\/\.zshrc и др\. без вопросов в режимах «Правки в папке без вопросов» и «Полный доступ»/)
     assert.equal(homeWarning({ ...f, approval: 'read-only' }), null)
     assert.equal(homeWarning({ ...f, worktree: 'feat/x' }), null)
     assert.equal(homeWarning({ ...f, cwd: '/Users/you/proj' }), null)

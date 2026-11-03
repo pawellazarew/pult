@@ -12,7 +12,7 @@ import type { SessionContext } from '../model/context.js'
 import type { AgentItem, ConvItem, ItemState, NoticeItem, ToolItem } from '../model/conversation.js'
 import { composerCmdEnter, searchKeys } from '../model/hotkeys.js'
 import { adjacentUser, itemForEvent, userMarks } from '../model/search.js'
-import { formatSeconds, messageSource, resultText, toolSummary } from '../model/conversation.js'
+import { formatSeconds, messageSource, resultText, toolInputText, toolSummary } from '../model/conversation.js'
 import { obj } from '../model/types.js'
 import type { QueueItem } from '../model/types.js'
 import type { ProviderUsage } from '../model/usage.js'
@@ -21,7 +21,9 @@ import { useAttachments } from './useAttachments.js'
 import { AttachmentStrip } from './AttachmentStrip.js'
 import { attachmentPrompt } from '../model/attachmentDrafts.js'
 import type { FilePathSource } from '../model/paths.js'
-import { APPROVAL_FULL_WARNING, approvalFooter, approvalHint } from '../model/newAgent.js'
+import { APPROVAL_FULL_WARNING, approvalHint } from '../model/newAgent.js'
+import { accessChip, headerPill, pendingStrip } from '../model/access.js'
+import type { ConsentView } from '../model/access.js'
 import { Chip, CMD, hhmm, Icon, IS_MAC, Kbd, ProviderTag } from './common.js'
 import { ImageContext, ImageGallery } from './Images.js'
 import { plural } from '../lib/ru.js'
@@ -125,6 +127,8 @@ export interface ConversationProps {
   /** Живой список моделей (Codex — `model/list` из «+ Сессия») и окна моделей из прошлых `context.updated`. */
   catalog?: ProviderCatalog | null
   windows?: ReadonlyMap<string, number>
+  /** Шаг A: согласие на полный доступ — меню подвала пишет «спрошу один раз», пока его нет. */
+  consent?: ConsentView | null
 }
 
 /** Как уходит реплика: сразу, в очередь (идёт ход) или «прервать и сказать». */
@@ -230,6 +234,9 @@ export function Conversation(p: ConversationProps): ReactElement {
     else if (j.dir > 0) { box.scrollTop = box.scrollHeight; stick.current = true }
   }, [p.userJump, marks, reveal])
 
+  // Шаг A: метки доступа строятся по действующему режиму (`access` демона), а не только по выбранному.
+  const pill = headerPill(agent)
+  const chip = accessChip(agent)
   const limited = agent.status === 'limited'
   const resetsAt = p.usage?.resetsAt ?? lastLimitReset(p.items)
   const holds = limitHolds(agent.status, resetsAt, p.now)
@@ -242,6 +249,8 @@ export function Conversation(p: ConversationProps): ReactElement {
           <div className="top">
             <Title agent={agent} onRename={p.onRename} />
             <ProviderTag provider={agent.provider} />
+            {pill && <span className="access-pill" data-state={pill.state} data-testid="conv-access-pill"
+              title={t("Агент работает без вопросов и без песочницы — сменить в меню подвала")}><Icon name="shield" />{pill.label}</span>}
             <Chip tone={sv.tone} label={agent.status === 'cold' ? t('Можно продолжить') : sv.label} testId="conv-status" />
           </div>
           <div className="conv-location" data-testid="conv-location" title={agent.cwd}><Icon name="folder" />{agent.cwd.split('/').filter(Boolean).pop() ?? agent.cwd}{agent.branch ? ` / ${agent.branch}` : ''}</div>
@@ -304,8 +313,9 @@ export function Conversation(p: ConversationProps): ReactElement {
           {...(p.onQueueEdit ? { edit: qe.view } : {})} notice={qe.notice} />
       ) : null}
       <Composer busy={sv.busy} needsYou={sv.needsYou} permFocused={p.focusedPerm !== null} link={p.link ?? 'up'} disabled={holds} sending={p.sending} error={p.sendError} onSend={p.onSend} agentName={agent.name} label={agentLabel(agent)} filePaths={p.filePaths ?? null}
+        accessRed={chip.red} accessNote={pendingStrip(agent)}
         onStop={p.onStop} queueable={!!p.onQueueRemove} inject={qe.inject} footer={<ChatFooter agent={agent} usage={p.usage} now={p.now} onReveal={p.onReveal} {...(p.onHelp ? { onHelp: p.onHelp } : {})}
-        {...(p.onConfigure ? { onConfigure: p.onConfigure } : {})} catalog={p.catalog ?? null} windows={p.windows ?? EMPTY_WINDOWS} />} />
+        {...(p.onConfigure ? { onConfigure: p.onConfigure } : {})} catalog={p.catalog ?? null} windows={p.windows ?? EMPTY_WINDOWS} consent={p.consent ?? null} />} />
     </section>
     </ImageContext.Provider>
   )
@@ -413,23 +423,29 @@ function Title({ agent, onRename }: { agent: AgentView; onRename(title: string):
  */
 const EMPTY_WINDOWS: ReadonlyMap<string, number> = new Map()
 
-function ChatFooter({ agent, usage, now, onReveal, onHelp, onConfigure, catalog, windows: ctxWindows }: {
+function ChatFooter({ agent, usage, now, onReveal, onHelp, onConfigure, catalog, windows: ctxWindows, consent }: {
   agent: AgentView; usage: ProviderUsage | undefined; now: number; onReveal(path: string): void; onHelp?(): void
   onConfigure?(pick: SettingsPick): void; catalog: ProviderCatalog | null; windows: ReadonlyMap<string, number>
+  consent: ConsentView | null
 }): ReactElement {
   const windows = limitWindowsView(usage, now)
   const provider = agent.provider
   const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null)
   const closeMenu = useCallback(() => setMenuAt(null), [])
-  const approvalTitle = t`Подтверждения: ${approvalHint(agent.provider, agent.approval ?? 'ask')}${agent.approval === 'full' ? ` — ${APPROVAL_FULL_WARNING}` : ''}`
+  // Шаг A: чип доступа — желаемый уровень и что с ним сейчас («после хода», «ожидается», «не подтверждено», «не
+  // разрешён»); красный — по действующему режиму (`access.red`), а не только по выбранному.
+  const chip = accessChip(agent)
+  const desired = agent.access?.desired ?? agent.approval ?? 'ask'
+  const approvalTitle = t`Доступ: ${approvalHint(agent.provider, desired, agent.access?.inheritMode ?? agent.claudeMode)}${chip.red ? ` — ${APPROVAL_FULL_WARNING}` : ''}` + `\n${chip.title}`
   const modelSpan = (agent.model || agent.effort)
     ? <span title={t("модель · усилие")} data-testid="conv-model">{[agent.model, agent.effort].filter(Boolean).join(' · ')}</span> : null
   const approvalSpan = (
-    <span className={`approval${agent.approval === 'full' ? ' t-fail' : ''}`} data-testid="conv-approval" data-approval={agent.approval ?? 'ask'} title={approvalTitle}>
-      {agent.provider === 'claude' && !agent.approval && agent.claudeMode ? t`по настройкам: ${agent.claudeMode}` : approvalFooter(agent.provider, agent.approval ?? 'ask', agent.claudeMode)}
+    <span className={`approval${chip.red ? ' t-fail' : chip.state === 'blocked' ? ' t-wait' : ''}`} data-testid="conv-approval" data-approval={desired}
+      data-access-state={chip.state} title={approvalTitle}>
+      {chip.red && <Icon name="shield" />}{chip.label.toLowerCase()}{chip.suffix && <span className="access-suffix" data-testid="conv-access-suffix"> · {chip.suffix}</span>}
     </span>
   )
-  const menuItems = (): MenuEntry[] => settingsMenu(agent, catalog, ctxWindows).map((r): MenuEntry => {
+  const menuItems = (): MenuEntry[] => settingsMenu(agent, catalog, ctxWindows, consent).map((r): MenuEntry => {
     if (r.type === 'sep') return 'sep'
     if (r.type === 'heading') return { heading: r.label, ...(r.testId ? { testId: r.testId } : {}) }
     if (r.type === 'note') return { note: r.label, ...(r.testId ? { testId: r.testId } : {}) }
@@ -688,7 +704,7 @@ function ToolRow({ it, loadEvents }: { it: ToolItem; loadEvents?: (ids: number[]
             <details className="tool-raw" open={!failure}>
               <summary>{t("Полный ввод и вывод")}</summary>
               {it.exitCode !== undefined && <div className="k">{t("Код завершения: ")}{it.exitCode}</div>}
-              <div className="k">{t("вход")}</div><pre>{JSON.stringify(shown.input, null, 2)}</pre>
+              <div className="k">{t("вход")}</div><pre>{toolInputText(shown.input)}</pre>
               {shown.result !== undefined && <><div className="k">{t("результат")}</div><pre>{shown.result}</pre></>}
             </details>
             {detail === 'loading' && <div className="k" data-testid="tool-detail-loading">{t("загружаю полный вход и вывод…")}</div>}
@@ -845,7 +861,11 @@ const draftStore: DraftStore = {
   set(k, v) { try { window.localStorage.setItem(k, v) } catch { /* хранилище недоступно */ } },
 }
 
-function Composer({ busy, needsYou, permFocused, link, disabled, sending, error, onSend, onStop, agentName, label, filePaths, queueable, inject, footer }: {
+function Composer({ busy, needsYou, permFocused, link, disabled, sending, error, onSend, onStop, agentName, label, filePaths, queueable, inject, footer, accessRed = false, accessNote = null }: {
+  /** Шаг A: красная рамка поля — чат с полным доступом (выбран или ещё жив процесс с полными правами). */
+  accessRed?: boolean
+  /** Шаг A: строка под полем при понижении во время хода с полными правами (кадр 11). */
+  accessNote?: string | null
   /** В Inbox есть выделенный запрос (любой сессии): ⌘Enter — его «разрешить», а не «прервать и сказать». */
   permFocused: boolean
   busy: boolean; needsYou: boolean; link: ConnState['state']; disabled: boolean; sending: boolean; error: string | null
@@ -968,7 +988,7 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
   }
   return (
     <ResizableComposer>
-      <div className={`box${attached.over ? ' attachment-over' : ''}`}>
+      <div className={`box${attached.over ? ' attachment-over' : ''}${accessRed ? ' access-full' : ''}`} data-access-full={accessRed ? '1' : undefined}>
         <AttachmentStrip items={attached.items} previews={attached.previews} pending={attached.pending} onRemove={attached.remove} />
         <textarea ref={ta} rows={3} value={text} onChange={(e) => setText(e.target.value)} onKeyDown={onKey}
           onPaste={onPaste} onDragOver={onDragOver} onDragEnter={attached.onDragEnter} onDragLeave={attached.onDragLeave} onDrop={onDrop}
@@ -986,6 +1006,7 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
           </div>
         </div>
       </div>
+      {accessNote && <div className="access-strip" role="status" data-testid="access-pending-strip"><Icon name="clock" />{accessNote}</div>}
       {/* Подсказки клавиш — в справке «?» под полем (⌘/); здесь остаётся только ошибка отправки. */}
       {error && <div className="hint"><span className="err" role="alert" data-testid="send-error">{error}</span></div>}
       {/* Картинка из буфера не сохранилась или окно старое — словами под полем (model/filePathsInput.ts). */}

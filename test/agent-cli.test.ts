@@ -12,7 +12,7 @@ import { after, before, describe, it } from 'node:test'
 import { connectClient } from '../dist/cli/client.js'
 import { layout } from '../dist/core/paths.js'
 import type { PultPaths } from '../dist/core/paths.js'
-import { FAKE_CLAUDE, waitFor } from './helpers.js'
+import { FAKE_CLAUDE, FAKE_ZCODE, waitFor } from './helpers.js'
 
 const CLI = fileURLToPath(new URL('../dist/cli/main.js', import.meta.url))
 
@@ -26,7 +26,7 @@ function runCli(paths: PultPaths, args: string[], timeoutMs = 25_000, extraEnv: 
     const child = spawn(process.execPath, [CLI, ...args], {
       // PULT_TEST_NET делает прогон герметичным: без неё демон звал настоящий `curl`
       // и результат зависел от страны выхода машины (ревью В3 — течёт и В2).
-      env: { ...process.env, PULT_LANG: 'ru', PULT_HOME: paths.home, PULT_TEST: '1', PULT_TEST_NET: netMode, PULT_CLAUDE_BIN: FAKE_CLAUDE, ...extraEnv },
+      env: { ...process.env, PULT_LANG: 'ru', PULT_HOME: paths.home, PULT_TEST: '1', PULT_TEST_NET: netMode, PULT_CLAUDE_BIN: FAKE_CLAUDE, PULT_ZCODE_BIN: FAKE_ZCODE, ...extraEnv },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     let stdout = ''
@@ -82,7 +82,7 @@ describe('CLI: агенты сквозным прогоном', () => {
   it('папка — домашняя (или выше): заводит, но предупреждает; в «только чтение» — молча', async () => {
     // PULT_HOME лежит не в этом «доме» — старт не отказ, а предупреждение: агент правил бы ~/.claude, ~/.zshrc…
     const fakeHome = makeWork('fakehome', 'simple')
-    const warn = /внимание — папка — домашняя или выше: агент сможет менять ~\/\.claude, ~\/\.codex, ~\/\.zshrc/
+    const warn = /внимание — папка — домашняя или выше: агент сможет менять ~\/\.claude, ~\/\.codex, ~\/\.zcode, ~\/\.zshrc/
     const a = await runCli(paths, ['agent', 'start', 'hw', '--kind', 'claude', '--cwd', fakeHome], 25_000, { HOME: fakeHome })
     assert.equal(a.code, 0, a.stderr)
     assert.match(a.stderr, warn)
@@ -279,6 +279,37 @@ describe('CLI: агенты сквозным прогоном', () => {
 
     const r = await runCli(paths, ['agent', 'prompt', 'w', 'помнишь меня?', '--wait', '--timeout', '20000'], 40_000)
     assert.equal(r.code, 0, `stdout=${r.stdout} stderr=${r.stderr}`)
+  })
+
+  it('zcode: старт, ход, resume вторым ходом — третий провайдер жив целиком', async () => {
+    // Тот же круг, что у claude, но маршрутом A: процесс на ход, ответ из записанного потока.
+    // Метка [[resume]] в реплике переключает сценарий фальшивого CLI (см. fake-zcode.mjs).
+    const zw = makeWork('zwork', 'simple')
+    const start = await runCli(paths, ['agent', 'start', 'zc', '--kind', 'zcode', '--cwd', zw])
+    assert.equal(start.code, 0, start.stderr)
+    assert.match(start.stdout, /агент zc заведён/)
+
+    const list = JSON.parse((await runCli(paths, ['agent', 'list', '--json'])).stdout) as { sessions: Array<{ name: string; provider: string }> }
+    const zc = list.sessions.find((s) => s.name === 'zc')
+    assert.equal(zc?.provider, 'zcode', 'kind=zcode не должен молча становиться claude')
+
+    const first = await runCli(paths, ['agent', 'prompt', 'zc', 'число?', '--wait', '--timeout', '20000'], 40_000)
+    assert.equal(first.code, 0, `stdout=${first.stdout} stderr=${first.stderr}`)
+    assert.match(first.stdout, /4711/)
+
+    const second = await runCli(paths, ['agent', 'prompt', 'zc', '[[resume]] теперь умножь', '--wait', '--timeout', '20000'], 40_000)
+    assert.equal(second.code, 0, `stdout=${second.stdout} stderr=${second.stderr}`)
+    assert.match(second.stdout, /420/)
+
+    // Журнал: session.started с sessionId CLI, ответ, расход; модель — из потока CLI.
+    const events = (await runCli(paths, ['agent', 'read', 'zc', '--format', 'json'])).stdout
+      .trim().split('\n').map((l) => JSON.parse(l) as { kind: string; provider?: string; data?: Record<string, unknown> })
+    assert.ok(events.some((e) => e.kind === 'session.started' && typeof e.data?.['providerSessionId'] === 'string' && String(e.data['providerSessionId']).startsWith('sess_')))
+    assert.ok(events.some((e) => e.kind === 'usage.updated'))
+    assert.ok(events.every((e) => e.provider === undefined || e.provider === 'zcode' || e.provider === 'pult'))
+
+    assert.equal((await runCli(paths, ['agent', 'stop', 'zc'])).code, 0)
+    assert.equal((await runCli(paths, ['agent', 'rm', 'zc'])).code, 0)
   })
 
   it('КОД 4: страж сети — блок страны', async () => {

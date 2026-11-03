@@ -53,8 +53,11 @@ export const SUBAGENT_TOOL_NAMES: ReadonlySet<string> = new Set(['Agent', 'Task'
 
 export type TurnSignal =
   | { kind: 'session_id'; id: string }
-  /** Начался (в том числе САМ, после фонового субагента) новый ход: пришёл `system/init`. */
-  | { kind: 'turn_started' }
+  /**
+   * Начался (в том числе САМ, после фонового субагента) новый ход: пришёл `system/init`. `permissionMode` — режим,
+   * с которым CLI на самом деле работает (шаг A: по нему строится метка доступа); только у init корня разговора.
+   */
+  | { kind: 'turn_started'; permissionMode?: string }
   | {
     kind: 'result'
     ok: boolean
@@ -230,7 +233,8 @@ export function createClaudeMapper(opts: MapperOptions): ClaudeMapper {
         if (subtype === 'init') {
           const id = str(ev['session_id'])
           if (id) out.signals.push({ kind: 'session_id', id })
-          out.signals.push({ kind: 'turn_started' })
+          const permissionMode = !parentId ? str(ev['permissionMode']) : null
+          out.signals.push({ kind: 'turn_started', ...(permissionMode ? { permissionMode } : {}) })
           if (!parentId) out.live = [{ kind: 'active' }]
           if (sessionStartedEmitted) return out
           sessionStartedEmitted = true

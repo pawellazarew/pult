@@ -16,6 +16,7 @@ const { EMPTY_THROTTLE, flushThrottle, offerNotice } = await import('../src/mode
 const { unmarkedNote } = await import('../src/model/rules.js')
 const { formatResetIn, formatClock, limitWindowsView } = await import('../src/model/usage.js')
 const { plural } = await import('../src/lib/ru.js')
+const { accessChip, accessChangeLine, consentLine, headerPill } = await import('../src/model/access.js')
 
 test('English model labels, durations and diagnostics use English', () => {
   assert.equal(friendlyTool('Bash'), 'Command')
@@ -73,4 +74,15 @@ test('notification summary uses English plural at 21 and targets Inbox', () => {
   assert.equal(summary?.title, 'Pult')
   assert.equal(summary?.body, '21 more sessions need you')
   assert.deepEqual(summary?.target, { inbox: true })
+})
+
+test('English access labels: chips, consent line, feed line and inherit footer', () => {
+  const chip = accessChip({ provider: 'codex', approval: 'full', access: { desired: 'full', desiredFull: true, red: true, blocked: false, pending: false, applied: { approval: 'full', confirmed: false } } as never })
+  assert.equal(chip.label, 'Full access')
+  assert.equal(chip.suffix, 'unconfirmed')
+  assert.match(chip.title, /^Access: Full access; last process started with Full access \(unconfirmed\)$/)
+  assert.deepEqual(headerPill({ provider: 'claude', approval: 'full' }), { label: 'full access', state: 'full' })
+  assert.equal(consentLine(null), 'Full access is not allowed. Pult asks once, the first time you choose Full access.')
+  assert.equal(accessChangeLine({ approval: { from: 'full', to: 'ask' } } as never, true)?.title, 'Access: Full access → Ask · applies when the current turn ends')
+  assert.equal(approvalHint('claude', 'inherit', 'bypassPermissions'), 'Pult does not set a mode — your defaultMode applies: currently bypassPermissions — this is full access')
 })

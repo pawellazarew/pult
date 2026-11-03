@@ -10,7 +10,7 @@ describe('полировка: фокус, управление у ввода и 
     assert.ok(await waitFor(async () => (await h.win.getAttribute('.app', 'data-conn')) === 'up', 20_000))
     h.codexConfig({ scenario: 'hang' })
     const c = await h.client()
-    await c.request('agent.start', { name: 'polish', kind: 'codex', cwd: h.workDir('pult'), model: 'gpt-5-codex', approval: 'full', confirm: true })
+    await c.request('agent.start', { name: 'polish', kind: 'codex', cwd: h.workDir('pult'), model: 'gpt-5-codex', approval: 'full', confirm: true, grant: 'cli-once' })
     await c.request('agent.rename', { name: 'polish', title: 'Сделать настройки проще и понятнее' })
     const emit = (kind: string, data: Record<string, unknown>) => c.request('events.emit', { sessionId: 'polish', provider: 'codex', kind, data })
     for (let i = 0; i < 8; i++) {

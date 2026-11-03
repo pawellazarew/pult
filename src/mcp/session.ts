@@ -73,7 +73,9 @@ export function createMcpExtras(d: ComposeDeps): (name: string, nodeBin: string,
         skipped(rec, refused)
         return { servers }
       }
-      if (rec.provider === 'claude' && claudeDefaultMode(d.claudeSettings(rec.cwd)) === 'bypassPermissions') {
+      // Ревью PR #39, m4: `defaultMode` владельца действует только у `inherit` (без флага) — остальные уровни Claude идут
+      // с явным `--permission-mode`, и bypass владельца браузеру не мешает.
+      if (rec.provider === 'claude' && rec.approval === 'inherit' && claudeDefaultMode(d.claudeSettings(rec.cwd)) === 'bypassPermissions') {
         // Правило «спрашивать» в этом режиме может не сработать — браузер с куками без вопросов не даём.
         skipped(rec, bypassRefusal())
         return { servers }

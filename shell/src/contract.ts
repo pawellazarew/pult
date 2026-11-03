@@ -1,3 +1,4 @@
+import type { RuntimeBounds } from '../../src/runtimes/types.js'
 import type { FileListing, FilePreview } from '../../src/core/fileBrowserTypes.js'
 export type { FileListing, FilePreview, FileEntry } from '../../src/core/fileBrowserTypes.js'
 // Контракт моста `window.pult` (docs/12 §2): то, что видит интерфейс, и белый список методов демона,
@@ -24,6 +25,8 @@ export const BRIDGE_VERSION = 1
  */
 export const ALLOWED_METHODS = [
   'daemon.status',
+  'runtime.discover', 'runtime.perform', 'runtime.takeover', 'runtime.release',
+  'runtime.setup.request', 'runtime.setup.resolve', 'runtime.setup.list',
   'doctor.run',
   'providers.check',
   'project.list',
@@ -79,6 +82,11 @@ export const ALLOWED_METHODS = [
   'agent.configure',
   'settings.get',
   'settings.set',
+  // Быстрый старт, шаг A: согласие на полный доступ — один раз из диалога окна и отзыв в «Настройки → Доступ».
+  // Отдельные методы, а не `settings.set`: согласие проверяет демон в каждой точке применения, и писать его может только
+  // этот путь. Окно старой оболочки получает `method_not_allowed` — интерфейс подсказывает обновить окно.
+  'access.grantFull',
+  'access.revokeFull',
 ] as const
 
 export type AllowedMethod = (typeof ALLOWED_METHODS)[number]
@@ -99,12 +107,16 @@ export const SUBSCRIBE_VIA_BRIDGE = new Set<string>(['events.subscribe', 'events
  * Поля параметров, которые интерфейс окна не шлёт, а демон принимает и которые РАСШИРЯЮТ права:
  *   - `perm.resolve.updatedInput` — подменил бы вход разрешённого инструмента (разрешили одну
  *     команду, исполнилась другая);
- *   - `agent.start.settingSources` — какие файлы настроек грузит claude (граница доступа CLI).
+ *   - `agent.start.settingSources` — какие файлы настроек грузит claude (граница доступа CLI);
+ *   - `agent.start.grant`, `agent.configure.grant` — разовое разрешение полного доступа CLI (`--yes`) в обход согласия.
  * Наименьшие права: main вырезает их до демона. Понадобятся окну — убрать отсюда осознанно.
  */
 export const STRIPPED_PARAMS: Readonly<Partial<Record<AllowedMethod, readonly string[]>>> = {
   'perm.resolve': ['updatedInput'],
-  'agent.start': ['settingSources'],
+  // `grant: cli-once` (шаг A) — разовое разрешение полного доступа терминалом в обход согласия: окну оно не положено,
+  // полный доступ из окна идёт только через согласие (`access.grantFull`).
+  'agent.start': ['settingSources', 'grant'],
+  'agent.configure': ['grant'],
 }
 
 /** Параметры вызова без вырезанных полей; нечего вырезать — тот же объект. */
@@ -154,7 +166,7 @@ export interface NewSessionPrefill {
   path?: string
   pathRejected?: boolean
   prompt?: string
-  provider?: 'claude' | 'codex'
+  provider?: 'claude' | 'codex' | 'zcode'
 }
 
 /**
@@ -162,6 +174,8 @@ export interface NewSessionPrefill {
  * смены версии моста: старая оболочка его просто не шлёт, старый интерфейс его не читает.
  */
 export interface NavTarget extends NotifyTarget {
+  /** Open the runtime pane after the agent attached a web target. */
+  runtime?: boolean
   newSession?: NewSessionPrefill
   /** Переход пришёл по ссылке `pult://`: окно не ставит фокус в поле ввода и глотает клавиши полсекунды. */
   link?: boolean
@@ -176,6 +190,8 @@ export interface PultBridge {
   readonly languageOverride?: 'auto' | 'ru' | 'en' | null
   /** Reload only the current trusted application document. */
   reloadWindow?(): void
+  /** Position the isolated native browser surface; null hides it. */
+  runtimeView?(sessionId: string, bounds: RuntimeBounds | null): Promise<void>
   /** Вызов метода демона из белого списка. Отказ — `BridgeError`. */
   call(method: AllowedMethod, params?: Record<string, unknown>): Promise<unknown>
   /**
@@ -261,6 +277,7 @@ export interface ClipboardImageBridge {
 /** Каналы IPC между preload и main. Имена в одном месте: опечатка в строке канала молчит. */
 export const IPC = {
   call: 'pult:call',
+  runtimeView: 'pult:runtime-view',
   subscribe: 'pult:subscribe',
   unsubscribe: 'pult:unsubscribe',
   event: 'pult:event',

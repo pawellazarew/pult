@@ -14,6 +14,7 @@ import { Conversation } from './components/Conversation.js'
 import type { SendMode } from './components/Conversation.js'
 import { Header } from './components/Header.js'
 import { FileWorkspace } from './components/FileWorkspace.js'
+import { RuntimePanel } from './components/RuntimePanel.js'
 import { WorkspaceLayout } from './components/WorkspaceLayout.js'
 import type { FileRequest } from './components/FileWorkspace.js'
 import { FilePreviewContext } from './model/filePreviewContext.js'
@@ -29,7 +30,9 @@ import { configureParams, confirmNeeded, isNoop, modelWindows, settingsErrorText
 import type { SettingsPick } from './model/sessionSettings.js'
 import type { SettingsReply } from './model/newAgent.js'
 import type { NewSessionSettings } from '../../src/sessions/settings.js'
-import { APPROVAL_FULL_WARNING } from './model/newAgent.js'
+import { ConsentDialog } from './components/Access.js'
+import { CONSENT_DIALOG_PROVIDERS, CONSENT_DIALOG_VERSION, isFullLevel } from './model/access.js'
+import type { ConsentView } from './model/access.js'
 import { UpdateBanner } from './components/UpdateBanner.js'
 import { addDismissed, applyErrorText, checkErrorText, FOCUS_CHECK_STALE_MS, focusCheckWanted, updateBanner, upToDateNote, windowVersionFromUA } from './model/update.js'
 import type { UpdateAction } from './model/update.js'
@@ -80,7 +83,9 @@ declare global {
 }
 
 type Modal = null | { type: 'new'; cwd?: string | null; prefill?: NewSessionPrefill; seq?: number } | { type: 'external' } | { type: 'doctor' } | { type: 'mcp' } | { type: 'stop'; name: string } | { type: 'rm'; name: string } | { type: 'hide'; path: string; sessions: readonly string[]; busy: readonly string[] } | { type: 'rename'; name: string } | { type: 'help' } | { type: 'search' }
-  | { type: 'settings' } | { type: 'configure'; name: string; pick: SettingsPick; reason: 'full' | 'misfit'; text?: string }
+  | { type: 'settings' } | { type: 'configure'; name: string; pick: SettingsPick; reason: 'misfit'; text?: string }
+  /** Шаг A: полный доступ без согласия — один диалог на всё время; после «Разрешить» смена уходит сама. */
+  | { type: 'consent'; name: string; pick: SettingsPick }
 
 const store = {
   get(k: string): string | null { try { return window.localStorage.getItem(k) } catch { return null } },
@@ -124,9 +129,12 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   useEffect(() => { store.set('pult.sidebarHidden', sidebarHidden ? '1' : '0') }, [sidebarHidden])
   const [inboxOpen, setInboxOpen] = useState<boolean>(() => store.get('pult.inbox') === '1')
   const [filesOpen, setFilesOpen] = useState(false)
+  const [runtimeOpen, setRuntimeOpen] = useState(false)
+  const [runtimeNavigate, setRuntimeNavigate] = useState<string | null>(null)
   const [filesExpanded, setFilesExpanded] = useState(false)
   const [fileRequest, setFileRequest] = useState<FileRequest | null>(null)
-  useEffect(() => { if (inboxOpen) setFilesOpen(false) }, [inboxOpen])
+  useEffect(() => { if (inboxOpen) { setFilesOpen(false); setRuntimeOpen(false) } }, [inboxOpen])
+  useEffect(() => { if (filesOpen) setRuntimeOpen(false) }, [filesOpen])
   useEffect(() => {
     const resize = (): void => { if (window.innerWidth < 1200) setFilesExpanded(true) }
     window.addEventListener('resize', resize)
@@ -406,6 +414,10 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     }
     const off = bridge.subscribe(bootSince, (ev) => {
       debug.current.ids.push(ev.id)
+      if (ev.kind === 'runtime.changed' && ev.sessionId === store.get('pult.selected')) {
+        const state = (ev.data as Record<string, unknown>)['state']
+        if (state === 'attached' || state === 'setup') { setRuntimeOpen(true); setFilesOpen(false); setInboxOpen(false) }
+      }
       queue.push(ev)
       // Пачкой: доигрывание истории — сотни кадров, перерисовка на каждый — лишняя работа.
       if (timer === null) timer = window.setTimeout(flush, 24)
@@ -431,7 +443,19 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   const modalRef = useRef<Modal>(null)
   useEffect(() => { modalRef.current = modal }, [modal])
   const linkSeq = useRef(0)
+  // A simulator/browser attach can arrive before the periodic agent.list snapshot.
+  // Wait for that session instead of interpreting an internal navigation as a stale link.
+  useEffect(() => {
+    if (!runtimeNavigate || !records.some((record) => record.name === runtimeNavigate)) return
+    select(runtimeNavigate); setRuntimeOpen(true); setFilesOpen(false); setInboxOpen(false)
+    setRuntimeNavigate(null)
+  }, [runtimeNavigate, records, select])
   useEffect(() => bridge.onNavigate((t) => {
+    if (t.runtime && t.sessionId) {
+      setRuntimeNavigate(t.sessionId)
+      void refreshAgents()
+      return
+    }
     if (t.link) {
       // Окно всплыло по чужой ссылке, а человек, возможно, печатал в другом приложении: фокус —
       // ни в одно поле, клавиши полсекунды глотаются, поле ввода сессии из ссылки фокус не берёт.
@@ -456,7 +480,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     }
     if (t.permId || t.inbox) setInboxOpen(true)
     if (t.permId) setFocusChosen(t.permId)
-  }), [bridge, select])
+  }), [bridge, select, refreshAgents])
   // Окно защиты после ссылки: Enter, ⌘Enter и буквы не доходят ни до горячих клавиш, ни до полей.
   // Ловим на window в фазе захвата — раньше любых обработчиков React и поля ввода.
   useEffect(() => {
@@ -773,11 +797,14 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     return a?.title ? <><b>{a.title}</b> (<span className="mono">{name}</span>)</> : <b>{name}</b>
   }
 
-  const createAgent = async (form: NewAgentForm, rememberCwd: boolean): Promise<string | null> => {
+  const createAgent = async (form: NewAgentForm, rememberCwd: boolean, consentRev?: number): Promise<string | { consent: true; text: string } | null> => {
     try {
       // M8f: `rememberCwd: false` — форму открыли уже с папкой (проект, ссылка): последний выбор её не запомнит.
-      await bridge.call('agent.start', { ...startParams(form), ...(rememberCwd ? {} : { rememberCwd: false }) })
+      await bridge.call('agent.start', { ...startParams(form, consentRev ?? settings?.access?.consent.rev), ...(rememberCwd ? {} : { rememberCwd: false }) })
     } catch (e) {
+      // Шаг A: согласие отозвали или дали снаружи, пока форма была открыта, — окно перечитывает правду.
+      if (isBridgeError(e) && (e.code === 'consent_changed' || e.code === 'consent_required')) void refreshSettings()
+      if (isBridgeError(e) && e.code === 'consent_required') return { consent: true, text: errorText(e) }
       return errorText(e)
     }
     select(form.name)
@@ -855,17 +882,55 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   const settingsOk = shellHasSettings(windowVersion)
   // Окна моделей из прошлых `context.updated` всех сессий: «не влезет: 300k > 200k» в меню подвала.
   const windows = useMemo(() => modelWindows(records.map((r) => ({ ...(r.model ? { model: r.model } : {}), context: ui.sessions[r.name]?.context ?? r.context ?? null }))), [records, ui.sessions])
-  const configureAgent = (name: string, pick: SettingsPick, confirmed = false): void => {
+  const consentNow = settings?.access?.consent ?? null
+  const configureAgent = (name: string, pick: SettingsPick, confirmed = false, consent = consentNow): void => {
     const a = agents.find((x) => x.name === name)
     if (!a || isNoop(pick, a)) return
-    const need = confirmed ? null : confirmNeeded(pick)
+    // Шаг A: полный доступ без согласия — диалог согласия (один раз на всё время); с согласием — без вопроса: красная
+    // метка и строка в ленте вместо модала «Полный доступ?» на каждой смене. `confirm: true` демон всё равно требует.
+    const inheritMode = a.access?.inheritMode ?? a.claudeMode ?? settings?.access?.claudeDefaultMode ?? null
+    const need = confirmed ? null : confirmNeeded(pick, consent, a.provider, inheritMode)
+    if (need === 'full') { setConsentState({ busy: false, error: null }); setModal({ type: 'consent', name, pick }); return }
     if (need) { setModal({ type: 'configure', name, pick, reason: need }); return }
     setModal(null)
-    bridge.call('agent.configure', configureParams(name, pick, confirmed)).then(() => refreshAgents(), (e: unknown) => {
+    const full = pick.kind === 'approval' && isFullLevel(a.provider, pick.approval, inheritMode)
+    bridge.call('agent.configure', configureParams(name, pick, confirmed || full, consent?.rev)).then(() => refreshAgents(), (e: unknown) => {
       // Окно не знало окна модели, а демон знает: спросить человека и повторить с подтверждением.
       if (isBridgeError(e) && e.code === 'needs_confirm') { setModal({ type: 'configure', name, pick, reason: 'misfit', text: e.message }); return }
+      if (isBridgeError(e) && (e.code === 'consent_changed' || e.code === 'consent_required')) void refreshSettings()
       setBannerError(settingsErrorText(isBridgeError(e) ? e.code : null, errorText(e)))
     })
+  }
+  // --- шаг A: согласие на полный доступ ---------------------------------------------------------------
+  const [consentState, setConsentState] = useState<{ busy: boolean; error: string | null }>({ busy: false, error: null })
+  /** «Разрешить полный доступ»: `access.grantFull` (провайдеры и версия текста диалога); ответ — согласие или текст отказа. */
+  const grantFull = async (): Promise<ConsentView | string> => {
+    try {
+      const r = await bridge.call('access.grantFull', { confirm: true, version: CONSENT_DIALOG_VERSION, providers: [...CONSENT_DIALOG_PROVIDERS] }) as { consent: ConsentView }
+      setSettings((cur) => (cur?.access ? { ...cur, access: { ...cur.access, consent: r.consent } } : cur))
+      void refreshSettings()
+      return r.consent
+    } catch (e) {
+      return settingsErrorText(isBridgeError(e) ? e.code : null, errorText(e))
+    }
+  }
+  const revokeFull = async (): Promise<string | null> => {
+    try {
+      const r = await bridge.call('access.revokeFull') as { consent: ConsentView }
+      setSettings((cur) => (cur?.access ? { ...cur, access: { ...cur.access, consent: r.consent } } : cur))
+      void refreshSettings()
+      void refreshAgents()
+      return null
+    } catch (e) {
+      return settingsErrorText(isBridgeError(e) ? e.code : null, errorText(e))
+    }
+  }
+  const grantAndConfigure = async (name: string, pick: SettingsPick): Promise<void> => {
+    setConsentState({ busy: true, error: null })
+    const r = await grantFull()
+    if (typeof r === 'string') { setConsentState({ busy: false, error: r }); return }
+    setConsentState({ busy: false, error: null })
+    configureAgent(name, pick, true, r)
   }
   const saveSettings = async (next: NewSessionSettings, autoCheck: boolean | null, guardRule: { rule: GuardRule; expect: GuardRule } | null, language?: LanguageSetting): Promise<string | null> => {
     // Флаг автопроверки и правило стража — только если сменились: старый демон их не принимает, и зря трогать файл незачем.
@@ -1052,6 +1117,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         const info = document.querySelector<HTMLDetailsElement>('.chat-info[open], .health-menu[open]')
         if (!modal && info) { e.preventDefault(); const fromInfo = info.contains(document.activeElement); info.open = false; if (fromInfo) info.querySelector('summary')?.focus(); return }
         if (modal) { e.preventDefault(); setModal(null); return }
+        if (runtimeOpen) { e.preventDefault(); setRuntimeOpen(false); return }
         if (filesOpen) { e.preventDefault(); closeFiles(); return }
         if (current && statusView(current.status).busy) { e.preventDefault(); setModal({ type: 'stop', name: current.name }) }
         return
@@ -1076,9 +1142,10 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         providers={providers} providersChecking={providersChecking} onProvidersCheck={() => void checkProviders()}
         doctorTone={doctorTone(doctor.report)} inboxCount={inboxNums.all} inboxOpen={inboxOpen}
         sidebarHidden={sidebarHidden} onToggleSidebar={() => setSidebarHidden((v) => !v)}
+        runtimeOpen={runtimeOpen} runtimeAvailable={!!current && conn.state === 'up'} onRuntime={() => { setRuntimeOpen((v) => !v); setFilesOpen(false); setInboxOpen(false) }}
         filesOpen={filesOpen} filesAvailable={!!current && !!bridge.listFiles && !!bridge.previewFile} onFiles={() => filesOpen ? closeFiles() : showFiles()}
         onDoctor={() => { setModal({ type: 'doctor' }); if (!doctor.loading) void runDoctor() }}
-        onInbox={() => { setFilesOpen(false); setInboxOpen((v) => !v) }} />
+        onInbox={() => { setFilesOpen(false); setRuntimeOpen(false); setInboxOpen((v) => !v) }} />
 
       {view.banner && (
         <div className="banner banner-fail" role="alert" data-testid="conn-banner">
@@ -1126,7 +1193,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         </div>
       )}
 
-      <WorkspaceLayout sidebarHidden={sidebarHidden} inboxOpen={inboxOpen} filesOpen={filesOpen} filesExpanded={filesExpanded}>
+      <WorkspaceLayout sidebarHidden={sidebarHidden} inboxOpen={inboxOpen} filesOpen={filesOpen || (!!current && runtimeOpen)} filesExpanded={filesOpen && filesExpanded}>
         <div className="agents-col">
           <ProjectTree groups={groups} selected={current?.name ?? null} revealSend={revealSend} now={now} collapsed={collapsed}
             onSelect={select} onNew={(cwd) => setModal({ type: 'new', cwd })} onToggle={toggleProject}
@@ -1169,7 +1236,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
             onApprove={approve} onDeny={deny} onAnswer={answer} onFocusPerm={setFocusChosen}
             onOpenInbox={(permId) => { setInboxOpen(true); setFocusChosen(permId) }}
             {...(settingsOk && conn.state === 'up' ? { onConfigure: (pick: SettingsPick) => configureAgent(current.name, pick) } : {})}
-            catalog={providers} windows={windows} />
+            catalog={providers} windows={windows} consent={consentNow} />
         ) : (
           <section className="conv">
             <div className="conv-empty" data-testid="conv-empty">
@@ -1185,6 +1252,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         {current && bridge.previewFile && bridge.listFiles && <FileWorkspace bridge={bridge} sessionId={current.name} cwd={current.cwd}
           open={filesOpen} expanded={filesExpanded} request={fileRequest} onClose={closeFiles}
           onExpand={() => setFilesExpanded((v) => window.innerWidth < 1200 ? true : !v)} />}
+        {current && runtimeOpen && <RuntimePanel key={current.name} bridge={bridge} sessionId={current.name} obstructed={modal !== null} onClose={() => setRuntimeOpen(false)} />}
         {inboxOpen && (
           <Inbox items={inboxShown.perms} cards={inboxShown.sessions} filter={inboxFilter} counts={inboxNums} onFilter={setInboxFilter}
             agents={agents} focused={focused?.id ?? null} busy={permBusy} retrying={retrying} now={now}
@@ -1202,7 +1270,8 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
 
       {modal?.type === 'new' && (
         <NewAgentDialog key={modal.seq ?? 0} taken={records.map((r) => r.name)} defaultCwd={modal.cwd ?? null} prefill={modal.prefill ?? null} catalog={providers} checking={providersChecking} onCheck={() => void checkProviders()}
-          settings={settings} pickFolder={() => bridge.pickFolder()} filePaths={filePaths} onCreate={(form) => createAgent(form, !(modal.cwd || modal.prefill?.path))} onClose={() => setModal(null)} />
+          settings={settings} pickFolder={() => bridge.pickFolder()} filePaths={filePaths} onCreate={(form, consentRev) => createAgent(form, !(modal.cwd || modal.prefill?.path), consentRev)}
+          onGrantFull={grantFull} onClose={() => setModal(null)} />
       )}
       {modal?.type === 'external' && <ExternalSessions bridge={bridge} taken={records.map((r) => r.name)} onClose={() => setModal(null)}
         onImported={(name) => { select(name); setModal(null); void refreshAgents() }} />}
@@ -1234,6 +1303,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
               onCheck: () => { void runDoctor().then(() => refreshSettings()) },
             },
           } : {})}
+          {...(settings?.access ? { access: { consent: settings.access.consent, onRevoke: revokeFull } } : {})}
           {...(settings?.codexRules ? {
             rules: {
               list: settings.codexRules,
@@ -1252,12 +1322,14 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
       )}
       {modal?.type === 'configure' && (
         <Confirm testId="confirm-configure" danger
-          title={modal.reason === 'full' ? tr('Полный доступ?') : tr('Разговор не влезет в окно модели')}
-          action={modal.reason === 'full' ? tr('Включить полный доступ') : tr('Всё равно сменить')}
-          text={modal.reason === 'full'
-            ? <>{tr("Сессия ")}{whoIs(modal.name)}{tr(" со следующего хода: ")}{APPROVAL_FULL_WARNING}.</>
-            : <>{modal.text ?? (modal.pick.kind === 'model' ? tr`${modal.pick.misfit ?? ''}: разговор сессии больше окна модели ${modal.pick.model}` : '')}{tr(". Сменить модель сессии ")}{whoIs(modal.name)}{tr(" всё равно? Первый ход после смены модели дороже — кэш промпта у каждой модели свой.")}</>}
+          title={tr('Разговор не влезет в окно модели')}
+          action={tr('Всё равно сменить')}
+          text={<>{modal.text ?? (modal.pick.kind === 'model' ? tr`${modal.pick.misfit ?? ''}: разговор сессии больше окна модели ${modal.pick.model}` : '')}{tr(". Сменить модель сессии ")}{whoIs(modal.name)}{tr(" всё равно? Первый ход после смены модели дороже — кэш промпта у каждой модели свой.")}</>}
           onOk={() => configureAgent(modal.name, modal.pick, true)} onCancel={() => setModal(null)} />
+      )}
+      {modal?.type === 'consent' && (
+        <ConsentDialog busy={consentState.busy} error={consentState.error}
+          onGrant={() => void grantAndConfigure(modal.name, modal.pick)} onKeep={() => setModal(null)} />
       )}
       {modal?.type === 'search' && <SearchDialog run={runSearch} labelOf={labelOf} now={now} onOpen={openHit} onClose={() => setModal(null)} />}
       {modal?.type === 'rename' && (

@@ -1,5 +1,5 @@
 import type { LanguageSetting } from '../../../src/i18n/core.js'
-import { t } from '../lib/i18n.js'
+import { getLanguage, t } from '../lib/i18n.js'
 // M8f: «Настройки» (⌘,). Раздел «Новая сессия» — умолчания по провайдерам и «Подставлять последний выбор»;
 // «Обновления» — версия, состояние канала, «Проверить сейчас», «Перезапустить и обновить» и флаг автопроверки (что писать —
 // model/update.ts); «Страж сети» (0.3.6) — режим deny/allow, страны, выходы провайдеров под черновиком
@@ -9,6 +9,8 @@ import { t } from '../lib/i18n.js'
 
 import { useEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
+import { AccessSection } from './Access.js'
+import type { ConsentView } from '../model/access.js'
 import { APPROVAL_LABEL, PRESETS } from '../model/newAgent.js'
 import { DEFAULT_APPROVALS, draftError, effortOptions, setDefault, setDefaultProvider, settingsDraft } from '../model/sessionSettings.js'
 import type { NewSessionSettings, Provider } from '../../../src/sessions/settings.js'
@@ -24,7 +26,7 @@ import type { CodexRulesList } from '../model/rules.js'
 import { CMD, Kbd } from './common.js'
 import { Dialog } from './Panels.js'
 
-const PROVIDERS: readonly Provider[] = ['claude', 'codex']
+const PROVIDERS: readonly Provider[] = ['claude', 'codex', 'zcode']
 
 function ProviderDefaultsBox({ provider, draft, catalog, onChange }: {
   provider: Provider; draft: NewSessionSettings; catalog: ProviderCatalog | null; onChange(d: NewSessionSettings): void
@@ -40,23 +42,27 @@ function ProviderDefaultsBox({ provider, draft, catalog, onChange }: {
   return (
     <fieldset data-testid={`settings-${provider}`}>
       <legend>{provider}</legend>
-      <label className="field" htmlFor={id('model')}>
-        <span className="lbl">{t("модель")}</span>
-        <select id={id('model')} value={d.model ?? ''} data-testid={`settings-${provider}-model`}
-          onChange={(e) => onChange(setDefault(draft, provider, 'model', e.target.value))}>
-          <option value="">{provider === 'codex' ? t('по умолчанию Codex') : t`как в форме (${PRESETS.claude.defaultModel})`}</option>
-          {models.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
-        </select>
-        {provider === 'codex' && !catalog?.codex.models.length && <span className="note">{t("список моделей Codex не загружен — «Проверить» в «+ Сессия»")}</span>}
-      </label>
-      <label className="field" htmlFor={id('effort')}>
-        <span className="lbl">{t("усилие")}</span>
-        <select id={id('effort')} value={d.effort ?? ''} data-testid={`settings-${provider}-effort`}
-          onChange={(e) => onChange(setDefault(draft, provider, 'effort', e.target.value))}>
-          <option value="">{t("как в форме")}</option>
-          {effortList.map((x) => <option key={x} value={x}>{x}</option>)}
-        </select>
-      </label>
+      {provider === 'zcode'
+        ? <span className="note" data-testid="settings-zcode-fixed">{t("Модель и уровень продуманности задаёт аккаунт Z.AI — переключения нет. Браузера и тёплого процесса у ZCode нет.")}</span>
+        : <>
+          <label className="field" htmlFor={id('model')}>
+            <span className="lbl">{t("модель")}</span>
+            <select id={id('model')} value={d.model ?? ''} data-testid={`settings-${provider}-model`}
+              onChange={(e) => onChange(setDefault(draft, provider, 'model', e.target.value))}>
+              <option value="">{provider === 'codex' ? t('по умолчанию Codex') : t`как в форме (${PRESETS.claude.defaultModel})`}</option>
+              {models.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+            </select>
+            {provider === 'codex' && !catalog?.codex.models.length && <span className="note">{t("список моделей Codex не загружен — «Проверить» в «+ Сессия»")}</span>}
+          </label>
+          <label className="field" htmlFor={id('effort')}>
+            <span className="lbl">{t("усилие")}</span>
+            <select id={id('effort')} value={d.effort ?? ''} data-testid={`settings-${provider}-effort`}
+              onChange={(e) => onChange(setDefault(draft, provider, 'effort', e.target.value))}>
+              <option value="">{t("как в форме")}</option>
+              {effortList.map((x) => <option key={x} value={x}>{x}</option>)}
+            </select>
+          </label>
+        </>}
       <label className="field" htmlFor={id('approval')}>
         <span className="lbl">{t("подтверждения")}</span>
         <select id={id('approval')} value={d.approval ?? ''} data-testid={`settings-${provider}-approval`}
@@ -66,17 +72,21 @@ function ProviderDefaultsBox({ provider, draft, catalog, onChange }: {
         </select>
         <span className="note">{t("«Полный доступ» по умолчанию не ставится — только явно при заведении.")}</span>
       </label>
-      <label className="check">
-        <input type="checkbox" checked={d.mode === 'warm'} data-testid={`settings-${provider}-warm`}
-          onChange={(e) => onChange(setDefault(draft, provider, 'mode', e.target.checked ? 'warm' : undefined))} />
-        <span>{t("Тёплый процесс между репликами")}</span>
-        {provider === 'codex' && <span className="note">{t("у Codex процесс app-server и так общий — флаг ни на что не влияет")}</span>}
-      </label>
-      <label className="check">
-        <input type="checkbox" checked={d.browser === true} data-testid={`settings-${provider}-browser`}
-          onChange={(e) => onChange(setDefault(draft, provider, 'browser', e.target.checked ? true : undefined))} />
-        <span>{t("Браузер для агента")}</span>
-      </label>
+      {provider !== 'zcode' && (
+        <label className="check">
+          <input type="checkbox" checked={d.mode === 'warm'} data-testid={`settings-${provider}-warm`}
+            onChange={(e) => onChange(setDefault(draft, provider, 'mode', e.target.checked ? 'warm' : undefined))} />
+          <span>{t("Тёплый процесс между репликами")}</span>
+          {provider === 'codex' && <span className="note">{t("у Codex процесс app-server и так общий — флаг ни на что не влияет")}</span>}
+        </label>
+      )}
+      {provider !== 'zcode' && (
+        <label className="check">
+          <input type="checkbox" checked={d.browser === true} data-testid={`settings-${provider}-browser`}
+            onChange={(e) => onChange(setDefault(draft, provider, 'browser', e.target.checked ? true : undefined))} />
+          <span>{t("Браузер для агента")}</span>
+        </label>
+      )}
       <label className="check">
         <input type="checkbox" checked={d.worktree === true} data-testid={`settings-${provider}-worktree`}
           onChange={(e) => onChange(setDefault(draft, provider, 'worktree', e.target.checked ? true : undefined))} />
@@ -273,7 +283,7 @@ export function NetGuardSection({ panel, rule, onChange }: {
       </div>
       {warn && <div className="upd-state upd-warn" role="alert" data-testid="guard-warning"><span className="grow">{warn}</span></div>}
       <div className="upd-actions">
-        <span className="note" data-testid="guard-checked">{newest ? t`проверено ${new Date(newest).toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' })}` : t('выход ещё не проверялся')}</span>
+        <span className="note" data-testid="guard-checked">{newest ? t`проверено ${new Date(newest).toLocaleTimeString(getLanguage() === 'ru' ? 'ru' : 'en-GB', { hour: '2-digit', minute: '2-digit' })}` : t('выход ещё не проверялся')}</span>
         <span className="grow" />
         <button type="button" className="btn btn-sm" disabled={!canCheck} data-testid="guard-check"
           onClick={() => { setCoolUntil(Date.now() + NET_CHECK_COOLDOWN_MS); panel.onCheck() }}>
@@ -338,7 +348,7 @@ export function RulesSection({ panel }: { panel: RulesPanel }): ReactElement {
   )
 }
 
-export function SettingsDialog({ settings, catalog, updates, autoCheck = null, netGuard, rules, language = 'auto', languageSupported = false, languageOverride = null, onSave, onClose }: {
+export function SettingsDialog({ settings, catalog, updates, autoCheck = null, netGuard, rules, access, language = 'auto', languageSupported = false, languageOverride = null, onSave, onClose }: {
   settings: NewSessionSettings | null
   language?: LanguageSetting
   languageSupported?: boolean
@@ -352,6 +362,8 @@ export function SettingsDialog({ settings, catalog, updates, autoCheck = null, n
   netGuard?: NetGuardPanel
   /** Раздел «Правила „Всегда“»; нет — демон их не отдаёт (старый), раздела нет. */
   rules?: RulesPanel
+  /** Шаг A: раздел «Доступ» — согласие на полный доступ и «Отозвать»; нет — старый демон, раздела нет. */
+  access?: { consent: ConsentView | null; onRevoke(): Promise<string | null> }
   /**
    * `null` — записано; строка — отказ демона. `autoCheck` — флаг автопроверки (null — не трогать); `guard` — новое
    * правило стража и то, на котором стоял черновик (null — не менялось или раздела нет).
@@ -428,6 +440,7 @@ export function SettingsDialog({ settings, catalog, updates, autoCheck = null, n
           </div>
         </section>
         {netGuard && guard && <NetGuardSection key={guardKey} panel={netGuard} rule={guard} onChange={setGuard} />}
+        {access && <AccessSection consent={access.consent} onRevoke={access.onRevoke} />}
         {rules && <RulesSection panel={rules} />}
         {updates && <UpdatesSection panel={updates} auto={auto} onAuto={setAuto} />}
         <section className="settings-sec" aria-labelledby="settings-look-h" data-testid="settings-appearance">
@@ -436,7 +449,7 @@ export function SettingsDialog({ settings, catalog, updates, autoCheck = null, n
             <select id="settings-language" data-testid="settings-language" value={languageDraft} disabled={busy || !languageSupported || !!languageOverride}
               onChange={(e) => setLanguageDraft(e.target.value as LanguageSetting)}>
               <option value="auto">{t('Как в системе')}</option>
-              <option value="ru">Русский</option>
+              <option value="ru">Русский{/* i18n-ignore: language names stay native */}</option>
               <option value="en">English</option>
             </select>
             <span className="note">{!languageSupported ? t('Для смены языка обнови окно Пульта через «Настройки → Обновления».') : languageOverride ? t`Язык задан переменной PULT_LANG=${languageOverride}. Убери её, чтобы выбирать язык здесь.` : t('Смена языка применяется кнопкой «Сохранить» и перезагружает окно. Переписка сохранится.')}</span>

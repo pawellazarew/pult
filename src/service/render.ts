@@ -24,6 +24,12 @@ export interface RenderInput {
   home: string
   /** process.execPath CLI, который ставит службу: его каталог идёт первым в PATH. */
   nodeExec: string
+  /**
+   * Конфиг-переменные zcode из окружения установки (ZCODE_BASE_URL и родня): без них CLI zcode не
+   * находит свой provider-конфиг в ~/.zcode и ходы падают (замер 02.11.2026). Служба launchd даёт
+   * демону только PATH — пробрасываем осознанно, как PATH.
+   */
+  zcodeEnv?: Record<string, string>
 }
 
 export class RenderError extends Error {
@@ -133,6 +139,7 @@ export function renderPlist(i: RenderInput): string {
 		${xs('PULT_HOME', i.pultHome)}
 		<key>PULT_SERVICE</key>
 		<string>1</string>
+${Object.entries(i.zcodeEnv ?? {}).map(([k, v]) => `\t\t<key>${xmlEscape(k)}</key>\n\t\t${xs('zcode-конфиг', v)}\n`).join('')}
 	</dict>
 
 	<!-- Standard, а НЕ Background. Background — фоновый класс launchd: ресурсы процесса ограничены,
@@ -199,6 +206,7 @@ StandardError=append:${unitRaw('путь service.log', i.serviceLog)}
 Environment=${unitQuote('PATH', `PATH=${path}`)}
 Environment=${unitQuote('PULT_HOME', `PULT_HOME=${i.pultHome}`)}
 Environment="PULT_SERVICE=1"
+${Object.entries(i.zcodeEnv ?? {}).map(([k, v]) => `Environment=${unitQuote(k, `${k}=${v}`)}\n`).join('')}
 WorkingDirectory=${unitRaw('домашний каталог', i.home)}
 
 [Install]

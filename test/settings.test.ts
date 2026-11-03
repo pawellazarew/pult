@@ -89,14 +89,14 @@ describe('M8f: настройки «Новая сессия» и последн�
     assert.throws(() => parseNewSession({ defaults: { codex: { approval: 'workspace', browser: true } } }, true), /браузер/)
     assert.throws(() => parseNewSession({ defaults: { claude: { model: 'a b' } } }, true), /model/)
     assert.throws(() => parseNewSession({ defaults: { provider: 'opencode' } }, true), /claude \| codex/)
-    const ok = parseNewSession({ rememberLast: false, defaults: { provider: 'codex', claude: { model: 'opus', effort: 'high', approval: 'workspace', mode: 'warm', browser: true, worktree: true }, codex: {} } }, true)
-    assert.deepEqual(ok.value, { rememberLast: false, defaults: { provider: 'codex', claude: { model: 'opus', effort: 'high', approval: 'workspace', mode: 'warm', browser: true, worktree: true }, codex: {} } })
+    const ok = parseNewSession({ rememberLast: false, defaults: { provider: 'codex', claude: { model: 'opus', effort: 'high', approval: 'workspace', mode: 'warm', browser: true, worktree: true }, codex: {}, zcode: { approval: 'read-only' } } }, true)
+    assert.deepEqual(ok.value, { rememberLast: false, defaults: { provider: 'codex', claude: { model: 'opus', effort: 'high', approval: 'workspace', mode: 'warm', browser: true, worktree: true }, codex: {}, zcode: { approval: 'read-only' } } })
   })
   it('мягкий разбор config.json: кривое поле выброшено с предупреждением, остальное на месте; нет раздела — умолчания', () => {
     const { config, warnings } = validateConfig({ newSession: { rememberLast: 'да', defaults: { claude: { model: 'opus', approval: 'full' } } } })
-    assert.deepEqual(config.newSession, { rememberLast: true, defaults: { claude: { model: 'opus' }, codex: {} } })
+    assert.deepEqual(config.newSession, { rememberLast: true, defaults: { claude: { model: 'opus' }, codex: {}, zcode: {} } })
     assert.equal(warnings.length, 2, warnings.join('\n'))
-    assert.deepEqual(defaultConfig().newSession, { rememberLast: true, defaults: { claude: {}, codex: {} } })
+    assert.deepEqual(defaultConfig().newSession, { rememberLast: true, defaults: { claude: {}, codex: {}, zcode: {} } })
   })
   it('последний выбор: full не запоминается; папка — только когда форма открыта без папки; второй провайдер не стирается', () => {
     const a = nextLastUsed({}, { kind: 'claude', model: 'opus', effort: 'high', approval: 'full', mode: 'warm', browser: false, worktree: true, cwd: '/p/app' }, true, 't1')
@@ -160,11 +160,12 @@ describe('M8f: адаптер claude — смена со следующего х
       assert.ok(second!.argv.includes('--resume'), 'разговор тот же')
       assert.deepEqual([flag(second!.argv, '--model'), flag(second!.argv, '--effort'), flag(second!.argv, '--permission-mode')], ['sonnet', 'high', 'manual'])
       assert.deepEqual(second!.argv.slice(second!.argv.indexOf('--disallowedTools') + 1, second!.argv.indexOf('--disallowedTools') + 6), ['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'ExitPlanMode'])
-      // Обратно в ask и без усилия — флагов нет.
+      // Обратно в ask и без усилия — флагов нет, кроме явного «Спрашивать» (шаг A: `manual`, а не «без флага»).
       r.adapter.configure?.('w', { model: 'sonnet' })
       await (await r.adapter.send('w', 'и ещё')).done
       const third = r.runs()[2]!.argv
-      assert.equal(third.includes('--permission-mode') || third.includes('--disallowedTools') || third.includes('--effort'), false, third.join(' '))
+      assert.equal(flag(third, '--permission-mode'), 'manual', third.join(' '))
+      assert.equal(third.includes('--disallowedTools') || third.includes('--effort'), false, third.join(' '))
     } finally { await r.adapter.shutdown(); r.remove() }
   })
   it('тёплый процесс: перезапуск на границе хода — новый процесс с --resume и новой моделью, старый уходит', async () => {
@@ -299,7 +300,7 @@ describe('M8f (ревью): адаптер claude — гонки и живой �
       r.adapter.configure?.('b', { approval: 'full' })
       release()
       await (await p).done
-      assert.equal(flag(r.runs()[0]!.argv, '--permission-mode'), undefined, 'идущий ход получил bypassPermissions')
+      assert.equal(flag(r.runs()[0]!.argv, '--permission-mode'), 'manual', 'идущий ход получил bypassPermissions')
       await (await r.adapter.send('b', 'два')).done
       assert.equal(flag(r.runs()[1]!.argv, '--permission-mode'), 'bypassPermissions')
     } finally { await r.adapter.shutdown(); r.remove() }
@@ -311,7 +312,7 @@ describe('M8f (ревью): адаптер claude — гонки и живой �
       await r.adapter.startSession({ name: 'b', cwd: r.cwd, mode: 'turn', broker: true, approval: 'full' })
       await (await r.adapter.send('b', 'раз', { approval: 'ask' as never, browser: { headed: true } })).done
       assert.deepEqual(seen[0], { approval: 'ask', browser: { headed: true } })
-      assert.equal(flag(r.runs()[0]!.argv, '--permission-mode'), undefined)
+      assert.equal(flag(r.runs()[0]!.argv, '--permission-mode'), 'manual')
     } finally { await r.adapter.shutdown(); r.remove() }
   })
   it('ревью 2: тёплый процесс, порядок фикстуры 06 (задачи кончились ДО result) — следующий ход берёт новые настройки', async () => {
@@ -559,20 +560,23 @@ describe('M8f: демон — agent.configure', () => {
       const argv = lastArgv(w.argvOut)
       assert.deepEqual([flag(argv, '--model'), flag(argv, '--effort'), flag(argv, '--permission-mode')], ['opus', 'high', 'manual'])
       assert.ok(argv.includes('--resume'))
-      // Полный доступ — с подтверждением; обратно в ask — поля нет.
-      await c.request('agent.configure', { name: 'w', approval: 'full', confirm: true })
+      // Полный доступ — с подтверждением и разрешением (шаг A: согласия нет — разово, как `--yes` CLI); обратно в ask —
+      // поля нет, и разовое разрешение уходит вместе с режимом.
+      await assert.rejects(c.request('agent.configure', { name: 'w', approval: 'full', confirm: true }), code('consent_required'))
+      const full = (await c.request('agent.configure', { name: 'w', approval: 'full', confirm: true, grant: 'cli-once' })) as Record<string, unknown>
+      assert.equal(full['grant'], 'cli-once')
       await c.request('agent.configure', { name: 'w', approval: 'ask', effort: 'medium' })
 
       c.close(); await d.stop('рестарт')
       const saved = parseSessions(JSON.parse(readFileSync(home.paths.sessions, 'utf8'))).find((s) => s.name === 'w')!
-      assert.deepEqual([saved.model, saved.effort, saved.approval], ['opus', 'medium', undefined])
+      assert.deepEqual([saved.model, saved.effort, saved.approval, saved.grant], ['opus', 'medium', undefined, undefined])
       d = await startTestDaemon(home)
       c = await connectClient(home.paths)
       await c.request('agent.configure', { name: 'w', model: 'sonnet' })
       await c.request('agent.prompt', { name: 'w', text: 'после рестарта' })
       await c.request('agent.wait', { name: 'w', timeoutMs: 10_000 })
       const after = lastArgv(w.argvOut)
-      assert.deepEqual([flag(after, '--model'), flag(after, '--effort'), after.includes('--permission-mode')], ['sonnet', 'medium', false])
+      assert.deepEqual([flag(after, '--model'), flag(after, '--effort'), flag(after, '--permission-mode')], ['sonnet', 'medium', 'manual'])
     } finally { c.close(); await d.stop('конец теста'); home.remove(); rmSync(root, { recursive: true, force: true }) }
   })
 
@@ -613,8 +617,10 @@ describe('M8f: демон — agent.configure', () => {
       browserInstall: async (p: PultPaths) => ({ installed: false, version: PLAYWRIGHT_MCP_VERSION, path: browserPrefix(p) }),
       findChrome: () => '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
     })
-    const c = await connectClient(home.paths)
+    const c = await connectClient(home.paths, { client: 'shell' })
     try {
+      // Шаг A: окно один раз даёт согласие — дальше полный доступ включается без вопроса.
+      await c.request('access.grantFull', { confirm: true, version: 1, providers: ['claude', 'codex', 'zcode'] })
       await c.request('agent.start', { name: 'b', kind: 'claude', cwd: claudeWork(root, 'b').cwd, browser: { headed: true } })
       const off = (await c.request('agent.configure', { name: 'b', approval: 'full', confirm: true })) as Record<string, unknown>
       assert.equal(off['browser'], undefined)
@@ -641,9 +647,13 @@ describe('M8f: демон — settings.get|set и последний выбор'
     const c = await connectClient(home.paths)
     try {
       const got = (await c.request('settings.get')) as Record<string, unknown>
-      const { network, codexRules, language, ...rest } = got
+      const { network, codexRules, access, language, ...rest } = got
       assert.equal(language, 'auto')
-      assert.deepEqual(rest, { newSession: { rememberLast: true, defaults: { claude: {}, codex: {} } }, lastUsed: {}, updates: { check: true } })
+      assert.deepEqual(rest, { newSession: { rememberLast: true, defaults: { claude: {}, codex: {}, zcode: {} } }, lastUsed: {}, updates: { check: true } })
+      // Шаг A: согласия нет; действующий defaultMode владельца (тестовый дом — файла настроек нет).
+      assert.deepEqual(access, { consent: { rev: 0, version: 0, current: 1, granted: false, providers: [] }, providers: ['claude', 'codex', 'zcode'], claudeDefaultMode: 'default' })
+      await assert.rejects(c.request('settings.set', { access: { consent: true } }), code('invalid_params'), 'согласие — только access.grantFull')
+      await assert.rejects(c.request('settings.set', { consent: { rev: 1, providers: ['claude'] } }), code('invalid_params'))
       // План 16, № 11: правила «Всегда» Codex — из файла временного дома, не из настоящего ~/.codex.
       assert.deepEqual(codexRules, { path: join(home.paths.home, 'codex-rules', 'default.rules'), exists: false, rules: [], unmarked: 0 })
       // 0.3.6: правило стража и последние выходы; прокси и профили провайдеров окну не отдаются.
@@ -657,7 +667,7 @@ describe('M8f: демон — settings.get|set и последний выбор'
       await assert.rejects(c.request('settings.set', { newSession: { rememberLast: true }, notifyCommand: 'curl x' }), code('invalid_params'))
       await assert.rejects(c.request('settings.set', { newSession: { defaults: { claude: { approval: 'full' } } } }), code('invalid_params'))
       await assert.rejects(c.request('settings.set', { newSession: { defaults: { claude: { proxy: 'http://evil' } } } }), code('invalid_params'))
-      const ns = { rememberLast: false, defaults: { provider: 'codex', claude: { model: 'opus' }, codex: { effort: 'high', approval: 'read-only' } } }
+      const ns = { rememberLast: false, defaults: { provider: 'codex', claude: { model: 'opus' }, codex: { effort: 'high', approval: 'read-only' }, zcode: {} } }
       const set = (await c.request('settings.set', { newSession: ns })) as Record<string, unknown>
       assert.deepEqual(set['newSession'], ns)
       const file = JSON.parse(readFileSync(home.paths.config, 'utf8')) as Record<string, unknown>
@@ -678,6 +688,7 @@ describe('M8f: демон — settings.get|set и последний выбор'
       await cli.request('agent.start', { name: 'a', kind: 'claude', cwd: claudeWork(root, 'a').cwd, model: 'opus' })
       assert.equal(existsSync(home.paths.newSessionLast), false, 'CLI последний выбор не трогает')
       const b = claudeWork(root, 'b').cwd
+      await win.request('access.grantFull', { confirm: true, version: 1, providers: ['claude', 'codex', 'zcode'] })
       await win.request('agent.start', { name: 'b', kind: 'claude', cwd: b, model: 'opus', effort: 'high', approval: 'full', confirm: true, mode: 'warm', worktree: undefined })
       const last = ((await win.request('settings.get')) as { lastUsed: Record<string, unknown> }).lastUsed
       assert.deepEqual([last['provider'], last['cwd'], last['claude']], ['claude', b, { model: 'opus', effort: 'high', mode: 'warm', browser: false, worktree: false }])

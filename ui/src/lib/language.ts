@@ -5,5 +5,5 @@ export async function initializeLanguage(): Promise<void> {
   const language = window.pult?.language ?? detectLanguage(navigator.language)
   setLanguage(language)
   document.documentElement.lang = language
-  document.title = language === 'en' ? 'Pult' : 'Пульт'
+  document.title = language === 'en' ? 'Pult' : 'Пульт' // i18n-ignore
 }

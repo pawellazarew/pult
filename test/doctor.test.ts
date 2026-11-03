@@ -31,6 +31,7 @@ const fakeTools = (over: Partial<Record<ToolName, LocatedTool>> = {}): Record<To
   claude: tool('claude', '/opt/homebrew/bin/claude'),
   codex: tool('codex', '/Users/user/.local/bin/codex', '/Applications/ChatGPT.app/Contents/Resources/codex'),
   opencode: tool('opencode', '/opt/homebrew/bin/opencode'),
+  zcode: tool('zcode', '/Users/user/.local/bin/zcode', '/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs'),
   git: tool('git', '/usr/bin/git'),
   gh: tool('gh', '/opt/homebrew/bin/gh'),
   node: tool('node', '/opt/homebrew/bin/node'),
@@ -53,6 +54,10 @@ function find(items: DoctorItem[], id: string): DoctorItem {
 }
 
 function deps(home: ReturnType<typeof tempHome>, over: Partial<DoctorDeps> = {}): DoctorDeps {
+  // Креды zcode по умолчанию «вход есть» (токен в файле временного дома): пункт ok и не роняет
+  // `report.ok` чужих тестов. Тесты самого пункта подменяют файл; реальный ~/.zcode не читается.
+  const credsOk = join(home.paths.home, 'zcode-credentials.json')
+  try { writeFileSync(credsOk, JSON.stringify({ 'oauth:zai:access_token': 'test' })) } catch { /* уже есть */ }
   return {
     paths: home.paths,
     config: defaultConfig(),
@@ -61,6 +66,7 @@ function deps(home: ReturnType<typeof tempHome>, over: Partial<DoctorDeps> = {})
     net: async () => netOk(),
     daemonStatus: async () => null,
     nodeVersion: 'v22.9.0',
+    zcodeCreds: () => credsOk,
     ...over,
   }
 }
@@ -303,8 +309,8 @@ describe('доктор', () => {
           return { ...netOk(), provider }
         },
       }))
-      assert.equal(peak, 3, 'три провайдера проверяются одновременно')
-      assert.deepEqual(report.items.filter((i) => i.id.startsWith('net.')).map((i) => i.id), ['net.claude', 'net.codex', 'net.opencode'])
+      assert.equal(peak, 4, 'четыре провайдера проверяются одновременно')
+      assert.deepEqual(report.items.filter((i) => i.id.startsWith('net.')).map((i) => i.id), ['net.claude', 'net.codex', 'net.opencode', 'net.zcode'])
     } finally {
       home.remove()
     }
@@ -315,6 +321,52 @@ describe('доктор', () => {
     try {
       const report = await runDoctor(deps(home, { locate: () => fakeTools({ codex: tool('codex', null) }) }))
       assert.equal(report.items.some((i) => i.id === 'codex.schema'), false)
+    } finally {
+      home.remove()
+    }
+  })
+
+  it('вход zcode меряется по файлу кред: нет — fail, есть токен — ok, мусор — warn', async () => {
+    const home = tempHome()
+    try {
+      const credsOk = `${home.paths.home}/creds-ok.json`
+      const credsJunk = `${home.paths.home}/creds-junk.json`
+      writeFileSync(credsOk, JSON.stringify({ 'oauth:zai:access_token': 'секрет-не-читается', 'oauth:active_provider': 'zai' }))
+      writeFileSync(credsJunk, '{не json')
+
+      const noLogin = await runDoctor(deps(home, { zcodeCreds: () => `${home.paths.home}/no-such.json` }))
+      assert.equal(find(noLogin.items, 'login.zcode').status, 'fail')
+      assert.match(find(noLogin.items, 'login.zcode').fixCmd ?? '', /zcode login/)
+      // Содержимое токена в отчёт не попадает.
+      assert.equal(JSON.stringify(noLogin.items).includes('секрет'), false)
+
+      const okLogin = await runDoctor(deps(home, { zcodeCreds: () => credsOk }))
+      assert.equal(find(okLogin.items, 'login.zcode').status, 'ok')
+
+      const junkLogin = await runDoctor(deps(home, { zcodeCreds: () => credsJunk }))
+      assert.equal(find(junkLogin.items, 'login.zcode').status, 'warn')
+    } finally {
+      home.remove()
+    }
+  })
+
+  it('бинарь zcode внутри ZCode.app — warn с советом про симлинк', async () => {
+    const home = tempHome()
+    try {
+      const inside = '/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs'
+      const report = await runDoctor(deps(home, {
+        locate: () => fakeTools({ zcode: tool('zcode', inside) }),
+      }))
+      const item = find(report.items, 'cli.zcode')
+      assert.equal(item.status, 'warn')
+      assert.match(item.detail, /внутри ZCode\.app/)
+      assert.match(item.fix ?? '', /ln -sf/)
+      // По симлинку — тихо ок.
+      const viaLink = await runDoctor(deps(home, {
+        locate: () => fakeTools({ zcode: tool('zcode', '/Users/user/.local/bin/zcode', inside) }),
+      }))
+      // realpath уходит внутрь .app — предупреждение остаётся, это и есть правило (как у codex).
+      assert.equal(find(viaLink.items, 'cli.zcode').status, 'warn')
     } finally {
       home.remove()
     }

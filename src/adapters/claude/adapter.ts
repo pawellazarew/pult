@@ -136,6 +136,14 @@ interface Live {
    */
   childFlags: TurnFlags | null
   childNetKey: string
+  /** Ревью PR #39: режим, который живой процесс сказал в последнем `system/init` (`permissionMode`); до init — `null`. */
+  childReported: string | null
+  /**
+   * Перепроверка ревью PR #39 (№ 11): процесс с полными правами, снятый из-за сужения доступа, но ещё не вышедший.
+   * `child` уже свободен под новый процесс, а этот отслеживается до настоящего выхода: метка горит, «Стоп» до него
+   * дотягивается, SIGTERM доводится до SIGKILL.
+   */
+  leaving?: { child: ChildProcess; approval: ApprovalMode | undefined } | null
   /**
    * Ход запустил фоновую работу, а `background_tasks_changed` ещё не пришёл (ревью M8f, LOW 13). Живёт не дольше
    * `subagentGraceMs` (`bgExpectedTimer`) и гаснет на любом сигнале о задачах (`background_tasks`, `task_notification`):
@@ -155,7 +163,11 @@ function flagsKey(f: TurnFlags): string {
   return JSON.stringify([f.model ?? null, f.effort ?? null, f.approval ?? 'ask', f.browser === undefined ? '?' : f.browser ? (f.browser.headed ? 'headed' : 'on') : 'off'])
 }
 
-const APPROVAL_RANK: Readonly<Record<ApprovalMode, number>> = { 'read-only': 0, ask: 1, workspace: 2, full: 3 }
+/**
+ * Ширина режима. `inherit` — как `full`: действует `defaultMode` владельца, и он может быть bypass, — гадать в сторону
+ * «тише» нельзя (смена `inherit → ask` ждёт фоновые задачи, как смена с полного).
+ */
+const APPROVAL_RANK: Readonly<Record<ApprovalMode, number>> = { 'read-only': 0, ask: 1, workspace: 2, full: 3, inherit: 3 }
 /** Режим `next` строже `prev` (full > workspace > ask > read-only по ширине). */
 export function stricterMode(next: ApprovalMode | undefined, prev: ApprovalMode | undefined): boolean {
   return APPROVAL_RANK[next ?? 'ask'] < APPROVAL_RANK[prev ?? 'ask']
@@ -333,6 +345,30 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
       l.autoWaiters.push(done)
     })
 
+  /** Ещё не вышедший процесс, снятый сужением доступа. */
+  const leavingAlive = (l: Live): { child: ChildProcess; approval: ApprovalMode | undefined } | null => {
+    const v = l.leaving
+    if (!v) return null
+    if (closedChildren.has(v.child) || v.child.exitCode !== null || v.child.signalCode !== null) { l.leaving = null; return null }
+    return v
+  }
+  /**
+   * Снять процесс с полными правами, которые больше не разрешены (перепроверка ревью, № 11): stdin закрыт, сразу SIGTERM,
+   * не ушёл за `INTERRUPT_KILL_MS` — SIGKILL. До выхода он в `l.leaving` (метка, «Стоп»), в `pendingKills` (shutdown).
+   */
+  const retireChild = (l: Live, child: ChildProcess, approval: ApprovalMode | undefined): void => {
+    l.leaving = { child, approval }
+    pendingKills.add(child)
+    child.once('exit', () => { pendingKills.delete(child); if (l.leaving?.child === child) l.leaving = null })
+    try { child.stdin?.end() } catch { /* закрыт */ }
+    void (async () => {
+      try { child.kill('SIGTERM') } catch { /* уже ушёл */ }
+      if (await waitExit(child, INTERRUPT_KILL_MS)) return
+      logger.warn('процесс с полными правами не ушёл по SIGTERM — SIGKILL', { session: l.spec.name, pid: child.pid })
+      try { child.kill('SIGKILL') } catch { /* уже ушёл */ }
+    })()
+  }
+
   /** Закрыть процесс, который жил ради фоновых задач: stdin закрыт — CLI уходит сам. */
   const releaseProcess = (l: Live): void => {
     l.idle?.detach()
@@ -407,6 +443,8 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
           return
         case 'turn_started':
           l.started = true
+          if (sig.permissionMode) l.childReported = sig.permissionMode
+          if (sig.permissionMode && !gone()) opts.applied?.(name, { approval: l.childFlags?.approval, reported: sig.permissionMode })
           clearQuiet()
           if (!l.autoTurn) {
             l.autoTurn = true
@@ -483,6 +521,8 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
    */
   /** M8f (ревью): процесс ещё держит фоновую работу — задачи, ход-итог или запущенное в ходе, о чём CLI ещё не сказал. */
   const bgBusy = (l: Live): boolean => l.bgTasks > 0 || l.autoTurn || l.bgExpected
+  /** Ревью PR #39: живой процесс запущен с полными правами — флагом `bypassPermissions` или так сказал его `init`. */
+  const childFull = (l: Live): boolean => l.childFlags?.approval === 'full' || l.childReported === 'bypassPermissions'
 
   /** Флаг «CLI ещё скажет о фоновых задачах» — снять (сигнал пришёл, процесс ушёл, срок вышел). */
   const clearBgExpected = (l: Live): void => {
@@ -755,6 +795,9 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
       l.child = child
       // M8f: с чем процесс запущен — по этому граница хода решает, менять ли его.
       l.childFlags = { ...flags }
+      // Шаг A: процесс с этими правами есть — до его `init` метка «ожидается» (отправлено, не подтверждено).
+      l.childReported = null
+      opts.applied?.(name, { approval: flags.approval, reported: null })
       l.childNetKey = netKeyOf(netEnv)
       child.once('close', () => { closedChildren.add(child) })
       // О3: файл --mcp-config нужен claude только при запуске, а в нём env и заголовки своих серверов
@@ -844,7 +887,10 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
         l.lastTurnAt = now()
         // Жив ли процесс после хода: тёплый — всегда (после удачного хода), «на ход» — только ради
         // фоновых задач. Его дальше слушает attachIdle — ходы-итоги не теряются ни в одном режиме.
+        // Ревью PR #39: тёплый процесс с полными правами, которые сессии больше не положены (понижение или отзыв во
+        // время хода), без фоновой работы не остаётся ждать следующего хода — уходит сразу.
         const keep = outcome.ok && l.child === child && (l.spec.mode === 'warm' || keepForBackground)
+          && (keepForBackground || !childFull(l) || opts.mayRunFull?.(name) !== false)
         if (l.spec.mode === 'warm' && l.child && outcome.ok) armReaper(l)
         // Процесс ждёт задачи, о которых CLI ещё не сказал (`startedInBackground` в result без
         // `background_tasks_changed`) — граница хода считает его занятым (M8f, ревью LOW 13).
@@ -853,7 +899,18 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
         // M8f (ревью, HIGH 1): НЕ удачный ход закрывает процесс и в тёплом режиме. Раньше тёплый процесс после
         // ошибки оставался без слушателя и без жнеца: если он потом умирал, следующий ход писал в мёртвый stdin
         // и ждал вечно, а `agent stop` его уже не видел.
-        if (!keep) {
+        // Не оставлен потому, что полные права больше не разрешены, — снимается лестницей сигналов (№ 11).
+        const fullGone = !keep && outcome.ok && childFull(l) && opts.mayRunFull?.(name) === false
+        if (fullGone) {
+          const approval = l.childFlags?.approval
+          if (l.child === child) {
+            l.child = null
+            l.mapper = null
+            dropBackground(l, 'process_exit')
+            clearBgExpected(l)
+          }
+          retireChild(l, child, approval)
+        } else if (!keep) {
           try { child.stdin?.end() } catch { /* закрыт */ }
           if (l.child === child) {
             l.child = null
@@ -944,6 +1001,9 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
             return
           case 'turn_started':
             l.started = true
+            // Шаг A: действующий режим — из `init` КАЖДОГО хода, а не из того, что Пульт отправил.
+            if (sig.permissionMode) l.childReported = sig.permissionMode
+            if (sig.permissionMode && !gone()) opts.applied?.(name, { approval: l.childFlags?.approval, reported: sig.permissionMode })
             // Пришёл новый `init` внутри отсрочки — значит фоновая работа ожила.
             clearGrace()
             return
@@ -1123,7 +1183,7 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
       live.set(spec.name, {
         spec, providerSessionId, started: false, child: null, mapper: null,
         lastTurnAt: 0, mcpConfigPath: null, busy: false, reaper: null, closing: false,
-        stopRequested: false, netEnv: {}, bgTasks: 0, idle: null, autoTurn: false, autoWaiters: [], childFlags: null, childNetKey: '{}', bgExpected: false, bgExpectedTimer: null, turnAbort: null,
+        stopRequested: false, netEnv: {}, bgTasks: 0, idle: null, autoTurn: false, autoWaiters: [], childFlags: null, childNetKey: '{}', childReported: null, bgExpected: false, bgExpectedTimer: null, turnAbort: null,
       })
       return { name: spec.name, providerSessionId } satisfies StartedSession
     },
@@ -1139,6 +1199,12 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
     async interrupt(name) {
       const l = live.get(name)
       if (!l) return
+      // Уходящий процесс с полными правами (№ 11): «Стоп» — сразу SIGKILL, ждать лестницу незачем.
+      const going = leavingAlive(l)
+      if (going) {
+        try { going.child.kill('SIGKILL') } catch { /* уже ушёл */ }
+        await waitExit(going.child, INTERRUPT_KILL_MS)
+      }
       // Флаг ставится ВСЕГДА, даже когда ребёнка ещё нет: ход может сидеть на `await` стража
       // сети и родить процесс через мгновение. Тогда его снимет сам `runTurn` по этому флагу.
       l.stopRequested = true
@@ -1203,7 +1269,7 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
         started: Boolean(rec.providerSessionId),
         child: null, mapper: null, lastTurnAt: 0, mcpConfigPath: null,
         busy: false, reaper: null, closing: false, stopRequested: false, netEnv: {},
-        bgTasks: 0, idle: null, autoTurn: false, autoWaiters: [], childFlags: null, childNetKey: '{}', bgExpected: false, bgExpectedTimer: null, turnAbort: null,
+        bgTasks: 0, idle: null, autoTurn: false, autoWaiters: [], childFlags: null, childNetKey: '{}', childReported: null, bgExpected: false, bgExpectedTimer: null, turnAbort: null,
       })
     },
 
@@ -1238,6 +1304,38 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
       askKeys.revokeSession(name)
       live.delete(name)
       status(name, 'done', {})
+    },
+
+    activeAccess(name) {
+      // Шаг A: процесс за работой — ход, ход-итог фоновой задачи или сами фоновые задачи. Ревью PR #39: процесс с
+      // полными правами считается и без дела (тёплый): он жив с bypass, и метка не снимается, пока он не вышел.
+      const l = live.get(name)
+      const child = l?.child
+      // № 11: процесс с полными правами снят, но ещё не вышел — права у него есть, метка горит.
+      const going = l ? leavingAlive(l) : null
+      if (going && going.approval === 'full') return { approval: 'full' }
+      // Только чтение: вышедший процесс — «никого нет», но его уборку делает ход (`dropDeadChild`), не геттер.
+      if (!l || !child || closedChildren.has(child) || child.exitCode !== null || child.signalCode !== null) return going ? (going.approval ? { approval: going.approval } : {}) : null
+      if (!l.childFlags || !(l.busy || bgBusy(l) || childFull(l))) return null
+      return l.childFlags.approval ? { approval: l.childFlags.approval } : {}
+    },
+
+    retire(name) {
+      // Ревью PR #39: доступ сузили. Тёплый процесс с полными правами без дела снимается сейчас — иначе он жил бы с
+      // bypass до жнеца. Занятый (ход, фоновые задачи) доживает: на границе хода его сменит новый процесс по снимку,
+      // а ход, который он начнёт сам после отзыва, менеджер остановит по его `init`.
+      const l = live.get(name)
+      if (!l || l.closing) return
+      dropDeadChild(l)
+      if (!l.child || l.busy || bgBusy(l) || !childFull(l) || opts.mayRunFull?.(name) !== false) return
+      logger.info('доступ сузили — тёплый процесс с полными правами снят', { session: name, pid: l.child.pid })
+      if (l.reaper) { clearTimeout(l.reaper); l.reaper = null }
+      const child = l.child
+      const approval = l.childFlags?.approval
+      releaseProcess(l)
+      // `releaseProcess` отпускает ссылку сразу и добивает одним SIGTERM; тут — слежка до выхода и SIGKILL (№ 11).
+      retireChild(l, child, approval)
+      status(name, 'cold', { reason: 'access_changed' })
     },
 
     blocked: () => (providerBlocked === null ? { blocked: false } : { blocked: true, reason: providerBlocked }),

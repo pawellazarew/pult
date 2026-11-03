@@ -17,9 +17,9 @@ export { DEFAULT_GUARD_COUNTRIES }
 export type { GuardRule }
 
 export type NetMode = 'auto' | 'required' | 'off'
-export type ProviderName = 'claude' | 'codex' | 'opencode'
+export type ProviderName = 'claude' | 'codex' | 'opencode' | 'zcode'
 
-export const PROVIDERS: readonly ProviderName[] = ['claude', 'codex', 'opencode']
+export const PROVIDERS: readonly ProviderName[] = ['claude', 'codex', 'opencode', 'zcode']
 
 export interface NetworkProfile {
   mode: NetMode
@@ -139,6 +139,7 @@ export function defaultConfig(): PultConfig {
       claude: { ...DEFAULT_NETWORK_PROFILE },
       codex: { ...DEFAULT_NETWORK_PROFILE },
       opencode: { ...DEFAULT_NETWORK_PROFILE },
+      zcode: { ...DEFAULT_NETWORK_PROFILE },
     },
     guard: defaultGuard(),
     warmTtlMs: DEFAULT_WARM_TTL_MS,
@@ -420,6 +421,23 @@ export function writeUpdatesCheck(file: string, check: boolean): void {
  */
 export function writeNetworkGuard(file: string, rule: GuardRule): void {
   writeConfigSubtree(file, 'network', (prev) => ({ ...prev, guard: { mode: rule.mode, countries: [...rule.countries] } }), 'правило стража сети не записано', ['guardCountries'])
+}
+
+/**
+ * Маркеры однократных миграций — `config.json → migrations.<имя>` (быстрый старт, ревью PR #39 M2). Живут в
+ * config.json, а не в файле, который мигрируют: прежний демон при откате переписывает `sessions.json` своей версией
+ * и о маркере не знает, а чужие ключи config.json он сохраняет (`writeConfigSubtree` пишет только своё поддерево).
+ */
+export function readMigrationMarker(file: string, name: string): { at: string } | null {
+  try {
+    const raw = JSON.parse(readFileSync(file, 'utf8')) as { migrations?: Record<string, unknown> }
+    const m = raw?.migrations?.[name] as { at?: unknown } | undefined
+    return m && typeof m.at === 'string' && Number.isFinite(Date.parse(m.at)) ? { at: m.at } : null
+  } catch { return null }
+}
+
+export function writeMigrationMarker(file: string, name: string, at: string): void {
+  writeConfigSubtree(file, 'migrations', (prev) => ({ ...prev, [name]: { at } }), `маркер миграции ${name} не записан`)
 }
 
 function writeConfigSubtree(file: string, key: string, next: (prev: Record<string, unknown>) => unknown, what: string, drop: readonly string[] = []): void {

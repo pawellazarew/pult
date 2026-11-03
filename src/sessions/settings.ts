@@ -5,9 +5,9 @@ import { tr } from '../i18n/shared.js'
 // один и тот же вход обязан быть одним.
 
 import type { ApprovalMode } from '../adapters/types.js'
-import { isApprovalMode } from '../adapters/types.js'
+import { APPROVAL_LIST, approvalFits, isApprovalMode } from '../adapters/types.js'
 
-export type Provider = 'claude' | 'codex'
+export type Provider = 'claude' | 'codex' | 'zcode'
 
 /**
  * Пресеты Claude — те, что предлагает форма «+ Сессия» (дословно то, что принимает CLI: `--model` знает
@@ -44,6 +44,7 @@ export const APPROVAL_WORDS: Readonly<Record<ApprovalMode, string>> = {
   get ask() { return tr('спрашивать') },
   get workspace() { return tr('правки в папке без вопросов') },
   get full() { return tr('полный доступ') },
+  get inherit() { return tr('как в настройках Claude') },
 }
 
 /**
@@ -52,7 +53,7 @@ export const APPROVAL_WORDS: Readonly<Record<ApprovalMode, string>> = {
  * правит файлы под папкой — а там настройки самих агентов и оболочки.
  */
 export function homeCwdWarning(): string {
-  return tr('папка — домашняя или выше: агент сможет менять ~/.claude, ~/.codex, ~/.zshrc и др. без вопросов ')
+  return tr('папка — домашняя или выше: агент сможет менять ~/.claude, ~/.codex, ~/.zcode, ~/.zshrc и др. без вопросов ')
   + tr('в режимах «Правки в папке без вопросов» и «Полный доступ» (у Codex — и в «Спрашивать»)')
 }
 /** Compatibility export for callers using the default Russian locale. */
@@ -144,6 +145,12 @@ function choiceFor(list: readonly ModelChoice[], model: string | null | undefine
  */
 export function planConfigure(cur: ConfigureTarget, req: ConfigureRequest, list: readonly ModelChoice[] | null, windows: ReadonlyMap<string, number>): ConfigureChanges {
   const changes: ConfigureChanges = {}
+  // ZCode (маршрут A): у его CLI нет флага модели и усилия — смена честно отклоняется, а не молча
+  // запоминается и не применяется. Режим подтверждений (`--mode`) меняется как у всех.
+  if (cur.provider === 'zcode') {
+    if (req.model !== undefined) throw new ConfigureError('invalid_params', tr('у ZCode модель задаётся аккаунтом Z.AI — выбора модели нет'))
+    if (req.effort !== undefined) throw new ConfigureError('invalid_params', tr('у ZCode нет переключения усилия — модель и уровень продуманности задаёт аккаунт'))
+  }
   if (req.model !== undefined) {
     if (typeof req.model !== 'string' || !MODEL_RE.test(req.model)) throw new ConfigureError('invalid_params', tr('модель — непустое имя без пробелов'))
     if (list && list.length && req.model !== cur.model && !list.some((m) => m.id === req.model)) {
@@ -154,7 +161,10 @@ export function planConfigure(cur: ConfigureTarget, req: ConfigureRequest, list:
     throw new ConfigureError('invalid_params', tr('усилие — слово латиницей (low, medium, high…)'))
   }
   if (req.approval !== undefined && !isApprovalMode(req.approval)) {
-    throw new ConfigureError('invalid_params', tr('режим подтверждений — read-only | ask | workspace | full'))
+    throw new ConfigureError('invalid_params', tr`режим подтверждений — ${tr(APPROVAL_LIST)}`)
+  }
+  if (req.approval !== undefined && !approvalFits(cur.provider, req.approval)) {
+    throw new ConfigureError('invalid_params', tr('режим «как в настройках Claude» есть только у Claude'))
   }
   const model = req.model ?? cur.model ?? null
   const modelChanged = req.model !== undefined && req.model !== (cur.model ?? null)
@@ -209,8 +219,11 @@ export function browserNote(c: ConfigureChanges): string | null {
 
 // --- «+ Сессия»: умолчания, последний выбор -------------------------------------------------------
 
-/** Режим подтверждений по умолчанию: `full` сюда не ставится никогда — только явно при заведении. */
-export type DefaultApproval = Exclude<ApprovalMode, 'full'>
+/**
+ * Режим подтверждений по умолчанию: `full` сюда не ставится никогда — только явно при заведении. `inherit` — тоже:
+ * при `defaultMode: bypassPermissions` у владельца он и есть полный доступ.
+ */
+export type DefaultApproval = Exclude<ApprovalMode, 'full' | 'inherit'>
 
 export interface ProviderDefaults {
   model?: string
@@ -225,7 +238,7 @@ export interface ProviderDefaults {
 export interface NewSessionSettings {
   /** Подставлять в «+ Сессия» последний выбор окна (иначе — умолчания). */
   rememberLast: boolean
-  defaults: { provider?: Provider; claude: ProviderDefaults; codex: ProviderDefaults }
+  defaults: { provider?: Provider; claude: ProviderDefaults; codex: ProviderDefaults; zcode: ProviderDefaults }
 }
 
 /** Последний выбор окна: те же поля плюс папка. `full` не хранится. */
@@ -233,18 +246,23 @@ export interface LastUsed {
   provider?: Provider
   claude?: ProviderDefaults
   codex?: ProviderDefaults
+  zcode?: ProviderDefaults
   cwd?: string
   at?: string
 }
 
 export function defaultNewSession(): NewSessionSettings {
-  return { rememberLast: true, defaults: { claude: {}, codex: {} } }
+  return { rememberLast: true, defaults: { claude: {}, codex: {}, zcode: {} } }
 }
 
 const PROVIDER_KEYS = new Set(['model', 'effort', 'approval', 'mode', 'browser', 'worktree'])
 
-/** Блокирует ли режим браузер (тот же список, что `approvalBrowserRefusal` в src/mcp/browser.ts). */
+/**
+ * Блокирует ли режим браузер (тот же список, что `approvalBrowserRefusal` в src/mcp/browser.ts).
+ * ZCode (маршрут A) браузера не получает ни в каком режиме: у его CLI нет канала MCP-конфига.
+ */
 export function modeBlocksBrowser(provider: Provider, mode: ApprovalMode | undefined): boolean {
+  if (provider === 'zcode') return true
   return provider === 'claude' ? mode === 'full' : mode === 'workspace' || mode === 'full'
 }
 
@@ -264,6 +282,7 @@ function parseProviderDefaults(provider: Provider, x: unknown, path: string, bad
   }
   if (o['approval'] !== undefined) {
     if (o['approval'] === 'full') bad(tr`${path}.approval — полный доступ по умолчанию не ставится: только явно при заведении`)
+    else if (o['approval'] === 'inherit') bad(tr`${path}.approval — «как в настройках Claude» по умолчанию не ставится: только явно при заведении`)
     else if (isApprovalMode(o['approval'])) out.approval = o['approval'] as DefaultApproval
     else bad(`${path}.approval — read-only | ask | workspace`)
   }
@@ -307,13 +326,14 @@ export function parseNewSession(x: unknown, strict: boolean): { value: NewSessio
     if (d === null || typeof d !== 'object' || Array.isArray(d)) bad(tr('.defaults — объект'))
     else {
       const dd = d as Record<string, unknown>
-      for (const k of Object.keys(dd)) if (k !== 'provider' && k !== 'claude' && k !== 'codex' && strict) bad(tr`.defaults.${k} — незнакомое поле`)
+      for (const k of Object.keys(dd)) if (k !== 'provider' && k !== 'claude' && k !== 'codex' && k !== 'zcode' && strict) bad(tr`.defaults.${k} — незнакомое поле`)
       if (dd['provider'] !== undefined) {
-        if (dd['provider'] === 'claude' || dd['provider'] === 'codex') value.defaults.provider = dd['provider']
-        else bad('.defaults.provider — claude | codex')
+        if (dd['provider'] === 'claude' || dd['provider'] === 'codex' || dd['provider'] === 'zcode') value.defaults.provider = dd['provider']
+        else bad('.defaults.provider — claude | codex | zcode')
       }
       value.defaults.claude = parseProviderDefaults('claude', dd['claude'], '.defaults.claude', bad, strict)
       value.defaults.codex = parseProviderDefaults('codex', dd['codex'], '.defaults.codex', bad, strict)
+      value.defaults.zcode = parseProviderDefaults('zcode', dd['zcode'], '.defaults.zcode', bad, strict)
     }
   }
   return { value, warnings }
@@ -324,16 +344,17 @@ export function parseLastUsed(x: unknown): LastUsed {
   if (x === null || typeof x !== 'object' || Array.isArray(x)) return {}
   const o = x as Record<string, unknown>
   const out: LastUsed = {}
-  if (o['provider'] === 'claude' || o['provider'] === 'codex') out.provider = o['provider']
+  if (o['provider'] === 'claude' || o['provider'] === 'codex' || o['provider'] === 'zcode') out.provider = o['provider']
   const soft = (p: Provider): ProviderDefaults | undefined => {
     const v = o[p]
     if (v === undefined) return undefined
     const src = v !== null && typeof v === 'object' && !Array.isArray(v) ? { ...(v as Record<string, unknown>) } : {}
-    if (src['approval'] === 'full') delete src['approval']
+    if (src['approval'] === 'full' || src['approval'] === 'inherit') delete src['approval']
     try { return parseProviderDefaults(p, src, p, () => { /* мягко */ }, false) } catch { return {} }
   }
   const c = soft('claude'); if (c) out.claude = c
   const x2 = soft('codex'); if (x2) out.codex = x2
+  const z = soft('zcode'); if (z) out.zcode = z
   if (typeof o['cwd'] === 'string' && o['cwd'].startsWith('/') && o['cwd'].length <= 4096 && !/[\p{Cc}\p{Cf}]/u.test(o['cwd'])) out.cwd = o['cwd']
   if (typeof o['at'] === 'string') out.at = o['at']
   return out
@@ -350,7 +371,7 @@ export function nextLastUsed(prev: LastUsed, start: {
   const p: ProviderDefaults = {
     ...(start.model && MODEL_RE.test(start.model) ? { model: start.model } : {}),
     ...(start.effort && EFFORT_RE.test(start.effort) ? { effort: start.effort } : {}),
-    ...(start.approval && start.approval !== 'full' ? { approval: start.approval } : {}),
+    ...(start.approval && start.approval !== 'full' && start.approval !== 'inherit' ? { approval: start.approval } : {}),
     mode: start.mode === 'warm' ? 'warm' : 'turn',
     browser: start.browser === true,
     worktree: start.worktree === true,

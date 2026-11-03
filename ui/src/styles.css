@@ -11,6 +11,7 @@
   --selected: #E9EDF5; --user-surface: #EFF1ED;
   --amber: #86551A; --amber-soft: rgba(155,94,31,.09); --amber-edge: rgba(155,94,31,.32);
   --teal: #236A61; --teal-soft: rgba(40,118,108,.09); --teal-edge: rgba(40,118,108,.32);
+  --glm: #A23A78; --glm-soft: rgba(162,58,120,.09); --glm-edge: rgba(162,58,120,.32);
   --oc: #7154A8; --oc-soft: rgba(113,84,168,.09); --oc-edge: rgba(113,84,168,.32);
   --ok: #28734D; --ok-soft: rgba(40,115,77,.10);
   --run: #3D60BE; --run-soft: rgba(66,103,200,.09);
@@ -35,6 +36,7 @@
     --selected: #293139; --user-surface: #252A2C;
     --amber: #DFA664; --amber-soft: rgba(223,166,100,.10); --amber-edge: rgba(223,166,100,.36);
     --teal: #74C5B3; --teal-soft: rgba(116,197,179,.10); --teal-edge: rgba(116,197,179,.36);
+    --glm: #E08FBE; --glm-soft: rgba(224,143,190,.10); --glm-edge: rgba(224,143,190,.36);
     --oc: #BBA5E0; --oc-soft: rgba(187,165,224,.10); --oc-edge: rgba(187,165,224,.36);
     --ok: #78C69A; --ok-soft: rgba(120,198,154,.11);
     --run: #8CAAF0; --run-soft: rgba(140,170,240,.10);
@@ -108,6 +110,7 @@ button { font: inherit; color: inherit; }
 }
 .tag-claude { color: var(--amber); background: var(--amber-soft); }
 .tag-codex { color: var(--teal); background: var(--teal-soft); }
+.tag-zcode { color: var(--glm); background: var(--glm-soft); }
 .tag-opencode { color: var(--oc); background: var(--oc-soft); }
 .tag-pult { color: var(--mut); background: var(--queued-soft); }
 .chip {
@@ -230,6 +233,7 @@ button { font: inherit; color: inherit; }
 .ag::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--prov, var(--queued)); opacity: .9; }
 .ag[data-provider="claude"] { --prov: var(--amber); }
 .ag[data-provider="codex"] { --prov: var(--teal); }
+.ag[data-provider="zcode"] { --prov: var(--glm); }
 .ag:hover { background: var(--sunk); }
 .ag[aria-selected="true"] { background: var(--accent-soft); }
 .ag[aria-selected="true"] .ag-name { color: var(--accent); }
@@ -341,6 +345,7 @@ button { font: inherit; color: inherit; }
 .tab[aria-selected="true"]::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; background: var(--accent); }
 .tab[data-provider="claude"] { --prov: var(--amber); }
 .tab[data-provider="codex"] { --prov: var(--teal); }
+.tab[data-provider="zcode"] { --prov: var(--glm); }
 .tab-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--prov, var(--queued)); flex: none; }
 .tab[data-busy="1"] .tab-dot { animation: pulse 1.4s ease-in-out infinite; }
 .tab[data-needs="1"] .tab-name { color: var(--wait); }
@@ -426,6 +431,7 @@ button { font: inherit; color: inherit; }
 .who-you { color: var(--accent); }
 .who-claude { color: var(--amber); }
 .who-codex { color: var(--teal); }
+.who-zcode { color: var(--glm); }
 .it-user .body {
   background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--accent);
   padding: 8px 12px; word-break: break-word;
@@ -494,7 +500,9 @@ button { font: inherit; color: inherit; }
 .md code.md-icode { cursor: pointer; }
 .md code.md-icode:hover { background: var(--accent-soft); }
 .md code.md-icode.md-flash { background: var(--ok-soft); }
-.md pre { margin: 0 0 8px; padding: 9px 11px; background: var(--sunk); border: 1px solid var(--hair); overflow: auto; font-family: var(--mono); font-size: 12px; line-height: 1.5; }
+/* Блок кода идёт сверху вниз строками как есть (отступы на месте), а длинная строка переносится внутри колонки —
+   без горизонтальной прокрутки: оверлейные полосы macOS её не показывают, хвост команды просто пропадает за краем. */
+.md pre { margin: 0 0 8px; padding: 9px 11px; background: var(--sunk); border: 1px solid var(--hair); overflow: auto; font-family: var(--mono); font-size: 12px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 4; }
 .md pre code { background: none; padding: 0; }
 /* Блок кода: шапка с языком и «Копировать». Шапка не выделяется — копия реплики целиком без неё. */
 .md-code { margin: 0 0 8px; background: var(--sunk); border: 1px solid var(--hair); }
@@ -556,6 +564,7 @@ button { font: inherit; color: inherit; }
 .it-agent > .body { border: 1px solid var(--line); border-left: 2px dashed var(--prov, var(--queued)); background: color-mix(in srgb, var(--panel) 55%, transparent); }
 .it-agent[data-provider="claude"] { --prov: var(--amber); }
 .it-agent[data-provider="codex"] { --prov: var(--teal); }
+.it-agent[data-provider="zcode"] { --prov: var(--glm); }
 .sub-head { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--hair); font-size: 12.5px; }
 .sub-head .lbl { color: var(--prov); }
 .sub-head .desc { color: var(--mut); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
@@ -638,18 +647,16 @@ button { font: inherit; color: inherit; }
 .diff { margin: 7px 10px 0; border: 1px solid var(--hair); font-family: var(--mono); font-size: 11.5px; line-height: 1.5; max-height: 280px; overflow: auto; background: var(--ground); }
 .diff-h { display: flex; gap: 10px; padding: 3px 8px; background: var(--sunk); border-bottom: 1px solid var(--hair); font-size: 10.5px; color: var(--mut); position: sticky; top: 0; }
 .diff-h .a { color: var(--add); } .diff-h .d { color: var(--del); }
-.dl { display: grid; grid-template-columns: 34px 14px 1fr; white-space: pre; }
+/* Строки диффа переносятся, а не уходят за край под невидимую прокрутку (оверлейные полосы macOS её
+   не показывают) — и в ленте, и в узкой колонке Inbox. Номер и знак остаются в своих колонках, перенос
+   идёт под текстом строки; minmax(0,1fr) — иначе длинный токен снова раздвигает колонку. */
+.dl { display: grid; grid-template-columns: 34px 14px minmax(0, 1fr); white-space: pre; }
 .dl .no { color: var(--faint); text-align: right; padding-right: 6px; user-select: none; }
 .dl .op { color: var(--faint); user-select: none; text-align: center; }
-.dl .tx { padding-right: 8px; }
+.dl .tx { padding-right: 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .dl.add { background: var(--add-soft); } .dl.add .op, .dl.add .tx { color: var(--add); }
 .dl.del { background: var(--del-soft); } .dl.del .op, .dl.del .tx { color: var(--del); }
 .dl.gap { color: var(--faint); background: var(--sunk); font-size: 10.5px; padding-left: 48px; display: block; }
-/* Узкая колонка Inbox: длинные строки переносятся, а не уходят за край под невидимую прокрутку
-   (оверлейные полосы macOS её не показывают). minmax(0,1fr) — иначе длинный токен снова
-   раздвигает колонку. В ленте дифф широкий и остаётся без переноса. */
-.inbox .dl { grid-template-columns: 34px 14px minmax(0, 1fr); }
-.inbox .dl .tx { white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* --- Inbox ------------------------------------------------------------------------ */
 .inbox { display: flex; flex-direction: column; min-height: 0; background: var(--panel); border-left: 1px solid var(--line); }
@@ -734,6 +741,7 @@ button { font: inherit; color: inherit; }
 .seg button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .seg.prov button[aria-pressed="true"][data-v="claude"] { background: var(--amber-soft); color: var(--amber); }
 .seg.prov button[aria-pressed="true"][data-v="codex"] { background: var(--teal-soft); color: var(--teal); }
+.seg.prov button[aria-pressed="true"][data-v="zcode"] { background: var(--glm-soft); color: var(--glm); }
 
 .doc-sum { display: flex; align-items: center; gap: 8px; }
 .doc-group h3 { margin: 0 0 6px; }
@@ -1119,3 +1127,33 @@ button { font: inherit; color: inherit; }
 
 /* Служебный курсор журнала демона: точка синхронизации e2e, человеку на экране не нужен. */
 .ag-foot.journal { display: none; }
+
+/* Быстрый старт, шаг A: доступ. Красное — только по действующему режиму (agent.list → access.red). */
+.composer .approval { display: inline-flex; align-items: center; gap: 4px; }
+.composer .approval > .ic { width: 12px; height: 12px; }
+.composer .approval .access-suffix { font-weight: 400; color: var(--mut); }
+.composer .approval.t-wait { color: var(--wait); }
+.composer .box.access-full { border-color: var(--fail-edge); }
+.composer .box.access-full:focus-within { border-color: var(--fail); box-shadow: 0 0 0 2px var(--fail-soft); }
+.access-strip { max-width: 764px; margin: 6px auto 0; display: flex; align-items: center; gap: 7px; padding: 6px 10px; border-radius: 8px;
+  background: var(--sunk); color: var(--mut); font: 12px/1.45 var(--body); }
+.access-strip .ic { width: 13px; height: 13px; flex: none; color: var(--wait); }
+.access-pill { flex: none; display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border: 1px solid var(--fail-edge); border-radius: 5px;
+  background: var(--fail-soft); color: var(--fail); font: 11.5px/1.6 var(--body); white-space: nowrap; }
+.access-pill .ic { width: 11px; height: 11px; }
+.ag-meta .row-access { display: inline-flex; align-items: center; gap: 3px; color: var(--fail); white-space: nowrap; }
+.ag-meta .row-access .ic { width: 11px; height: 11px; }
+/* Диалог согласия может стоять поверх «Новой сессии» — свой слой над её затемнением. */
+.scrim.scrim-top { z-index: 110; }
+.dlg.consent { width: min(560px, calc(100vw - 32px)); }
+.dlg.consent .dlg-h { gap: 10px; }
+.consent-icon { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 7px; background: var(--fail-soft); color: var(--fail); }
+.consent-icon .ic { width: 15px; height: 15px; }
+.consent-lead { margin: 0 0 12px; line-height: 1.55; }
+.consent-prov { display: grid; grid-template-columns: 74px 1fr; gap: 10px 12px; margin: 0 0 12px; padding: 12px 14px; border-radius: 8px; background: var(--sunk); font-size: 12.5px; line-height: 1.55; }
+.consent-prov dt { font-weight: 600; }
+.consent-prov dd { margin: 0; }
+.consent-prov code { font: 11.5px var(--mono); padding: 0 4px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); }
+.consent-list { margin: 0; padding-left: 18px; font-size: 12.5px; line-height: 1.55; }
+.consent-list li + li { margin-top: 4px; }
+.dlg.consent .dlg-f .note { font-size: 12px; color: var(--mut); }

@@ -1,4 +1,4 @@
-import { t } from '../lib/i18n.js'
+import { getLanguage, t } from '../lib/i18n.js'
 import { useEffect, useState } from 'react'
 import type { ReactElement } from 'react'
 import type { PultBridge } from '../../../shell/src/contract.js'
@@ -83,7 +83,7 @@ export function ExternalSessions({ bridge, taken, onImported, onClose }: {
           {sessions.map((s) => <button key={s.id} type="button" className="external-row" aria-pressed={selected?.id === s.id} disabled={importing}
             onClick={() => setSelected(s)} data-testid="external-session-row">
             <strong>{s.title}</strong><span className="mono mut" title={s.cwd}>{shortPath(s.cwd, 50)}</span>
-            <time className="mut">{new Date(s.updatedAt).toLocaleString('ru-RU')}</time>
+            <time className="mut">{new Date(s.updatedAt).toLocaleString(getLanguage() === 'ru' ? 'ru-RU' : 'en-GB')}</time>
           </button>)}
           {page.nextCursor && <button type="button" className="btn" disabled={loading || importing} onClick={() => void more()}>{loading ? t('Загружаю…') : t('Ещё чаты')}</button>}
         </div>

@@ -47,6 +47,14 @@ export const sharedEn: Readonly<Record<string, string>> = {
   ": mode = {0} — не deny|allow": ": mode = {0} is not deny|allow",
   ": countries не список": ": countries is not a list",
   "config.json: network.guard.countries: {0} — не код страны ISO 3166-1, пропущено": "config.json: network.guard.countries: {0} is not an ISO 3166-1 country code; skipped",
-  "config.json: network.guard — режим allow без стран: все ходы запрещены, пока не добавишь страну («Настройки» → «Страж сети»)": "config.json: network.guard is in allow mode with no countries; all turns are blocked until you add a country (Settings → Network guard)"
+  "config.json: network.guard — режим allow без стран: все ходы запрещены, пока не добавишь страну («Настройки» → «Страж сети»)": "config.json: network.guard is in allow mode with no countries; all turns are blocked until you add a country (Settings → Network guard)",
+  "как в настройках Claude": "as in Claude settings",
+  "папка — домашняя или выше: агент сможет менять ~/.claude, ~/.codex, ~/.zcode, ~/.zshrc и др. без вопросов ": "the folder is your home directory or above: the agent can change ~/.claude, ~/.codex, ~/.zcode, ~/.zshrc and other files without asking ",
+  "у ZCode модель задаётся аккаунтом Z.AI — выбора модели нет": "ZCode's model is set by the Z.AI account; there is no model choice",
+  "у ZCode нет переключения усилия — модель и уровень продуманности задаёт аккаунт": "ZCode has no effort setting; the account sets the model and reasoning level",
+  "режим подтверждений — {0}": "approval mode must be {0}",
+  "режим «как в настройках Claude» есть только у Claude": "the “as in Claude settings” mode is available only for Claude",
+  "{0}.approval — «как в настройках Claude» по умолчанию не ставится: только явно при заведении": "{0}.approval cannot default to “as in Claude settings”; choose it explicitly when starting a session",
+  "read-only | ask | workspace | full | inherit (только claude)": "read-only | ask | workspace | full | inherit (claude only)"
 }
 export const tr = translator(sharedEn)
