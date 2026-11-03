@@ -73,7 +73,7 @@ describe('белый список моста', () => {
     assert.deepEqual([...ALLOWED_METHODS].sort(), [
       'access.grantFull', 'access.revokeFull',
       'agent.archive', 'agent.browser', 'agent.configure', 'agent.export', 'agent.import', 'agent.list', 'agent.preflight', 'agent.prompt', 'agent.queue.move', 'agent.queue.remove', 'agent.queue.resume', 'agent.read', 'agent.rename', 'agent.retry', 'agent.rm', 'agent.seen', 'agent.start', 'agent.startStatus', 'agent.stop', 'agent.tree', 'agent.wait',
-      'daemon.status', 'doctor.run', 'draft.claim', 'draft.list', 'draft.put', 'draft.remove', 'draft.touch', 'events.get', 'events.history', 'events.search', 'events.snapshot', 'events.subscribe', 'events.tail', 'events.unsubscribe',
+      'daemon.status', 'doctor.run', 'draft.claim', 'draft.get', 'draft.list', 'draft.put', 'draft.remove', 'draft.touch', 'events.get', 'events.history', 'events.search', 'events.snapshot', 'events.subscribe', 'events.tail', 'events.unsubscribe',
       'folders.clearHistory', 'folders.forget', 'folders.list', 'folders.recent',
       'mcp.list', 'mcp.select', 'perm.list', 'perm.resolve', 'project.add', 'project.list', 'project.remove', 'provider.reset', 'providers.check',
       'runtime.discover', 'runtime.perform', 'runtime.release', 'runtime.setup.list', 'runtime.setup.request', 'runtime.setup.resolve', 'runtime.takeover',

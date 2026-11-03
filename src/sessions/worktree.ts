@@ -277,3 +277,13 @@ export async function removeWorktree(wt: WorktreeInfo, parentEnv: NodeJS.Process
   const r = await git(['-C', from, 'worktree', 'remove', wt.path], env)
   if (r.code !== 0) throw new WorktreeError(GIT_FAILED, gitText(r))
 }
+
+/**
+ * Шаг B (ревью m10): ветку, которую завёл несостоявшийся старт, убрать вслед за его worktree. `branch -d` — без силы:
+ * ветку с коммитами, которых нет в текущей, git не удалит. Зовётся только для ветки, которую этот старт и создал.
+ */
+export async function deleteBranch(wt: WorktreeInfo, parentEnv: NodeJS.ProcessEnv = process.env): Promise<void> {
+  if (!existsSync(wt.repo)) return
+  const r = await git(['-C', wt.repo, 'branch', '-d', '--', wt.branch], gitEnv(parentEnv))
+  if (r.code !== 0) throw new WorktreeError(GIT_FAILED, gitText(r))
+}

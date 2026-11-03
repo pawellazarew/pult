@@ -25,6 +25,13 @@ export interface StartEntry {
   name?: string
   /** Ошибка последней попытки: старт не дошёл до `registered` или реплика не принята. */
   error?: { code: string; message: string }
+  /** sha256 первой реплики, принятой этим стартом: повтор с другим текстом получает `promptDiffers`. */
+  promptHash?: string
+  /**
+   * Номер последнего события журнала ДО отдачи реплики. `prompt-accepted` пишется до `say` (ревью M2/5): упал демон
+   * посреди — повтор смотрит, есть ли после этого номера `message.user` сессии; есть — реплика ушла, второй раз нет.
+   */
+  promptFrom?: number
   at: string
   updatedAt: string
 }
@@ -38,6 +45,10 @@ export interface StartJournal {
   reservedNames(): Set<string>
   /** Убрать записи старше срока; число убранных. */
   prune(maxAgeMs?: number): number
+  /** Снять запись (бронь имени черновика, который удалили, не отправив). */
+  remove(requestId: string): boolean
+  /** Все записи (сверка с реестром после рестарта). */
+  list(): StartEntry[]
 }
 
 export function createStartJournal(dir: string, now: () => number = Date.now): StartJournal {
@@ -52,6 +63,8 @@ export function createStartJournal(dir: string, now: () => number = Date.now): S
         requestId: id, phase: o['phase'] as StartPhase,
         ...(typeof o['name'] === 'string' ? { name: o['name'] } : {}),
         ...(err && typeof err['code'] === 'string' && typeof err['message'] === 'string' ? { error: { code: err['code'], message: err['message'] } } : {}),
+        ...(typeof o['promptHash'] === 'string' && /^[0-9a-f]{64}$/.test(o['promptHash']) ? { promptHash: o['promptHash'] } : {}),
+        ...(typeof o['promptFrom'] === 'number' && Number.isSafeInteger(o['promptFrom']) ? { promptFrom: o['promptFrom'] } : {}),
         at: typeof o['at'] === 'string' ? o['at'] : new Date(0).toISOString(),
         updatedAt: typeof o['updatedAt'] === 'string' ? o['updatedAt'] : new Date(0).toISOString(),
       }
@@ -74,6 +87,13 @@ export function createStartJournal(dir: string, now: () => number = Date.now): S
         if (e?.name && !phaseAtLeast(e.phase, 'registered')) out.add(e.name)
       }
       return out
+    },
+    remove(requestId) {
+      if (!REQUEST_ID_RE.test(requestId)) return false
+      try { unlinkSync(file(requestId)); return true } catch { return false }
+    },
+    list() {
+      return all().flatMap((id) => { const e = read(id); return e ? [e] : [] })
     },
     prune(maxAgeMs = START_JOURNAL_MAX_AGE_MS) {
       let n = 0

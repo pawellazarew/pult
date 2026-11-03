@@ -131,6 +131,12 @@ export interface SessionRecord {
   autoTitled?: boolean
   createdAt: string
   /**
+   * Быстрый старт, шаг B: `requestId` старта из черновика окна (`agent.start {requestId}`). Связь журнала стартов с ЭТИМ
+   * экземпляром сессии: повтор запроса после рестарта демона находит сессию по нему, а не по имени — имя могли удалить
+   * и отдать другой сессии (ревью Codex 6, 7).
+   */
+  startRequest?: string
+  /**
    * Начало последнего хода человека (`message.user` из `agent.prompt`: реплика из окна, из очереди или из CLI).
    * По нему окно ставит беседу наверх списка — один раз, в момент старта хода. События хода, субагенты, фон,
    * смена статуса и сторож тишины его не трогают: строка не прыгает, пока идёт ход. Нет поля — ходов ещё не
@@ -336,6 +342,7 @@ export function parseSessions(raw: unknown): SessionRecord[] {
       ...(o['archived'] === true ? { archived: true } : {}),
       ...(o['autoTitled'] === true ? { autoTitled: true } : {}),
       createdAt: typeof o['createdAt'] === 'string' ? o['createdAt'] : new Date(0).toISOString(),
+      ...(typeof o['startRequest'] === 'string' && /^[0-9a-f-]{36}$/.test(o['startRequest']) ? { startRequest: o['startRequest'] } : {}),
       ...(typeof o['lastTurnAt'] === 'string' && Number.isFinite(Date.parse(o['lastTurnAt'])) ? { lastTurnAt: o['lastTurnAt'] } : {}),
       lastStatus: isStatus(o['lastStatus']) ? o['lastStatus'] : 'cold',
       lastEventId: typeof o['lastEventId'] === 'number' && Number.isSafeInteger(o['lastEventId']) ? o['lastEventId'] : 0,
