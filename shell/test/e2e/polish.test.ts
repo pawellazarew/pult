@@ -80,15 +80,22 @@ describe('полировка: фокус, управление у ввода и 
     assert.ok(await h.win.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1))
   })
 
-  it('в узком окне модальный диалог находится выше открытого Inbox', async () => {
+  it('в узком окне черновик и меню его чипа не перекрыты открытым Inbox', async () => {
     await h.app.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows()[0]?.setContentSize(1024, 642) })
     await h.win.getByTestId('toggle-inbox').click()
     await h.win.keyboard.press('Meta+N')
-    const dialog = h.win.getByTestId('new-agent-dialog')
-    await dialog.waitFor()
-    const pick = dialog.getByTestId('pick-folder')
-    assert.ok(await pick.evaluate((el) => { const r = el.getBoundingClientRect(); return el.contains(document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)) }), 'Inbox перекрывает кнопку диалога')
+    const d = h.win.getByTestId('draft')
+    await d.waitFor()
+    const visible = async (testId: string): Promise<boolean> => h.win.getByTestId(testId).first().evaluate((el) => {
+      const r = el.getBoundingClientRect(); return el.contains(document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2))
+    })
+    assert.ok(await visible('draft-send'), 'Inbox перекрывает «Отправить»')
+    await d.getByTestId('draft-chip-access').click()
+    await h.win.getByTestId('draft-menu-access').waitFor()
+    assert.ok(await visible('draft-access-item'), 'меню доступа перекрыто')
     await h.win.keyboard.press('Escape')
-    await dialog.waitFor({ state: 'detached' })
+    await d.getByTestId('draft-input').fill('')
+    await h.win.keyboard.press('Escape')
+    await d.waitFor({ state: 'detached' })
   })
 })

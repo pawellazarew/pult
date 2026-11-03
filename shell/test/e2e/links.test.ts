@@ -1,7 +1,7 @@
 // e2e ссылок pult:// (docs/14 О3). macOS отдаёт ссылку событием `open-url` — тест шлёт его в main
 // тем же `app.emit`, что и система; холодный старт — ссылкой в argv (так её отдаёт Linux), до ready.
-// Главное: `pult://new` только заполняет диалог — без «Завести» демон не видит ни одной новой сессии,
-// а папку подставляет, только если она уже знакома (проект или папка сессии). В тестовом прогоне
+// Главное: `pult://new` только открывает черновик (шаг B быстрого старта) — без «Отправить» демон не видит ни одной новой
+// сессии, а папку подставляет, только если она уже знакома (проект или папка сессии). В тестовом прогоне
 // оболочка обработчиком pult:// в системе не регистрируется. Предел частоты ссылок сжат до 400 мс.
 
 import assert from 'node:assert/strict'
@@ -49,27 +49,39 @@ describe('ссылки pult://', () => {
   /** Следующая годная ссылка — не раньше предела частоты. */
   const gap = (): Promise<void> => sleep(GAP_MS + 100)
 
-  it('холодный старт по ссылке: диалог заполнен, чужая папка не подставлена, сессия не заведена', async () => {
-    const dlg = h.win.getByTestId('new-agent-dialog')
-    await dlg.waitFor({ timeout: 20_000 })
-    await dlg.getByTestId('new-agent-from-link').waitFor({ timeout: 2000 })
-    // Папки нет среди проектов и сессий (её и на диске нет) — поле пустое, человек выбирает сам.
-    await dlg.getByTestId('new-agent-link-path-rejected').waitFor({ timeout: 2000 })
-    assert.equal(await dlg.getByTestId('new-agent-cwd').getAttribute('data-path'), '')
-    assert.equal(await dlg.getByTestId('new-agent-prompt').inputValue(), COLD_PROMPT, '`+` остался `+`')
-    assert.equal(await dlg.getByTestId('new-agent-prompt-stats').textContent(), `2 строки · ${[...COLD_PROMPT].length} знаков`)
-    assert.equal(await dlg.getByRole('group', { name: 'Провайдер' }).getByRole('button', { name: 'codex' }).getAttribute('aria-pressed'), 'true')
+  /** Убрать черновик из списка (с текстом Esc его не трогает) — меню строки в сайдбаре. */
+  const removeDraft = async (id: string): Promise<void> => {
+    await h.win.locator(`[data-testid="draft-row"][data-draft="${id}"]`).click({ button: 'right' })
+    await h.win.getByTestId('draft-menu-list').getByTestId('draft-remove').click()
+    await h.win.locator(`[data-testid="draft-row"][data-draft="${id}"]`).waitFor({ state: 'detached', timeout: 5000 })
+  }
+
+  it('холодный старт по ссылке: черновик заполнен, чужая папка не подставлена, сессия не заведена', async () => {
+    const d = h.win.getByTestId('draft')
+    await d.waitFor({ timeout: 20_000 })
+    await d.getByTestId('draft-from-link').waitFor({ timeout: 2000 })
+    // Папки нет среди проектов и сессий (её и на диске нет) — чип пустой, человек выбирает сам.
+    await d.getByTestId('draft-link-path-rejected').waitFor({ timeout: 2000 })
+    assert.equal(await d.getByTestId('draft-chip-folder').getAttribute('data-path'), '')
+    assert.equal(await d.getByTestId('draft-input').inputValue(), COLD_PROMPT, '`+` остался `+`')
+    // Длинный хвост реплики из ссылки не спрячется за краем поля: счётчик строк и знаков (ревью M5).
+    assert.equal(await d.getByTestId('draft-prompt-stats').textContent(), `Текст из ссылки: 2 строки · ${[...COLD_PROMPT].length} знаков — прокрути поле, прежде чем отправлять.`)
+    assert.equal(await d.getByTestId('draft-chip-model').getAttribute('data-provider'), 'codex')
+    assert.notEqual(await d.getByTestId('draft-input').evaluate((el) => el === document.activeElement), true, 'черновик из ссылки фокус не берёт')
     const seen = await links()
     assert.equal(seen.length, 1)
     assert.deepEqual(seen[0], { via: 'argv', ok: true, target: { newSession: { path: COLD_PATH, prompt: COLD_PROMPT, provider: 'codex' }, link: true } })
     assert.deepEqual(await delivered(), [{ newSession: { pathRejected: true, prompt: COLD_PROMPT, provider: 'codex' }, link: true }])
     assert.equal(await h.app.evaluate(() => (globalThis as LinkGlobals).__pultTestProtocolClient), false, 'PULT_TEST не регистрирует pult:// в системе')
-    // Ничего не запущено без человека; «Завести» без папки — отказ формы.
-    await dlg.getByTestId('new-agent-submit').click()
-    assert.ok(await waitFor(async () => (await dlg.getByText('выбери папку').count()) === 1, 3000), 'форма пустила без папки')
-    assert.deepEqual(await list(), [])
+    // Ничего не запущено без человека; ↵ без папки открывает меню папки, а не заводит чат.
+    await sleep(1100)
+    await d.getByTestId('draft-input').press('Enter')
+    await d.getByTestId('draft-menu-folder').waitFor({ timeout: 3000 })
     await h.win.keyboard.press('Escape')
-    await dlg.waitFor({ state: 'detached', timeout: 5000 })
+    await d.getByTestId('draft-menu-folder').waitFor({ state: 'detached', timeout: 3000 })
+    assert.deepEqual(await list(), [])
+    await removeDraft((await d.getAttribute('data-draft')) as string)
+    await d.waitFor({ state: 'detached', timeout: 5000 })
     assert.deepEqual(await list(), [])
   })
 
@@ -101,19 +113,21 @@ describe('ссылки pult://', () => {
     const dir = h.workDir('stranger', { scenario: 'simple' })
     await gap()
     await openUrl(`pult://new?path=${enc(dir)}`)
-    const dlg = h.win.getByTestId('new-agent-dialog')
-    await dlg.waitFor({ timeout: 5000 })
-    await dlg.getByTestId('new-agent-link-path-rejected').waitFor({ timeout: 2000 })
-    assert.equal(await dlg.getByTestId('new-agent-cwd').getAttribute('data-path'), '')
+    const d = h.win.getByTestId('draft')
+    await d.waitFor({ timeout: 5000 })
+    await d.getByTestId('draft-link-path-rejected').waitFor({ timeout: 2000 })
+    assert.equal(await d.getByTestId('draft-chip-folder').getAttribute('data-path'), '')
     await h.stubPickFolder(dir)
-    await dlg.getByTestId('pick-folder').click()
-    assert.ok(await waitFor(async () => (await dlg.getByTestId('new-agent-cwd').getAttribute('data-path')) === dir, 5000), 'выбор папки не сработал')
+    await d.getByTestId('draft-pick-folder').click()
+    assert.ok(await waitFor(async () => (await d.getByTestId('draft-chip-folder').getAttribute('data-path')) === dir, 5000), 'выбор папки не сработал')
+    assert.equal(await d.getByTestId('draft-link-path-rejected').count(), 0, 'пометка ушла с выбором папки')
+    // Пустой черновик Esc убирает.
     await h.win.keyboard.press('Escape')
-    await dlg.waitFor({ state: 'detached', timeout: 5000 })
+    await d.waitFor({ state: 'detached', timeout: 5000 })
     assert.deepEqual((await list()).map((r) => r.name).sort(), ['alpha', 'beta'])
   })
 
-  it('pult://new с папкой проекта (через симлинк): путь целиком; «Завести» заперта секунду и одна заводит сессию', async () => {
+  it('pult://new с папкой проекта (через симлинк): путь проекта; отправка заперта секунду; вторая ссылка — новый черновик', async () => {
     const dir = h.workDir('linked', { scenario: 'simple' })
     const added = (await c.request('project.add', { path: dir })) as { path: string }
     const alias = path.join(h.home, 'aliases', 'linked-alias')
@@ -121,33 +135,37 @@ describe('ссылки pult://', () => {
     symlinkSync(dir, alias)
     await gap()
     await openUrl(`pult://new?path=${enc(alias)}&prompt=${enc('Скажи одно слово')}`)
-    const dlg = h.win.getByTestId('new-agent-dialog')
-    await dlg.waitFor({ timeout: 5000 })
-    const submit = dlg.getByTestId('new-agent-submit')
+    const d = h.win.getByTestId('draft')
+    await d.waitFor({ timeout: 5000 })
+    const first = (await d.getAttribute('data-draft')) as string
+    const submit = d.getByTestId('draft-send')
     assert.equal(await submit.isDisabled(), true, 'кнопка заперта сразу после ссылки')
-    // В форму идёт путь проекта, как его хранит демон, а не путь из ссылки.
-    assert.equal(await dlg.getByTestId('new-agent-cwd').getAttribute('data-path'), added.path)
-    assert.equal(await dlg.getByTestId('new-agent-cwd').textContent(), added.path, 'путь целиком, без сокращения')
-    assert.equal(await dlg.getByTestId('new-agent-link-path-rejected').count(), 0)
-    assert.equal(await dlg.getByTestId('new-agent-name').inputValue(), 'linked')
+    // В черновик идёт путь проекта, как его хранит демон, а не путь из ссылки.
+    assert.equal(await d.getByTestId('draft-chip-folder').getAttribute('data-path'), added.path)
+    assert.equal(await d.getByTestId('draft-location').textContent(), added.path, 'путь целиком, без сокращения')
+    assert.equal(await d.getByTestId('draft-link-path-rejected').count(), 0)
     await sleep(500)
     assert.deepEqual((await list()).map((r) => r.name).sort(), ['alpha', 'beta'], 'ссылка сама ничего не завела')
 
-    // Вторая ссылка поверх открытого диалога его не подменяет — строка в шапке.
+    // Вторая ссылка открытый черновик не подменяет — заводит новый; первый остаётся в списке с текстом.
     await gap()
     await openUrl('pult://new?provider=codex&prompt=other')
-    const banner = h.win.getByTestId('action-error')
-    await banner.waitFor({ timeout: 5000 })
-    assert.match((await banner.textContent()) ?? '', /pult:\/\//)
-    assert.equal(await dlg.getByTestId('new-agent-cwd').getAttribute('data-path'), added.path)
-    assert.equal(await dlg.getByTestId('new-agent-prompt').inputValue(), 'Скажи одно слово')
-
+    assert.ok(await waitFor(async () => (await h.win.getByTestId('draft').getAttribute('data-draft')) !== first, 5000), 'нового черновика нет')
+    const second = (await h.win.getByTestId('draft').getAttribute('data-draft')) as string
+    assert.equal(await h.win.getByTestId('draft-input').inputValue(), 'other')
+    assert.equal(await h.win.getByTestId('draft-row').count(), 2)
+    await removeDraft(second)
+    await h.win.locator(`[data-testid="draft-row"][data-draft="${first}"]`).click()
+    await d.waitFor({ timeout: 5000 })
+    assert.equal(await d.getByTestId('draft-input').inputValue(), 'Скажи одно слово')
+    assert.ok(await waitFor(async () => !(await submit.isDisabled()), 3000), 'кнопка так и не открылась')
     await submit.click()
-    await dlg.waitFor({ state: 'detached', timeout: 10_000 })
+    await d.waitFor({ state: 'detached', timeout: 10_000 })
     await h.win.locator('[data-testid="conversation"][data-agent="linked"]').waitFor({ timeout: 10_000 })
     const rec = (await list()).find((r) => r.name === 'linked')
     assert.deepEqual([rec?.provider, rec?.cwd], ['claude', added.path])
     assert.ok(await waitFor(async () => /Скажи одно слово/.test((await h.win.getByTestId('feed').textContent()) ?? ''), 10_000), 'первая реплика не ушла')
+    assert.equal(await h.win.getByTestId('draft-row').count(), 0, 'отправленный черновик ушёл из списка')
   })
 
   it('предел частоты: вторая годная ссылка следом — отброшена', async () => {
@@ -192,7 +210,7 @@ describe('ссылки pult://', () => {
     assert.deepEqual(seen.filter((l) => l.ok), [], JSON.stringify(seen))
     assert.ok(seen.every((l) => typeof l.reason === 'string' && l.reason.length > 0 && l.reason !== 'частая ссылка'))
     await sleep(300)
-    assert.equal(await h.win.getByTestId('new-agent-dialog').count(), 0)
+    assert.equal(await h.win.getByTestId('draft').count(), 0)
     await h.win.locator('[data-testid="conversation"][data-agent="alpha"]').waitFor({ timeout: 2000 })
   })
 

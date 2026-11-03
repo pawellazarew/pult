@@ -34,6 +34,12 @@ const PATHS: Record<string, ReactElement> = {
   mark: <><rect x="1.5" y="1.5" width="13" height="13" rx="2" /><path d="M4.5 10.5l2-2 2 1.5 3-4.5" /></>,
   // Шаг A: щит доступа — чип, плашка в шапке, строка сайдбара, диалог согласия.
   shield: <path d="M8 1.8l5 1.9v4c0 3.1-2.1 5.6-5 6.5-2.9-.9-5-3.4-5-6.5v-4z" />,
+  // Шаг B: чипы черновика — стрелка меню, усилие, ещё, браузер, «только этот чат».
+  chevd: <path d="M4.5 6.5L8 10l3.5-3.5" />,
+  gauge: <><path d="M2.5 11.5a5.5 5.5 0 1 1 11 0" /><path d="M8 11.5l2.6-3.2" /></>,
+  more: <><circle cx="3.5" cy="8" r=".9" fill="currentColor" /><circle cx="8" cy="8" r=".9" fill="currentColor" /><circle cx="12.5" cy="8" r=".9" fill="currentColor" /></>,
+  globe: <><circle cx="8" cy="8" r="6" /><path d="M2 8h12M8 2c1.8 1.7 2.6 3.7 2.6 6S9.8 12.3 8 14c-1.8-1.7-2.6-3.7-2.6-6S6.2 3.7 8 2z" /></>,
+  pin: <path d="M6 2.5h4l-.5 4 2 2v1H4.5v-1l2-2zM8 9.5V14" />,
 }
 
 export function Icon({ name, className = 'ic' }: { name: keyof typeof PATHS | string; className?: string }): ReactElement {

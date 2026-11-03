@@ -49,28 +49,28 @@ function ProviderDefaultsBox({ provider, draft, catalog, onChange }: {
             <span className="lbl">{t("модель")}</span>
             <select id={id('model')} value={d.model ?? ''} data-testid={`settings-${provider}-model`}
               onChange={(e) => onChange(setDefault(draft, provider, 'model', e.target.value))}>
-              <option value="">{provider === 'codex' ? t('по умолчанию Codex') : t`как в форме (${PRESETS.claude.defaultModel})`}</option>
+              <option value="">{provider === 'codex' ? t('по умолчанию Codex') : t`по умолчанию (${PRESETS.claude.defaultModel})`}</option>
               {models.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
             </select>
-            {provider === 'codex' && !catalog?.codex.models.length && <span className="note">{t("список моделей Codex не загружен — «Проверить» в «+ Сессия»")}</span>}
+            {provider === 'codex' && !catalog?.codex.models.length && <span className="note">{t("список моделей Codex не загружен — «Проверить» в шапке окна")}</span>}
           </label>
           <label className="field" htmlFor={id('effort')}>
             <span className="lbl">{t("усилие")}</span>
             <select id={id('effort')} value={d.effort ?? ''} data-testid={`settings-${provider}-effort`}
               onChange={(e) => onChange(setDefault(draft, provider, 'effort', e.target.value))}>
-              <option value="">{t("как в форме")}</option>
+              <option value="">{t("по умолчанию")}</option>
               {effortList.map((x) => <option key={x} value={x}>{x}</option>)}
             </select>
           </label>
         </>}
       <label className="field" htmlFor={id('approval')}>
-        <span className="lbl">{t("подтверждения")}</span>
+        <span className="lbl">{t("доступ по умолчанию")}</span>
         <select id={id('approval')} value={d.approval ?? ''} data-testid={`settings-${provider}-approval`}
           onChange={(e) => onChange(setDefault(draft, provider, 'approval', e.target.value as typeof d.approval | ''))}>
-          <option value="">{t("как в форме (")}{APPROVAL_LABEL.ask.toLowerCase()})</option>
+          <option value="">{t("для новой папки — ")}{APPROVAL_LABEL.workspace.toLowerCase()}</option>
           {DEFAULT_APPROVALS.map((a) => <option key={a} value={a}>{APPROVAL_LABEL[a]}</option>)}
         </select>
-        <span className="note">{t("«Полный доступ» по умолчанию не ставится — только явно при заведении.")}</span>
+        <span className="note">{t("«Полный доступ» по умолчанию не ставится — только явно в чате; папка его запомнит.")}</span>
       </label>
       {provider !== 'zcode' && (
         <label className="check">
@@ -420,21 +420,18 @@ export function SettingsDialog({ settings, catalog, updates, autoCheck = null, n
       </>}>
       <div className="form-stack" onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); e.stopPropagation(); void save() } }}>
         <section className="settings-sec" aria-labelledby="settings-new-h" data-testid="settings-new-session">
-          <h3 id="settings-new-h">{t("Новая сессия")}</h3>
+          <h3 id="settings-new-h">{t("Новый чат")}</h3>
           <label className="field" htmlFor="set-provider">
             <span className="lbl">{t("провайдер по умолчанию")}</span>
             <select id="set-provider" ref={first} value={draft.defaults.provider ?? ''} data-testid="settings-provider"
               onChange={(e) => setDraft(setDefaultProvider(draft, e.target.value as Provider | ''))}>
-              <option value="">{t("как в форме (claude)")}</option>
+              <option value="">{t("по умолчанию (claude)")}</option>
               {PROVIDERS.map((p) => <option key={p} value={p}>{p}</option>)}
             </select>
           </label>
-          <label className="check">
-            <input type="checkbox" checked={draft.rememberLast} data-testid="settings-remember-last"
-              onChange={(e) => setDraft({ ...draft, rememberLast: e.target.checked })} />
-            <span>{t("Подставлять последний выбор")}</span>
-            <span className="note">{t("«+ Сессия» откроется с тем, что ты выбрал в прошлый раз (кроме реплики и «Полного доступа»); иначе — с умолчаниями ниже. pult agent start всегда берёт умолчания.")}</span>
-          </label>
+          {/* Шаг B: черновик нового чата берёт эти умолчания и доступ, запомненный для папки; «последний выбор» он не
+              читает (флаг `rememberLast` остаётся в config.json до перехода на пресеты, шаг C). */}
+          <span className="note" data-testid="settings-new-chat-note">{t("Новый чат (⌘N) начинается с этих умолчаний. Доступ каждая папка помнит свой — тот, что ты выбрал при отправке или сменил в чате; у новой папки — «Правки в папке без вопросов» или выбранное ниже.")}</span>
           <div className="settings-prov">
             {PROVIDERS.map((p) => <ProviderDefaultsBox key={p} provider={p} draft={draft} catalog={catalog} onChange={setDraft} />)}
           </div>

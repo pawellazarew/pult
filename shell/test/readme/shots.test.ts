@@ -149,7 +149,7 @@ describe('кадры README', () => {
 
   before(async () => {
     mkdirSync(OUT, { recursive: true })
-    for (const f of ['hero', 'inbox', 'new-session', 'settings-menu']) for (const s of ['light', 'dark']) rmSync(path.join(OUT, `${f}-${s}.png`), { force: true })
+    for (const f of ['hero', 'inbox', 'new-chat', 'new-chat-access', 'settings-menu']) for (const s of ['light', 'dark']) rmSync(path.join(OUT, `${f}-${s}.png`), { force: true })
     fakeHome = mkdtempSync(path.join(tmpdir(), 'pr-home-'))
     h = await launch({
       name: 'readme',
@@ -292,24 +292,28 @@ describe('кадры README', () => {
     await h.win.keyboard.press('Meta+I')
   })
 
-  it('диалог «+ Сессия»', async () => {
+  it('черновик нового чата (шаг B): поле по центру и чипы; меню доступа у своего чипа', async () => {
     await h.stubPickFolder(dir('mobile-app'))
     await h.win.keyboard.press('Meta+N')
-    const dlg = h.win.getByTestId('new-agent-dialog')
-    await dlg.waitFor({ timeout: 3000 })
-    await dlg.getByTestId('pick-folder').click()
-    await waitFor(async () => (await dlg.getByTestId('new-agent-name').inputValue()) !== '', 3000)
-    await dlg.getByTestId('new-agent-name').fill('push-settings')
-    await dlg.getByRole('group', { name: 'Провайдер' }).getByRole('button', { name: 'claude', exact: true }).click()
-    await dlg.getByRole('group', { name: 'Модель' }).getByRole('button', { name: 'opus', exact: true }).click()
-    await dlg.getByRole('group', { name: 'Усилие' }).getByRole('button', { name: 'high', exact: true }).click()
-    await dlg.getByTestId('new-agent-prompt').fill('Добавь экран настроек уведомлений: три переключателя и ссылка на системные настройки.')
-    // Поле реплики в фокусе прокручивает диалог вниз — кадру нужен верх формы (провайдер, папка, подтверждения).
-    await dlg.evaluate((el) => {
-      (document.activeElement as HTMLElement | null)?.blur()
-      for (const n of [el, ...Array.from(el.querySelectorAll<HTMLElement>('*'))]) if (n.scrollHeight > n.clientHeight) n.scrollTop = 0
-    })
-    await shoot('new-session')
+    const d = h.win.getByTestId('draft')
+    await d.waitFor({ timeout: 3000 })
+    if ((await d.getByTestId('draft-chip-folder').getAttribute('data-path')) !== dir('mobile-app')) {
+      await d.getByTestId('draft-chip-folder').click()
+      await h.win.getByTestId('draft-folder-other').click()
+      await waitFor(async () => (await d.getByTestId('draft-chip-folder').getAttribute('data-path')) === dir('mobile-app'), 3000)
+    }
+    await d.getByTestId('draft-chip-model').click()
+    await h.win.locator('[data-testid="draft-model-item"][data-value="claude:opus"]').click()
+    await d.getByTestId('draft-chip-effort').click()
+    await h.win.locator('[data-testid="draft-effort-item"][data-value="high"]').click()
+    await d.getByTestId('draft-input').fill('Добавь экран настроек уведомлений: три переключателя и ссылка на системные настройки.')
+    await shoot('new-chat')
+    await d.getByTestId('draft-chip-access').click()
+    await h.win.getByTestId('draft-menu-access').waitFor({ timeout: 3000 })
+    await shoot('new-chat-access')
+    await h.win.keyboard.press('Escape')
+    await d.getByTestId('draft-input').fill('')
     await h.win.keyboard.press('Escape')
   })
+
 })

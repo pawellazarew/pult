@@ -17,6 +17,8 @@ import type { ProjectGroup } from '../model/projects.js'
 import { projectRemoval } from '../model/projects.js'
 import { plural } from '../lib/ru.js'
 import { CMD, Icon, Kbd } from './common.js'
+import type { DraftChat } from '../model/draft.js'
+import { draftLabel, folderName } from '../model/draft.js'
 
 export interface ProjectTreeProps {
   groups: readonly ProjectGroup[]
@@ -30,7 +32,7 @@ export interface ProjectTreeProps {
   /** Свёрнутые проекты (пути). */
   collapsed: ReadonlySet<string>
   onSelect(name: string): void
-  /** Новая сессия: `null` — без папки (её выберут в диалоге), иначе — в этом проекте. */
+  /** Новый чат (черновик): `null` — как ⌘N (папка открытого чата или последняя), иначе — в этом проекте. */
   onNew(projectPath: string | null): void
   onToggle(path: string): void
   onAddProject(): void
@@ -51,6 +53,11 @@ export interface ProjectTreeProps {
   onExport?(name: string): void
   /** О3: браузер для агента вкл/выкл и «показывать окно» — со следующего хода. Нет — старая оболочка. */
   onBrowser?(name: string, on: boolean, headed: boolean): void
+  /** Шаг B: черновики новых чатов — курсивные строки вверху списка (§3.2). */
+  drafts?: readonly DraftChat[]
+  activeDraft?: string | null
+  onOpenDraft?(id: string): void
+  onDiscardDraft?(id: string): void
 }
 
 type OpenMenu = { at: { x: number; y: number }; items: MenuEntry[]; testId: string }
@@ -148,7 +155,7 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
     e.preventDefault(); e.stopPropagation()
     const removal = projectRemoval(g)
     setMenu({ at: menuAt(e), testId: 'project-menu-list', items: [
-      { label: t('Новая сессия здесь'), onSelect: () => p.onNew(g.path), testId: 'project-menu-new' },
+      { label: t('Новый чат здесь'), onSelect: () => p.onNew(g.path), testId: 'project-menu-new' },
       ...(!g.pinned ? [{ label: t('Закрепить как проект'), onSelect: () => p.onPin(g.path, true), testId: 'project-pin' }] : []),
       // M8d: убрать можно ЛЮБОЙ проект. Закреплённый без сессий — снять закрепление (это и есть «убрать»);
       // закреплённый с сессиями можно и просто открепить — сессии останутся папкой; «Убрать из списка…» у папки с
@@ -192,6 +199,25 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
           {query && <button type="button" className="row-btn" onClick={() => setQuery('')} aria-label={t("Очистить поиск")}><Icon name="x" /></button>}
         </label>
       </div>
+      {(p.drafts ?? []).length > 0 && (
+        <ul className="ag-list draft-list" role="listbox" aria-label={t('Черновики')} data-testid="drafts">
+          {(p.drafts ?? []).map((d) => (
+            <li key={d.id} className="ag draft-row" role="option" aria-selected={d.id === p.activeDraft} tabIndex={0}
+              data-testid="draft-row" data-draft={d.id}
+              onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); p.onOpenDraft?.(d.id) } }}
+              onClick={() => p.onOpenDraft?.(d.id)}
+              onContextMenu={(e) => { e.preventDefault(); setMenu({ at: menuAt(e), testId: 'draft-menu-list', items: [{ label: t('Удалить черновик'), danger: true, onSelect: () => p.onDiscardDraft?.(d.id), testId: 'draft-remove' }] }) }}>
+              <span className="ag-name draft-name" title={d.text || undefined}>{draftLabel(d)}</span>
+              <span className="ag-right">
+                <span className="chat-row-status is-quiet">{t('черновик')}</span>
+                <button type="button" className="row-btn" data-testid="draft-row-menu" title={t('Действия с черновиком')} aria-label={t('Действия с черновиком')}
+                  onClick={(e) => { e.stopPropagation(); setMenu({ at: menuAt(e), testId: 'draft-menu-list', items: [{ label: t('Удалить черновик'), danger: true, onSelect: () => p.onDiscardDraft?.(d.id), testId: 'draft-remove' }] }) }}><span className="dots" aria-hidden="true">⋯</span></button>
+              </span>
+              <span className="ag-meta"><span className="chat-project">{d.cwd ? folderName(d.cwd) : t('папка не выбрана')}</span></span>
+            </li>
+          ))}
+        </ul>
+      )}
       <div className="sidebar-filters" aria-label={t("Фильтр чатов")}>
         {(['all', 'working', 'waiting'] as const).map((key) => {
           const count = key === 'all' ? sections.reduce((n, g) => n + g.rows.length, 0) : sections.find((g) => g.key === key)!.rows.length
@@ -219,7 +245,7 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
                 {closed && waiting > 0 && <span className="project-state t-wait" title={`${waitLabel}${working ? t` · ${working} в работе` : ''}`} aria-label={waitLabel}>● {waiting}</span>}
                 {closed && waiting === 0 && working > 0 && <span className="project-state t-run" title={t`${working} в работе`} aria-label={t`${working} в работе`}>● {working}</span>}
                 {g.unread > 0 && <span className="proj-unread" data-testid="project-unread" title={`${g.unread} ${plural(g.unread, t('непрочитанная беседа'), t('непрочитанные беседы'), t('непрочитанных бесед'))}`}>{g.unread}</span>}
-                <button type="button" className="proj-btn" title={t`Новая сессия в ${shortPath(g.path, 60)}`} aria-label={t`Новый чат в ${g.name}`} data-testid="project-new-session"
+                <button type="button" className="proj-btn" title={t`Новый чат в ${shortPath(g.path, 60)}`} aria-label={t`Новый чат в ${g.name}`} data-testid="project-new-session"
                   onKeyDown={(e) => e.stopPropagation()} onClick={(e) => { e.preventDefault(); e.stopPropagation(); p.onNew(g.path) }}><Icon name="plus" /></button>
                 <button type="button" className="proj-btn" data-testid="project-menu" title={t("Действия с проектом")} aria-label={t`Действия с проектом ${g.name}`}
                   onKeyDown={(e) => e.stopPropagation()} onClick={(e) => projectMenu(e, g)}><span className="dots" aria-hidden="true">⋯</span></button>

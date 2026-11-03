@@ -1,13 +1,15 @@
 import { t as tr } from '../lib/i18n.js'
-// Форма «+ Агент» (docs/12 §3 п.5): пресеты модели и усилия, имя из папки, проверка, параметры
-// `agent.start`. Чистые функции.
+// Новый чат: списки моделей и усилий провайдеров, уровни доступа словами, заготовка ссылки `pult://new`. Чистые функции.
+// Шаг B (design/2026-11-02-quick-start): формы «Новая сессия» больше нет — черновик и его поля в model/draft.ts, имя
+// выделяет демон (src/sessions/naming.ts).
 
 import type { GuardRule } from '../../../src/core/guard.js'
 import type { CodexRulesList } from './rules.js'
 import type { NewSessionPrefill } from '../../../shell/src/contract.js'
 import type { ApprovalMode } from '../../../src/adapters/types.js'
-import { CLAUDE_DEFAULT_EFFORT, CLAUDE_DEFAULT_MODEL, CLAUDE_EFFORTS, CLAUDE_MODELS, CODEX_EFFORTS_FALLBACK, homeCwdWarning, modeBlocksBrowser } from '../../../src/sessions/settings.js'
-import type { LastUsed, NewSessionSettings, ProviderDefaults } from '../../../src/sessions/settings.js'
+import { CLAUDE_DEFAULT_EFFORT, CLAUDE_DEFAULT_MODEL, CLAUDE_EFFORTS, CLAUDE_MODELS, CODEX_EFFORTS_FALLBACK } from '../../../src/sessions/settings.js'
+import type { LastUsed, NewSessionSettings } from '../../../src/sessions/settings.js'
+export { suggestName } from '../../../src/sessions/naming.js'
 import type { AgentProvider } from './types.js'
 import type { AccessSettings } from './access.js'
 import type { ProviderCatalog } from './types.js'
@@ -41,24 +43,6 @@ export const PRESETS: Readonly<Record<AgentProvider, ProviderPreset>> = {
   codex: { models: [], efforts: CODEX_EFFORTS_FALLBACK, defaultModel: null, defaultEffort: 'medium' },
   // ZCode (маршрут A): у CLI нет флага --model — модель задаёт аккаунт Z.AI, выбора в форме нет.
   zcode: { models: [], efforts: [], defaultModel: null, defaultEffort: '' },
-}
-
-export interface NewAgentForm {
-  provider: AgentProvider
-  cwd: string
-  name: string
-  worktree: string
-  model: string | null
-  effort: string
-  prompt: string
-  /** О3: браузер для агента с первого хода. */
-  browser: boolean
-  /** Окно браузера видно (иначе без окна). Имеет смысл только с `browser`. */
-  browserHeaded: boolean
-  /** M8d: как подтверждать действия; по умолчанию `ask` — как у всех сессий до M8d. */
-  approval: ApprovalMode
-  /** M8f: процесс на ход (по умолчанию) или тёплый — из настроек «Новая сессия»; в форме поля нет. */
-  mode: 'turn' | 'warm'
 }
 
 /**
@@ -133,15 +117,6 @@ export function cwdCoversHome(cwd: string): boolean {
 }
 
 /**
- * Предупреждение (не отказ) в «+ Сессия»: папка — дом или выше, режим шире «Только чтение». С веткой worktree агент
- * живёт в папке worktree, а не здесь, — предупреждать не о чем.
- */
-export function homeWarning(form: Pick<NewAgentForm, 'cwd' | 'approval' | 'worktree'>): string | null {
-  if (!form.cwd || form.approval === 'read-only' || form.worktree.trim()) return null
-  return cwdCoversHome(form.cwd) ? homeCwdWarning() : null
-}
-
-/**
  * Режим, при котором браузер для агента не включается (тот же список, что у демона — src/mcp/browser.ts
  * `approvalBrowserRefusal`): Claude `full`; Codex `workspace` и `full` (спрашивать некого).
  * ZCode (маршрут A) браузера не получает ни в одном режиме: у его CLI нет канала MCP-конфига.
@@ -149,11 +124,6 @@ export function homeWarning(form: Pick<NewAgentForm, 'cwd' | 'approval' | 'workt
 export function approvalBlocksBrowser(provider: AgentProvider, mode: ApprovalMode): boolean {
   if (provider === 'zcode') return true
   return provider === 'claude' ? mode === 'full' : mode === 'workspace' || mode === 'full'
-}
-
-export function defaultForm(provider: AgentProvider = 'claude'): NewAgentForm {
-  const p = PRESETS[provider]
-  return { provider, cwd: '', name: '', worktree: '', model: p.defaultModel, effort: p.defaultEffort, prompt: '', browser: false, browserHeaded: false, approval: 'ask', mode: 'turn' }
 }
 
 /** Ответ `settings.get` (M8f). */
@@ -172,49 +142,6 @@ export interface SettingsReply {
   codexRules?: CodexRulesList
   /** Шаг A: согласие на полный доступ и действующий `defaultMode` Claude владельца; нет — старый демон. */
   access?: AccessSettings
-}
-
-/** Поля провайдера поверх формы: модель, усилие, режим, процесс, браузер, предложенная ветка. */
-function applyProviderDefaults(f: NewAgentForm, d: ProviderDefaults | undefined, fromLast: boolean, safe: ProviderDefaults | undefined): NewAgentForm {
-  if (!d) return f
-  let approval = f.approval
-  if (d.approval !== undefined) approval = d.approval
-  // `full` из последнего выбора не подставляется НИКОГДА (файл его и не хранит — это вторая линия): умолчание или «спрашивать».
-  if (fromLast && (approval as string) === 'full') approval = safe?.approval ?? 'ask'
-  const out: NewAgentForm = {
-    ...f,
-    ...(d.model !== undefined ? { model: d.model } : {}),
-    ...(d.effort !== undefined ? { effort: d.effort } : {}),
-    approval,
-    ...(d.mode !== undefined ? { mode: d.mode } : {}),
-    ...(d.browser !== undefined ? { browser: d.browser && !modeBlocksBrowser(f.provider, approval) } : {}),
-  }
-  return d.worktree !== undefined ? { ...out, worktree: d.worktree && out.name ? `pult/${out.name}` : '' } : out
-}
-
-/**
- * M8f: форма «+ Сессия» по слоям — встроенные умолчания < `newSession.defaults` < последний выбор окна (если
- * «Подставлять последний выбор») < явный контекст (папка проекта, ссылка). Реплика не подставляется никогда;
- * папка из последнего выбора — только когда форму открыли без папки. `full` из последнего выбора — никогда.
- */
-/** Умолчания/последний выбор конкретного провайдера из ответа `settings.get`. */
-function providerPick(x: { claude?: ProviderDefaults; codex?: ProviderDefaults; zcode?: ProviderDefaults } | undefined, provider: AgentProvider): ProviderDefaults | undefined {
-  return x ? x[provider] : undefined
-}
-
-export function prefillForm(ctx: { cwd?: string | null; prefill?: NewSessionPrefill | null }, settings: SettingsReply | null, taken: readonly string[]): NewAgentForm {
-  const ns = settings?.newSession
-  const last = ns?.rememberLast ? settings?.lastUsed : undefined
-  const explicitProvider = ctx.prefill?.provider
-  const provider: AgentProvider = explicitProvider ?? last?.provider ?? ns?.defaults.provider ?? 'claude'
-  let f = defaultForm(provider)
-  const cwd = ctx.prefill ? (ctx.prefill.pathRejected ? undefined : ctx.prefill.path) : ctx.cwd ?? (last?.cwd || undefined)
-  if (cwd) f = { ...f, cwd, name: suggestName(cwd, taken) }
-  if (ctx.prefill?.prompt) f = { ...f, prompt: ctx.prefill.prompt }
-  const defaults = providerPick(ns?.defaults, provider)
-  f = applyProviderDefaults(f, defaults, false, undefined)
-  if (last) f = applyProviderDefaults(f, providerPick(last, provider), true, defaults)
-  return f
 }
 
 // Те же правила, что у main (shell/src/pultUrl.ts): в папке — ни управляющих, ни невидимых символов,
@@ -244,107 +171,8 @@ export function linkPrefill(x: unknown): NewSessionPrefill | null {
   return out
 }
 
-/** Форма по ссылке: провайдер, папка (и имя из неё), первая реплика. Модель, усилие, ветка — по умолчанию. */
-export function linkForm(p: NewSessionPrefill, taken: readonly string[]): NewAgentForm {
-  const f = defaultForm(p.provider ?? 'claude')
-  const path = p.pathRejected ? undefined : p.path
-  return { ...f, ...(path ? { cwd: path, name: suggestName(path, taken) } : {}), ...(p.prompt ? { prompt: p.prompt } : {}) }
-}
-
 /** Счётчик под репликой из ссылки: сколько в ней строк и знаков — длинный хвост не спрячется за краем поля. */
 export function promptStats(text: string): { lines: number; chars: number } {
   return { lines: text ? text.split('\n').length : 0, chars: [...text].length }
 }
 
-/** M8f: смена провайдера в форме — его умолчания и последний выбор (тот же порядок слоёв, что у `prefillForm`). */
-export function switchProviderPrefill(form: NewAgentForm, provider: AgentProvider, settings: SettingsReply | null): NewAgentForm {
-  let f = switchProvider(form, provider)
-  const ns = settings?.newSession
-  if (!ns) return f
-  const defaults = providerPick(ns.defaults, provider)
-  f = applyProviderDefaults(f, defaults, false, undefined)
-  const last = ns.rememberLast ? settings?.lastUsed : undefined
-  if (last) f = applyProviderDefaults(f, providerPick(last, provider), true, defaults)
-  return f
-}
-
-/**
- * Смена провайдера: модель и усилие — из его пресета, остальное как было. «Как в настройках Claude» у Codex нет —
- * становится явным «Спрашивать» (не «без флага» и не шире).
- */
-export function switchProvider(form: NewAgentForm, provider: AgentProvider): NewAgentForm {
-  const p = PRESETS[provider]
-  return {
-    ...form, provider, model: p.defaultModel, effort: p.efforts.includes(form.effort) ? form.effort : p.defaultEffort,
-    ...(form.approval === 'inherit' && provider !== 'claude' ? { approval: 'ask' as const } : {}),
-  }
-}
-
-const TRANSLIT: Record<string, string> = {
-  а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i', й: 'y', к: 'k', л: 'l', м: 'm', // i18n-ignore
-  н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f', х: 'h', ц: 'c', ч: 'ch', ш: 'sh', щ: 'sch', // i18n-ignore
-  ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya', // i18n-ignore
-}
-
-/** Имя агента из папки: латиница, `[a-z][a-z0-9_-]{0,31}`, свободное (суффикс -2, -3…). */
-export function suggestName(folder: string, taken: readonly string[]): string {
-  const base = folder.split('/').filter(Boolean).pop() ?? ''
-  let s = [...base.toLowerCase()].map((ch) => TRANSLIT[ch] ?? ch).join('')
-  s = s.replace(/[^a-z0-9_-]+/g, '-').replace(/-+/g, '-').replace(/^[-_0-9]+/, '').replace(/[-_]+$/, '')
-  if (!s) s = 'agent'
-  s = s.slice(0, 28).replace(/[-_]+$/, '')
-  const busy = new Set(taken)
-  if (!busy.has(s)) return s
-  for (let i = 2; i < 100; i++) {
-    const c = `${s}-${i}`
-    if (!busy.has(c)) return c
-  }
-  return `${s.slice(0, 20)}-${Date.now().toString(36).slice(-6)}`
-}
-
-/** Папка выбрана (системным диалогом или перетаскиванием): `cwd` и имя из папки, пока имя не трогали руками. */
-export function withFolder(form: NewAgentForm, dir: string, nameTouched: boolean, taken: readonly string[]): NewAgentForm {
-  return { ...form, cwd: dir, name: nameTouched ? form.name : suggestName(dir, taken) }
-}
-
-export type FormErrors = Partial<Record<'name' | 'cwd' | 'worktree' | 'approval', string>>
-
-export function validateForm(form: NewAgentForm, taken: readonly string[]): FormErrors {
-  const err: FormErrors = {}
-  if (!form.cwd) err.cwd = tr('выбери папку')
-  if (!AGENT_NAME_RE.test(form.name)) err.name = tr('латиница, цифры, - и _; с буквы; до 32 знаков')
-  else if (taken.includes(form.name)) err.name = tr('такая сессия уже есть')
-  const b = form.worktree.trim()
-  if (b && (/[\s~^:?*[\\]/.test(b) || b.startsWith('-') || b.includes('..') || b.endsWith('/') || b.endsWith('.lock'))) {
-    err.worktree = tr('недопустимое имя ветки git')
-  }
-  // Демон такой старт всё равно отверг бы — говорим заранее и по-человечески.
-  if (form.browser && approvalBlocksBrowser(form.provider, form.approval)) {
-    err.approval = tr('в этом режиме браузер для агента не включается — сними галочку браузера или выбери режим тише')
-  }
-  return err
-}
-
-/**
- * Параметры `agent.start` из формы (без пустых полей). У ZCode модели и усилия нет — поля не шлются. `consentRev` —
- * номер согласия на полный доступ, который видело окно (шаг A): демон сверит его с файлом и, если согласие тем
- * временем отозвали, ответит `consent_changed`.
- */
-export function startParams(form: NewAgentForm, consentRev?: number): Record<string, unknown> {
-  const b = form.worktree.trim()
-  return {
-    name: form.name,
-    kind: form.provider,
-    cwd: form.cwd,
-    ...(form.provider !== 'zcode' && form.model ? { model: form.model } : {}),
-    ...(form.provider !== 'zcode' && form.effort ? { effort: form.effort } : {}),
-    ...(b ? { worktree: b } : {}),
-    ...(form.browser ? { browser: form.browserHeaded ? { headed: true } : true } : {}),
-    // `ask` не шлём: так и старый демон (без M8d) примет параметры, и запись останется без поля.
-    ...(form.approval !== 'ask' ? { approval: form.approval } : {}),
-    // «Полный доступ» демон заводит только с подтверждением и согласием (шаг A): человек дал согласие в диалоге и видел
-    // красное предупреждение в форме. `inherit` — то же: при bypass у владельца это полный доступ.
-    ...(form.approval === 'full' || form.approval === 'inherit' ? { confirm: true, ...(consentRev !== undefined ? { consentRev } : {}) } : {}),
-    ...(form.mode === 'warm' ? { mode: 'warm' } : {}),
-  }
-}

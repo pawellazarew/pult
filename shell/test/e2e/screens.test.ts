@@ -7,7 +7,7 @@
 //   fix-limits   claude, ЖДЁТ разрешения на правку файла (Edit с диффом); с названием «Округление лимитов»;
 //   codex-tests  codex, ЖДЁТ разрешения на команду;
 // Inbox — два запроса, лимиты claude и codex — из событий ходов.
-// Кадры: main, inbox, new-agent, doctor, daemon-down × light, dark → test-results/screens/.
+// Кадры: main, inbox, черновик нового чата и меню его чипов (шаг B), doctor, daemon-down × light, dark → test-results/screens/.
 
 import assert from 'node:assert/strict'
 import { after, before, describe, it } from 'node:test'
@@ -68,6 +68,16 @@ describe('скриншоты экранов (демо)', () => {
     assert.ok(await waitFor(async () => (await statusOf('codex-tests')) === 'blocked_permission', 20_000), 'codex-tests не спросил разрешения')
     assert.equal(await statusOf('ui-refactor'), 'working')
     assert.ok(await waitFor(async () => ((await h.win.getByTestId('inbox-count').textContent()) ?? '') === '2', 10_000), 'в Inbox не два запроса')
+    // Шаг B, кадр «Где работаем?»: ни один чат не открыт, из окна чатов не заводили — черновик без папки с недавними
+    // папками (сессии демона и история Claude Code/Codex).
+    await h.win.keyboard.press('Meta+N')
+    const d = h.win.getByTestId('draft')
+    await d.waitFor({ timeout: 3000 })
+    assert.equal(await d.getByTestId('draft-chip-folder').getAttribute('data-path'), '', 'черновик не без папки')
+    assert.ok(await waitFor(async () => (await d.getByTestId('draft-recent-folder').count()) > 0, 5000), 'нет недавних папок')
+    await both('draft-no-folder')
+    await h.win.keyboard.press('Escape')
+    await d.waitFor({ state: 'detached', timeout: 3000 })
     // Субагент ui-refactor успел «напечатать» хвост до паузы.
     await h.win.locator('[data-testid="agent-row"][data-agent="ui-refactor"]').click()
     assert.ok(await waitFor(async () => ((await h.win.getByTestId('feed').textContent()) ?? '').includes('99,6'), 15_000), 'дельты субагента не дошли')
@@ -114,29 +124,39 @@ describe('скриншоты экранов (демо)', () => {
     await h.win.keyboard.press('Escape')
   })
 
-  it('диалог «+ Агент»', async () => {
-    await h.stubPickFolder(h.workDir('landing-copy'))
+  it('черновик нового чата: поле по центру, чипы, меню у своего чипа; «Где работаем?»', async () => {
+    const dir = h.workDir('landing-copy')
+    await h.stubPickFolder(dir)
     await h.win.keyboard.press('Meta+N')
-    const dlg = h.win.getByTestId('new-agent-dialog')
-    await dlg.waitFor({ timeout: 3000 })
-    await dlg.getByTestId('pick-folder').click()
-    await waitFor(async () => ((await dlg.getByTestId('new-agent-name').inputValue()) === 'landing-copy'), 3000)
-    await dlg.getByTestId('new-agent-worktree').fill('feat/landing-copy')
-    await dlg.getByTestId('new-agent-prompt').fill('Перепиши первый экран лендинга короче: одна мысль, одна кнопка.')
-    // Ряды модели и усилия целиком в диалоге: шесть уровней codex — самый широкий ряд.
-    for (const provider of ['codex', 'claude'] as const) {
-      await dlg.getByRole('group', { name: 'Провайдер' }).getByRole('button', { name: provider }).click()
-      const over = await dlg.evaluate((el) => {
-        const body = el.querySelector('.form-stack')!.getBoundingClientRect()
-        return Array.from(el.querySelectorAll('.seg')).map((s) => Math.round(s.getBoundingClientRect().right - body.right))
-      })
-      for (const px of over) assert.ok(px <= 0, `ряд кнопок (${provider}) шире диалога на ${px}px`)
+    const d = h.win.getByTestId('draft')
+    await d.waitFor({ timeout: 3000 })
+    // Ряд чипов и поле не уезжают: верх поля — на закреплённой позиции, ввод и меню его не двигают.
+    await d.getByTestId('draft-chip-folder').click()
+    await h.win.getByTestId('draft-folder-other').click()
+    assert.ok(await waitFor(async () => (await d.getByTestId('draft-chip-folder').getAttribute('data-path')) === dir, 3000))
+    const top = async (): Promise<number> => (await d.locator('.draft-box').boundingBox())?.y ?? -1
+    const y0 = await top()
+    await both('draft')
+    await d.getByTestId('draft-input').fill('Перепиши первый экран лендинга короче: одна мысль, одна кнопка.')
+    assert.equal(await top(), y0, 'поле сдвинулось при вводе')
+    // Каждое меню встаёт у своего чипа (в прототипе меню доступа висело в правом верхнем углу — известный недочёт).
+    for (const [chip, menu] of [['draft-chip-model', 'draft-menu-model'], ['draft-chip-effort', 'draft-menu-effort'], ['draft-chip-access', 'draft-menu-access'], ['draft-chip-more', 'draft-menu-more']] as const) {
+      await d.getByTestId(chip).click()
+      const m = h.win.getByTestId(menu)
+      await m.waitFor({ timeout: 3000 })
+      const c = (await d.getByTestId(chip).boundingBox())!
+      const r = (await m.boundingBox())!
+      assert.ok(Math.abs(r.x - c.x) <= 2 || r.x + r.width <= (h.win.viewportSize()?.width ?? 1e9), `${menu} не у чипа`)
+      assert.ok(r.y >= c.y + c.height - 1 || r.y + r.height <= c.y + 1, `${menu} перекрывает свой чип`)
+      assert.ok(Math.abs(r.x - c.x) <= 40, `${menu} далеко от чипа по горизонтали: ${r.x} против ${c.x}`)
+      assert.equal(await top(), y0, `поле сдвинулось с открытым ${menu}`)
+      if (menu === 'draft-menu-model' || menu === 'draft-menu-access') await both(menu)
+      await h.win.keyboard.press('Escape')
+      await m.waitFor({ state: 'detached', timeout: 3000 })
     }
-    assert.deepEqual(await dlg.getByRole('group', { name: 'Усилие' }).getByRole('button').allTextContents(), ['low', 'medium', 'high', 'xhigh', 'max'])
-    assert.deepEqual(await dlg.getByRole('group', { name: 'Модель' }).getByRole('button').allTextContents(), ['haiku', 'sonnet', 'opus', 'fable'])
-    await both('new-agent')
+    await d.getByTestId('draft-input').fill('')
     await h.win.keyboard.press('Escape')
-    await dlg.waitFor({ state: 'detached', timeout: 3000 })
+    await d.waitFor({ state: 'detached', timeout: 3000 })
   })
 
   it('панель doctor', async () => {

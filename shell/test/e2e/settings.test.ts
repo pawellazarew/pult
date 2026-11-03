@@ -74,7 +74,7 @@ describe('окно: настройки сессии M8f', () => {
     assert.equal(await h.win.getByTestId('confirm-configure').count(), 0)
   })
 
-  it('⌘, → «Настройки»: умолчания записаны в config.json; «Подставлять последний выбор» выключен — «+ Сессия» с умолчаниями', async () => {
+  it('⌘, → «Настройки»: умолчания записаны в config.json; черновик нового чата (⌘N) — с ними', async () => {
     await h.win.keyboard.press('Meta+,')
     const dlg = h.win.getByTestId('settings-dialog')
     await dlg.waitFor({ timeout: 5000 })
@@ -83,20 +83,24 @@ describe('окно: настройки сессии M8f', () => {
     await h.win.getByTestId('settings-claude-model').selectOption('opus')
     await h.win.getByTestId('settings-claude-effort').selectOption('high')
     await h.win.getByTestId('settings-claude-approval').selectOption('read-only')
-    await h.win.getByTestId('settings-remember-last').uncheck()
     await h.win.getByTestId('settings-save').click()
     assert.ok(await waitFor(async () => (await dlg.count()) === 0, 5000), 'диалог не закрылся после сохранения')
     const cfg = JSON.parse(readFileSync(h.paths.config, 'utf8')) as { newSession?: { rememberLast: boolean; defaults: { claude: Record<string, unknown> } } }
-    assert.equal(cfg.newSession?.rememberLast, false)
     assert.deepEqual(cfg.newSession?.defaults.claude, { model: 'opus', effort: 'high', approval: 'read-only' })
-    // «+ Сессия» — с умолчаниями.
+    // Черновик — с умолчаниями (в папке без своей памяти доступа).
     await h.win.keyboard.press('Meta+N')
-    const form = h.win.getByTestId('new-agent-dialog')
-    await form.waitFor({ timeout: 5000 })
-    assert.equal(await h.win.getByTestId('new-agent-approval').inputValue(), 'read-only')
-    assert.equal(await h.win.locator('[aria-label="Модель"] button[aria-pressed="true"]').textContent(), 'opus')
+    const d = h.win.getByTestId('draft')
+    await d.waitFor({ timeout: 5000 })
+    assert.equal(await d.getByTestId('draft-chip-model').getAttribute('data-model'), 'opus')
+    assert.equal(await d.getByTestId('draft-chip-effort').getAttribute('data-effort'), 'high')
+    const folder = await d.getByTestId('draft-chip-folder').getAttribute('data-path')
+    const mem = folder ? ((await (await h.client()).request('agent.preflight', { cwd: folder })) as { folder?: { access?: string } }).folder?.access : undefined
+    if (!mem) assert.equal(await d.getByTestId('draft-chip-access').getAttribute('data-approval'), 'read-only')
+    await d.getByTestId('draft-input').fill('')
     await h.win.keyboard.press('Escape')
+    await d.waitFor({ state: 'detached', timeout: 5000 })
   })
+
 
   it('«Страж сети»: разрешать только DE → config.json и doctor; выход XX — ход отказан, причина в ленте', async () => {
     await h.win.keyboard.press('Meta+,')

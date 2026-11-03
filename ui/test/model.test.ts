@@ -11,7 +11,9 @@ import type { Block, Inline } from '../src/model/markdown.js'
 import { insertPaths, quotePath } from '../src/model/paths.js'
 import { answersReady, buildAnswers, isQuestionTool, questionsOf } from '../src/model/questions.js'
 import { closeTab, groupByProject, openTab, projectName, pruneTabs } from '../src/model/projects.js'
-import { AGENT_NAME_RE, defaultForm, linkForm, linkPrefill, LINK_PROMPT_MAX_LINES, promptStats, PRESETS, providerPreset, startParams, suggestName, switchProvider, validateForm } from '../src/model/newAgent.js'
+import { AGENT_NAME_RE, linkPrefill, LINK_PROMPT_MAX_LINES, promptStats, PRESETS, providerPreset, suggestName } from '../src/model/newAgent.js'
+import { branchError, createDraft, draftStartParams, pickEffort, pickModel } from '../src/model/draft.js'
+import { env } from './draftFixture.js'
 import { armLinkGuard, keysGuarded, LINK_KEY_GUARD_MS, resetLinkGuard, swallowsKey, takeAutoFocus } from '../src/lib/linkGuard.js'
 import { describePermission, gutterNo, lineDiff, parseUnifiedDiff } from '../src/model/permissions.js'
 import { applyEvents, EMPTY_STATE, notificationFor, syncStatuses } from '../src/model/state.js'
@@ -371,7 +373,6 @@ describe('форма «+ Сессия» по ссылке pult://new (О3)', () 
     assert.deepEqual(linkPrefill({ prompt: 'x\n'.repeat(LINK_PROMPT_MAX_LINES) }), {}, '201 строка')
     // Main выбросил чужую папку и поставил пометку — даже если путь вдруг пришёл, в форму он не попадёт.
     assert.deepEqual(linkPrefill({ path: '/p', pathRejected: true }), { pathRejected: true })
-    assert.deepEqual(linkForm({ path: '/p', pathRejected: true, prompt: 'x' }, []), { ...defaultForm('claude'), prompt: 'x' })
   })
   it('счётчик реплики из ссылки: строки и знаки (кодовые точки)', () => {
     assert.deepEqual(promptStats(''), { lines: 0, chars: 0 })
@@ -394,12 +395,14 @@ describe('форма «+ Сессия» по ссылке pult://new (О3)', () 
     assert.equal(takeAutoFocus('alpha', 9000), true, 'ссылка без сессии фокус не трогает')
     resetLinkGuard()
   })
-  it('форма: провайдер, папка с именем из неё, реплика; остальное по умолчанию', () => {
-    const f = linkForm({ path: '/Users/user/Эхо Океана', prompt: 'почини', provider: 'codex' }, ['eho-okeana'])
-    assert.deepEqual(f, { ...defaultForm('codex'), cwd: '/Users/user/Эхо Океана', name: 'eho-okeana-2', prompt: 'почини' })
-    assert.deepEqual(linkForm({}, []), defaultForm('claude'))
-    // Ничего не запускается само: форма — это только поля; agent.start шлёт кнопка «Завести».
-    assert.deepEqual(validateForm(linkForm({ prompt: 'x' }, []), []).cwd, 'выбери папку')
+  it('черновик из ссылки: провайдер и реплика подставлены, папка — только знакомая; сам не отправляется', () => {
+    const d = createDraft({ cwd: '/Users/user/Эхо Океана', origin: { kind: 'link', provider: 'codex' }, text: 'почини' }, env())
+    assert.deepEqual([d.provider, d.cwd, d.text, d.origin.kind], ['codex', '/Users/user/Эхо Океана', 'почини', 'link'])
+    const r = createDraft({ cwd: null, origin: { kind: 'link', pathRejected: true }, text: 'x' }, env())
+    assert.deepEqual([r.cwd, r.provider], [null, 'claude'])
+    // Параметры старта — только по кнопке/↵ человека: origin link, имя выдаст демон.
+    assert.equal(draftStartParams(d, { prompt: d.text, inheritMode: null })['origin'], 'link')
+    assert.equal('name' in draftStartParams(d, { prompt: d.text, inheritMode: null }), false)
   })
 })
 
@@ -417,9 +420,9 @@ describe('форма «+ Сессия»', () => {
   })
 
   it('пресеты: claude — модель и усилие, codex — только усилие', () => {
-    const c = defaultForm('claude')
+    const c = createDraft({ cwd: '/p' }, env())
     assert.deepEqual([c.model, c.effort], ['sonnet', 'medium'])
-    const x = switchProvider({ ...c, effort: 'high' }, 'codex')
+    const x = pickModel(pickEffort(c, 'high'), 'codex', null, env(), null)
     assert.deepEqual([x.provider, x.model, x.effort], ['codex', null, 'high'])
   })
 
@@ -437,18 +440,23 @@ describe('форма «+ Сессия»', () => {
     // ZCode: пресет пуст — модель задаёт аккаунт Z.AI.
     assert.deepEqual([PRESETS.zcode.models, PRESETS.zcode.defaultModel], [[], null])
     // Уровень, которого у другого провайдера нет, при переключении не протекает в `agent.start`.
-    const back = switchProvider({ ...defaultForm('codex'), effort: 'ultra' }, 'claude')
+    const codex = pickEffort(pickModel(createDraft({ cwd: '/p' }, env()), 'codex', null, env(), null), 'ultra')
+    const back = pickModel(codex, 'claude', 'sonnet', env(), null)
     assert.deepEqual([back.model, back.effort], ['sonnet', 'medium'])
-    assert.equal(switchProvider({ ...defaultForm('claude'), effort: 'max' }, 'codex').effort, 'max')
+    assert.equal(pickModel(pickEffort(createDraft({ cwd: '/p' }, env()), 'max'), 'codex', null, env(), null).effort, 'max')
+    assert.equal(pickModel(createDraft({ cwd: '/p' }, env()), 'zcode', null, env(), null).effort, '')
   })
 
-  it('проверка и параметры agent.start', () => {
-    const f = { ...defaultForm('claude'), cwd: '/p', name: 'w', worktree: ' feat/ui ', prompt: 'x' }
-    assert.deepEqual(validateForm(f, []), {})
-    assert.deepEqual(Object.keys(validateForm({ ...f, cwd: '', name: 'W!', worktree: 'a b' }, [])).sort(), ['cwd', 'name', 'worktree'])
-    assert.equal(validateForm(f, ['w']).name, 'такая сессия уже есть')
-    assert.deepEqual(startParams(f), { name: 'w', kind: 'claude', cwd: '/p', model: 'sonnet', effort: 'medium', worktree: 'feat/ui' })
-    assert.deepEqual(startParams({ ...defaultForm('codex'), cwd: '/p', name: 'c' }), { name: 'c', kind: 'codex', cwd: '/p', effort: 'medium' })
+  it('параметры agent.start черновика: requestId, ветка (или true — назовёт демон), без пустых полей', () => {
+    const f = createDraft({ id: '11111111-2222-4333-8444-555555555555', cwd: '/p' }, env())
+    assert.deepEqual(draftStartParams({ ...f, worktree: true, branch: ' feat/ui ' }, { prompt: 'x', inheritMode: null }), {
+      requestId: '11111111-2222-4333-8444-555555555555', kind: 'claude', cwd: '/p', model: 'sonnet', effort: 'medium', worktree: 'feat/ui', approval: 'workspace', prompt: 'x', origin: 'user',
+    })
+    assert.equal(draftStartParams({ ...f, worktree: true }, { prompt: '', inheritMode: null })['worktree'], true)
+    const codex = pickModel(f, 'codex', null, env(), null)
+    assert.deepEqual(draftStartParams(codex, { prompt: '', inheritMode: null }), { requestId: f.id, kind: 'codex', cwd: '/p', effort: 'medium', approval: 'workspace', origin: 'user' })
+    assert.equal(branchError('a b'), 'недопустимое имя ветки git')
+    assert.equal(branchError(''), null)
   })
 })
 

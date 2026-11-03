@@ -8,7 +8,9 @@ import { setLanguage } from '../../src/i18n/core.js'
 // Match application startup: locale is selected before modules with localized constants load.
 setLanguage('en')
 const { SettingsDialog } = await import('../src/components/Settings.js')
-const { NewAgentDialog, Inbox } = await import('../src/components/Panels.js')
+const { Inbox } = await import('../src/components/Panels.js')
+const { DraftView } = await import('../src/components/Draft.js')
+const { draftProps } = await import('./draftFixture.js')
 const { Conversation } = await import('../src/components/Conversation.js')
 const { PermCard } = await import('../src/components/PermCard.js')
 const { ProjectTree } = await import('../src/components/ProjectTree.js')
@@ -36,15 +38,22 @@ describe('English application screens', () => {
     assert.match(settings, />System default</)
     assert.match(settings, /value="en" selected=""/)
     assert.match(settings, /Full access cannot be a default/)
+    assert.match(settings, /New chat \(⌘N\) starts with these defaults/)
     assert.match(settings, />Save /)
     // Language names are intentionally displayed in their native language.
     assert.doesNotMatch(settings.replace('Русский', ''), /[А-Яа-яЁё]/)
 
-    const create = html(NewAgentDialog, { taken: [], defaultCwd: '/srv/project', pickFolder: async () => null, onCreate: async () => null, onClose: noop })
-    assert.match(create, /New session/)
-    assert.match(create, /first message/)
-    assert.match(create, /Full access/)
-    assert.doesNotMatch(create, /[А-Яа-яЁё]/)
+    for (const menu of [null, 'folder', 'model', 'effort', 'access', 'more'] as const) {
+      const create = html(DraftView, draftProps({ initialMenu: menu }))
+      assert.match(create, /New chat/)
+      assert.doesNotMatch(create, /[А-Яа-яЁё]/, `menu ${menu}`)
+    }
+    const access = html(DraftView, draftProps({ initialMenu: 'access' }))
+    assert.match(access, /Full access/)
+    assert.match(access, /This chat only/)
+    const pick = html(DraftView, draftProps({ draft: { ...draftProps().draft, cwd: null } }))
+    assert.match(pick, /Where are we working\?/)
+    assert.doesNotMatch(pick, /[А-Яа-яЁё]/)
   })
 
   it('conversation chrome is English while Russian message text is untouched', () => {

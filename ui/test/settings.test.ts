@@ -11,7 +11,8 @@ import { SettingsDialog } from '../src/components/Settings.js'
 import type { AgentView } from '../src/model/agents.js'
 import { applyConversation, EMPTY_CONVERSATION } from '../src/model/conversation.js'
 import { hotkeyAction } from '../src/model/hotkeys.js'
-import { prefillForm, startParams, switchProviderPrefill } from '../src/model/newAgent.js'
+import { createDraft, draftStartParams, pickModel } from '../src/model/draft.js'
+import { env } from './draftFixture.js'
 import type { SettingsReply } from '../src/model/newAgent.js'
 import {
   configureParams, confirmNeeded, draftError, footerParts, isNoop, modelWindows, setDefault, setDefaultProvider, settingsDraft, settingsErrorText,
@@ -133,42 +134,41 @@ describe('M8f: строка ленты о смене', () => {
   })
 })
 
-describe('M8f: «+ Сессия» по слоям', () => {
+describe('шаг B: черновик по умолчаниям Настроек (без «последнего выбора»)', () => {
   const settings = (over: Partial<SettingsReply['newSession']> = {}, last: SettingsReply['lastUsed'] = {}): SettingsReply => ({
     newSession: { rememberLast: true, defaults: { claude: { model: 'opus', effort: 'high', approval: 'read-only' }, codex: { effort: 'xhigh' }, zcode: {} }, ...over },
     lastUsed: last,
   })
-  it('нет настроек — как раньше: claude, встроенные модель и усилие, «спрашивать»', () => {
-    const f = prefillForm({ cwd: null }, null, [])
-    assert.deepEqual([f.provider, f.model, f.effort, f.approval, f.cwd, f.mode], ['claude', 'sonnet', 'medium', 'ask', '', 'turn'])
+  it('нет настроек: claude, встроенные модель и усилие, новая папка — «Правки в папке»', () => {
+    const f = createDraft({ cwd: null }, env())
+    assert.deepEqual([f.provider, f.model, f.effort, f.approval, f.cwd, f.mode], ['claude', 'sonnet', 'medium', 'workspace', null, 'turn'])
   })
-  it('умолчания поверх встроенных; последний выбор поверх умолчаний; явная папка — главнее', () => {
-    const last = { provider: 'claude' as const, claude: { model: 'haiku', approval: 'workspace' as const, mode: 'warm' as const }, cwd: '/p/last' }
-    const d = prefillForm({ cwd: null }, settings({ rememberLast: false }, last), ['last'])
-    assert.deepEqual([d.model, d.effort, d.approval, d.cwd], ['opus', 'high', 'read-only', ''], 'rememberLast выключен — только умолчания, папки нет')
-    const l = prefillForm({ cwd: null }, settings({}, last), ['last'])
-    assert.deepEqual([l.model, l.effort, l.approval, l.mode, l.cwd, l.name], ['haiku', 'high', 'workspace', 'warm', '/p/last', 'last-2'])
-    assert.equal(startParams(l)['mode'], 'warm')
-    const proj = prefillForm({ cwd: '/p/proj' }, settings({}, last), [])
-    assert.deepEqual([proj.cwd, proj.name, proj.model], ['/p/proj', 'proj', 'haiku'], 'папка проекта главнее прошлой папки')
+  it('умолчания поверх встроенных; «последний выбор» черновик не берёт (шаг C переносит его в пресеты)', () => {
+    const last = { provider: 'codex' as const, claude: { model: 'haiku', approval: 'workspace' as const, mode: 'warm' as const }, cwd: '/p/last' }
+    const d = createDraft({ cwd: null }, env({ settings: settings({}, last) }))
+    assert.deepEqual([d.provider, d.model, d.effort, d.approval, d.cwd], ['claude', 'opus', 'high', 'read-only', null])
+    const warm = createDraft({ cwd: '/p' }, env({ settings: settings({ defaults: { claude: { mode: 'warm' }, codex: {}, zcode: {} } }) }))
+    assert.equal(draftStartParams(warm, { prompt: '', inheritMode: null })['mode'], 'warm')
   })
-  it('full из последнего выбора не подставляется НИКОГДА: умолчание провайдера или «спрашивать»', () => {
-    const tampered = { provider: 'claude' as const, claude: { approval: 'full' as never } }
-    assert.equal(prefillForm({ cwd: null }, settings({}, tampered), []).approval, 'read-only')
-    const noDefault = settings({ defaults: { claude: {}, codex: {}, zcode: {} } }, tampered)
-    assert.equal(prefillForm({ cwd: null }, noDefault, []).approval, 'ask')
+  it('память папки сильнее умолчания; полный из памяти — только при согласии', () => {
+    const s = settings()
+    const folder = (access: 'full' | 'read-only') => ({ cwd: '/p', ok: true, folder: { access } })
+    assert.equal(createDraft({ cwd: '/p' }, env({ settings: s, folder: folder('read-only') })).approval, 'read-only')
+    const revoked = createDraft({ cwd: '/p' }, env({ settings: s, folder: folder('full') }))
+    assert.deepEqual([revoked.approval, revoked.notes], ['ask', ['full-revoked']])
   })
-  it('провайдер: ссылка > последний > умолчание; смена провайдера в форме берёт его слои; браузер в «без вопросов» не ставится', () => {
+  it('провайдер: ссылка > умолчание; смена провайдера берёт его умолчания; браузер в «без вопросов» не ставится', () => {
     const s = settings({ defaults: { provider: 'codex', claude: {}, codex: { approval: 'workspace', browser: true }, zcode: {} } })
-    assert.equal(prefillForm({ cwd: null }, s, []).provider, 'codex')
-    assert.equal(prefillForm({ cwd: null }, s, []).browser, false, 'Codex workspace — браузер не включается')
-    assert.equal(prefillForm({ cwd: null, prefill: { provider: 'claude', path: '/p/x' } }, s, []).provider, 'claude')
-    const sw = switchProviderPrefill(prefillForm({ cwd: null }, settings(), []), 'codex', settings())
+    assert.equal(createDraft({ cwd: null }, env({ settings: s })).provider, 'codex')
+    assert.equal(createDraft({ cwd: null }, env({ settings: s })).browser, false, 'Codex workspace — браузер не включается')
+    assert.equal(createDraft({ cwd: '/p/x', origin: { kind: 'link', provider: 'claude' } }, env({ settings: s })).provider, 'claude')
+    const sw = pickModel(createDraft({ cwd: null }, env({ settings: settings() })), 'codex', null, env({ settings: settings() }), null)
     assert.deepEqual([sw.provider, sw.effort], ['codex', 'xhigh'])
   })
-  it('предлагать ветку worktree — pult/<имя>', () => {
-    const f = prefillForm({ cwd: '/p/app' }, settings({ defaults: { claude: { worktree: true }, codex: {}, zcode: {} } }), [])
-    assert.equal(f.worktree, 'pult/app')
+  it('«предлагать ветку worktree» — ветка включена, имя даст демон', () => {
+    const f = createDraft({ cwd: '/p/app' }, env({ settings: settings({ defaults: { claude: { worktree: true }, codex: {}, zcode: {} } }) }))
+    assert.equal(f.worktree, true)
+    assert.equal(draftStartParams(f, { prompt: '', inheritMode: null })['worktree'], true)
   })
 })
 
@@ -191,15 +191,16 @@ describe('M8f: «Настройки» (⌘,)', () => {
     assert.equal(draftError(d), null)
     assert.deepEqual(d, { rememberLast: true, defaults: { provider: 'codex', claude: {}, codex: { approval: 'workspace' }, zcode: {} } })
   })
-  it('экран: раздел «Новая сессия» с обоими провайдерами и переключателем, «Внешний вид» — пустой, с одной строкой', () => {
+  it('экран: раздел «Новый чат» с провайдерами и доступом по умолчанию, «Внешний вид» — пустой, с одной строкой', () => {
     const out = html(SettingsDialog, { settings: { rememberLast: false, defaults: { claude: { model: 'opus' }, codex: {} } }, catalog: CATALOG, onSave: async () => null, onClose: noop })
     const t = text(out)
     assert.match(out, /data-testid="settings-new-session"/)
     assert.match(out, /data-testid="settings-claude"/)
     assert.match(out, /data-testid="settings-codex"/)
-    assert.match(out, /data-testid="settings-remember-last"/)
-    assert.doesNotMatch(out, /data-testid="settings-remember-last" checked/)
-    assert.match(t, /Подставлять последний выбор/)
+    // Шаг B: «Подставлять последний выбор» черновик не читает — переключателя нет; доступ папки помнит сама.
+    assert.doesNotMatch(out, /settings-remember-last/)
+    assert.match(t, /Доступ каждая папка помнит свой/)
+    assert.match(out, /<option value="" selected="">для новой папки — правки в папке без вопросов<\/option>/)
     assert.match(t, /Внешний вид Темы и цвета — после редизайна\./)
     assert.doesNotMatch(out, /<option value="full"/, '«Полный доступ» умолчанием не ставится')
     assert.match(out, /<option value="gpt-deep">GPT Deep<\/option>/)
