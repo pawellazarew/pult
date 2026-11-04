@@ -19,6 +19,11 @@ describe('переход из системного уведомления', () =
     for (const name of ['alpha', 'beta']) {
       await c.request('agent.start', { name, kind: 'claude', cwd: h.workDir(name, { scenario: name === 'beta' ? 'demo-edit' : 'simple' }) })
     }
+    // agent.start из CLI не пишет событие сессии: окно узнаёт обе записи из
+    // следующего agent.list. Видимая alpha ещё не означает, что beta уже известна.
+    for (const name of ['alpha', 'beta']) {
+      await h.win.locator(`[data-testid="agent-row"][data-agent="${name}"]`).waitFor({ timeout: 5000 })
+    }
     await h.win.locator('[data-testid="agent-row"][data-agent="alpha"]').click()
     await h.win.locator('[data-testid="conversation"][data-agent="alpha"]').waitFor()
   })

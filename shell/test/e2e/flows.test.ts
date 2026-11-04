@@ -455,6 +455,10 @@ describe('окно: рабочие сценарии', () => {
     const [item] = await queued()
     assert.ok(item, 'в очереди нет реплики')
     await c.request('agent.queue.remove', { name: 'qedit', id: item.id })
+    // RPC опережает окно: при переходе в «реплики уже нет» редактор пересоздаётся
+    // и берёт фокус. Дождаться этого перехода до fill, иначе native insertText
+    // может попасть в редактор очереди вместо поля реплики.
+    await h.win.locator('[data-testid="queue-item-edit"] .queue-edit-note').waitFor({ timeout: 5000 })
     await box.fill('черновик')
     await h.win.getByTestId('queue-edit-save').click()
     assert.ok(await waitFor(async () => /уже удалена/.test((await h.win.getByTestId('queue-notice').textContent({ timeout: 500 }).catch(() => '')) ?? ''), 5000),
