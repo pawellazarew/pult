@@ -245,15 +245,21 @@ export async function launch(opts: {
       await current.emulateMedia({ colorScheme: sch })
     },
     async reopen(between?: () => Promise<void>) {
+      // Новый app.evaluate при нуле окон иногда роняет Electron44/macOS в V8
+      // inspector (SIGSEGV). Ставим однократный обработчик до закрытия, затем
+      // активируем только свой дочерний процесс нативным сигналом, без inspector.
+      // Так between() по-прежнему выполняется при действительно закрытом окне.
+      await app.evaluate(({ app: a }) => {
+        process.once('SIGUSR2', () => { a.emit('activate') })
+      })
       await current.close()
       if (between) await between()
       assert.equal(app.windows().length, 0, 'окно не закрылось')
       const next = app.waitForEvent('window', { timeout: 15_000 })
-      // Ждём его ниже; без этого отказ, пришедший, пока идёт evaluate, — unhandledRejection без причины.
+      // Ждём ниже: ошибка сигнала не должна оставить unhandledRejection от next.
       next.catch(() => {})
       try {
-        // Как клик по иконке в доке: macOS шлёт `activate`, оболочка открывает окно заново.
-        await app.evaluate(({ app: a }) => { (a as unknown as { emit(e: string): boolean }).emit('activate') })
+        if (!appProcess.kill('SIGUSR2')) throw new Error('не удалось активировать дочерний Electron')
         current = await next
       } catch (e) {
         const why = electronExit ? `; Electron вышел до close() (${electronExit}), хвост вывода:\n${electronOut.slice(-15).join('\n')}` : ''
