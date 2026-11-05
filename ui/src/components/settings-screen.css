@@ -47,5 +47,7 @@
 .new-chat-advanced > .form-stack { padding-top: 18px; }
 
 .settings-screen .btn { background: var(--panel); color: var(--ink); border-color: var(--hair); }
-.settings-screen .btn-primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+.settings-screen .btn-primary { background: var(--accent); color: var(--ground); border-color: var(--accent); }
 .settings-screen .settings-back { background: transparent; border-color: transparent; color: var(--mut); }
+
+.settings-screen .settings-provider-tabs .btn[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-edge); }

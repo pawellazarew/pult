@@ -1,7 +1,7 @@
 .dictation { position: relative; display: flex; align-items: center; gap: 3px; }
 .dictation-mic { gap: 6px; }
 .dictation-options { padding-inline: 5px; }
-.dictation-mic.recording { color: var(--err, #c94343); border-color: currentColor; }
+.dictation-mic.recording { color: var(--fail); border-color: currentColor; }
 .dictation-state { position: absolute; bottom: 100%; right: 0; padding: 5px 8px; font-size: 11px; color: var(--mut); white-space: nowrap; background: var(--ground); border-radius: 5px; }
 .dictation-settings, .dictation-notice { position: absolute; bottom: calc(100% + 10px); right: 0; z-index: 40; width: min(340px, 75vw); padding: 14px; background: var(--ground); color: var(--ink); border: 1px solid var(--hair); border-radius: 10px; box-shadow: 0 8px 28px #0002; font-size: 12px; }
 .dictation-settings { max-height: min(540px, 70vh); overflow-y: auto; }
