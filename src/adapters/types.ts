@@ -234,6 +234,8 @@ export interface ProviderAdapter {
    * текущие настройки сессии в адаптере на момент вызова.
    */
   send(name: string, text: string, at?: TurnSettings): Promise<TurnStarted>
+  /** Уточнение в текущий ход без остановки. Только у провайдеров с same-turn steering. */
+  steer?(name: string, text: string): Promise<{ turnId: string }>
   /** Ответ на запрос разрешения по непрозрачному id провайдера (у Claude не используется). */
   respondPermission(name: string, requestId: string, decision: PermissionDecision): Promise<void>
   /**

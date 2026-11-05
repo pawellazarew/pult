@@ -346,6 +346,13 @@ async function onRequest(id, method, params) {
       void runTurn(scenario, params.threadId, turnId)
       return
     }
+    case 'turn/steer': {
+      const t = threads.get(params.threadId)
+      if (!t?.turn || t.turn !== params.expectedTurnId) { replyErr(id, -32600, 'no matching active turn'); return }
+      if (cfg.rejectSteer) { replyErr(id, -32600, 'steering rejected'); return }
+      replyOk(id, { turnId: t.turn })
+      return
+    }
     case 'turn/interrupt': {
       const t = threads.get(params.threadId)
       if (!t || t.turn !== params.turnId) { replyErr(id, -32600, 'no active turn to interrupt'); return }

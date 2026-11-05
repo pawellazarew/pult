@@ -32,7 +32,7 @@ interface Base {
   ts: string
 }
 
-export interface UserItem extends Base { type: 'user'; text: string }
+export interface UserItem extends Base { type: 'user'; text: string; questionId?: number }
 export interface ModelItem extends Base {
   type: 'model'
   text: string
@@ -43,6 +43,9 @@ export interface ModelItem extends Base {
   /** Codex: id элемента — по нему дельты находят свою реплику. */
   itemId?: string
   model?: string
+  questions?: Array<{ title: string; options: string[] | null }>
+  questionEventId?: number
+  questionAnswered?: boolean
 }
 export interface ToolItem extends Base {
   type: 'tool'
@@ -237,7 +240,9 @@ export function applyConversation(conv: Conversation, ev: PultEvent): Conversati
   switch (ev.kind) {
     case 'message.user': {
       const text = str(d['text']) ?? ''
-      return push(conv, ev, { ...base, type: 'user', text })
+      const questionId = num(d['questionId'])
+      if (questionId !== undefined) conv = { ...conv, items: conv.items.map((it) => it.type === 'model' && it.questionEventId === questionId ? { ...it, questionAnswered: true } : it) }
+      return push(conv, ev, { ...base, type: 'user', text, ...(questionId !== undefined ? { questionId } : {}) })
     }
 
     case 'message.delta': {
@@ -265,6 +270,7 @@ export function applyConversation(conv: Conversation, ev: PultEvent): Conversati
       const itemId = str(d['itemId'])
       const error = str(d['error'])
       const model = str(d['model'])
+      const questions = !parentId && Array.isArray(d['questions']) ? d['questions'] as ModelItem['questions'] : undefined
       const path = scopePath(conv.items, parentId)
       const scope = scopeAt(conv.items, path)
       // Идущая реплика этой области: последняя по itemId (codex) или просто последняя идущая.
@@ -276,22 +282,22 @@ export function applyConversation(conv: Conversation, ev: PultEvent): Conversati
       if (idx >= 0) {
         const open = scope[idx] as ModelItem
         const done: ModelItem = {
-          ...open, text: text || open.text, streaming: false,
+          ...open, text: text || open.text, streaming: false, ...(questions?.length ? { questions, questionEventId: ev.id } : {}),
           ...(error ? { error } : {}), ...(model ? { model } : {}),
         }
         return {
           lastId: ev.id,
           items: withScope(conv.items, path, (s) => {
             const next = s.slice()
-            if (!done.text.trim() && !error) next.splice(idx, 1)
+            if (!done.text.trim() && !error && !questions?.length) next.splice(idx, 1)
             else next[idx] = done
             return next
           }),
         }
       }
-      if (!text.trim() && !error) return { ...conv, lastId: ev.id }
+      if (!text.trim() && !error && !questions?.length) return { ...conv, lastId: ev.id }
       return push(conv, ev, {
-        ...base, type: 'model', text, streaming: false,
+        ...base, type: 'model', text, streaming: false, ...(questions?.length ? { questions, questionEventId: ev.id } : {}),
         ...(itemId ? { itemId } : {}), ...(error ? { error } : {}), ...(model ? { model } : {}),
       }, parentId)
     }
@@ -583,4 +589,12 @@ export function expirePermissionsBefore(conv: Conversation, beforeId: number): C
   })
   const items = fix(conv.items)
   return changed ? { ...conv, items } : conv
+}
+
+
+/** Question and reply can arrive on separate history pages. Reconcile after joining them. */
+export function reconcileAsyncAnswers(items: readonly ConvItem[]): readonly ConvItem[] {
+  const answered = new Set(items.flatMap(it => it.type === 'user' && it.questionId !== undefined ? [it.questionId] : []))
+  if (!items.some(it => it.type === 'model' && !it.questionAnswered && it.questionEventId !== undefined && answered.has(it.questionEventId))) return items
+  return items.map(it => it.type === 'model' && it.questionEventId !== undefined && answered.has(it.questionEventId) ? { ...it, questionAnswered: true } : it)
 }

@@ -118,6 +118,38 @@ export interface CodexMapper {
 const obj = (v: unknown): Record<string, unknown> | null =>
   v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null
 const str = (v: unknown): string | null => (typeof v === 'string' ? v : null)
+
+/** Structured request_user_input_async metadata from Codex 0.166 agentMessage items.
+ * Reject the whole form on malformed/oversized data; never infer questions from Markdown.
+ * Keep exact labels (after the same redaction as message text), without silently truncating choices. */
+function asyncQuestions(value: unknown): Array<{ title: string; options: string[] | null }> | null {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 8) return null
+  const clean = (raw: unknown, limit: number): string | null => {
+    if (typeof raw !== 'string' || !raw.trim() || raw.length > limit) return null
+    const safe = redactString(raw)
+    return safe.length <= limit ? safe : null
+  }
+  const questions: Array<{ title: string; options: string[] | null }> = []
+  for (const raw of value) {
+    const question = obj(raw)
+    if (!question) return null
+    const title = clean(question['title'], 2000)
+    if (title === null) return null
+    const offered = question['options']
+    let options: string[] | null = null
+    if (offered !== undefined && offered !== null) {
+      if (!Array.isArray(offered) || offered.length > 12) return null
+      options = []
+      for (const rawOption of offered) {
+        const option = clean(rawOption, 500)
+        if (option === null) return null
+        options.push(option)
+      }
+    }
+    questions.push({ title, options })
+  }
+  return questions
+}
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
 
 /**
@@ -229,10 +261,11 @@ export function createCodexMapper(opts: CodexMapperOptions): CodexMapper {
           if (!done) return out
           const text = str(item['text']) ?? ''
           const phase = str(item['phase'])
+          const questions = asyncQuestions(item['questions'])
           out.drafts.push({
             ...base,
             kind: 'message.done',
-            data: { text: redactString(text), ...(phase ? { phase } : {}), itemId: id },
+            data: { text: redactString(text), ...(phase ? { phase } : {}), itemId: id, ...(questions ? { questions } : {}) },
           })
           // Текст РЕБЁНКА в ответ родителя не попадает: родитель перескажет его сам
           // (измерено, B4: «Subagent reply: PING»). Иначе ответ хода двоился бы.

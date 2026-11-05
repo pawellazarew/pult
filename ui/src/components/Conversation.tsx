@@ -1,3 +1,4 @@
+import { AsyncQuestion } from './AsyncQuestion.js'
 import { t } from '../lib/i18n.js'
 // Центр окна: разговор с выбранным агентом (docs/12 §3 п.2). Вся логика ленты — в model/conversation.ts;
 // здесь только отрисовка, прокрутка «прилипает» к низу, пока человек сам не отлистал вверх.
@@ -116,6 +117,7 @@ export interface ConversationProps {
   menu?: SessionMenuApi
   /** Без `scope` — один раз; `session` / `rule` — кнопки M8d. */
   onApprove(permId: string, scope?: 'session' | 'rule'): void
+  onAsyncAnswer?(questionId: number, answers: string[]): Promise<void>
   onAnswer?(permId: string, answers: Record<string, { answers: string[] }>): void
   onDeny(permId: string, reason: string): void
   onFocusPerm(permId: string): void
@@ -134,7 +136,7 @@ export interface ConversationProps {
 }
 
 /** Как уходит реплика: сразу, в очередь (идёт ход) или «прервать и сказать». */
-export type SendMode = 'now' | 'queue' | 'interrupt'
+export type SendMode = 'now' | 'queue' | 'interrupt' | 'steer'
 
 /** Таймеры снятия подсветки по элементам ленты (переход из поиска, метки, ⌥↑/⌥↓). */
 const flashTimers = new WeakMap<Element, number>()
@@ -316,7 +318,7 @@ export function Conversation(p: ConversationProps): ReactElement {
       ) : null}
       <Composer busy={sv.busy} needsYou={sv.needsYou} permFocused={p.focusedPerm !== null} link={p.link ?? 'up'} disabled={holds} sending={p.sending} error={p.sendError} onSend={p.onSend} agentName={agent.name} label={agentLabel(agent)} filePaths={p.filePaths ?? null}
         accessRed={chip.red} accessNote={pendingStrip(agent)}
-        onStop={p.onStop} queueable={!!p.onQueueRemove} inject={qe.inject} footer={<ChatFooter agent={agent} usage={p.usage} now={p.now} onReveal={p.onReveal} {...(p.onHelp ? { onHelp: p.onHelp } : {})}
+        onStop={p.onStop} steerable={agent.provider === 'codex'} queueable={!!p.onQueueRemove} inject={qe.inject} footer={<ChatFooter agent={agent} usage={p.usage} now={p.now} onReveal={p.onReveal} {...(p.onHelp ? { onHelp: p.onHelp } : {})}
         {...(p.onConfigure ? { onConfigure: p.onConfigure } : {})} catalog={p.catalog ?? null} windows={p.windows ?? EMPTY_WINDOWS} consent={p.consent ?? null} />} />
     </section>
     </ImageContext.Provider>
@@ -613,7 +615,7 @@ function Item({ it, ...p }: { it: ConvItem } & ConversationProps): ReactElement 
       return (
         <div className="it it-model" data-testid="msg-model" data-streaming={it.streaming ? '1' : '0'} data-event-id={it.id}>
           <Gutter who={prov} cls={`who-${prov}`} ts={it.ts} {...(src !== null ? { copy: { text: src, what: t('ответ') } } : {})} />
-          <div className={`body${it.error ? ' err' : ''}`}><Markdown text={it.text} streaming={it.streaming} /></div>
+          <div className={`body${it.error ? ' err' : ''}`}>{it.questions?.length ? <AsyncQuestion item={it} session={p.agent.name} now={p.now} {...(p.onAsyncAnswer ? { onAnswer: p.onAsyncAnswer } : {})} /> : <Markdown text={it.text} streaming={it.streaming} />}</div>
         </div>
       )
     case 'tool':
@@ -863,7 +865,7 @@ const draftStore: DraftStore = {
   set(k, v) { try { window.localStorage.setItem(k, v) } catch { /* хранилище недоступно */ } },
 }
 
-function Composer({ busy, needsYou, permFocused, link, disabled, sending, error, onSend, onStop, agentName, label, filePaths, queueable, inject, footer, accessRed = false, accessNote = null }: {
+function Composer({ busy, needsYou, permFocused, link, disabled, sending, error, onSend, onStop, agentName, label, filePaths, queueable, steerable = false, inject, footer, accessRed = false, accessNote = null }: {
   /** Шаг A: красная рамка поля — чат с полным доступом (выбран или ещё жив процесс с полными правами). */
   accessRed?: boolean
   /** Шаг A: строка под полем при понижении во время хода с полными правами (кадр 11). */
@@ -879,6 +881,7 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
   filePaths: FilePathSource | null
   /** Демон знает очередь (О2): во время хода поле не заперто — Enter ставит в очередь, ⌘Enter прерывает. */
   queueable: boolean
+  steerable?: boolean
   /**
    * Текст из правки очереди, которую не удалось сохранить (реплика ушла или убрана, вышел срок): в поле по
    * правилу M8e — пустое поле получает его как есть, набранное остаётся под ним через пустую строку.
@@ -971,7 +974,13 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
   // ⌘V на файлах из Finder и перетаскивание кладут в поле пути (model/filePathsInput.ts).
   const { onPaste, onDragOver, onDrop, notice: pasteNotice } = attached
   const onKey = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
-    if (e.nativeEvent.isComposing || e.key !== 'Enter' || e.shiftKey || e.altKey) return
+    if (e.nativeEvent.isComposing || e.key !== 'Enter' || e.shiftKey) return
+    if (e.altKey) {
+      if (!e.metaKey && !e.ctrlKey && steerable && busy && !needsYou) {
+        e.preventDefault(); e.stopPropagation(); void send('steer')
+      }
+      return
+    }
     const cmd = IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey
     if (!e.metaKey && !e.ctrlKey) {
       e.preventDefault()
@@ -1005,6 +1014,7 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
           requestAnimationFrame(() => ta.current?.focus())
         }} />
         {attached.enabled && <><input ref={picker} className="attach-picker-input" type="file" multiple data-testid="attachment-picker" onChange={(e) => { attached.addFiles(Array.from(e.target.files ?? [])); e.target.value = '' }} /><button type="button" className="btn attach-picker" title={t("Прикрепить файлы")} aria-label={t("Прикрепить файлы")} onClick={() => picker.current?.click()} disabled={blocked}>＋</button></>}
+        {steerable && busy && !needsYou && <button type="button" className="btn" data-testid="steer" title={t("Уточнить текущую задачу без остановки (⌥Enter)")} onClick={() => void send('steer')} disabled={blocked || dictating || (!text.trim() && !attached.items.length)}>{t("Уточнить сейчас")}</button>}
         {busy && <button type="button" className="btn btn-danger composer-stop" onClick={onStop} data-testid="stop-turn" title={t("Остановить ход (Esc)")}><Icon name="stop" />{t("Стоп")}</button>}
         <button type="button" className="btn btn-primary" onClick={() => void send()} disabled={blocked || dictating || (!text.trim() && !attached.items.length)} data-testid="send"
           title={busy && queueable ? t`Идёт ход: реплика уйдёт, когда он кончится. ${CMD}Enter — прервать и сказать` : undefined}>

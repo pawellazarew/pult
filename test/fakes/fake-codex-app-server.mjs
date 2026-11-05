@@ -125,6 +125,10 @@ async function playTurn(scenario, threadId, turnId, state) {
   // обычным ходом — ход, который обязан висеть, тихо завершался бы успехом.
   const names = scenario in SCENARIOS ? SCENARIOS[scenario] : SCENARIOS.simple
   if (names === null) {
+    if (cfg.asyncQuestions) out({ jsonrpc: '2.0', method: 'item/completed', params: { threadId, turnId, item: {
+      type: 'agentMessage', id: `async-question-${turnId}`, text: 'What makes questions difficult?\n- No form\n- Delivery',
+      phase: 'final_answer', questions: cfg.asyncQuestions,
+    } } })
     // Ход, который сам не кончится: его снимут `turn/interrupt` или смерть процесса.
     await new Promise(() => {})
     return
@@ -257,6 +261,7 @@ async function onRequest(id, method, params) {
       return
     }
     case 'turn/start': {
+      if (cfg.turnStartFails) { replyErr(id, -32600, 'turn/start rejected'); return }
       const t = threads.get(params.threadId)
       if (!t) { replyErr(id, -32600, `unknown thread ${params.threadId}`); return }
       if (t.turn) { replyErr(id, -32600, 'activeTurnNotSteerable'); return }
@@ -285,6 +290,13 @@ async function onRequest(id, method, params) {
       void playTurn(scenario, params.threadId, turnId, state).then(() => {
         if (t.turn && t.turn.id === turnId) t.turn = null
       })
+      return
+    }
+    case 'turn/steer': {
+      const t = threads.get(params.threadId)
+      if (!t?.turn || t.turn.id !== params.expectedTurnId) { replyErr(id, -32600, 'no matching active turn'); return }
+      if (cfg.rejectSteer || params.input?.some(i => i.text === 'reject this steering')) { replyErr(id, -32600, 'steering rejected'); return }
+      replyOk(id, { turnId: t.turn.id })
       return
     }
     case 'turn/interrupt': {

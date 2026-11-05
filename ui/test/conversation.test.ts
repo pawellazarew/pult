@@ -4,7 +4,7 @@ import { describe, it } from 'node:test'
 import { createClaudeMapper } from '../../src/adapters/claude/mapper.js'
 import type { PultEvent } from '../src/model/types.js'
 import type { AgentItem, ConvItem, ModelItem, NoticeItem, PermItem, ToolItem } from '../src/model/conversation.js'
-import { applyConversation, countItems, EMPTY_CONVERSATION, foldConversation, resultText, toolSummary } from '../src/model/conversation.js'
+import { reconcileAsyncAnswers, applyConversation, countItems, EMPTY_CONVERSATION, foldConversation, resultText, toolSummary } from '../src/model/conversation.js'
 
 let seq = 0
 const ev = (kind: string, data: Record<string, unknown> = {}, over: Partial<PultEvent> = {}): PultEvent => ({
@@ -201,4 +201,32 @@ describe('лента: предупреждение о лимите — не «и
     const hard = applyConversation(EMPTY_CONVERSATION, ev('limit.hit', { status: 'rejected', rateLimitType: 'seven_day', resetsAt: 1791687600 }))
     assert.match((hard.items[0] as NoticeItem).title, /исчерпан/)
   })
+})
+
+
+describe('Codex async questions in conversation replay', () => {
+  it('metadata survives delta replacement and answered state survives full replay', () => {
+    const delta = ev('message.delta', { text: 'Choose', itemId: 'q-async' })
+    const done = ev('message.done', { text: 'Choose?', itemId: 'q-async', questions: [{ title: 'Choose?', options: ['A', 'B'] }] })
+    const c = foldConversation([delta, done])
+    const question = c.items[0] as ModelItem
+    assert.equal(question.id, delta.id)
+    assert.equal(question.questionEventId, done.id)
+    assert.deepEqual(question.questions, [{ title: 'Choose?', options: ['A', 'B'] }])
+    const answered = foldConversation([delta, done, ev('message.user', { text: 'Choose?\nA', questionId: done.id })])
+    assert.equal((answered.items[0] as ModelItem).questionAnswered, true)
+  })
+  it('subagent async questions remain text until thread routing exists', () => {
+    const c = foldConversation([ev('message.done', { text: 'Subagent question', questions: [{ title: 'Choose?', options: null }] }, { parentId: 'child' })])
+    assert.ok(!c.items.some(it => it.type === 'model' && it.questions?.length))
+  })
+})
+
+
+it('reconciles async question replies from a separate history page', () => {
+  const question = ev('message.done', { text: 'Choose?', questions: [{ title: 'Choose?', options: ['A'] }] })
+  const before = foldConversation([question])
+  const after = foldConversation([ev('message.user', { text: 'A', questionId: question.id })])
+  const combined = reconcileAsyncAnswers([...before.items, ...after.items])
+  assert.equal((combined[0] as ModelItem).questionAnswered, true)
 })
