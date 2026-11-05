@@ -73,9 +73,17 @@ describe('окно: границы безопасности и тема', () => 
 
   it('шрифты загружены локально', async () => {
     const fonts = await h.win.evaluate(async () => {
+      // Unselected appearance fonts are loaded on demand rather than by the initial layout.
+      await Promise.all(['Onest', 'Geologica', 'JetBrains Mono'].map((f) => document.fonts.load(`16px "${f}"`, 'Пульт')))
       await document.fonts.ready
-      return ['Onest', 'Geologica', 'JetBrains Mono'].map((f) => document.fonts.check(`16px "${f}"`, 'Пульт'))
+      return {
+        ready: ['Onest', 'Geologica', 'JetBrains Mono'].map((f) => document.fonts.check(`16px "${f}"`, 'Пульт')),
+        sources: Array.from(document.styleSheets).flatMap((sheet) => Array.from(sheet.cssRules).flatMap((rule) =>
+          rule instanceof CSSFontFaceRule ? Array.from(rule.style.getPropertyValue('src').matchAll(/url\(["']?([^"')]+)["']?\)/g), (match) => new URL(match[1]!, document.baseURI).href) : [])),
+      }
     })
-    assert.deepEqual(fonts, [true, true, true])
+    assert.deepEqual(fonts.ready, [true, true, true])
+    assert.ok(fonts.sources.length >= 3)
+    assert.ok(fonts.sources.every((source) => { const url = new URL(source); return url.protocol === 'app:' && url.hostname === 'pult' && url.pathname.startsWith('/fonts/') }))
   })
 })
