@@ -647,7 +647,8 @@ describe('M8f: демон — settings.get|set и последний выбор'
     const c = await connectClient(home.paths)
     try {
       const got = (await c.request('settings.get')) as Record<string, unknown>
-      const { network, codexRules, access, language, attachments, ...rest } = got
+      const { network, codexRules, access, language, attachments, disk, ...rest } = got
+      assert.deepEqual((disk as { settings: unknown }).settings, { thresholdGb: 6, prompt: null })
       assert.deepEqual(attachments, { retentionDays: 30 })
       assert.equal(language, 'auto')
       assert.deepEqual(rest, { newSession: { rememberLast: true, defaults: { claude: {}, codex: {}, zcode: {} } }, lastUsed: {}, updates: { check: true } })

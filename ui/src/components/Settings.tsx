@@ -1,3 +1,5 @@
+import { DiskSettings } from './DiskSettings.js'
+import type { DiskSettings as DiskPreferences, DiskStatus } from '../../../src/core/disk.js'
 import type { LanguageSetting } from '../../../src/i18n/core.js'
 import { getLanguage, t } from '../lib/i18n.js'
 // M8f: «Настройки» (⌘,). Раздел «Новая сессия» — умолчания по провайдерам и «Подставлять последний выбор»;
@@ -464,7 +466,9 @@ export function FilesStorageSection({ retentionDays, onRetentionChange }: { rete
 
 export type SettingsSection = 'general' | 'appearance' | 'usage' | 'storage' | 'access' | 'sessions' | 'providers' | 'voice' | 'network' | 'rules' | 'keys' | 'updates'
 
-export function SettingsDialog({ settings, catalog, updates, autoCheck = null, netGuard, rules, access, language = 'auto', languageSupported = false, languageOverride = null, onSave, onClose, usage, now = Date.now(), onUsageRefresh, usageRefreshing = false, retentionDays, onRetentionChange, initialSection = 'appearance' }: {
+export function SettingsDialog({ settings, catalog, updates, autoCheck = null, netGuard, rules, access, language = 'auto', languageSupported = false, languageOverride = null, onSave, onClose, usage, now = Date.now(), onUsageRefresh, usageRefreshing = false, retentionDays, onRetentionChange, initialSection = 'appearance', disk, onDiskSave }: {
+  disk?: { settings: DiskPreferences; status: DiskStatus }
+  onDiskSave?(value: DiskPreferences): Promise<void>
   initialSection?: SettingsSection
   usage?: UsageState
   now?: number
@@ -610,7 +614,7 @@ export function SettingsDialog({ settings, catalog, updates, autoCheck = null, n
       <div className="settings-content form-stack" onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); e.stopPropagation(); void save() } }}>
         <div className="settings-page" hidden={section !== 'appearance'}><AppearanceSection value={appearance} onChange={setAppearance} /></div>
         <div className="settings-page" hidden={section !== 'usage'}><UsageSection usage={usage} now={now} onRefresh={onUsageRefresh} refreshing={usageRefreshing} /></div>
-        <div className="settings-page" hidden={section !== 'storage'}><FilesStorageSection retentionDays={retentionDays} onRetentionChange={onRetentionChange} /></div>
+        <div className="settings-page" hidden={section !== 'storage'}><FilesStorageSection retentionDays={retentionDays} onRetentionChange={onRetentionChange} /><DiskSettings disk={disk} onSave={onDiskSave} /></div>
         <div className="settings-page" hidden={section !== 'general'}><h3>{t('Основные')}</h3><section className="settings-sec">          <label className="field" htmlFor="settings-language">
             <span className="lbl">{t('Язык / Language')}</span>
             <select id="settings-language" data-testid="settings-language" value={languageDraft} disabled={busy || !languageSupported || !!languageOverride}
