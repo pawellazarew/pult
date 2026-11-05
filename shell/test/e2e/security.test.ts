@@ -64,6 +64,10 @@ describe('окно: границы безопасности и тема', () => 
       // доходит — переключаем тему тем же способом, каким Chromium сообщает системную: медиазапросом.
       await h.win.emulateMedia({ colorScheme: theme })
       assert.ok(await waitFor(async () => (await h.win.evaluate(() => matchMedia('(prefers-color-scheme: dark)').matches)) === (theme === 'dark')))
+      // matchMedia меняется раньше доставки change-события. Теперь палитру задаёт useAppearance
+      // через data-theme, поэтому ждём применения системной темы самим приложением.
+      assert.ok(await waitFor(async () => await h.win.locator('html').getAttribute('data-theme') === theme), `приложение не применило системную тему ${theme}`)
+      assert.equal(await h.win.locator('html').getAttribute('data-theme-preference'), 'system')
       const bg = await h.win.evaluate(() => getComputedStyle(document.body).backgroundColor)
       assert.equal(bg, theme === 'dark' ? 'rgb(25, 27, 29)' : 'rgb(250, 250, 249)')
       await sleep(100)
