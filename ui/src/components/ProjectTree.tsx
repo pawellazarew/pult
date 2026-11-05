@@ -2,7 +2,7 @@ import { ProviderIcon } from './ProviderIcon.js'
 import { t } from '../lib/i18n.js'
 // Основная навигация — проекты с чатами; недавние остаются отдельными ярлыками снизу.
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { MouseEvent, ReactElement } from 'react'
 import type { ProjectFilter } from '../model/navigation.js'
 import { ContextMenu } from './ContextMenu.js'
@@ -122,6 +122,8 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
   const archived = p.archived ?? []
   const temporaryChats = p.temporaryChats ?? []
   const [menu, setMenu] = useState<OpenMenu | null>(null)
+  const menuOpen = useRef(false)
+  useLayoutEffect(() => { menuOpen.current = menu !== null }, [menu])
   const [archiveOpen, setArchiveOpen] = useState(false)
   const [query, setQuery] = useState('')
   const [revealRequest, setRevealRequest] = useState(0)
@@ -154,6 +156,8 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
   useEffect(() => {
     if (!p.selected) return
     const timer = window.setTimeout(() => {
+      // Отложенный reveal не должен прокручивать список и закрывать уже открытое меню другого чата.
+      if (menuOpen.current) return
       const area = projectArea.current
       const row = area?.querySelector<HTMLElement>('[data-testid="agent-row"][aria-selected="true"]')
       if (!area || !row || row.closest('details:not([open])')) return
