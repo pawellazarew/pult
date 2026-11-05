@@ -122,6 +122,8 @@ export function Dictation({ disabled, onText, onBusy, settingsOnly = false }: { 
   const actions = useRef({ start, stop, cancel }); actions.current = { start, stop, cancel }
   useEffect(() => {
     if (settingsOnly) return
+    const observer = new MutationObserver(() => { if (state.current !== 'idle' && document.querySelector('[aria-modal="true"]')) actions.current.cancel() })
+    observer.observe(document.body, { childList: true, subtree: true })
     let held = false
     const down = (e: KeyboardEvent): void => {
       if (e.code === 'Space' && e.ctrlKey && e.shiftKey && !e.metaKey && !e.altKey) {
@@ -135,6 +137,7 @@ export function Dictation({ disabled, onText, onBusy, settingsOnly = false }: { 
     const blur = (): void => { held = false; if (state.current !== 'idle') actions.current.cancel() }
     window.addEventListener('keydown', down, true); window.addEventListener('keyup', up, true); window.addEventListener('blur', blur)
     return () => {
+      observer.disconnect()
       window.removeEventListener('keydown', down, true); window.removeEventListener('keyup', up, true); window.removeEventListener('blur', blur)
       ++run.current; stopTracks(); void api?.cancel().catch(() => {}); live.current.onBusy(false)
     }

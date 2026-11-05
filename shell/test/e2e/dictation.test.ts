@@ -20,7 +20,8 @@ describe('dictation: browser capture and draft lifecycle', () => {
       import React, { useState } from 'react';
       import { createRoot } from 'react-dom/client';
       import { Dictation } from './ui/src/components/Dictation.tsx';
-      import { appendDictation } from './ui/src/model/speech.ts';
+      import { appendDictation, pcmWav } from './ui/src/model/speech.ts';
+      window.nativeSpeechCodec = { AudioContext: window.AudioContext, MediaRecorder: window.MediaRecorder, OfflineAudioContext: window.OfflineAudioContext, pcmWav };
       let delayed = false, resolveText;
       window.testSpeech = { stopped: 0, requests: 0, cancel: 0, ready: true, delay: () => delayed = true, finish: () => resolveText?.('голосом') };
       window.pult = { speech: {
@@ -58,7 +59,7 @@ describe('dictation: browser capture and draft lifecycle', () => {
     await page.getByTestId('draft').fill('Допечатал')
     await page.getByTestId('dictation-toggle').click()
     assert.ok(await waitFor(async () => await page.getByTestId('draft').inputValue() === 'Допечатал голосом'))
-    assert.equal(await page.getByTestId('send').isEnabled(), true)
+    assert.ok(await waitFor(() => page.getByTestId('send').isEnabled()))
     assert.equal(await page.evaluate(() => (window as any).testSpeech.stopped), 2)
   })
   it('ordinary Space release does not end click recording; Escape discards it', async () => {
@@ -68,7 +69,7 @@ describe('dictation: browser capture and draft lifecycle', () => {
     await page.keyboard.press('Space')
     assert.equal(await page.getByRole('button', { name: 'Завершить диктовку' }).count(), 1)
     await page.keyboard.press('Escape')
-    assert.equal(await page.getByTestId('send').isEnabled(), true)
+    assert.ok(await waitFor(() => page.getByTestId('send').isEnabled()))
     assert.equal(await page.evaluate(() => (window as any).testSpeech.requests), 1)
     await page.getByTestId('draft').fill('Допечатал голосом')
   })
@@ -81,13 +82,37 @@ describe('dictation: browser capture and draft lifecycle', () => {
     await page.getByTestId('switch').click()
     await page.evaluate(() => (window as any).testSpeech.finish())
     assert.equal(await page.getByTestId('draft').inputValue(), 'Допечатал голосом')
-    assert.equal(await page.getByTestId('send').isEnabled(), true)
+    assert.ok(await waitFor(() => page.getByTestId('send').isEnabled()))
+  })
+  it('real Chromium WebM/Opus decodes to the canonical 16 kHz WAV without microphone access', async () => {
+    const result = await page.evaluate(async () => {
+      const native = (window as any).nativeSpeechCodec
+      const context = new native.AudioContext()
+      try {
+        const destination = context.createMediaStreamDestination()
+        const oscillator = context.createOscillator()
+        oscillator.connect(destination); oscillator.start()
+        await context.resume()
+        const chunks: Blob[] = []
+        const recorder = new native.MediaRecorder(destination.stream, { mimeType: 'audio/webm;codecs=opus' })
+        recorder.ondataavailable = (e: BlobEvent) => chunks.push(e.data)
+        const stopped = new Promise<void>((resolve) => { recorder.onstop = () => resolve() })
+        recorder.start()
+        await new Promise((resolve) => setTimeout(resolve, 350))
+        recorder.stop(); oscillator.stop(); destination.stream.getTracks().forEach((track: MediaStreamTrack) => track.stop())
+        await stopped
+        const decoded = await new native.OfflineAudioContext(1, 1, 16000).decodeAudioData(await new Blob(chunks).arrayBuffer())
+        const wav = native.pcmWav([decoded.getChannelData(0)]) as Uint8Array
+        return { rate: decoded.sampleRate, length: wav.length, riff: new TextDecoder().decode(wav.subarray(0, 4)) }
+      } finally { await context.close() }
+    })
+    assert.equal(result.rate, 16000); assert.equal(result.riff, 'RIFF'); assert.ok(result.length > 3244)
   })
   it('missing model opens a concrete download proposal without recording', async () => {
     await page.evaluate(() => { (window as any).testSpeech.ready = false })
     await page.getByTestId('dictation-toggle').click()
     await page.getByRole('button', { name: 'Скачать модель · 148 МБ' }).waitFor()
-    assert.equal(await page.getByTestId('send').isEnabled(), true)
+    assert.ok(await waitFor(() => page.getByTestId('send').isEnabled()))
     const client = await h.client()
     await client.request('agent.start', { name: 'voice', kind: 'claude', cwd: h.workDir('voice', { scenario: 'simple' }) })
     await h.win.bringToFront()

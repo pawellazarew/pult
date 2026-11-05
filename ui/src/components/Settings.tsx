@@ -442,13 +442,13 @@ export function SettingsDialog({ settings, catalog, updates, autoCheck = null, n
     return () => window.removeEventListener('keydown', key, true)
   }, [])
   const pages: Array<{ id: SettingsSection; label: string; group: string }> = [
-    { id: 'general', label: t('Основные'), group: t('Приложение') },
     { id: 'sessions', label: t('Новые чаты'), group: t('Работа') },
     { id: 'providers', label: t('Модели и агенты'), group: t('Работа') },
     { id: 'voice', label: t('Диктовка'), group: t('Работа') },
     ...(netGuard ? [{ id: 'network' as const, label: t('Страж сети'), group: t('Безопасность') }] : []),
     ...(access ? [{ id: 'access' as const, label: t('Доступ агентов'), group: t('Безопасность') }] : []),
     ...(rules ? [{ id: 'rules' as const, label: t('Постоянные разрешения'), group: t('Безопасность') }] : []),
+    { id: 'general', label: t('Основные'), group: t('Приложение') },
     { id: 'keys', label: t('Сочетания клавиш'), group: t('Приложение') },
     ...(updates ? [{ id: 'updates' as const, label: t('Обновления'), group: t('Приложение') }] : []),
   ]

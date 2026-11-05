@@ -45,3 +45,7 @@
 .new-chat-advanced > summary { cursor: pointer; font-size: 13px; color: var(--ink); }
 .new-chat-advanced > summary span { margin-left: 8px; color: var(--faint); font-size: 11px; }
 .new-chat-advanced > .form-stack { padding-top: 18px; }
+
+.settings-screen .btn { background: var(--panel); color: var(--ink); border-color: var(--hair); }
+.settings-screen .btn-primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+.settings-screen .settings-back { background: transparent; border-color: transparent; color: var(--mut); }
