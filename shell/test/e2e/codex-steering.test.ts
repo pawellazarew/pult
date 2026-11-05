@@ -8,7 +8,7 @@ describe('Codex: async question forms and steering', () => {
   let h: Harness
   before(async () => {
     h = await launch({ name: 'codex-steering' })
-    h.codexConfig({ scenario: 'hang' })
+    h.codexConfig({ scenario: 'hang', asyncQuestions: [{ title: 'What makes questions difficult?', options: ['No form', 'Delivery'] }, { title: 'Any details?', options: null }] })
     const c = await h.client()
     await c.request('agent.start', { name: 'steer-ui', kind: 'codex', cwd: h.workDir('steer-ui') })
     await c.request('agent.prompt', { name: 'steer-ui', text: 'initial task' })
@@ -20,11 +20,6 @@ describe('Codex: async question forms and steering', () => {
   const record = async () => ((await (await h.client()).request('agent.list')) as { sessions: Array<{ name: string; lastStatus: string; queue?: unknown[] }> }).sessions.find(s => s.name === 'steer-ui')!
 
   it('the screenshot question is a real form; replying steers without stopping and survives reload', async () => {
-    const c = await h.client()
-    await c.request('events.emit', { sessionId: 'steer-ui', provider: 'codex', kind: 'message.done', data: {
-      itemId: 'async-question-item', text: 'What makes questions difficult?\n- No form\n- Delivery',
-      questions: [{ title: 'What makes questions difficult?', options: ['No form', 'Delivery'] }, { title: 'Any details?', options: null }],
-    } })
     const form = h.win.getByTestId('async-question')
     await form.getByRole('textbox', { name: 'What makes questions difficult?: свой ответ', exact: true }).fill('old custom text')
     await form.getByLabel('No form', { exact: false }).check()

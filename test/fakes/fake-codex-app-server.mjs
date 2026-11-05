@@ -125,6 +125,10 @@ async function playTurn(scenario, threadId, turnId, state) {
   // обычным ходом — ход, который обязан висеть, тихо завершался бы успехом.
   const names = scenario in SCENARIOS ? SCENARIOS[scenario] : SCENARIOS.simple
   if (names === null) {
+    if (cfg.asyncQuestions) out({ jsonrpc: '2.0', method: 'item/completed', params: { threadId, turnId, item: {
+      type: 'agentMessage', id: `async-question-${turnId}`, text: 'What makes questions difficult?\n- No form\n- Delivery',
+      phase: 'final_answer', questions: cfg.asyncQuestions,
+    } } })
     // Ход, который сам не кончится: его снимут `turn/interrupt` или смерть процесса.
     await new Promise(() => {})
     return
