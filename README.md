@@ -77,6 +77,23 @@ Xcode and an iOS runtime are required for iOS; Android needs its SDK, Emulator a
 
 The built-in browser requires an open Pult window. Only virtual devices are supported. Model-requested screenshots are sent to the selected provider. Text-only models can use UI trees but cannot visually evaluate screenshots. iOS text input uses the simulator clipboard and supports Unicode; Android input currently supports ASCII only.
 
+## Dictation and settings
+
+Settings (`⌘,`) opens a separate workspace with sections for new chats, providers, dictation,
+network guard, persistent permissions, keyboard shortcuts and updates. Draft changes survive
+navigation between sections. Speech language and microphone preferences save immediately.
+The sidebar has one project/chat list without a duplicate Recents area.
+
+Click the microphone to start and finish dictation, or hold `Ctrl+Shift+Space` in the Pult window.
+Escape, switching chats or leaving the window cancels the recording. Text is appended to your draft
+and never sent automatically. Recordings are limited to two minutes.
+
+Download Whisper base (148 MB) once from Settings → Dictation. Recognition then runs locally,
+without an API key or internet. Select Russian, English or automatic language detection, a preferred
+microphone and excluded device names (AirPods by default). If no eligible device is connected,
+recording does not start; an explicitly preferred connected device takes precedence over exclusions.
+macOS asks for microphone access. Temporary audio is removed after transcription or cancellation.
+
 ## Requirements
 
 - **macOS on Apple Silicon** (daemon, CLI and window) **or Linux** (daemon and CLI; there is no window on Linux).

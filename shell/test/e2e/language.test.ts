@@ -22,6 +22,7 @@ it('RU → EN → RU: saved language, chrome, drafts and session names survive r
     await h.win.getByTestId('open-settings').click()
     await h.win.getByTestId('settings-language').selectOption('en')
     assert.equal(await h.win.locator('html').getAttribute('lang'), 'ru')
+    await h.win.getByTestId('settings-nav-providers').click()
     await h.win.getByTestId('settings-claude-warm').check()
     await h.win.getByTestId('settings-save').click()
     assert.ok(await waitFor(async () => await h.win.locator('html').getAttribute('lang') === 'en', 10_000))

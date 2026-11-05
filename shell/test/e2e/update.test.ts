@@ -194,6 +194,7 @@ describe('окно: «Настройки» → «Обновления» — пр
   it('⌘, → «Проверить сейчас»: ставить нечего — «Установлена последняя версия», короткая плашка в окне', async () => {
     await h.win.keyboard.press('Meta+,')
     await h.win.getByTestId('settings-dialog').waitFor({ timeout: 5000 })
+    await h.win.getByTestId('settings-nav-updates').click()
     const sec = h.win.getByTestId('settings-updates')
     await sec.waitFor({ timeout: 5000 })
     // Одна версия: окно того же номера, что пакет, — отдельной строкой не показывается.

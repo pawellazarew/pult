@@ -1,0 +1,53 @@
+/* Settings form a separate workspace. Chat state remains mounted underneath. */
+.settings-screen { position: fixed; inset: 0; z-index: 100; background: var(--ground); }
+.settings-screen .scrim { padding: 0; background: var(--ground); }
+.settings-screen .scrim .dlg.wide { width: 100%; height: 100%; max-width: none; max-height: none; border: 0; border-radius: 0; box-shadow: none; background: var(--ground); }
+.settings-screen .dlg-h { display: none; }
+.settings-screen .dlg-b { padding: 0; flex: 1; min-height: 0; overflow: hidden; }
+.settings-screen .dlg-f { min-height: 64px; padding: 12px 32px; border-top: 1px solid var(--hair); }
+.settings-layout { display: grid; grid-template-columns: 232px minmax(0, 1fr); height: 100%; min-height: 0; }
+.settings-navigation { padding: 26px 14px; background: var(--sidebar); border-right: 1px solid var(--hair); overflow-y: auto; }
+.settings-navigation h2 { font: 600 18px var(--body); margin: 28px 12px 24px; }
+.settings-back { width: 100%; justify-content: flex-start; border: 0; background: transparent; color: var(--mut); }
+.settings-group-label { margin: 24px 12px 8px; font-size: 11px; color: var(--faint); }
+.settings-nav-item { display: block; width: 100%; padding: 11px 12px; text-align: left; font: 13px var(--body); border: 0; border-radius: 7px; background: transparent; color: var(--mut); cursor: pointer; }
+.settings-nav-item:hover { background: var(--sunk); color: var(--ink); }
+.settings-nav-item.active { color: var(--ink); background: var(--ground); font-weight: 600; }
+.settings-content { display: block; overflow-y: auto; min-width: 0; padding: 44px clamp(24px, 6vw, 100px); }
+.settings-page { max-width: 760px; margin: 0 auto; }
+.settings-page[hidden], .settings-page [hidden] { display: none !important; }
+.settings-page > h3, .settings-page .settings-sec > h3 { font: 600 24px/1.3 var(--body); letter-spacing: -.02em; margin: 0 0 20px; }
+.settings-intro { color: var(--mut); font-size: 13px; line-height: 1.65; margin: 0 0 28px; }
+.settings-page .settings-sec { gap: 22px; }
+.settings-page .field { max-width: 520px; gap: 8px; }
+.settings-page .check { padding: 16px 0; border-bottom: 1px solid var(--hair); }
+.settings-page .note { line-height: 1.6; }
+.settings-page fieldset { margin: 22px 0; padding: 22px; border: 1px solid var(--hair); border-radius: 10px; display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+.settings-page legend { font-size: 12px; color: var(--mut); padding: 0 8px; }
+.settings-provider-tabs { display: flex; gap: 8px; margin: 20px 0; }
+.settings-provider-tabs .selected { background: var(--sunk); border-color: var(--mut); }
+.settings-save-note { font-size: 12px; color: var(--mut); }
+.settings-discard { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 12px; }
+.settings-keys { margin: 0; }
+.settings-keys > div { display: grid; grid-template-columns: minmax(140px, 32%) 1fr; gap: 20px; padding: 15px 0; border-bottom: 1px solid var(--hair); font-size: 12px; }
+.settings-keys dd { margin: 0; color: var(--mut); line-height: 1.5; }
+.dictation-inline { display: block; }
+.dictation-inline .dictation-settings { position: static; width: auto; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; max-height: none; overflow: visible; font-size: 13px; }
+.dictation-inline .dictation-settings label { margin: 24px 0 12px; max-width: 520px; }
+.dictation-inline .dictation-notice { position: static; width: auto; margin-top: 16px; box-shadow: none; }
+@media (max-width: 760px) {
+  .settings-layout { grid-template-columns: 190px minmax(0, 1fr); }
+  .settings-content { padding: 28px 20px; }
+  .settings-screen .dlg-f { padding: 10px 18px; flex-wrap: wrap; }
+}
+
+.new-chat-advanced { border-top: 1px solid var(--hair); padding-top: 14px; }
+.new-chat-advanced > summary { cursor: pointer; font-size: 13px; color: var(--ink); }
+.new-chat-advanced > summary span { margin-left: 8px; color: var(--faint); font-size: 11px; }
+.new-chat-advanced > .form-stack { padding-top: 18px; }
+
+.settings-screen .btn { background: var(--panel); color: var(--ink); border-color: var(--hair); }
+.settings-screen .btn-primary { background: var(--accent); color: var(--ground); border-color: var(--accent); }
+.settings-screen .settings-back { background: transparent; border-color: transparent; color: var(--mut); }
+
+.settings-screen .settings-provider-tabs .btn[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-edge); }

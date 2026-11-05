@@ -197,7 +197,17 @@ export interface NavTarget extends NotifyTarget {
   link?: boolean
 }
 
+export interface SpeechStatus { runtime: boolean; ready: boolean; downloading: boolean; received: number; total: number }
+export interface SpeechBridge {
+  status(): Promise<SpeechStatus>
+  install(): Promise<void>
+  prepare(): Promise<void>
+  transcribe(wav: Uint8Array, language: 'ru' | 'en' | 'auto'): Promise<string>
+  cancel(): Promise<void>
+}
+
 export interface PultBridge {
+  speech?: SpeechBridge
   readonly version: number
   /** PULT_TEST=1 у процесса оболочки: интерфейс включает отладочные крючки для e2e. */
   readonly testMode: boolean
@@ -292,6 +302,7 @@ export interface ClipboardImageBridge {
 
 /** Каналы IPC между preload и main. Имена в одном месте: опечатка в строке канала молчит. */
 export const IPC = {
+  speech: 'pult:speech',
   call: 'pult:call',
   runtimeView: 'pult:runtime-view',
   subscribe: 'pult:subscribe',

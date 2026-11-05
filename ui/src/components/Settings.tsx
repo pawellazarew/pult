@@ -23,6 +23,9 @@ import type { GuardMode, GuardRule, GuardStash } from '../model/netGuard.js'
 import type { GuardCheck } from '../model/health.js'
 import { ruleMeta, ruleTitle, unmarkedNote } from '../model/rules.js'
 import type { CodexRulesList } from '../model/rules.js'
+import { Dictation } from './Dictation.js'
+import { HOTKEYS } from './Panels.js'
+import './settings-screen.css'
 import { CMD, Kbd } from './common.js'
 import { Dialog } from './Panels.js'
 
@@ -72,12 +75,11 @@ function ProviderDefaultsBox({ provider, draft, catalog, onChange }: {
         </select>
         <span className="note">{t("«Полный доступ» по умолчанию не ставится — только явно в чате; папка его запомнит.")}</span>
       </label>
-      {provider !== 'zcode' && (
+      {provider === 'claude' && (
         <label className="check">
           <input type="checkbox" checked={d.mode === 'warm'} data-testid={`settings-${provider}-warm`}
             onChange={(e) => onChange(setDefault(draft, provider, 'mode', e.target.checked ? 'warm' : undefined))} />
           <span>{t("Тёплый процесс между репликами")}</span>
-          {provider === 'codex' && <span className="note">{t("у Codex процесс app-server и так общий — флаг ни на что не влияет")}</span>}
         </label>
       )}
       {provider !== 'zcode' && (
@@ -264,7 +266,7 @@ export function NetGuardSection({ panel, rule, onChange }: {
           onChange={(e) => setQ(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !(e.metaKey || e.ctrlKey) && found[0]) { e.preventDefault(); e.stopPropagation(); add(found[0]) }
-            if (e.key === 'Escape' && q) { e.preventDefault(); e.stopPropagation(); setQ('') }
+      if (e.key === 'Escape' && q) { e.preventDefault(); e.stopPropagation(); setQ('') }
           }} />
       </label>
       {q.trim() !== '' && (
@@ -348,7 +350,10 @@ export function RulesSection({ panel }: { panel: RulesPanel }): ReactElement {
   )
 }
 
-export function SettingsDialog({ settings, catalog, updates, autoCheck = null, netGuard, rules, access, language = 'auto', languageSupported = false, languageOverride = null, onSave, onClose }: {
+export type SettingsSection = 'general' | 'access' | 'sessions' | 'providers' | 'voice' | 'network' | 'rules' | 'keys' | 'updates'
+
+export function SettingsDialog({ settings, catalog, updates, autoCheck = null, netGuard, rules, access, language = 'auto', languageSupported = false, languageOverride = null, onSave, onClose, initialSection = 'general' }: {
+  initialSection?: SettingsSection
   settings: NewSessionSettings | null
   language?: LanguageSetting
   languageSupported?: boolean
@@ -378,8 +383,18 @@ export function SettingsDialog({ settings, catalog, updates, autoCheck = null, n
     setLanguageDraft((draft) => draft === previous ? language : draft)
     previousLanguage.current = language
   }, [language])
+  const [section, setSection] = useState<SettingsSection>(initialSection)
+  const [provider, setProvider] = useState<Provider>('claude')
+  const [discard, setDiscard] = useState(false)
   const [draft, setDraft] = useState<NewSessionSettings>(() => settingsDraft(settings))
   const [auto, setAuto] = useState<boolean | null>(autoCheck)
+  const baseline = useRef(settingsDraft(settings))
+  const autoBaseline = useRef(autoCheck)
+  useEffect(() => {
+    if (JSON.stringify(draft) === JSON.stringify(baseline.current)) setDraft(settingsDraft(settings))
+    baseline.current = settingsDraft(settings)
+  }, [settings])
+  useEffect(() => { if (auto === autoBaseline.current) setAuto(autoCheck); autoBaseline.current = autoCheck }, [autoCheck])
   // Правило, на котором стоит черновик: на «Сохранить» уходит только СМЕНА, и с ним же как `expect` — демон откажет
   // (`guard_changed`), если правило тем временем поменяли из терминала. Свежее правило пришло (окно перечитывает
   // настройки при открытии), а черновик не тронут — черновик встаёт на него.
@@ -389,7 +404,9 @@ export function SettingsDialog({ settings, catalog, updates, autoCheck = null, n
   const [guardKey, setGuardKey] = useState(0)
   const fetched = netGuard?.rule
   useEffect(() => {
-    if (!fetched || !initialGuard || sameGuard(fetched, initialGuard)) return
+    if (!fetched) return
+    if (!initialGuard) { setInitialGuard(seed(fetched)); setGuard(seed(fetched)); return }
+    if (sameGuard(fetched, initialGuard)) return
     if (guard && !sameGuard(guard, initialGuard)) return
     setInitialGuard(seed(fetched))
     setGuard(seed(fetched))
@@ -398,7 +415,11 @@ export function SettingsDialog({ settings, catalog, updates, autoCheck = null, n
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const first = useRef<HTMLSelectElement>(null)
-  useEffect(() => { first.current?.focus() }, [])
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null
+    document.querySelector<HTMLButtonElement>('[data-settings-active="true"]')?.focus()
+    return () => { if (previous?.isConnected) previous.focus() }
+  }, [])
   const invalid = draftError(draft) ?? (guard ? guardDraftError(guard) : null)
   const save = async (): Promise<void> => {
     if (busy || invalid) return
@@ -408,19 +429,77 @@ export function SettingsDialog({ settings, catalog, updates, autoCheck = null, n
     setBusy(false)
     if (e) setErr(e)
   }
+  const dirty = languageDraft !== language || JSON.stringify(draft) !== JSON.stringify(settingsDraft(settings)) || auto !== autoCheck || !!(guard && initialGuard && !sameGuard(guard, initialGuard))
+  const close = (): void => { if (busy) return; if (dirty) setDiscard(true); else onClose() }
+  const actions = useRef({ close, save }); actions.current = { close, save }
+  useEffect(() => {
+    const key = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape' && (e.target as HTMLInputElement | null)?.id === 'guard-search' && (e.target as HTMLInputElement).value) return
+      if (e.key === 'Escape' || ((e.metaKey || e.ctrlKey) && e.code === 'Comma')) { e.preventDefault(); e.stopImmediatePropagation(); actions.current.close() }
+      else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); e.stopImmediatePropagation(); void actions.current.save() }
+    }
+    window.addEventListener('keydown', key, true)
+    return () => window.removeEventListener('keydown', key, true)
+  }, [])
+  const pages: Array<{ id: SettingsSection; label: string; group: string }> = [
+    { id: 'sessions', label: t('Новые чаты'), group: t('Работа') },
+    { id: 'providers', label: t('Модели и агенты'), group: t('Работа') },
+    { id: 'voice', label: t('Диктовка'), group: t('Работа') },
+    ...(netGuard ? [{ id: 'network' as const, label: t('Страж сети'), group: t('Безопасность') }] : []),
+    ...(access ? [{ id: 'access' as const, label: t('Доступ агентов'), group: t('Безопасность') }] : []),
+    ...(rules ? [{ id: 'rules' as const, label: t('Постоянные разрешения'), group: t('Безопасность') }] : []),
+    { id: 'general', label: t('Основные'), group: t('Приложение') },
+    { id: 'keys', label: t('Сочетания клавиш'), group: t('Приложение') },
+    ...(updates ? [{ id: 'updates' as const, label: t('Обновления'), group: t('Приложение') }] : []),
+  ]
   return (
-    <Dialog title={t("Настройки")} size="wide" onClose={onClose} testId="settings-dialog"
+    <div className="settings-screen" onKeyDownCapture={(e) => {
+      if (e.key === 'Tab') {
+        const targets = Array.from(e.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]')).filter((el) => el.getClientRects().length > 0)
+        const first = targets[0], last = targets.at(-1)
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus() }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus() }
+      }
+      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); e.stopPropagation(); void save() }
+      if (e.key === 'Escape' || ((e.metaKey || e.ctrlKey) && e.code === 'Comma')) { e.preventDefault(); e.stopPropagation(); close() }
+    }}>
+    <Dialog title={t("Настройки")} size="wide" onClose={close} testId="settings-dialog"
       footer={<>
         {(err ?? invalid) && <span className="err" role="alert" data-testid="settings-error">{err ?? invalid}</span>}
+        {discard ? <span className="settings-discard" role="alert">{t("Есть несохранённые изменения.")}<button type="button" className="btn" onClick={() => setDiscard(false)}>{t("Продолжить настройку")}</button>
+          <button type="button" className="btn" onClick={onClose}>{t("Выйти без сохранения")}</button>
+        </span> : <span className="settings-save-note" role="status">{dirty ? t('Есть несохранённые изменения') : t('Изменений нет')}</span>}
         <span className="grow" />
-        <button type="button" className="btn" onClick={onClose}>{t("Отмена ")}<Kbd>Esc</Kbd></button>
+        <button type="button" className="btn" onClick={close}>{t("К работе")}<Kbd>Esc</Kbd></button>
         <button type="button" className="btn btn-primary" disabled={busy || !!invalid} onClick={() => void save()} data-testid="settings-save">
           {busy ? t('Сохраняю…') : t('Сохранить')} <Kbd>{`${CMD}↵`}</Kbd>
         </button>
       </>}>
-      <div className="form-stack" onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); e.stopPropagation(); void save() } }}>
+      <div className="settings-layout">
+      <aside className="settings-navigation">
+        <button type="button" className="btn settings-back" onClick={close}>{t("← К работе")}</button>
+        <h2>{t("Настройки")}</h2>
+        <nav aria-label={t("Разделы настроек")}>{pages.map((page, i) => <div key={page.id}>
+          {pages[i - 1]?.group !== page.group && <div className="settings-group-label">{page.group}</div>}
+          <button type="button" className={`settings-nav-item${section === page.id ? ' active' : ''}`} aria-current={section === page.id ? 'page' : undefined}
+            data-settings-active={section === page.id} data-testid={`settings-nav-${page.id}`} onClick={() => { setSection(page.id); setDiscard(false) }}>{page.label}</button>
+        </div>)}</nav>
+      </aside>
+      <div className="settings-content form-stack" onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); e.stopPropagation(); void save() } }}>
+        <div className="settings-page" hidden={section !== 'general'}><h3>{t('Основные')}</h3><section className="settings-sec">          <label className="field" htmlFor="settings-language">
+            <span className="lbl">{t('Язык / Language')}</span>
+            <select id="settings-language" data-testid="settings-language" value={languageDraft} disabled={busy || !languageSupported || !!languageOverride}
+              onChange={(e) => setLanguageDraft(e.target.value as LanguageSetting)}>
+              <option value="auto">{t('Как в системе')}</option>
+              <option value="ru">{t("Русский")}{/* i18n-ignore: language names stay native */}</option>
+              <option value="en">English</option>
+            </select>
+            <span className="note">{!languageSupported ? t('Для смены языка обнови окно Пульта через «Настройки → Обновления».') : languageOverride ? t`Язык задан переменной PULT_LANG=${languageOverride}. Убери её, чтобы выбирать язык здесь.` : t('Смена языка применяется кнопкой «Сохранить» и перезагружает окно. Переписка сохранится.')}</span>
+          </label></section></div>
+        <div className="settings-page" hidden={section !== 'access'}>{access && <AccessSection consent={access.consent} onRevoke={access.onRevoke} />}</div>
+        <div className="settings-page" hidden={section !== 'sessions'}>
         <section className="settings-sec" aria-labelledby="settings-new-h" data-testid="settings-new-session">
-          <h3 id="settings-new-h">{t("Новый чат")}</h3>
+          <h3 id="settings-new-h">{t("Новые чаты")}</h3><p className="settings-intro">{t("Выбери, с какими параметрами начинать работу. Уже открытые чаты сохранят свои настройки.")}</p>
           <label className="field" htmlFor="set-provider">
             <span className="lbl">{t("провайдер по умолчанию")}</span>
             <select id="set-provider" ref={first} value={draft.defaults.provider ?? ''} data-testid="settings-provider"
@@ -429,32 +508,19 @@ export function SettingsDialog({ settings, catalog, updates, autoCheck = null, n
               {PROVIDERS.map((p) => <option key={p} value={p}>{p}</option>)}
             </select>
           </label>
-          {/* Шаг B: черновик нового чата берёт эти умолчания и доступ, запомненный для папки; «последний выбор» он не
-              читает (флаг `rememberLast` остаётся в config.json до перехода на пресеты, шаг C). */}
           <span className="note" data-testid="settings-new-chat-note">{t("Новый чат (⌘N) начинается с этих умолчаний. Доступ каждая папка помнит свой — тот, что ты выбрал при отправке или сменил в чате; у новой папки — «Правки в папке без вопросов» или выбранное ниже.")}</span>
-          <div className="settings-prov">
-            {PROVIDERS.map((p) => <ProviderDefaultsBox key={p} provider={p} draft={draft} catalog={catalog} onChange={setDraft} />)}
-          </div>
-        </section>
-        {netGuard && guard && <NetGuardSection key={guardKey} panel={netGuard} rule={guard} onChange={setGuard} />}
-        {access && <AccessSection consent={access.consent} onRevoke={access.onRevoke} />}
-        {rules && <RulesSection panel={rules} />}
-        {updates && <UpdatesSection panel={updates} auto={auto} onAuto={setAuto} />}
-        <section className="settings-sec" aria-labelledby="settings-look-h" data-testid="settings-appearance">
-          <label className="field" htmlFor="settings-language">
-            <span className="lbl">{t('Язык / Language')}</span>
-            <select id="settings-language" data-testid="settings-language" value={languageDraft} disabled={busy || !languageSupported || !!languageOverride}
-              onChange={(e) => setLanguageDraft(e.target.value as LanguageSetting)}>
-              <option value="auto">{t('Как в системе')}</option>
-              <option value="ru">Русский{/* i18n-ignore: language names stay native */}</option>
-              <option value="en">English</option>
-            </select>
-            <span className="note">{!languageSupported ? t('Для смены языка обнови окно Пульта через «Настройки → Обновления».') : languageOverride ? t`Язык задан переменной PULT_LANG=${languageOverride}. Убери её, чтобы выбирать язык здесь.` : t('Смена языка применяется кнопкой «Сохранить» и перезагружает окно. Переписка сохранится.')}</span>
-          </label>
-          <h3 id="settings-look-h">{t("Внешний вид")}</h3>
-          <span className="note">{t("Темы и цвета — после редизайна.")}</span>
-        </section>
-      </div>
-    </Dialog>
+        </section></div>
+        <div className="settings-page" hidden={section !== 'providers'}>
+          <h3>{t("Модели и агенты")}</h3><p className="settings-intro">{t("Параметры новых чатов для каждого провайдера.")}</p>
+          <div className="settings-provider-tabs" role="group" aria-label={t("Провайдер")}>{PROVIDERS.map((p) => <button type="button" className={`btn${provider === p ? ' selected' : ''}`} aria-pressed={provider === p} onClick={() => setProvider(p)} key={p}>{p === 'claude' ? 'Claude' : p === 'codex' ? 'Codex' : 'ZCode'}</button>)}</div>
+          {PROVIDERS.map((p) => <div key={p} hidden={provider !== p}><ProviderDefaultsBox provider={p} draft={draft} catalog={catalog} onChange={setDraft} /></div>)}
+        </div>
+        <div className="settings-page" hidden={section !== 'voice'}><h3>{t("Диктовка")}</h3><p className="settings-intro">{t("Говори вместо набора текста. Язык и микрофон сохраняются сразу.")}</p><Dictation settingsOnly disabled={false} onBusy={() => {}} onText={() => {}} /></div>
+        <div className="settings-page" hidden={section !== 'network'}>{netGuard && guard && <NetGuardSection key={guardKey} panel={netGuard} rule={guard} onChange={setGuard} />}</div>
+        <div className="settings-page" hidden={section !== 'rules'}>{rules && <RulesSection panel={rules} />}</div>
+        <div className="settings-page" hidden={section !== 'keys'}><h3>{t("Сочетания клавиш")}</h3><p className="settings-intro">{t("Основные действия доступны без мыши.")}</p><dl className="settings-keys">{HOTKEYS.map(([key, label], i) => <div key={i}><dt><Kbd>{key}</Kbd></dt><dd>{label}</dd></div>)}</dl></div>
+        <div className="settings-page" hidden={section !== 'updates'}>{updates && <UpdatesSection panel={updates} auto={auto} onAuto={setAuto} />}</div>
+      </div></div>
+    </Dialog></div>
   )
 }
