@@ -79,8 +79,8 @@ jobs:
   check:
     needs: changes
     runs-on: ${{ matrix.os }}
-    # e2e окна на macOS докачивает Electron (~100 МБ) и поднимает его дважды — отсюда запас.
-    timeout-minutes: 20
+    # Полный e2e окна запускает отдельный Electron на каждый сценарий; запас на загрузку и медленный runner.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:

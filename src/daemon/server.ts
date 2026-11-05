@@ -1670,6 +1670,8 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
           ...(p['interrupt'] === true ? { interrupt: true } : {}),
           ...(p['steer'] === true ? { steer: true } : {}),
         })
+      case 'agent.queue.send':
+        return await manager.queueSend(String(p['name'] ?? ''), String(p['id'] ?? ''))
       case 'agent.queue.resume':
         return manager.queueResume(String(p['name'] ?? ''))
       case 'agent.queue.remove':
@@ -2168,6 +2170,7 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
       case 'agent.list':
       case 'agent.seen':
       case 'agent.retry':
+      case 'agent.queue.send':
       case 'agent.queue.resume':
       case 'agent.queue.remove':
       case 'agent.queue.move':

@@ -293,6 +293,7 @@ async function onRequest(id, method, params) {
       return
     }
     case 'turn/steer': {
+      if (cfg.steerDelayMs) await sleep(Number(cfg.steerDelayMs))
       const t = threads.get(params.threadId)
       if (!t?.turn || t.turn.id !== params.expectedTurnId) { replyErr(id, -32600, 'no matching active turn'); return }
       if (cfg.rejectSteer || params.input?.some(i => i.text === 'reject this steering')) { replyErr(id, -32600, 'steering rejected'); return }
