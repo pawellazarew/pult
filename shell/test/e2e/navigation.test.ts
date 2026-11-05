@@ -22,10 +22,10 @@ describe('проекты как основная навигация', () => {
   })
   after(async () => { await h?.close() })
 
-  it('проект содержит чаты, длинный список раскрывается; недавние остаются отдельными ярлыками', async () => {
+  it('проект содержит чаты, длинный список раскрывается; дублирующего списка нет', async () => {
     assert.equal(await h.win.getByTestId('project').count(), 1)
     assert.equal(await h.win.getByTestId('agent-row').count(), 4)
-    assert.equal(await h.win.getByTestId('recent-row').count(), 59)
+    assert.equal(await h.win.getByTestId('recent-row').count(), 0)
     await h.win.getByTestId('project-more').click()
     assert.equal(await h.win.getByTestId('agent-row').count(), 60)
     await h.win.getByRole('button', { name: 'Свернуть список', exact: true }).click()
@@ -50,22 +50,13 @@ describe('проекты как основная навигация', () => {
     await h.win.locator('[data-testid="conversation"][data-agent="chat-59"]').waitFor()
   })
 
-  it('выбор старого чата из недавних раскрывает проект и показывает выбранный чат за пределами краткого списка', async () => {
-    const project = h.win.getByTestId('project')
-    await project.getByTestId('project-toggle').click()
-    assert.ok(await waitFor(async () => await project.getAttribute('open') === null))
-    await h.win.locator('[data-testid="recent-row"][data-agent="chat-00"]').click()
+  it('старый чат находится поиском без отдельного списка недавних', async () => {
+    const search = h.win.getByTestId('chat-filter')
+    await search.fill('chat-00')
+    await h.win.locator('[data-testid="agent-row"][data-agent="chat-00"]').click()
+    await search.fill('')
     await h.win.locator('[data-testid="conversation"][data-agent="chat-00"]').waitFor()
-    assert.ok(await waitFor(async () => await project.getAttribute('open') !== null))
-    const selected = project.locator('[data-testid="agent-row"][data-agent="chat-00"]')
-    assert.equal(await selected.getAttribute('aria-selected'), 'true')
-    assert.ok(await waitFor(async () => {
-      const row = await selected.boundingBox(), area = await h.win.getByTestId('sidebar-projects').boundingBox()
-      return !!row && !!area && row.y >= area.y && row.y + row.height <= area.y + area.height + 1
-    }))
-    await project.getByTestId('project-toggle').click()
-    await h.win.locator('[data-testid="recent-row"][data-agent="chat-00"]').click()
-    assert.ok(await waitFor(async () => await project.getAttribute('open') !== null), 'повторный выбор текущего чата тоже раскрывает проект')
+    assert.equal(await h.win.locator('[data-testid="agent-row"][data-agent="chat-00"]').getAttribute('aria-selected'), 'true')
     await h.win.locator('[data-testid="agent-row"][data-agent="chat-59"]').click()
   })
 
@@ -131,7 +122,6 @@ describe('проекты как основная навигация', () => {
       await sampler
       assert.deepEqual(await order(), expected, 'события после хода строку не двигают')
       assert.deepEqual([...seen].filter((o) => o !== before.join(' ') && o !== expected.join(' ')), [], 'промежуточных порядков нет')
-      assert.equal(await h.win.locator('[data-testid="recent-row"]').first().getAttribute('data-agent'), 'chat-45', 'и в «Недавних» он первый')
       assert.equal(await h.win.getByTestId('conversation').getAttribute('data-agent'), 'chat-59', 'выбор не украден')
     } finally {
       sampling = false
@@ -142,7 +132,7 @@ describe('проекты как основная навигация', () => {
     }
   })
 
-  it('много проектов прокручиваются в основной области; недавние видны на трёх размерах окна', async () => {
+  it('много проектов прокручиваются в основной области на трёх размерах окна', async () => {
     const c = await h.client()
     for (let i = 0; i < 12; i++) await c.request('project.add', { path: h.workDir(`project-${i}`) })
     await h.win.evaluate(() => window.dispatchEvent(new Event('focus')))
@@ -150,13 +140,10 @@ describe('проекты как основная навигация', () => {
     for (const [width, height] of [[1280, 800], [1024, 642], [900, 560]]) {
       await h.app.evaluate(({ BrowserWindow }, [w, hh]) => BrowserWindow.getAllWindows()[0]?.setContentSize(w!, hh!), [width, height])
       await h.win.getByTestId('sidebar-projects').evaluate((el) => { el.scrollTop = el.scrollHeight })
-      await h.win.locator('[data-testid="chats-recent"] .ag-list').evaluate((el) => { el.scrollTop = 0 })
       assert.ok(await waitFor(async () => h.win.evaluate(() => {
         const projects = document.querySelector('[data-testid="sidebar-projects"]')!.getBoundingClientRect()
-        const recent = document.querySelector('[data-testid="chats-recent"]')!.getBoundingClientRect()
-        const first = document.querySelector('[data-testid="recent-row"]')!.getBoundingClientRect()
         const heading = document.querySelector('.projects-heading')!.getBoundingClientRect()
-        return projects.bottom <= recent.top && first.top >= recent.top && first.bottom <= recent.bottom + 1 && recent.bottom <= innerHeight && heading.top >= projects.top - 1 && document.documentElement.scrollWidth <= innerWidth + 1
+        return projects.bottom <= innerHeight && heading.top >= projects.top - 1 && document.documentElement.scrollWidth <= innerWidth + 1
       })))
       await h.shot(`project-sidebar-${width}`)
     }

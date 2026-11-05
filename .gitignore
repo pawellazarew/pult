@@ -42,3 +42,7 @@ spike/*/logs/
 spike/*/results.json
 spike/env/*.log.jsonl
 spike/env/*.err.txt
+
+# Reproducible local speech runtime (shell/scripts/build-speech.mjs).
+shell/.speech-build/
+shell/build/speech/

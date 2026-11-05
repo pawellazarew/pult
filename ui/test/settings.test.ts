@@ -201,7 +201,7 @@ describe('M8f: «Настройки» (⌘,)', () => {
     assert.doesNotMatch(out, /settings-remember-last/)
     assert.match(t, /Доступ каждая папка помнит свой/)
     assert.match(out, /<option value="" selected="">для новой папки — правки в папке без вопросов<\/option>/)
-    assert.match(t, /Внешний вид Темы и цвета — после редизайна\./)
+    assert.doesNotMatch(t, /Темы и цвета — после редизайна/); assert.match(out, /settings-nav-providers/)
     assert.doesNotMatch(out, /<option value="full"/, '«Полный доступ» умолчанием не ставится')
     assert.match(out, /<option value="gpt-deep">GPT Deep<\/option>/)
   })

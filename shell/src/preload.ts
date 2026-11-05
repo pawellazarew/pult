@@ -34,6 +34,13 @@ function unwrap(r: CallReply): unknown {
 }
 
 const bridge: PultBridge = {
+  speech: {
+    async status() { return unwrap(await ipcRenderer.invoke(IPC.speech, 'status') as CallReply) as import('./contract.js').SpeechStatus },
+    async install() { unwrap(await ipcRenderer.invoke(IPC.speech, 'install') as CallReply) },
+    async prepare() { unwrap(await ipcRenderer.invoke(IPC.speech, 'prepare') as CallReply) },
+    async transcribe(wav, language) { return unwrap(await ipcRenderer.invoke(IPC.speech, 'transcribe', wav, language) as CallReply) as string },
+    async cancel() { unwrap(await ipcRenderer.invoke(IPC.speech, 'cancel') as CallReply) },
+  },
   version: BRIDGE_VERSION,
   testMode,
   language: getLanguage(),

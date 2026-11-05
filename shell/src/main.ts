@@ -15,10 +15,11 @@ import { realpathSync, readFileSync, writeFileSync, statSync, accessSync, consta
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
-  app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, Notification, powerMonitor, protocol, session, shell, Tray, WebContentsView,
+  app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, Notification, powerMonitor, protocol, session, shell, systemPreferences, Tray, WebContentsView,
 } from 'electron'
 import type { IpcMainEvent, IpcMainInvokeEvent, MenuItemConstructorOptions, NativeImage, WebContents } from 'electron'
 import { readScopedImage } from '../../src/core/images.js'
+import { LocalSpeech } from './speech.js'
 import { localFile } from './localFile.js'
 import { listWorkspaceFiles, readWorkspaceFile } from '../../src/core/fileBrowser.js'
 import { referencesFile } from '../../src/core/fileReferences.js'
@@ -73,6 +74,8 @@ let mainWindow: BrowserWindow | null = null
 let link: DaemonLink | null = null
 let uiRoot = ''
 /** PULT_HOME — из paths() пакета, как у демона; пусто до boot. */
+let speech: LocalSpeech | null = null
+let microphoneUntil = 0
 let pultHome = ''
 let setPackageLanguage: ((value: 'ru' | 'en') => void) | null = null
 let tray: Tray | null = null
@@ -172,7 +175,7 @@ function createWindow(): BrowserWindow {
   })
   win.once('ready-to-show', () => win.show())
   win.on('focus', () => { void link?.checkConnection() })
-  win.on('closed', () => { if (mainWindow === win) mainWindow = null })
+  win.on('closed', () => { speech?.cancel(); microphoneUntil = 0; if (mainWindow === win) mainWindow = null })
   const wcId = win.webContents.id
   win.webContents.once('destroyed', () => link?.unsubscribePrefix(`${wcId}:`))
   void win.loadURL(APP_INDEX)
@@ -446,6 +449,23 @@ async function imageForSession(sessionId: unknown, source: unknown) {
 function registerIpc(): void {
   ipcMain.on(IPC.reloadWindow, (e) => { if (trusted(e)) e.sender.reload() })
   ipcMain.on(IPC.languageGet, (e) => { e.returnValue = trusted(e) ? { language: getLanguage(), override: isLanguageSetting(process.env['PULT_LANG']) ? process.env['PULT_LANG'] : null } : { language: 'en', override: null } })
+  ipcMain.handle(IPC.speech, async (e, action: unknown, wav: unknown, language: unknown): Promise<CallReply> => {
+    if (!trusted(e)) return { ok: false, error: { code: 'untrusted', message: tr('Недоверенное окно') } }
+    try {
+      speech ??= new LocalSpeech(app.isPackaged ? path.join(process.resourcesPath, 'speech/whisper-cli') : path.join(HERE, '../build/speech/whisper-cli'), path.join(pultHome, 'models/speech'))
+      let result: unknown
+      if (action === 'status') result = await speech.status()
+      else if (action === 'install') result = await speech.install()
+      else if (action === 'cancel') result = speech.cancel()
+      else if (action === 'transcribe') result = await speech.transcribe(wav, language)
+      else if (action === 'prepare') {
+        const allowed = process.platform !== 'darwin' || await systemPreferences.askForMediaAccess('microphone')
+        if (!allowed) throw new Error(tr('Разреши Пульту микрофон в Системных настройках → Конфиденциальность и безопасность → Микрофон.'))
+        microphoneUntil = Date.now() + 15_000
+      } else throw new Error(tr('Неизвестная команда диктовки'))
+      return { ok: true, result }
+    } catch (error) { return { ok: false, error: { code: 'speech', message: error instanceof Error ? error.message : tr('Ошибка диктовки') } } }
+  })
   ipcMain.handle(IPC.runtimeView, async (e, sessionId: unknown, bounds: unknown): Promise<CallReply> => {
     if (!trusted(e)) return fail('forbidden', tr('Вызов не из окна Пульта'))
     try {
@@ -759,8 +779,13 @@ async function boot(): Promise<void> {
   stopRuntimeHost = startRuntimeHost({ link, web: runtimeWeb, log })
 
   registerAppProtocol()
-  session.defaultSession.setPermissionRequestHandler((_wc, _perm, cb) => cb(false))
-  session.defaultSession.setPermissionCheckHandler(() => false)
+  session.defaultSession.setPermissionRequestHandler((wc, permission, cb, details) => {
+    cb(wc === mainWindow?.webContents && details.isMainFrame && permission === 'media'
+      && Date.now() < microphoneUntil && 'mediaTypes' in details && Array.isArray(details.mediaTypes) && details.mediaTypes.length > 0 && details.mediaTypes.every((t) => t === 'audio'))
+  })
+  session.defaultSession.setPermissionCheckHandler((wc, permission, _origin, details) =>
+    wc === mainWindow?.webContents && permission === 'media' && details.isMainFrame
+      && Date.now() < microphoneUntil && details.mediaType === 'audio')
   registerIpc()
   await notifications.restore()
   powerMonitor.on('resume', () => { void link?.checkConnection() })
@@ -810,5 +835,5 @@ if (!app.requestSingleInstanceLock()) {
     if (process.platform !== 'darwin') app.quit()
   })
   app.on('activate', () => { if (link) showWindow() })
-  app.on('before-quit', () => { stopRuntimeHost?.(); runtimeWeb?.close(); stopTray(); link?.close() })
+  app.on('before-quit', () => { speech?.close(); stopRuntimeHost?.(); runtimeWeb?.close(); stopTray(); link?.close() })
 }
