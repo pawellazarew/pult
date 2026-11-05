@@ -3,10 +3,14 @@
 // (у worktree — исходный репозиторий: сама папка worktree живёт в PULT_HOME). Сессия вне всех
 // проектов не теряется: её папка показывается неявным проектом — его можно закрепить «+».
 
+import { t as tr } from '../lib/i18n.js'
 import type { AgentView } from './agents.js'
 import { statusRank } from './agents.js'
 
+export const GENERAL_GROUP_PATH = 'pult:conversations'
+
 export interface ProjectGroup {
+  scope?: 'general' | 'project'
   /** Папка проекта — ключ группы. */
   path: string
   /** Подпись: последняя часть пути. */
@@ -41,6 +45,14 @@ export function groupByProject(projects: readonly string[], sessions: readonly A
   for (const s of sessions) {
     // Архивные — не в проектах: у них своя секция внизу дерева.
     if (s.archived) continue
+    if (s.scope === 'general') {
+      let general = groups.get(GENERAL_GROUP_PATH)
+      if (!general) { general = { path: GENERAL_GROUP_PATH, scope: 'general', name: tr('Разговоры'), pinned: false, sessions: [], waiting: 0, unread: 0 }; groups.set(GENERAL_GROUP_PATH, general) }
+      general.sessions.push(s)
+      if (statusRank(s.status, s.pending) === 0) general.waiting++
+      if (s.unread) general.unread++
+      continue
+    }
     const anchor = s.repo ?? s.cwd
     const root = byDepth.find((p) => under(anchor, p))
     let g = root ? groups.get(root) : groups.get(anchor)
@@ -54,7 +66,8 @@ export function groupByProject(projects: readonly string[], sessions: readonly A
     if (s.unread) g.unread += 1
   }
   loose.sort((a, b) => a.name.localeCompare(b.name) || a.path.localeCompare(b.path))
-  return [...pinned.map((p) => groups.get(p)!), ...loose]
+  const general = groups.get(GENERAL_GROUP_PATH)
+  return [...(general ? [general] : []), ...pinned.map((p) => groups.get(p)!), ...loose]
 }
 
 /**

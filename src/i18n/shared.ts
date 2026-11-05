@@ -55,6 +55,12 @@ export const sharedEn: Readonly<Record<string, string>> = {
   "режим подтверждений — {0}": "approval mode must be {0}",
   "режим «как в настройках Claude» есть только у Claude": "the “as in Claude settings” mode is available only for Claude",
   "{0}.approval — «как в настройках Claude» по умолчанию не ставится: только явно при заведении": "{0}.approval cannot default to “as in Claude settings”; choose it explicitly when starting a session",
+  "папка разговоров без проекта подменена — запуск отменён": "the conversations directory was replaced; start cancelled",
+  "папка разговора без проекта изменилась — запуск отменён": "the conversation directory changed; start cancelled",
+  "неверное имя разговора": "invalid conversation name",
+  "скорость ответа переключается только у Codex": "response speed can only be changed for Codex",
+  "скорость — default или fast": "speed must be default or fast",
+  "скорость: {0} → {1}": "speed: {0} → {1}",
   "read-only | ask | workspace | full | inherit (только claude)": "read-only | ask | workspace | full | inherit (claude only)"
 }
 export const tr = translator(sharedEn)

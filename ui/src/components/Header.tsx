@@ -1,140 +1,59 @@
+import { useCallback, useEffect, useRef, useState } from 'react'
+import type { ReactElement } from 'react'
 import { t } from '../lib/i18n.js'
-// Шапка (docs/12 §3 п.4): демон (версия, режим, аптайм), страж сети (страна выхода, время
-// проверки), лимиты claude и codex (окна 5 ч и 7 дн), doctor и Inbox со счётчиком.
-
-import type { ReactElement, ReactNode } from 'react'
-import { formatUptime } from '../lib/conn.js'
 import type { GuardView } from '../model/health.js'
 import { providerStatusView } from '../model/health.js'
 import type { ConnState } from '../../../shell/src/contract.js'
-import type { AgentProvider, DaemonStatus, Tone, ProviderCatalog } from '../model/types.js'
-import type { ProviderUsage, UsageState } from '../model/usage.js'
-import { formatClock, formatPct, formatResetIn, usageTone, usageForDisplay } from '../model/usage.js'
-import { CMD, hhmm, Icon, Kbd } from './common.js'
+import type { DaemonStatus, Tone, ProviderCatalog } from '../model/types.js'
+import type { UsageState } from '../model/usage.js'
+import { formatUptime } from '../lib/conn.js'
+import { hhmm, Icon } from './common.js'
+import { ContextMenu } from './ContextMenu.js'
 
+/** Operational details belong to the sidebar footer; failures still have contextual banners. */
 export function Header(p: {
-  conn: ConnState
-  status: DaemonStatus | null
-  statusAt: number
-  now: number
-  guard: GuardView
-  usage: UsageState
-  providers?: ProviderCatalog | null
-  providersChecking?: boolean
-  onProvidersCheck?(): void
-  doctorTone: Tone
-  inboxCount: number
-  inboxOpen: boolean
-  sidebarHidden?: boolean
-  onToggleSidebar?(): void
-  onDoctor(): void
-  onInbox(): void
-  runtimeOpen?: boolean
-  runtimeAvailable?: boolean
-  onRuntime?(): void
-  filesOpen?: boolean
-  filesAvailable?: boolean
-  onFiles?(): void
+  conn: ConnState; status: DaemonStatus | null; statusAt: number; now: number; guard: GuardView; usage: UsageState
+  providers?: ProviderCatalog | null; providersChecking?: boolean; onProvidersCheck?(): void
+  doctorTone: Tone; inboxCount: number; inboxOpen: boolean
+  sidebarHidden?: boolean; onToggleSidebar?(): void
+  onDoctor(): void; onInbox(): void
+  runtimeOpen?: boolean; runtimeAvailable?: boolean; onRuntime?(): void
+  filesOpen?: boolean; filesAvailable?: boolean; onFiles?(): void
+  onSettings?(): void; onHelp?(): void; onNews?(): void; onExternal?(): void; onAddProject?(): void
 }): ReactElement {
+  const [help, setHelp] = useState<{ x: number; y: number } | null>(null)
+  const closeHelp = useCallback(() => setHelp(null), [])
+  const health = useRef<HTMLDetailsElement>(null)
+  useEffect(() => { const close = (event: PointerEvent): void => { if (health.current && !health.current.contains(event.target as Node)) health.current.open = false }; document.addEventListener('pointerdown', close); return () => document.removeEventListener('pointerdown', close) }, [])
   const up = p.conn.state === 'up'
-  const uptime = p.status ? p.status.uptimeMs + Math.max(0, p.now - p.statusAt) : null
   const daemonTone: Tone = up ? 'ok' : p.conn.state === 'connecting' ? 'run' : 'fail'
-  // Демона нет — страж и лимиты показывают последнее, что было известно, и никто их не
-  // обновляет. Зелёный «выход FI» при красном «демон недоступен» читался как «защищено».
-  const stale = !up
-  const guardTitle = stale
-    ? t`${p.guard.checkedAt ? t`на ${hhmm(p.guard.checkedAt)}` : t('последняя проверка')}, не обновляется — демон недоступен. ${p.guard.detail}`
-    : p.guard.detail
-  return (
-    <header className={`hdr${stale ? ' hdr-stale' : ''}`}>
-      <div className="hdr-brand"><Icon name="mark" className="mark" />{t("Пульт")}</div>
-
-      {p.onToggleSidebar && <button type="button" className="btn btn-ghost sidebar-toggle" data-testid="toggle-sidebar"
-        aria-label={p.sidebarHidden ? t('Показать беседы') : t('Скрыть беседы')} aria-expanded={!p.sidebarHidden}
-        title={t`Список бесед (${CMD}B)`} onClick={p.onToggleSidebar}><Icon name="sidebar" /></button>}
-      <details className="health-menu" data-testid="health-menu">
-        <summary className={`health-summary t-${!up ? daemonTone : p.doctorTone === 'fail' ? 'fail' : p.guard.tone === 'fail' ? 'fail' : 'ok'}`}>
-          <span className="dot" /><span>{!up ? p.conn.state === 'connecting' ? t('Подключение…') : t('Нет соединения') : p.doctorTone === 'fail' ? t('Нужна проверка') : t('Подключено')}</span><Icon name="chev" />
-        </summary>
-        <div className="health-popover">
-      <div className="cell cell-state" data-testid="hdr-daemon">
-        <span className="lbl">{t("демон")}</span>
-        <span className={`val t-${daemonTone}`}>
-          <span className="dot" />
-          {up && p.conn.state === 'up' ? (
-            <span data-testid="daemon-meta">
-              <span className="ink">{p.conn.daemon.version}</span>
-              <span className="sub"> · {p.status ? (p.status.mode === 'service' ? t('служба') : t('по требованию')) : '…'}{uptime !== null ? ` · ${formatUptime(uptime)}` : ''}</span>
-            </span>
-          ) : <span data-testid="conn-state">{p.conn.state === 'connecting' ? t('подключение…') : t('недоступен')}</span>}
-        </span>
+  const tone = !up ? daemonTone : p.doctorTone === 'fail' || p.guard.tone === 'fail' ? 'fail' : p.doctorTone === 'wait' ? 'wait' : 'ok'
+  const uptime = p.status ? p.status.uptimeMs + Math.max(0, p.now - p.statusAt) : null
+  return <footer className="sidebar-footer" aria-label={t('Помощь и настройки')} data-testid="sidebar-footer">
+    {p.onAddProject && <button type="button" className="footer-icon" title={t('Добавить проект')} aria-label={t('Добавить проект')} onClick={p.onAddProject}><Icon name="folder-plus" /></button>}
+    <button type="button" className="footer-icon" aria-pressed={p.inboxOpen} onClick={p.onInbox} data-testid="toggle-inbox" title="Inbox" aria-label={`Inbox: ${p.inboxCount}`}><Icon name="inbox" />{p.inboxCount > 0 && <span className="footer-badge" data-testid="inbox-count">{p.inboxCount}</span>}</button>
+    <details ref={health} className="health-menu" data-testid="health-menu">
+      <summary className={`footer-icon health-summary t-${tone}`} title={t('Этот Mac')} aria-label={t('Этот Mac')}><Icon name="machine" /><span className="health-dot" /></summary>
+      <div className={`health-popover${up ? '' : ' hdr-stale'}`}>
+        <div className="footer-pop-title">{t('Этот Mac')}{!up && <span className="mut"> · {t('Нет соединения')}</span>}</div>
+        <div className="footer-health-row" data-testid="hdr-daemon"><span>{t('демон')}</span><span className={`t-${daemonTone}`}>
+          {up && p.conn.state === 'up' ? <span data-testid="daemon-meta">{p.conn.daemon.version}{uptime !== null ? ` · ${formatUptime(uptime)}` : ''}</span> : <span data-testid="conn-state">{p.conn.state === 'connecting' ? t('подключение…') : t('недоступен')}</span>}
+        </span></div>
+        <div className="footer-health-row" data-testid="hdr-guard" title={up ? p.guard.detail : t`Последняя проверка, не обновляется — демон недоступен. ${p.guard.detail}`}><span>{t('страж сети')}</span><span className={`t-${up ? p.guard.tone : 'mut'}`}>{p.guard.label}{p.guard.checkedAt ? ` · ${hhmm(p.guard.checkedAt)}` : ''}</span></div>
+        {(['claude','codex','zcode'] as const).map((provider) => { const st = providerStatusView(p.providers?.[provider], p.providersChecking ?? false); return <div key={provider} className="footer-health-row"><span>{provider === 'zcode' ? 'ZCode' : provider === 'claude' ? 'Claude' : 'Codex'}</span><button type="button" className={`link-btn t-${up ? st.tone : 'mut'}`} title={st.title} disabled={!up || p.providersChecking || !p.onProvidersCheck} onClick={p.onProvidersCheck} data-testid={`provider-status-${provider}`}>{st.label}</button></div> })}
+        <button type="button" className="footer-menu-item" onClick={() => { const el = document.querySelector<HTMLDetailsElement>('.health-menu'); if (el) el.open = false; p.onDoctor() }} data-testid="open-doctor"><Icon name="pulse" />{t('Запустить диагностику')}</button>
+        {p.onExternal && <button type="button" className="footer-menu-item" disabled={!up} onClick={p.onExternal} data-testid="open-external-sessions"><Icon name="folder" />{t('Существующие чаты')}</button>}
       </div>
-
-      <div className="cell" data-testid="hdr-guard" title={guardTitle}>
-        <span className="lbl">{t("страж сети")}</span>
-        <span className={`val t-${p.guard.tone}`}>
-          <span>{p.guard.label}</span>
-          {p.guard.checkedAt && <span className="sub">· {hhmm(p.guard.checkedAt)}</span>}
-        </span>
-      </div>
-
-      {(['claude', 'codex', 'zcode'] as const).map((provider) => {
-        const st = providerStatusView(p.providers?.[provider], p.providersChecking ?? false)
-        return (
-          <UsageCell key={provider} provider={provider} u={p.usage[provider]} now={p.now}>
-            <button type="button" className={`pstat t-${st.tone}`} title={st.title}
-              disabled={!up || p.providersChecking || !p.onProvidersCheck} onClick={p.onProvidersCheck} data-testid={`provider-status-${provider}`}>
-              <span className="dot" />{st.label}
-            </button>
-          </UsageCell>
-        )
-      })}
-
-        </div>
-      </details>
-      {up && p.guard.tone !== 'ok' && <span className={`header-guard-alert t-${p.guard.tone}`} title={guardTitle}>{p.guard.label}</span>}
-      <div className="hdr-spacer" />
-      <div className="hdr-actions">
-        {p.onRuntime && <button type="button" className="btn" aria-pressed={p.runtimeOpen} disabled={!p.runtimeAvailable} onClick={p.onRuntime} data-testid="toggle-runtime" title={t("Браузер и мобильные устройства")}>{t("Превью")}</button>}
-        {p.onFiles && <button type="button" className="btn" aria-pressed={p.filesOpen} disabled={!p.filesAvailable} onClick={p.onFiles} data-testid="toggle-files" title={t`Файлы проекта (${CMD}P)`}>
-          <Icon name="folder" />{t("Файлы")}</button>}
-        <button type="button" className="btn" onClick={p.onDoctor} data-testid="open-doctor" title={t("Проверка окружения")}>
-          <span className={`t-${p.doctorTone} ic-wrap`}><Icon name="pulse" /></span><span className="doctor-label">{t("Диагностика")}</span>
-        </button>
-        <button type="button" className="btn" aria-pressed={p.inboxOpen} onClick={p.onInbox} data-testid="toggle-inbox" title={`Inbox (${CMD}I)`}>
-          <Icon name="inbox" />Inbox
-          <span className={`badge${p.inboxCount ? '' : ' zero'}`} data-testid="inbox-count">{p.inboxCount}</span>
-          <Kbd>{`${CMD}I`}</Kbd>
-        </button>
-      </div>
-    </header>
-  )
-}
-
-function UsageCell({ provider, u: originalUsage, now, children }: { provider: AgentProvider; u: ProviderUsage | undefined; now: number; children?: ReactNode }): ReactElement {
-  const u = usageForDisplay(originalUsage, now)
-  // Проценты — ИЗРАСХОДОВАННАЯ доля окна; голое «42%» читалось и как «осталось».
-  const title = u
-    ? t`${provider}: 5 ч — использовано ${formatPct(u.fiveHour?.utilization)}${u.fiveHour?.resetsAt ? t`, сброс ${formatResetIn(u.fiveHour.resetsAt, now)} (${formatClock(u.fiveHour.resetsAt * 1000, now)})` : ''}; `
-      + t`7 дн — использовано ${formatPct(u.sevenDay?.utilization)}${u.sevenDay?.resetsAt ? t`, сброс ${formatResetIn(u.sevenDay.resetsAt, now)} (${formatClock(u.sevenDay.resetsAt * 1000, now)})` : ''}`
-    : t`${provider}: лимиты появятся после первого хода`
-  return (
-    <div className="cell" data-testid={`hdr-usage-${provider}`} title={title}>
-      <div className="cell-top"><span className={`lbl who-${provider}`}>{provider}</span>{children}</div>
-      <div className="meters">
-        <Meter k={t("5ч")} u={u?.fiveHour?.utilization ?? null} status={u?.status} />
-        <Meter k={t("7дн")} u={u?.sevenDay?.utilization ?? null} status={u?.status} />
-      </div>
-    </div>
-  )
-}
-
-function Meter({ k, u, status }: { k: string; u: number | null; status: string | undefined }): ReactElement {
-  const tone = usageTone(u, status === 'limited' || status === 'blocked' ? status : undefined)
-  return (
-    <div className={`meter t-${tone}`} aria-label={t`${k}: использовано ${formatPct(u)}`}>
-      <div className="row"><span className="k">{k}</span><span>{formatPct(u)}</span></div>
-      <div className="bar"><i style={{ width: `${Math.min(100, Math.round((u ?? 0) * 100))}%` }} /></div>
-    </div>
-  )
+    </details>
+    <span className="grow" />
+    <button type="button" className="footer-icon" aria-label={t('Помощь')} title={t('Помощь')} data-testid="open-help" aria-haspopup="menu" aria-expanded={help !== null} onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); setHelp(help ? null : { x: r.left, y: r.top - 6 }) }}><Icon name="help" /></button>
+    <button type="button" className="footer-icon" title={t('Настройки')} aria-label={t('Настройки')} onClick={p.onSettings} data-testid="open-settings"><Icon name="settings" /></button>
+    {help && <ContextMenu at={help} above onClose={closeHelp} label={t('Помощь')} testId="help-menu" items={[
+      { heading: t('Помощь') },
+      { label: t('Сочетания клавиш'), onSelect: () => p.onHelp?.(), testId: 'help-shortcuts' },
+      { label: t('Что нового'), onSelect: () => p.onNews?.(), testId: 'help-news' },
+      { label: t('Запустить диагностику'), onSelect: p.onDoctor, testId: 'help-diagnostics' },
+      'sep', { note: t`Пульт ${up && p.conn.state === 'up' ? p.conn.daemon.version : '—'}` },
+    ]} />}
+  </footer>
 }

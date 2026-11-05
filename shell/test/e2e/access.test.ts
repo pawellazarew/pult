@@ -5,7 +5,8 @@
 //     действующий режим — из system/init (bypassPermissions);
 //   * понижение во время хода: «Спрашивать · после хода», «полный доступ · до конца хода», строка под полем;
 //   * «Настройки → Доступ» → «Отозвать»: следующий ход идёт в явном «Спрашивать» (manual), в ленте — почему;
-//   * шаг B: память доступа папки — ⌘N → текст → ↵ сразу с запомненным; брошенный черновик и «Только этот чат» её не
+//   * память доступа папки — «+» проекта → текст → ↵ с запомненным; глобальный ⌘N — без проекта и без его доступа;
+//     брошенный черновик и «Только этот чат» её не
 //     пишут; ключ — настоящая папка (симлинк — та же); черновик из ссылки полный сам не включает.
 // Кадры (светлая тема) — test-results/screens/access-*.png.
 
@@ -46,15 +47,29 @@ describe('окно: доступ — согласие один раз и мет�
   }
   const memory = async (cwd: string): Promise<string | undefined> =>
     ((await c.request('agent.preflight', { cwd })) as { folder?: { access?: string } }).folder?.access
+  const chooseFolder = async (cwd: string): Promise<void> => {
+    await h.stubPickFolder(cwd)
+    await draft().getByTestId('draft-chip-folder').click()
+    await h.win.getByTestId('draft-folder-other').click()
+    assert.ok(await waitFor(async () => (await draft().getByTestId('draft-chip-folder').getAttribute('data-path')) === cwd, 5000), 'папка не выбралась')
+  }
+  const newProjectDraft = async (cwd: string): Promise<void> => {
+    const project = h.win.locator(`[data-testid="project"][data-project="${cwd}"]`)
+    await project.waitFor({ timeout: 5000 })
+    await project.hover()
+    await project.getByTestId('project-new-session').click()
+    await draft().waitFor({ timeout: 5000 })
+    assert.equal(await draft().getByTestId('draft-chip-folder').getAttribute('data-path'), cwd, '«+» проекта сохраняет его папку')
+  }
 
   it('черновик: полный доступ — диалог согласия; Enter и Esc оставляют как было, «Разрешить» пишет consent.json', async () => {
     // Ход висит после init: метки видны, пока он идёт, и «Стоп» на месте.
     const dir = h.workDir('full', { scenario: 'simple', hangAfterInit: 60_000, argvOut: argvOut() })
-    await h.stubPickFolder(dir)
     await h.win.keyboard.press('Meta+N')
     await draft().waitFor({ timeout: 5000 })
-    await draft().getByTestId('draft-pick-folder').click()
-    assert.ok(await waitFor(async () => (await draft().getByTestId('draft-chip-folder').getAttribute('data-path')) === dir, 5000), 'папка не выбралась')
+    assert.equal(await draft().getByTestId('draft-chip-folder').getAttribute('data-path'), '', 'глобальный черновик без проекта')
+    assert.equal(await accessChip().getAttribute('data-approval'), 'ask')
+    await chooseFolder(dir)
     assert.equal(await accessChip().getAttribute('data-approval'), 'workspace', 'новая папка — «Правки в папке» (решение Павла)')
     await pickAccess('full')
     const consent = h.win.getByTestId('consent-dialog')
@@ -111,7 +126,7 @@ describe('окно: доступ — согласие один раз и мет�
   })
 
   it('понижение во время хода: «после хода», «до конца хода», строка под полем; после стопа метка гаснет', async () => {
-    await h.win.getByTestId('conv-settings').click()
+    await h.win.getByTestId('conv-access').click()
     await h.win.getByTestId('settings-menu').waitFor({ timeout: 5000 })
     await h.win.getByTestId('settings-approval-ask').click()
     assert.ok(await waitFor(async () => (await rec('full'))?.access?.pending === true, 5000), 'ожидающий режим не виден демону')
@@ -130,15 +145,15 @@ describe('окно: доступ — согласие один раз и мет�
 
   it('«Настройки → Доступ» → «Отозвать»: следующий ход полного доступа — в явном «Спрашивать» и заметка в ленте', async () => {
     // Обратно в полный — согласие есть, вопроса нет; потом отзыв.
-    await h.win.getByTestId('conv-settings').click()
+    await h.win.getByTestId('conv-access').click()
     await h.win.getByTestId('settings-approval-full').click()
     assert.ok(await waitFor(async () => (await rec('full'))?.approval === 'full', 5000))
     assert.equal(await h.win.getByTestId('consent-dialog').count(), 0, 'согласие уже есть — без диалога')
     await h.win.keyboard.press('Meta+,')
     const dlg = h.win.getByTestId('settings-dialog')
     await dlg.waitFor({ timeout: 5000 })
-    assert.match((await h.win.getByTestId('access-consent-line').textContent()) ?? '', /Полный доступ разрешён \d\d\.\d\d\.\d{4}/)
     await h.win.getByTestId('settings-nav-access').click()
+    assert.match((await h.win.getByTestId('access-consent-line').textContent()) ?? '', /Полный доступ разрешён \d\d\.\d\d\.\d{4}/)
     await h.win.getByTestId('access-revoke').click()
     assert.ok(await waitFor(async () => /отозван/.test((await h.win.getByTestId('access-consent-line').textContent()) ?? ''), 5000), 'строка не сменилась')
     await h.win.keyboard.press('Escape')
@@ -151,15 +166,12 @@ describe('окно: доступ — согласие один раз и мет�
     assert.ok(await waitFor(async () => /полный доступ отозван — ход в «Спрашивать»/.test((await h.win.getByTestId('feed').textContent()) ?? ''), 6000), 'заметки в ленте нет')
     assert.equal(await h.win.getByTestId('conv-approval').getAttribute('data-access-state'), 'blocked')
   })
-  it('шаг B: память папки — «Только чтение» запоминается; ⌘N → текст → ↵ сразу с ним; брошенный черновик и «Только этот чат» не пишут', async () => {
+  it('память папки — «Только чтение» запоминается; «+» проекта подставляет его; брошенный черновик и «Только этот чат» не пишут', async () => {
     const dir = h.workDir('mem', { scenario: 'simple' })
-    await h.stubPickFolder(dir)
     await h.win.locator('[data-testid="agent-row"][data-agent="full"]').click()
     await h.win.keyboard.press('Meta+N')
     await draft().waitFor({ timeout: 5000 })
-    await draft().getByTestId('draft-chip-folder').click()
-    await h.win.getByTestId('draft-folder-other').click()
-    assert.ok(await waitFor(async () => (await draft().getByTestId('draft-chip-folder').getAttribute('data-path')) === dir, 5000), 'папка не выбралась')
+    await chooseFolder(dir)
     await pickAccess('read-only')
     assert.ok(await waitFor(async () => (await accessChip().getAttribute('data-approval')) === 'read-only', 5000), `доступ: ${await accessChip().getAttribute('data-approval')}`)
     await h.win.keyboard.type('раз')
@@ -169,9 +181,8 @@ describe('окно: доступ — согласие один раз и мет�
     assert.equal((await rec('mem'))?.approval, 'read-only')
     assert.equal(await memory(dir), 'read-only')
 
-    // Следующий ⌘N в этой папке: доступ из памяти, ни одного клика — ⌘N, текст, ↵.
-    await h.win.keyboard.press('Meta+N')
-    await draft().waitFor({ timeout: 5000 })
+    // «+» проекта выбирает папку явно и подставляет её доступ из памяти.
+    await newProjectDraft(dir)
     assert.ok(await waitFor(async () => (await accessChip().getAttribute('data-approval')) === 'read-only', 5000), 'память папки не подставилась')
     await h.win.keyboard.type('два')
     await h.win.keyboard.press('Enter')
@@ -179,8 +190,7 @@ describe('окно: доступ — согласие один раз и мет�
     assert.equal((await rec('mem-2'))?.approval, 'read-only')
 
     // Брошенный пустой черновик: выбор доступа не пишется, сам черновик исчезает.
-    await h.win.keyboard.press('Meta+N')
-    await draft().waitFor({ timeout: 5000 })
+    await newProjectDraft(dir)
     await pickAccess('workspace')
     await h.win.locator('[data-testid="agent-row"][data-agent="mem"]').click()
     await draft().waitFor({ state: 'detached', timeout: 5000 })
@@ -188,8 +198,7 @@ describe('окно: доступ — согласие один раз и мет�
     assert.equal(await memory(dir), 'read-only', 'брошенный черновик память не пишет')
 
     // «Только этот чат»: уровень — этому чату, память папки не трогается.
-    await h.win.keyboard.press('Meta+N')
-    await draft().waitFor({ timeout: 5000 })
+    await newProjectDraft(dir)
     await accessChip().click()
     await h.win.getByTestId('draft-access-chat-only').click()
     await h.win.locator('[data-testid="draft-access-item"][data-value="ask"]').click()
@@ -202,11 +211,10 @@ describe('окно: доступ — согласие один раз и мет�
 
   it('шаг B: черновик с текстом при уходе остаётся у демона и переживает переоткрытие окна; ключ папки — через симлинк', async () => {
     const dir = h.workDir('mem')
-    await h.win.keyboard.press('Meta+N')
-    await draft().waitFor({ timeout: 5000 })
+    await newProjectDraft(dir)
     const id = (await draft().getAttribute('data-draft')) as string
     await h.win.keyboard.type('черновик на потом')
-    assert.match((await draft().getByTestId('draft-esc-hint').textContent()) ?? '', /черновик сохранится, если уйти/)
+    assert.equal(await draft().getByTestId('draft-esc-hint').count(), 0, 'постоянная подсказка клавиш скрыта')
     await h.win.locator('[data-testid="agent-row"][data-agent="mem"]').click()
     await draft().waitFor({ state: 'detached', timeout: 5000 })
     await h.win.locator(`[data-testid="draft-row"][data-draft="${id}"]`).waitFor({ timeout: 5000 })
@@ -234,12 +242,9 @@ describe('окно: доступ — согласие один раз и мет�
     // Симлинк на ту же папку — тот же ключ памяти: «Только чтение» на месте.
     const alias = join(h.home, 'mem-alias')
     symlinkSync(dir, alias)
-    await h.stubPickFolder(alias)
     await h.win.keyboard.press('Meta+N')
     await draft().waitFor({ timeout: 5000 })
-    await draft().getByTestId('draft-chip-folder').click()
-    await h.win.getByTestId('draft-folder-other').click()
-    assert.ok(await waitFor(async () => (await draft().getByTestId('draft-chip-folder').getAttribute('data-path')) === alias, 5000))
+    await chooseFolder(alias)
     assert.ok(await waitFor(async () => (await accessChip().getAttribute('data-approval')) === 'read-only', 5000), 'память по симлинку не нашлась')
     await h.win.keyboard.press('Escape')
     await draft().waitFor({ state: 'detached', timeout: 5000 })
@@ -250,8 +255,7 @@ describe('окно: доступ — согласие один раз и мет�
     const dir = h.workDir('mem')
     // Полный доступ для папки: явный выбор в черновике (согласие снова — его отозвали выше) и отправка.
     await h.win.locator('[data-testid="agent-row"][data-agent="mem"]').click()
-    await h.win.keyboard.press('Meta+N')
-    await draft().waitFor({ timeout: 5000 })
+    await newProjectDraft(dir)
     await pickAccess('full')
     await h.win.getByTestId('consent-grant').click()
     assert.ok(await waitFor(async () => (await accessChip().getAttribute('data-approval')) === 'full', 5000))
@@ -259,10 +263,18 @@ describe('окно: доступ — согласие один раз и мет�
     await h.win.keyboard.press('Enter')
     await h.win.locator('[data-testid="conversation"][data-agent="mem-4"]').waitFor({ timeout: 10_000 })
     assert.equal(await memory(dir), 'full')
-    // ⌘N в той же папке — полный сразу, без диалога (C2).
+    // «+» этого проекта — полный из памяти, без диалога (C2).
+    await newProjectDraft(dir)
+    assert.ok(await waitFor(async () => (await accessChip().getAttribute('data-approval')) === 'full', 5000), 'полный из памяти не подставился')
+    await h.win.keyboard.press('Escape')
+    await draft().waitFor({ state: 'detached', timeout: 5000 })
+
+    // Глобальный новый разговор не наследует полный доступ выбранного проекта.
     await h.win.keyboard.press('Meta+N')
     await draft().waitFor({ timeout: 5000 })
-    assert.ok(await waitFor(async () => (await accessChip().getAttribute('data-approval')) === 'full', 5000), 'полный из памяти не подставился')
+    assert.equal(await draft().getByTestId('draft-chip-folder').getAttribute('data-path'), '')
+    assert.equal(await accessChip().getAttribute('data-approval'), 'ask')
+    assert.equal(await h.win.getByTestId('consent-dialog').count(), 0)
     await h.win.keyboard.press('Escape')
     await draft().waitFor({ state: 'detached', timeout: 5000 })
 

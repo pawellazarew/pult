@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { DragEvent, KeyboardEvent as ReactKeyboardEvent, ReactElement, ReactNode, RefObject } from 'react'
 import { t } from '../lib/i18n.js'
+import { ProviderIcon } from './ProviderIcon.js'
 import type { ApprovalMode } from '../../../src/adapters/types.js'
 import type { SavedAttachment } from '../../../shell/src/contract.js'
 import { plural } from '../lib/ru.js'
@@ -25,7 +26,7 @@ import { Dictation } from './Dictation.js'
 import { appendDictation } from '../model/speech.js'
 import { AttachmentStrip } from './AttachmentStrip.js'
 import { useAttachments } from './useAttachments.js'
-import { CMD, Icon, IS_MAC, Kbd } from './common.js'
+import { Icon, IS_MAC } from './common.js'
 
 /** Недавняя папка (`folders.recent`): откуда Пульт её знает и когда в ней работали. */
 export interface RecentFolder { path: string; at: string; source: 'pult' | 'claude' | 'codex' }
@@ -42,7 +43,7 @@ export interface DraftFiles { count: number; finalize(name: string): Promise<Sav
 /** Сколько отправка заперта в черновике из ссылки (все пути: кнопка, ↵, ⌘↵) — §3.1, B3. */
 export const LINK_SUBMIT_DELAY_MS = 1000
 
-export type MenuKind = 'folder' | 'model' | 'effort' | 'access' | 'more'
+export type MenuKind = 'folder' | 'model' | 'effort' | 'access' | 'speed' | 'more'
 
 export interface DraftViewProps {
   draft: DraftChat
@@ -66,6 +67,8 @@ export interface DraftViewProps {
   noAutoFocus?: boolean
   /** Меню, открытое сразу (тесты отрисовки и кадры README). */
   initialMenu?: MenuKind | null
+  /** Window actions supplied by Console, independent of draft state. */
+  headerActions?: ReactNode
   /** Счётчик ⌘N на этом же черновике: сменился — открытое меню закрывается (§3.5). */
   menuReset?: number
   /** Вложения поменялись — их метаданные идут в снимок черновика (пустота, восстановление). */
@@ -76,7 +79,7 @@ export interface DraftViewProps {
   onChange(d: DraftChat): void
   /** Текст поля — отдельно: вставка вложений приходит позже, и снимок черновика к тому времени мог смениться. */
   onText(text: string): void
-  onFolder(cwd: string): void
+  onFolder(cwd: string | null): void
   onPickSystemFolder(): void
   /** Уровень доступа из меню: полный без согласия — диалог согласия у вызывающего. */
   onApproval(a: ApprovalMode): void
@@ -205,6 +208,7 @@ function Toggle({ on }: { on: boolean }): ReactElement {
 
 export function DraftView(p: DraftViewProps): ReactElement {
   const d = p.draft
+  const general = d.scope === 'general'
   const textRef = useRef(d.text); textRef.current = d.text
   const [dictating, setDictating] = useState(false)
   const [menu, setMenu] = useState<MenuKind | null>(p.initialMenu ?? null)
@@ -212,7 +216,7 @@ export function DraftView(p: DraftViewProps): ReactElement {
   const box = useRef<HTMLTextAreaElement>(null)
   const refs = {
     folder: useRef<HTMLButtonElement>(null), model: useRef<HTMLButtonElement>(null), effort: useRef<HTMLButtonElement>(null),
-    access: useRef<HTMLButtonElement>(null), more: useRef<HTMLButtonElement>(null),
+    access: useRef<HTMLButtonElement>(null), speed: useRef<HTMLButtonElement>(null), more: useRef<HTMLButtonElement>(null),
   }
   const inheritMode = p.env.inheritMode
   const consent = p.env.consent
@@ -273,7 +277,7 @@ export function DraftView(p: DraftViewProps): ReactElement {
   const empty = draftEmpty(d, files.items.length)
   const send = (): void => {
     if (dictating) return
-    const decision = submitDecision({ composing: false, repeat: false, busy: p.sending, linkLocked: Date.now() < armedAt, hasFolder: !!d.cwd, hasText, blocked })
+    const decision = submitDecision({ composing: false, repeat: false, busy: p.sending, linkLocked: Date.now() < armedAt, hasFolder: !!d.cwd, scope: d.scope, hasText, blocked })
     if (decision === 'folder') { setMenu('folder'); return }
     if (decision !== 'send') return
     if (readiness === 'stale') p.onCheckProviders()
@@ -292,7 +296,7 @@ export function DraftView(p: DraftViewProps): ReactElement {
     if (e.nativeEvent.isComposing || e.keyCode === 229) return
     e.preventDefault()
     e.stopPropagation()
-    const decision = submitDecision({ composing: false, repeat: e.repeat, busy: p.sending, linkLocked: Date.now() < armedAt, hasFolder: !!d.cwd, hasText, blocked })
+    const decision = submitDecision({ composing: false, repeat: e.repeat, busy: p.sending, linkLocked: Date.now() < armedAt, hasFolder: !!d.cwd, scope: d.scope, hasText, blocked })
     if (decision === 'folder') setMenu('folder')
     else if (decision === 'send') send()
   }
@@ -356,14 +360,16 @@ export function DraftView(p: DraftViewProps): ReactElement {
   }
   const folderMenu = (
     <ChipMenu anchor={refs.folder} onClose={closeMenu} label={t('Папка')} testId="draft-menu-folder"
-      footer={<><span>{t('Можно перетащить папку в окно')}</span><span className="grow" /><Kbd>{`${CMD}⇧O`}</Kbd></>}>
+      footer={<span>{t('Можно перетащить папку в окно')}</span>}>
+      <MenuItem testId="draft-folder-general" label={t('Без проекта')} checked={general} onSelect={() => { closeMenu(); p.onFolder(null) }} />
+      <div className="dmsep" />
       {folderRows().length > 0 && <div className="dmh" role="presentation">{t('Проекты и недавние')}</div>}
       {folderRows().map((f) => (
         <MenuItem key={f.path} testId="draft-folder-item" value={f.path} label={<b>{folderName(f.path)}</b>} note={f.note}
           checked={d.cwd === f.path} onSelect={() => pickFolderRow(f.path)} />
       ))}
       <div className="dmsep" />
-      <MenuItem testId="draft-folder-other" label={t('Другая папка…')} right={<Kbd>{`${CMD}O`}</Kbd>} onSelect={() => { setMenu(null); p.onPickSystemFolder() }} />
+      <MenuItem testId="draft-folder-other" label={t('Другая папка…')} onSelect={() => { setMenu(null); p.onPickSystemFolder() }} />
     </ChipMenu>
   )
 
@@ -394,7 +400,7 @@ export function DraftView(p: DraftViewProps): ReactElement {
   }
   const modelMenu = (
     <ChipMenu anchor={refs.model} onClose={closeMenu} label={t('Модель')} testId="draft-menu-model"
-      footer={<><span>{t('Список Codex — из твоего Codex CLI')}</span><span className="grow" /><Kbd>{`${CMD}⇧I`}</Kbd></>}>
+      footer={<span>{t('Список Codex — из твоего Codex CLI')}</span>}>
       {(['claude', 'codex', 'zcode'] as const).map((prov, i) => {
         const r = readinessOf(p.catalog, prov, p.checking, p.now)
         return (
@@ -411,7 +417,7 @@ export function DraftView(p: DraftViewProps): ReactElement {
   const preset = providerPreset(d.provider, d.model, p.catalog)
   const effortMenu = (
     <ChipMenu anchor={refs.effort} onClose={closeMenu} label={t('Усилие')} testId="draft-menu-effort"
-      footer={<><span>{t('Выше усилие — дольше и дороже ход')}</span><span className="grow" /><Kbd>{`${CMD}⇧E`}</Kbd></>}>
+      footer={<span>{t('Выше усилие — дольше и дороже ход')}</span>}>
       <div className="dmh" role="presentation">{t('Усилие')}{d.model ? ` · ${d.model}` : ''}</div>
       {preset.efforts.map((e) => (
         <MenuItem key={e} testId="draft-effort-item" value={e} label={e} checked={d.effort === e}
@@ -432,7 +438,7 @@ export function DraftView(p: DraftViewProps): ReactElement {
     : t`Сейчас — по умолчанию; выбор здесь запомню для ${folderLabel}`
   const accessMenu = (
     <ChipMenu anchor={refs.access} onClose={closeMenu} label={t('Доступ агента')} testId="draft-menu-access"
-      footer={<><span data-testid="draft-access-footer">{rememberLine}</span><span className="grow" /><Kbd>{`${CMD}⇧M`}</Kbd></>}>
+      footer={<span data-testid="draft-access-footer">{rememberLine}</span>}>
       <div className="dmh" role="presentation">{t('Доступ агента')} · {PROVIDER_NAME[d.provider]}</div>
       {approvalLevels(d.provider).map((a) => {
         const isFull = a === 'full' || (a === 'inherit' && inheritMode === 'bypassPermissions')
@@ -457,6 +463,14 @@ export function DraftView(p: DraftViewProps): ReactElement {
     </ChipMenu>
   )
 
+  const speedMenu = (
+    <ChipMenu anchor={refs.speed} onClose={closeMenu} label={t('Скорость')} testId="draft-menu-speed"
+      footer={<span>{t('Доступность и расход зависят от модели и тарифа.')}</span>}>
+      <MenuItem testId="draft-speed-normal" label="Normal" checked={d.serviceTier !== 'fast'} onSelect={() => { closeMenu(); p.onChange({ ...d, serviceTier: 'default' }) }} />
+      <MenuItem testId="draft-speed-fast" label="Fast" checked={d.serviceTier === 'fast'} onSelect={() => { closeMenu(); p.onChange({ ...d, serviceTier: 'fast' }) }} />
+    </ChipMenu>
+  )
+
   const browserOff = approvalBlocksBrowser(d.provider, d.approval)
   const browserReason = d.provider === 'zcode' ? t('у ZCode браузера для агента нет')
     : full ? t('в полном доступе выключен') : d.provider === 'codex' && d.approval === 'workspace' ? t('у Codex в «Правки в папке» выключен') : null
@@ -464,12 +478,12 @@ export function DraftView(p: DraftViewProps): ReactElement {
     <ChipMenu anchor={refs.more} onClose={closeMenu} label={t('Ещё: ветка, браузер')} testId="draft-menu-more"
       footer={<span>{t('Включённое появится чипом под полем')}</span>}>
       <div className="dmh" role="presentation">{t('Редкое')}</div>
-      <button type="button" role="menuitemcheckbox" data-mi="1" aria-checked={d.worktree} className="dmi" data-testid="draft-more-worktree"
-        onClick={() => p.onChange(toggleWorktree(d, !d.worktree))}>
+      <button type="button" role="menuitemcheckbox" data-mi="1" aria-checked={d.worktree} aria-disabled={general ? 'true' : undefined} className={`dmi${general ? ' disabled' : ''}`} data-testid="draft-more-worktree"
+        onClick={() => { if (!general) p.onChange(toggleWorktree(d, !d.worktree)) }}>
         <span className="ck" aria-hidden="true"><Icon name="branch" /></span>
         <span className="l">{t('Отдельная ветка (worktree)')}</span>
         <span className="r"><Toggle on={d.worktree} /></span>
-        <span className="d">{t('своя копия репозитория, основная папка не тронута')}</span>
+        <span className="d">{general ? t('Для отдельной ветки выбери проект.') : t('своя копия репозитория, основная папка не тронута')}</span>
       </button>
       {d.worktree && (
         <div className="dmi-input">
@@ -542,88 +556,64 @@ export function DraftView(p: DraftViewProps): ReactElement {
   return (
     <section className="conv draft-view" aria-label={t('Новый чат')} data-testid="draft" data-draft={d.id} {...drag} data-drop={folderOver ? '1' : undefined}>
       <header className="conv-head">
-        <div className="conv-title">
-          <div className="top">
-            <h2 className="draft-title" data-testid="draft-title">{t('Новый чат')}</h2>
-            <span className="draft-pill" data-testid="draft-pill">{t('черновик · ещё не заведён')}</span>
-            {d.origin.kind === 'link' && <span className="draft-pill link" data-testid="draft-from-link"><Icon name="info" />{t('из ссылки')}</span>}
-          </div>
-          <div className="conv-location" data-testid="draft-location" title={d.cwd ?? undefined}><Icon name="folder" />{d.cwd ? (d.origin.kind === 'link' ? d.cwd : shortPath(d.cwd, 80)) : t('папка не выбрана')}</div>
+        <div className="conv-title"><div className="top">
+          <h2 className="draft-title" data-testid="draft-title">{t('Новый чат')}</h2>
+          <button ref={refs.folder} type="button" className={`dchip fold draft-scope${refusal ? ' danger' : noFolder && !general ? ' warn' : ''}`} aria-haspopup="menu" aria-expanded={menu === 'folder'}
+            disabled={p.sending} data-testid="draft-chip-folder" data-path={d.cwd ?? ''} title={d.cwd ?? t('Без проекта')} aria-label={t('Проект разговора')} onClick={() => toggle('folder')}>
+            <Icon name={general ? 'model' : 'folder'} /><span className="txt">{general ? t('Без проекта') : noFolder ? t('Выбери папку') : fname}</span><Icon name="chevd" className="ic chev" />
+          </button>
+          {d.origin.kind === 'link' && <span className="draft-pill link" data-testid="draft-from-link"><Icon name="info" />{t('из ссылки')}</span>}
         </div>
+        {d.origin.kind === 'link' && d.cwd && <div className="conv-location draft-link-location" data-testid="draft-location"><Icon name="folder" />{d.cwd}</div>}
+        </div>
+        {p.headerActions && <div className="draft-header-actions">{p.headerActions}</div>}
       </header>
-      <div className={`draft-wrap${noFolder ? ' picking' : ''}`}>
+      <div className="draft-wrap">
         <div className="draft-col">
-          {noFolder ? (
-            <>
-              <h1 className="draft-h" data-testid="draft-heading">{t('Где работаем?')}</h1>
-              <p className="draft-sub">{t('Выбери папку — Пульт запомнит её для следующих чатов.')}</p>
-              <div className="draft-pick" data-testid="draft-recent">
-                {(p.recent ?? []).length > 0 && <div className="pick-l">{t('Недавние папки — из чатов Пульта, Claude Code и Codex')}</div>}
-                {(p.recent ?? []).slice(0, 5).map((f) => (
-                  <button key={f.path} type="button" className="fold-row" data-testid="draft-recent-folder" data-path={f.path} onClick={() => p.onFolder(f.path)}>
-                    <Icon name="folder" />
-                    <span className="fr-name"><span className="n">{folderName(f.path)}</span><span className="p mono">{shortPath(f.path, 60)}</span></span>
-                    <span className="src">{f.source === 'claude' ? 'Claude Code' : f.source === 'codex' ? 'Codex' : t('Пульт')} · {ago(f.at, p.now)}</span>
-                  </button>
-                ))}
-                <div className="pick-actions">
-                  <button type="button" className="btn" onClick={p.onPickSystemFolder} data-testid="draft-pick-folder"><Icon name="folder" />{(p.recent ?? []).length ? t('Другая папка…') : t('Выбрать папку…')}<Kbd>{`${CMD}O`}</Kbd></button>
-                  <span className="drop">{t('или перетащи папку в окно')}</span>
-                </div>
-              </div>
-            </>
-          ) : (
-            <h1 className="draft-h" data-testid="draft-heading">{t('Что делаем в ')}<span className="fold">{fname}</span>?</h1>
-          )}
-          <div>
+          <div className="draft-intro">
+            <h1 className="draft-h" data-testid="draft-heading">{general ? t('О чём поговорим?') : noFolder ? t('Выбери проект') : <>{t('Что делаем в ')}<span className="fold">{fname}</span>?</>}</h1>
+            <p className="draft-sub">{general ? t('Вопрос, идея или черновик — можно начать без проекта.') : noFolder ? t('Папку можно выбрать в заголовке.') : t('Напиши задачу ниже.')}</p>
+          </div>
+          <div className="draft-compose">
             <div className={`draft-box${full ? ' full' : ''}${files.over ? ' attachment-over' : ''}`} data-access-full={full ? '1' : undefined}>
               <AttachmentStrip items={files.items} previews={files.previews} pending={files.pending} onRemove={files.remove} />
               <textarea ref={box} rows={3} value={d.text} data-testid="draft-input" aria-label={t('Первая реплика нового чата')}
-                placeholder={noFolder ? t('Можно начать писать — папку выберешь до отправки') : t('Опиши задачу')}
+                placeholder={general ? t('Напиши сообщение…') : t('Опиши задачу')}
                 readOnly={p.sending}
                 onChange={(e) => p.onText(e.target.value)} onKeyDown={onKey}
                 onPaste={files.onPaste} onDragEnter={files.onDragEnter} onDragOver={files.onDragOver} onDragLeave={files.onDragLeave} onDrop={files.onDrop} />
               <div className="draft-tb">
+                {files.enabled && <AttachButton disabled={p.sending || files.pending > 0} onFiles={files.addFiles} />}
                 <div className="dchips" data-testid="draft-chips" inert={p.sending}>
-                  <button ref={refs.folder} type="button" className={`dchip${noFolder ? ' warn' : refusal ? ' danger' : ' fold'}`} aria-haspopup="menu" aria-expanded={menu === 'folder'}
-                    data-testid="draft-chip-folder" data-path={d.cwd ?? ''} title={t`Папка ${CMD}⇧O`} onClick={() => toggle('folder')}>
-                    <Icon name="folder" /><span className="txt">{noFolder ? t('Выбери папку') : fname}</span><Icon name="chevd" className="ic chev" />
-                  </button>
-                  <span className="vsep" aria-hidden="true" />
                   <button ref={refs.model} type="button" className={`dchip${unlisted ? ' warn' : ''}`} aria-haspopup="menu" aria-expanded={menu === 'model'}
-                    data-testid="draft-chip-model" data-provider={d.provider} data-model={d.model ?? ''} title={t`Модель ${CMD}⇧I`} onClick={() => toggle('model')}>
-                    <span className={`pn who-${d.provider}`}>{PROVIDER_NAME[d.provider]}</span><span className="txt">{modelLabel}</span>{unlisted ? <span className="dim">{t(' · нет в списке')}</span> : null}<Icon name="chevd" className="ic chev" />
+                    data-testid="draft-chip-model" data-provider={d.provider} data-model={d.model ?? ''} title={t('Модель')} onClick={() => toggle('model')}>
+                    <ProviderIcon provider={d.provider} /><span className="txt">{modelLabel}</span>{unlisted ? <span className="dim">{t(' · нет в списке')}</span> : null}<Icon name="chevd" className="ic chev" />
                   </button>
                   {d.provider !== 'zcode' && (
                     <button ref={refs.effort} type="button" className="dchip" aria-haspopup="menu" aria-expanded={menu === 'effort'}
-                      data-testid="draft-chip-effort" data-effort={d.effort} title={t`Усилие ${CMD}⇧E`} onClick={() => toggle('effort')}>
-                      <Icon name="gauge" />{d.effort || t('по умолчанию')}<Icon name="chevd" className="ic chev" />
+                      data-testid="draft-chip-effort" data-effort={d.effort} title={t('Усилие')} aria-label={t`Усилие: ${d.effort || t('по умолчанию')}`} onClick={() => toggle('effort')}>
+                      <Icon name="gauge" /><span className="draft-control-label">{d.effort || t('по умолчанию')}</span><Icon name="chevd" className="ic chev" />
                     </button>
                   )}
                   <button ref={refs.access} type="button" className={`dchip${full ? ' danger' : ''}`} aria-haspopup="menu" aria-expanded={menu === 'access'}
-                    data-testid="draft-chip-access" data-approval={d.approval} title={t`Доступ ${CMD}⇧M`} onClick={() => toggle('access')}>
-                    <Icon name="shield" /><span className="txt">{access}</span>{d.chatOnly ? <span className="dim">{t(' · этот чат')}</span> : null}<Icon name="chevd" className="ic chev" />
+                    data-testid="draft-chip-access" data-approval={d.approval} title={t('Доступ агента')} aria-label={t`Доступ: ${access}`} onClick={() => toggle('access')}>
+                    <Icon name="shield" /><span className="txt draft-control-label">{access}</span>{d.chatOnly ? <span className="dim">{t(' · этот чат')}</span> : null}<Icon name="chevd" className="ic chev" />
                   </button>
+                  {d.provider === 'codex' && <button ref={refs.speed} type="button" className={`dchip icon-only draft-speed${d.serviceTier === 'fast' ? ' fast' : ''}`} aria-haspopup="menu" aria-expanded={menu === 'speed'} data-testid="draft-chip-speed" title={t`Скорость: ${d.serviceTier === 'fast' ? 'Fast' : 'Normal'}`} aria-label={t`Скорость: ${d.serviceTier === 'fast' ? 'Fast' : 'Normal'}`} onClick={() => toggle('speed')}><Icon name="bolt" /></button>}
                   {d.worktree && <button type="button" className="dchip extra" data-testid="draft-chip-worktree" onClick={() => toggle('more')}><Icon name="branch" />{t('ветка ')}{d.branch.trim() || 'pult/…'}</button>}
                   {d.browser && <button type="button" className="dchip extra" data-testid="draft-chip-browser" onClick={() => toggle('more')}><Icon name="globe" />{t('браузер')}</button>}
                   <button ref={refs.more} type="button" className="dchip icon-only" aria-haspopup="menu" aria-expanded={menu === 'more'}
                     data-testid="draft-chip-more" title={t('Ещё: ветка, браузер')} aria-label={t('Ещё: ветка, браузер')} onClick={() => toggle('more')}><Icon name="more" /></button>
                 </div>
                 <Dictation key={d.id} disabled={p.sending || p.obstructed} onBusy={setDictating} onText={(spoken) => { p.onText(appendDictation(textRef.current, spoken)); requestAnimationFrame(() => box.current?.focus()) }} />
-                {files.enabled && <AttachButton disabled={p.sending || files.pending > 0} onFiles={files.addFiles} />}
                 <button type="button" className="btn btn-primary draft-send" data-testid="draft-send" onClick={send}
-                  disabled={p.sending || dictating || linkLocked || !hasText || blocked} aria-busy={p.sending || undefined}>
-                  <Icon name="send" />{p.sending ? t('Завожу…') : t('Отправить')}
+                  disabled={p.sending || dictating || linkLocked || !hasText || blocked} aria-busy={p.sending || undefined} aria-label={p.sending ? t('Завожу…') : t('Отправить')} title={p.sending ? t('Завожу…') : t('Отправить')}>
+                  {p.sending ? <Icon name="clock" /> : <svg className="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5" /></svg>}
                 </button>
               </div>
             </div>
             {notes.map((n) => <div key={n.testId} className={`inline-note ${n.tone}`} role={n.tone === 'fail' ? 'alert' : 'status'} data-testid={n.testId}><Icon name={n.tone === 'ok' ? 'check' : 'info'} /><span>{n.text}</span></div>)}
-            <div className="draft-hint">
-              <span><Kbd>↵</Kbd>{t('отправить и завести чат')}</span><span><Kbd>⇧↵</Kbd>{t('новая строка')}</span>
-              <span className="grow" />
-              {empty ? <span data-testid="draft-esc-hint"><Kbd>Esc</Kbd>{t('убрать пустой черновик')}</span>
-                : <span data-testid="draft-esc-hint">{t('черновик сохранится, если уйти')}</span>}
-            </div>
+
           </div>
         </div>
       </div>
@@ -631,6 +621,7 @@ export function DraftView(p: DraftViewProps): ReactElement {
       {menu === 'model' && modelMenu}
       {menu === 'effort' && effortMenu}
       {menu === 'access' && accessMenu}
+      {menu === 'speed' && d.provider === 'codex' && speedMenu}
       {menu === 'more' && moreMenu}
     </section>
   )

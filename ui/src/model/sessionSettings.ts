@@ -3,7 +3,7 @@ import { t as tr } from '../lib/i18n.js'
 // Чистые функции: пункты меню, когда нужен вопрос, параметры `agent.configure`, черновик настроек и `settings.set`.
 // Проверки — те же, что у демона (src/sessions/settings.ts): окно лишь говорит заранее то, что демон и так скажет.
 
-import type { ApprovalMode } from '../../../src/adapters/types.js'
+import type { ApprovalMode, ServiceTier } from '../../../src/adapters/types.js'
 import {
   APPROVAL_WORDS, CLAUDE_EFFORTS, CODEX_EFFORTS_FALLBACK, ConfigureError, modeBlocksBrowser, modelWindows, parseNewSession, windowMisfit,
 } from '../../../src/sessions/settings.js'
@@ -20,6 +20,7 @@ export { modelWindows }
 
 /** Что выбрали в меню подвала. */
 export type SettingsPick =
+  | { kind: 'speed'; serviceTier: ServiceTier }
   | { kind: 'model'; model: string; misfit?: string }
   | { kind: 'effort'; effort: string }
   | { kind: 'approval'; approval: ApprovalMode }
@@ -132,7 +133,8 @@ export function confirmNeeded(pick: SettingsPick, consent?: ConsentView | null, 
  * Выбор текущего значения — ничего не менять. Ревью PR #39, M3: кроме полного уровня «не разрешён» — его повторный
  * выбор и есть «Разрешить»: диалог согласия, затем `agent.configure` с тем же уровнем.
  */
-export function isNoop(pick: SettingsPick, agent: Pick<AgentView, 'model' | 'effort' | 'approval' | 'access'>): boolean {
+export function isNoop(pick: SettingsPick, agent: Pick<AgentView, 'model' | 'effort' | 'approval' | 'access'> & { serviceTier?: ServiceTier }): boolean {
+  if (pick.kind === 'speed') return pick.serviceTier === (agent.serviceTier ?? 'default')
   if (pick.kind === 'model') return pick.model === agent.model
   if (pick.kind === 'effort') return pick.effort === agent.effort
   return pick.approval === (agent.approval ?? 'ask') && agent.access?.blocked !== true
@@ -146,7 +148,7 @@ export function isNoop(pick: SettingsPick, agent: Pick<AgentView, 'model' | 'eff
 export function configureParams(name: string, pick: SettingsPick, confirmed: boolean, consentRev?: number): Record<string, unknown> {
   return {
     name,
-    ...(pick.kind === 'model' ? { model: pick.model } : pick.kind === 'effort' ? { effort: pick.effort } : { approval: pick.approval }),
+    ...(pick.kind === 'speed' ? { serviceTier: pick.serviceTier } : pick.kind === 'model' ? { model: pick.model } : pick.kind === 'effort' ? { effort: pick.effort } : { approval: pick.approval }),
     ...(confirmed ? { confirm: true } : {}),
     ...(confirmed && pick.kind === 'approval' && consentRev !== undefined ? { consentRev } : {}),
   }

@@ -9,12 +9,12 @@ import { discoverMobile, performMobile, installMobileSetup } from '../runtimes/m
 import { withLanguage } from '../i18n/context.js'
 import { getLanguage, isLanguageSetting, resolveLanguage } from '../i18n/core.js'
 import type { LanguageSetting } from '../i18n/core.js'
-import { existsSync, chmodSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync } from 'node:fs'
+import { existsSync, chmodSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync } from 'node:fs'
 import net from 'node:net'
 import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
-import type { ProviderName, PultConfig } from '../core/config.js'
+import type { AttachmentRetentionDays, ProviderName, PultConfig } from '../core/config.js'
 import type { EventDraft, PultEvent } from '../core/events.js'
 import { DAEMON_SESSION, isEventKind } from '../core/events.js'
 import type { Logger } from '../core/log.js'
@@ -30,6 +30,7 @@ import { createStore, GET_LIMIT } from '../core/store.js'
 import { clipEvent, compactHistory, fitEvent, HISTORY_PAGE_BYTES, LIVE_LINE_BYTES, pageHistory } from '../core/history.js'
 import { normalizeQuery, QUERY_MAX_CHARS, SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX, searchEvents } from '../core/search.js'
 import { exportSession } from '../core/exportMd.js'
+import type { PromptAttachment } from '../core/promptAttachments.js'
 import { ATTACHMENTS_SWEEP_MS, sweepAttachments } from '../core/attachments.js'
 
 /** Строка события в `events.get` — до этой длины: окно показывает вывод до 4000 знаков, вход — целиком. */
@@ -69,7 +70,7 @@ import type { StartEntry, StartPhase } from '../core/startJournal.js'
 import { suggestName } from '../sessions/naming.js'
 import { coversPultHome } from '../sessions/manager.js'
 import type { ApprovalMode, PermissionDecision, PermissionScope } from '../adapters/types.js'
-import { APPROVAL_LIST, approvalFits, isApprovalMode, PERMISSION_SCOPES } from '../adapters/types.js'
+import { APPROVAL_LIST, approvalFits, isApprovalMode, isServiceTier, PERMISSION_SCOPES } from '../adapters/types.js'
 import { CONSENT_PROVIDERS, CONSENT_VERSION, consentCovers, consentView, createConsentStore } from '../core/consent.js'
 import type { ConsentProvider } from '../core/consent.js'
 import { accessView, isFullLevel } from '../sessions/access.js'
@@ -97,7 +98,7 @@ import type { BrowserInstaller, InstallResult } from '../mcp/browser.js'
 import { browserDoctorItems, bypassDoctorItems, mcpDoctorItems } from '../mcp/doctor.js'
 import { createMcpExtras } from '../mcp/session.js'
 import { listServers, RESERVED_MCP_NAMES } from '../mcp/servers.js'
-import { MCP_SERVER_NAME_RE, MCP_SERVERS_MAX, writeMcpSelection, writeNetworkGuard, writeLanguage, writeNewSession, writeUpdatesCheck } from '../core/config.js'
+import { MCP_SERVER_NAME_RE, MCP_SERVERS_MAX, isAttachmentRetentionDays, writeAttachmentRetention, writeMcpSelection, writeNetworkGuard, writeLanguage, writeNewSession, writeUpdatesCheck } from '../core/config.js'
 import { GuardError, guardLine, guardVerdict, parseGuardShape, parseGuardStrict, sameGuard } from '../core/guard.js'
 import type { GuardRule } from '../core/guard.js'
 import type { SessionBrowser, SessionRecord, SessionStatus } from '../sessions/registry.js'
@@ -854,6 +855,7 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
   // профили и noProxy окну не отдаются.
   const settingsReply = (): Record<string, unknown> => ({
     language: config.language,
+    attachments: { ...config.attachments },
     newSession: config.newSession, lastUsed: readLastUsed(), updates: { check: config.updates.check },
     network: { guard: { mode: config.guard.mode, countries: [...config.guard.countries] }, exits: lastNetExits() },
     codexRules: rules.list(),
@@ -1023,6 +1025,9 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
   /** Всё, что может отказать ДО заведения чего-либо: режим, полный доступ (согласие), браузер. */
   const validateStart = (conn: Connection, p: Record<string, unknown>): StartChecks => {
     const kind = p['kind'] === 'codex' ? 'codex' : p['kind'] === 'zcode' ? 'zcode' : 'claude'
+    if (p['serviceTier'] !== undefined && (kind !== 'codex' || !isServiceTier(p['serviceTier']))) throw new ManagerError(ERROR_CODES.invalidParams, 'agent.start: serviceTier — default или fast, только для Codex')
+    if (p['scope'] !== undefined && p['scope'] !== 'general' && p['scope'] !== 'project') throw new ManagerError(ERROR_CODES.invalidParams, 'agent.start: scope — project | general')
+    if (p['scope'] === 'general' && (p['cwd'] || p['worktree'] || p['base'] || p['folder'])) throw new ManagerError(ERROR_CODES.invalidParams, 'agent.start: разговор без проекта не принимает папку или worktree')
     // M8d: как подтверждать действия. Нет поля — `ask`; незнакомое значение — отказ, а не тихий `ask`:
     // человек, попросивший `full`, но опечатавшийся, иначе получил бы не то, что думает.
     if (p['approval'] !== undefined && !isApprovalMode(p['approval'])) {
@@ -1036,7 +1041,7 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
     // Ревью M8d: «полный доступ» — только с явным подтверждением (`confirm: true`; CLI — по `--yes`). Шаг A: и с
     // разрешением — согласием окна (`consent.json`, сверка `consentRev`) или разовым `grant: cli-once` из CLI.
     // `inherit` при `defaultMode: bypassPermissions` у владельца — тоже полный доступ. Отказ ДО заведения чего-либо.
-    const full = isFullLevel(kind, approval, approval === 'inherit' ? inheritModeOf(kind, String(p['cwd'] ?? ''), str(p['settingSources'])) : null)
+    const full = isFullLevel(kind, approval, approval === 'inherit' ? inheritModeOf(kind, String(p['cwd'] || paths.home), str(p['settingSources'])) : null)
     // Черновик из ссылки полный доступ сам не включает (B3, ревью Codex 1): только явный выбор в этом черновике. В том
     // числе «как в настройках Claude», когда настройки ПАПКИ дают bypassPermissions.
     if (full && p['origin'] === 'link' && p['approvalOrigin'] !== 'explicit') {
@@ -1054,9 +1059,11 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
       name,
       ...(str(p['title']) !== undefined ? { title: str(p['title']) as string } : {}),
       kind: v.kind,
+      ...(p['scope'] === 'general' ? { scope: 'general' as const } : {}),
       cwd: String(p['cwd'] ?? ''),
       ...(str(p['model']) !== undefined ? { model: str(p['model']) as string } : {}),
       ...(str(p['effort']) !== undefined ? { effort: str(p['effort']) as string } : {}),
+      ...(isServiceTier(p['serviceTier']) ? { serviceTier: p['serviceTier'] } : {}),
       ...(p['mode'] === 'warm' ? { mode: 'warm' as const } : {}),
       ...(str(p['settingSources']) !== undefined ? { settingSources: str(p['settingSources']) as string } : {}),
       ...(branch !== undefined ? { worktree: branch } : {}),
@@ -1070,7 +1077,7 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
     if (v.browser) browserOn(rec.name)
     // M8f: последний выбор «+ Сессия» — только с окна (клиент `shell`): CLI и скрипты его не трогают.
     // Папка — если форма не была открыта уже с папкой (`rememberCwd: false`). `full` не запоминается.
-    if (conn.client === 'shell') {
+    if (conn.client === 'shell' && rec.scope !== 'general') {
       try {
         const next = nextLastUsed(readLastUsed(), {
           kind: v.kind,
@@ -1094,7 +1101,7 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
    * CLI в память не пишет. Сбой записи памяти старт не роняет — чат уже заведён.
    */
   const afterStart = (conn: Connection, p: Record<string, unknown>, rec: SessionRecord, v: StartChecks): void => {
-    if (conn.client !== 'shell') return
+    if (conn.client !== 'shell' || rec.scope === 'general') return
     const folder = String(p['cwd'] ?? '')
     try {
       folders.use(folder)
@@ -1131,6 +1138,9 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
   const startShape = (p: Record<string, unknown>): string => hashOf(JSON.stringify([
     p['kind'] ?? 'claude', String(p['cwd'] ?? ''), p['model'] ?? null, p['effort'] ?? null, p['approval'] ?? 'ask', p['worktree'] ?? null,
     p['browser'] ?? null, p['mode'] ?? null,
+    // Keep pre-upgrade request hashes for ordinary project/default starts.
+    ...(p['scope'] === 'general' ? [{ scope: 'general' }] : []),
+    ...(p['serviceTier'] === 'fast' ? [{ serviceTier: 'fast' }] : []),
   ]))
   /** Папка не та, что видело окно (ревью Codex 2): заменили или перенаправили симлинк после снимка черновика. */
   const checkFolderRef = (p: Record<string, unknown>): void => {
@@ -1146,7 +1156,7 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
     }
   }
   const startWithRequest = async (conn: Connection, p: Record<string, unknown>, requestId: string): Promise<Record<string, unknown>> => {
-    const prompt = typeof p['prompt'] === 'string' && p['prompt'].trim() ? p['prompt'] : undefined
+    const prompt = typeof p['prompt'] === 'string' && p['prompt'].trim() ? p['prompt'] : Array.isArray(p['attachments']) && p['attachments'].length ? (typeof p['prompt'] === 'string' ? p['prompt'] : '') : undefined
     let entry = startJournal.get(requestId)
     const put = (e: Omit<StartEntry, 'updatedAt'>): StartEntry => { const x = { ...e, updatedAt: '' }; startJournal.put(x); return x }
     // Сессия — по `startRequest` в её записи, а не по имени (ревью Codex 6, 7): имя могли удалить и отдать другой, а
@@ -1161,7 +1171,7 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
       }
       const at = entry?.at ?? ours.createdAt
       if (!entry || !phaseAtLeast(entry.phase, 'registered')) entry = put({ ...(entry ?? {}), requestId, phase: 'registered', name: ours.name, at, shape })
-      return withDraftClaim(p, requestId, () => finishPrompt(requestId, entry as StartEntry, withBrowser(publicRecord(ours)), prompt, put), true)
+      return withDraftClaim(p, requestId, () => finishPrompt(requestId, entry as StartEntry, withBrowser(publicRecord(ours)), prompt, put, p['attachments'] as PromptAttachment[] | undefined), true)
     }
     if (entry?.name && phaseAtLeast(entry.phase, 'registered')) {
       throw new ManagerError(ERROR_CODES.notFound, `сессию ${entry.name}, заведённую по этому запросу, уже удалили — отправь черновик заново`)
@@ -1193,7 +1203,7 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
       }
       const registered = put({ requestId, phase: 'registered', name: nm, at, shape })
       afterStart(conn, p, rec, v)
-      return finishPrompt(requestId, registered, rec, prompt, put)
+      return finishPrompt(requestId, registered, rec, prompt, put, p['attachments'] as PromptAttachment[] | undefined)
     })
   }
   /**
@@ -1220,7 +1230,7 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
     let consumed = false
     try {
       const r = await run()
-      consumed = r['promptSent'] === true || (r['promptSent'] === false && !(typeof p['prompt'] === 'string' && p['prompt'].trim()) && !r['promptError'])
+      consumed = r['promptSent'] === true || (r['promptSent'] === false && !(typeof p['prompt'] === 'string' && (p['prompt'].trim() || (Array.isArray(p['attachments']) && p['attachments'].length))) && !r['promptError'])
       return r
     } finally { drafts.endStart(id, requestId, consumed) }
   }
@@ -1230,22 +1240,22 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
    * отвечает `duplicate` и `promptDiffers`, если текст другой (окно не выбросит правку молча, ревью M3).
    */
   const finishPrompt = async (requestId: string, entry: StartEntry, rec: SessionRecord, prompt: string | undefined,
-    put: (e: Omit<StartEntry, 'updatedAt'>) => StartEntry): Promise<Record<string, unknown>> => {
+    put: (e: Omit<StartEntry, 'updatedAt'>) => StartEntry, attachments?: readonly PromptAttachment[]): Promise<Record<string, unknown>> => {
     const base = { ...rec, requestId }
-    const hash = prompt ? hashOf(prompt) : undefined
+    const hash = prompt !== undefined ? hashOf(attachments?.length ? JSON.stringify([prompt, attachments]) : prompt) : undefined
     if (phaseAtLeast(entry.phase, 'prompt-accepted')) {
       const lost = entry.phase === 'prompt-accepted' && entry.promptFrom !== undefined && !promptDelivered(rec.name, entry.promptFrom)
-      if (!lost || !prompt) {
+      if (!lost || prompt === undefined) {
         return { ...base, phase: entry.phase, promptSent: !lost, duplicate: true, ...(hash && entry.promptHash && hash !== entry.promptHash ? { promptDiffers: true } : {}) }
       }
       // Демон упал до записи реплики — её не было: отдаём сейчас.
     }
-    if (!prompt) return { ...base, phase: entry.phase, promptSent: false }
+    if (prompt === undefined) return { ...base, phase: entry.phase, promptSent: false }
     const from = store.lastId
     const { error: _old, ...clean } = entry
     put({ ...clean, phase: 'prompt-accepted', promptHash: hash as string, promptFrom: from })
     try {
-      await manager.say(rec.name, prompt)
+      await manager.say(rec.name, prompt, { ...(attachments?.length ? { attachments } : {}) })
     } catch (e) {
       // `say` отказал — провайдер реплику не получил, даже если `message.user` уже в ленте (его пишут ДО resume/send,
       // Codex recheck 8): «Повторить» её отдаёт. Проверка `message.user` остаётся только для сбоя демона посреди `say`.
@@ -1263,15 +1273,16 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
    */
   const recentFolders = async (limit: number): Promise<Array<{ path: string; at: string; source: 'pult' | 'claude' | 'codex'; access?: ApprovalMode }>> => {
     const out = new Map<string, { path: string; at: string; source: 'pult' | 'claude' | 'codex'; access?: ApprovalMode }>()
+    const generalRoot = join(realpathSync(paths.home), 'conversations')
     const add = (path: string, at: string, source: 'pult' | 'claude' | 'codex', access?: ApprovalMode): void => {
       const id = folderIdentity(path)
-      if (!id || coversPultHome(id.key, paths.home)) return
+      if (!id || coversPultHome(id.key, paths.home) || id.key === generalRoot || id.key.startsWith(generalRoot + '/')) return
       const have = out.get(id.key)
       if (have && have.at >= at) { if (access && !have.access) have.access = access; return }
       out.set(id.key, { path: id.key === path ? path : id.display, at, source, ...(access ?? have?.access ? { access: (access ?? have?.access) as ApprovalMode } : {}) })
     }
     for (const f of folders.recent(limit * 2)) add(f.path, f.lastUsedAt, 'pult', f.access)
-    for (const r of manager.list()) if (!r.archived) add(r.worktree?.repo ?? r.cwd, r.lastTurnAt ?? r.createdAt, 'pult')
+    for (const r of manager.list()) if (!r.archived && r.scope !== 'general') add(r.worktree?.repo ?? r.cwd, r.lastTurnAt ?? r.createdAt, 'pult')
     const ext = async (provider: 'claude' | 'codex'): Promise<void> => {
       try {
         const page = await Promise.race([
@@ -1305,10 +1316,11 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
         if (p['approval'] !== undefined && !isApprovalMode(p['approval'])) {
           throw new ManagerError(ERROR_CODES.invalidParams, `agent.configure: approval — ${APPROVAL_LIST}`)
         }
+        if (p['serviceTier'] !== undefined && !isServiceTier(p['serviceTier'])) throw new ManagerError(ERROR_CODES.invalidParams, 'agent.configure: serviceTier — default или fast')
         if (p['confirm'] !== undefined && typeof p['confirm'] !== 'boolean') throw new ManagerError(ERROR_CODES.invalidParams, 'agent.configure: confirm — true | false')
         if (p['grant'] !== undefined && p['grant'] !== 'cli-once') throw new ManagerError(ERROR_CODES.invalidParams, 'agent.configure: grant — только cli-once')
         refuseShellGrant(conn.client, p, 'agent.configure')
-        if (p['model'] === undefined && p['effort'] === undefined && p['approval'] === undefined) {
+        if (p['model'] === undefined && p['effort'] === undefined && p['approval'] === undefined && p['serviceTier'] === undefined) {
           throw new ManagerError(ERROR_CODES.invalidParams, 'agent.configure: нечего менять — model, effort или approval')
         }
         // Шаг A: полный доступ (и «как в настройках Claude» при bypass у владельца) — только с подтверждением И
@@ -1326,6 +1338,7 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
         }
         const r = await manager.configure({
           name: String(p['name'] ?? ''),
+          ...(isServiceTier(p['serviceTier']) ? { serviceTier: p['serviceTier'] } : {}),
           ...(p['model'] !== undefined ? { model: p['model'] as string } : {}),
           ...(p['effort'] !== undefined ? { effort: p['effort'] as string } : {}),
           ...(p['approval'] !== undefined ? { approval: p['approval'] as ApprovalMode } : {}),
@@ -1334,7 +1347,7 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
         })
         if (r.changes.browser === 'on') browserOn(r.record.name)
         // Шаг B: смена доступа в живом чате окном — в память папки (у worktree — основного репозитория), §3.7.
-        if (r.changes.approval && p['rememberAccess'] === true && conn.client === 'shell') {
+        if (r.changes.approval && p['rememberAccess'] === true && conn.client === 'shell' && r.record.scope !== 'general') {
           const folder = r.record.worktree?.repo ?? r.record.cwd
           try { folders.remember(folder, r.changes.approval.to ?? 'ask') } catch (e) { logger.warn('память папки не записана', { folder, error: (e as Error).message }) }
         }
@@ -1376,8 +1389,8 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
         // `network.guard` (0.3.6): профили сети, прокси, noProxy, команды, адрес канала (`updates.url`) и всё прочее
         // config.json отсюда не достать. Разбор строгий — кривое поле отказывает целиком, и тогда файл не трогается вовсе.
         const keys = Object.keys(p)
-        if (!keys.length || keys.some((k) => k !== 'language' && k !== 'newSession' && k !== 'updates' && k !== 'network' && k !== 'codexRules')) {
-          throw new ManagerError(ERROR_CODES.invalidParams, 'settings.set: можно менять только language, newSession, updates.check, network.guard и codexRules.revoke')
+        if (!keys.length || keys.some((k) => k !== 'language' && k !== 'newSession' && k !== 'updates' && k !== 'network' && k !== 'codexRules' && k !== 'attachments')) {
+          throw new ManagerError(ERROR_CODES.invalidParams, 'settings.set: можно менять только language, newSession, updates.check, network.guard, attachments.retentionDays и codexRules.revoke')
         }
         // План 16, № 11: «Отозвать» из «Настроек» — через уже разрешённый оболочке метод (Pult.app не меняется).
         // Только `{revoke: id}` и только отдельным вызовом: отзыв — живая кнопка, а не часть черновика «Сохранить».
@@ -1401,6 +1414,14 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
             if (e instanceof ConfigureError) throw new ManagerError(ERROR_CODES.invalidParams, `settings.set: ${e.message}`)
             throw e
           }
+        }
+        let retentionDays: AttachmentRetentionDays | undefined
+        if (p['attachments'] !== undefined) {
+          const a = p['attachments']
+          const keys = a !== null && typeof a === 'object' && !Array.isArray(a) ? Object.keys(a) : []
+          const value = keys.length === 1 && keys[0] === 'retentionDays' ? (a as Record<string, unknown>)['retentionDays'] : undefined
+          if (!isAttachmentRetentionDays(value)) throw new ManagerError(ERROR_CODES.invalidParams, 'settings.set: attachments — {retentionDays: 7|30|90|null}')
+          retentionDays = value
         }
         let check: boolean | undefined
         if (p['updates'] !== undefined) {
@@ -1432,11 +1453,13 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
           }
         }
         try {
+          if (retentionDays !== undefined) writeAttachmentRetention(paths.config, retentionDays)
           if (language !== undefined) writeLanguage(paths.config, language)
           if (ns !== undefined) writeNewSession(paths.config, ns)
           if (check !== undefined) writeUpdatesCheck(paths.config, check)
           if (guard !== undefined) writeNetworkGuard(paths.config, guard)
         } catch (e) { throw new ManagerError(ERROR_CODES.internal, (e as Error).message) }
+        if (retentionDays !== undefined) config.attachments.retentionDays = retentionDays
         if (language !== undefined) config.language = language
         if (ns !== undefined) {
           config.newSession = ns
@@ -1530,14 +1553,15 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
           throw new ManagerError(ERROR_CODES.invalidParams, 'agent.start: requestId — UUID (uuid черновика)')
         }
         if (p['prompt'] !== undefined && typeof p['prompt'] !== 'string') throw new ManagerError(ERROR_CODES.invalidParams, 'agent.start: prompt — строка')
+        if (p['attachments'] !== undefined && !Array.isArray(p['attachments'])) throw new ManagerError(ERROR_CODES.invalidParams, 'agent.start: attachments — массив')
         if (p['origin'] !== undefined && p['origin'] !== 'user' && p['origin'] !== 'link') throw new ManagerError(ERROR_CODES.invalidParams, 'agent.start: origin — user | link')
         if (typeof requestId !== 'string') {
           if (p['reserveOnly'] !== undefined) throw new ManagerError(ERROR_CODES.invalidParams, 'agent.start: reserveOnly — только с requestId')
           const v = validateStart(conn, p)
           const rec = await doStart(conn, p, String(p['name'] ?? ''), v)
           afterStart(conn, p, rec, v)
-          const prompt = typeof p['prompt'] === 'string' && p['prompt'].trim() ? p['prompt'] : undefined
-          if (prompt) await manager.say(rec.name, prompt)
+          const prompt = typeof p['prompt'] === 'string' && p['prompt'].trim() ? p['prompt'] : Array.isArray(p['attachments']) && p['attachments'].length ? (typeof p['prompt'] === 'string' ? p['prompt'] : '') : undefined
+          if (prompt !== undefined) await manager.say(rec.name, prompt, { ...(p['attachments'] !== undefined ? { attachments: p['attachments'] as PromptAttachment[] } : {}) })
           return rec
         }
         // Повторы с одним `requestId` идут строго по одному (ревью m4): каждый ждёт предыдущего и продолжает по журналу.
@@ -1669,6 +1693,7 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
           ...(p['queue'] === true ? { queue: true } : {}),
           ...(p['interrupt'] === true ? { interrupt: true } : {}),
           ...(p['steer'] === true ? { steer: true } : {}),
+          ...(p['attachments'] !== undefined ? { attachments: p['attachments'] as PromptAttachment[] } : {}),
         })
       case 'agent.queue.send':
         return await manager.queueSend(String(p['name'] ?? ''), String(p['id'] ?? ''))
@@ -2124,9 +2149,10 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
         const sessionId = typeof params['sessionId'] === 'string' ? params['sessionId'] : DAEMON_SESSION
         const provider = params['provider'] === 'claude' || params['provider'] === 'codex' ? params['provider'] : 'pult'
         const data = (params['data'] ?? {}) as Record<string, unknown>
+        const parentId = typeof params['parentId'] === 'string' ? params['parentId'] : undefined
         const ids: number[] = []
         for (let i = 0; i < count; i++) {
-          ids.push(emit({ sessionId, provider, kind, data: { ...data, n: i } }).id)
+          ids.push(emit({ sessionId, provider, kind, ...(parentId !== undefined ? { parentId } : {}), data: { ...data, n: i } }).id)
         }
         send({ id: req.id, result: { ids, lastEventId: store.lastId } })
         return
@@ -2359,7 +2385,7 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
   chmodSync(paths.sock, 0o600)
 
   // Картинки из буфера окна (PULT_HOME/attachments, окно 0.1.16): папка есть всегда (её отдают claude через --add-dir),
-  // старше 30 дней — удаляются на старте и раз в сутки (src/core/attachments.ts: только внутри, симлинки не раскрываются).
+  // по выбранному сроку хранения удаляются на старте и раз в сутки (src/core/attachments.ts: только внутри, симлинки не раскрываются).
   try {
     mkdirSync(paths.attachments, { recursive: true, mode: 0o700 })
     // Права — как у остальных папок PULT_HOME (mode у mkdir режет umask). Симлинк на месте папки не трогаем: chmod пошёл бы по нему.
@@ -2367,7 +2393,7 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
   } catch (e) { logger.warn('attachments не создалась', { error: (e as Error).message }) }
   const sweepAttachmentsNow = (): void => {
     try {
-      const r = sweepAttachments(paths.attachments)
+      const r = sweepAttachments(paths.attachments, Date.now(), config.attachments.retentionDays === null ? null : config.attachments.retentionDays * 24 * 60 * 60 * 1000)
       if (r.files || r.dirs || r.errors) logger.info('уборка attachments', { ...r })
     } catch (e) { logger.warn('уборка attachments не удалась', { error: (e as Error).message }) }
   }

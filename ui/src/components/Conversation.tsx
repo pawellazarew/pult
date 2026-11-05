@@ -1,6 +1,9 @@
 import './queue.css'
 import { AsyncQuestion } from './AsyncQuestion.js'
 import { t } from '../lib/i18n.js'
+import { ProviderIcon } from './ProviderIcon.js'
+import { archiveFinished, parseSubagentKeys, subagentViews, visibleSubagents } from '../model/subagents.js'
+import type { SubagentView } from '../model/subagents.js'
 // Центр окна: разговор с выбранным агентом (docs/12 §3 п.2). Вся логика ленты — в model/conversation.ts;
 // здесь только отрисовка, прокрутка «прилипает» к низу, пока человек сам не отлистал вверх.
 
@@ -21,9 +24,10 @@ import type { ProviderUsage } from '../model/usage.js'
 import { formatClock, formatResetIn, limitHolds, limitWindowsView } from '../model/usage.js'
 import { Dictation } from './Dictation.js'
 import { appendDictation } from '../model/speech.js'
-import { useAttachments } from './useAttachments.js'
+import { queueAttachmentEditNotice, useAttachments } from './useAttachments.js'
 import { AttachmentStrip } from './AttachmentStrip.js'
-import { attachmentPrompt } from '../model/attachmentDrafts.js'
+import { UserAttachments } from './UserAttachments.js'
+import type { PromptAttachment } from '../../../src/core/promptAttachments.js'
 import type { FilePathSource } from '../model/paths.js'
 import { APPROVAL_FULL_WARNING, approvalHint } from '../model/newAgent.js'
 import { accessChip, headerPill, pendingStrip } from '../model/access.js'
@@ -57,6 +61,12 @@ export interface ConversationProps {
   agent: AgentView
   items: readonly ConvItem[]
   now: number
+  headerActions?: ReactNode
+  menuExtras?: readonly MenuEntry[]
+  readOnly?: boolean
+  onOpenSubagent?(key: string): void
+  onOpenParent?(): void
+  onParentVisibility?(name: string, visible: boolean): void
   usage: ProviderUsage | undefined
   focusedPerm: string | null
   permBusy: Set<string>
@@ -66,7 +76,7 @@ export interface ConversationProps {
    * M8e: реплика ушла, демон ещё не подтвердил — бледный пузырь «отправляется…» в конце ленты
    * (model/pending.ts). Подтверждение — настоящая реплика в ленте; тогда Console присылает `null`.
    */
-  pending?: { text: string; ts: string } | null
+  pending?: { text: string; ts: string; attachments?: readonly PromptAttachment[] } | null
   /**
    * Связь с демоном (по умолчанию 'up'). Не 'up' — реплика не уйдёт, ввод это говорит, а не зовёт
    * печатать. 'connecting' и 'down' различаем: кнопка «Запустить демона» есть только в 'down'.
@@ -77,7 +87,7 @@ export interface ConversationProps {
    * прервать ход и сразу сказать. Поле чистится сразу (M8e); `false` — не вышло: текст возвращается в поле,
    * если в нём ещё пусто.
    */
-  onSend(text: string, mode?: SendMode): Promise<boolean>
+  onSend(text: string, mode?: SendMode, attachments?: readonly PromptAttachment[]): Promise<boolean>
   /** Очередь реплик: убрать, переставить, пустить дальше после неудачного хода. Нет — старый демон. */
   onQueueRemove?(id: string): void
   onQueueMove?(id: string, to: number): void
@@ -149,10 +159,38 @@ export function Conversation(p: ConversationProps): ReactElement {
   const imageBridge = useContext(MdBridgeContext)
   const sv = statusView(agent.status)
   const feed = useRef<HTMLDivElement>(null)
-  const qe = useQueueEdit(p.onQueueEdit)
+  const qe = useQueueEdit(p.onQueueEdit, agent.name)
   const stick = useRef(true)
   const feedSize = useRef({ height: 0, viewport: 0 })
   const [away, setAway] = useState(false)
+  const views = subagentViews(p.items)
+  const stateKey = `pult.subagents.${agent.name}`
+  const readKeys = (suffix: string): string[] => { try { return parseSubagentKeys(window.localStorage.getItem(`${stateKey}.${suffix}`)) } catch { return [] } }
+  const [childTabs, setChildTabs] = useState<string[]>(() => readKeys('tabs'))
+  const [hiddenChildren, setHiddenChildren] = useState<ReadonlySet<string>>(() => new Set(readKeys('hidden')))
+  const [activeChild, setActiveChild] = useState<string | null>(null)
+  const [showArchived, setShowArchived] = useState(false)
+  const [childrenMenu, setChildrenMenu] = useState<{ x: number; y: number } | null>(null)
+  const closeChildrenMenu = useCallback(() => setChildrenMenu(null), [])
+  const parentScroll = useRef(0)
+  const childPositions = useRef(new Map<string, number>())
+  const child = views.find((view) => view.key === activeChild)
+  const visibleChildren = visibleSubagents(views, hiddenChildren)
+  useEffect(() => { try { window.localStorage.setItem(`${stateKey}.tabs`, JSON.stringify(childTabs)); window.localStorage.setItem(`${stateKey}.hidden`, JSON.stringify([...hiddenChildren])) } catch { /* optional view preferences */ } }, [childTabs, hiddenChildren, stateKey])
+  const openChild = (key: string): void => {
+    if (!activeChild) parentScroll.current = feed.current?.scrollTop ?? 0
+    setChildTabs((before) => before.includes(key) ? before : [...before, key]); setActiveChild(key)
+  }
+  const returnToParent = (): void => {
+    const parent = child?.parentKey ?? null
+    if (parent) openChild(parent); else setActiveChild(null)
+    requestAnimationFrame(() => { if (!parent) { if (feed.current) feed.current.scrollTop = parentScroll.current; document.querySelector<HTMLTextAreaElement>('[data-testid="composer"]')?.focus() } })
+  }
+  const childProps: ConversationProps = { ...p, readOnly: true, onOpenSubagent: openChild, onOpenParent: returnToParent }
+  useLayoutEffect(() => {
+    p.onParentVisibility?.(agent.name, activeChild === null)
+    return () => p.onParentVisibility?.(agent.name, true)
+  }, [activeChild, agent.name, p.onParentVisibility])
 
   // Своя реплика ушла — лента едет вниз к ней, даже если человек перед этим листал вверх.
   const pendingText = p.pending?.text
@@ -219,12 +257,14 @@ export function Conversation(p: ConversationProps): ReactElement {
   useLayoutEffect(() => {
     const t = p.scrollTo
     if (!t || doneJump.current === t.nonce) return
+    // Reveal only after the parent feed has measurable geometry.
+    if (activeChild !== null) { setActiveChild(null); return }
     const it = itemForEvent(p.items, t.eventId, { ...(t.kind !== undefined ? { kind: t.kind } : {}), ...(t.parentId !== undefined ? { parentId: t.parentId } : {}) })
     if (it && reveal(it.id, 'center')) {
       doneJump.current = t.nonce
       p.onScrolled?.(t.nonce)
     }
-  }, [p.scrollTo, p.items, reveal, p.onScrolled])
+  }, [activeChild, p.scrollTo, p.items, reveal, p.onScrolled])
   const marks = userMarks(p.items)
   const lastUserJump = useRef<number | null>(null)
   useEffect(() => {
@@ -260,12 +300,21 @@ export function Conversation(p: ConversationProps): ReactElement {
               title={t("Агент работает без вопросов и без песочницы — сменить в меню подвала")}><Icon name="shield" />{pill.label}</span>}
             <Chip tone={sv.tone} label={agent.status === 'cold' ? t('Можно продолжить') : sv.label} testId="conv-status" />
           </div>
-          <div className="conv-location" data-testid="conv-location" title={agent.cwd}><Icon name="folder" />{agent.cwd.split('/').filter(Boolean).pop() ?? agent.cwd}{agent.branch ? ` / ${agent.branch}` : ''}</div>
+          <div className="conv-location" data-testid="conv-location" title={agent.scope === 'general' ? undefined : agent.cwd}><Icon name={agent.scope === 'general' ? 'model' : 'folder'} />{agent.scope === 'general' ? t('Без проекта') : (agent.cwd.split('/').filter(Boolean).pop() ?? agent.cwd)}{agent.branch ? ` / ${agent.branch}` : ''}</div>
         </div>
-        <ConversationMenu agent={agent} menu={p.menu} busy={sv.busy} onRemove={p.onRemove} />
+        {p.headerActions}
+        <ConversationMenu agent={agent} extras={p.menuExtras} menu={p.menu} busy={sv.busy} onRemove={p.onRemove} />
       </header>
 
-      {limited && (
+      {childTabs.length > 0 && <div className="subagent-tabs" role="tablist" aria-label={t('Родитель и субагенты')} data-testid="subagent-tabs">
+        <button type="button" role="tab" aria-selected={activeChild === null} onClick={() => { setActiveChild(null); requestAnimationFrame(() => { if (feed.current) feed.current.scrollTop = parentScroll.current }) }} data-testid="subagent-parent-tab">{agentLabel(agent)}</button>
+        {childTabs.map((key) => { const view = views.find((v) => v.key === key); return <div key={key} className={`subagent-tab${activeChild === key ? ' active' : ''}`}>
+          <button type="button" role="tab" aria-selected={activeChild === key} onClick={() => openChild(key)} data-testid="subagent-tab" data-child={key}><ProviderIcon provider={agent.provider} /><span className={`subagent-state t-${view ? stateTone(view.item.state) : 'mut'}`} data-working={view?.item.state === 'running' ? 'true' : 'false'}>●</span>{view?.item.subagentType ?? view?.item.description ?? t('Субагент')}</button>
+          <button type="button" className="subagent-tab-close" aria-label={t('Закрыть вкладку субагента')} onClick={() => { setChildTabs((before) => before.filter((k) => k !== key)); if (activeChild === key) returnToParent() }}><Icon name="x" /></button>
+        </div> })}
+      </div>}
+      {activeChild !== null && <SubagentHistory child={child ?? null} positions={childPositions.current} props={childProps} parentLabel={child?.parentKey ? views.find((view) => view.key === child.parentKey)?.item.subagentType ?? agentLabel(agent) : agentLabel(agent)} onParent={returnToParent} />}
+      {limited && activeChild === null && (
         <div className="strip strip-wait" data-testid="limit-strip">
           <Icon name="clock" />
           <span>{holds
@@ -274,7 +323,7 @@ export function Conversation(p: ConversationProps): ReactElement {
         </div>
       )}
 
-      <div className="feed-wrap">
+      <div className="feed-wrap" hidden={activeChild !== null}>
       {marks.length > 0 && <UserRail marks={marks} items={p.items} feed={feed} onJump={(id) => reveal(id, 'start')} />}
       <div className="feed" ref={feed} onScroll={onScroll} onLoadCapture={() => { const el = feed.current; if (el && stick.current) el.scrollTop = el.scrollHeight }} data-testid="feed">
         {p.items.length === 0 && !p.pending && p.historyLoading ? (
@@ -284,7 +333,7 @@ export function Conversation(p: ConversationProps): ReactElement {
         ) : p.items.length === 0 && !p.pending ? (
           <div className="conv-empty">
             <h3>{t("Разговор пуст")}</h3>
-            <div>{t("Напиши первую реплику внизу — сессия начнёт работу в ")}<span className="mono">{shortPath(agent.cwd)}</span>.</div>
+            <div>{t("Напиши первую реплику внизу — сессия начнёт работу в ")}<span className="mono">{agent.scope === 'general' ? t('Без проекта') : shortPath(agent.cwd)}</span>.</div>
           </div>
         ) : (
           <div className="feed-inner">
@@ -293,14 +342,14 @@ export function Conversation(p: ConversationProps): ReactElement {
                 {p.earlier.loading ? t('Загружаю…') : t('Показать раньше')}
               </button>
             )}
-            <ActivityItems items={p.items} props={p} />
+            <ActivityItems items={p.items} props={{ ...p, onOpenSubagent: openChild }} />
             {p.pending && (
               // M8e: реплика в пути. Тот же вид, что у реплики человека, но бледнее и без «копировать»;
               // настоящая придёт событием `message.user` и встанет на это место.
               <div className="it it-user it-pending" data-testid="msg-user-pending" aria-busy="true">
                 <Gutter who={t("ты")} cls="who-you" ts={p.pending.ts} />
                 <div className="body">
-                  <Markdown text={p.pending.text} human />
+                  <UserAttachments items={p.pending.attachments ?? []} /><Markdown text={p.pending.text} human />
                   <div className="pending-note" role="status">{t("отправляется…")}</div>
                 </div>
               </div>
@@ -314,13 +363,19 @@ export function Conversation(p: ConversationProps): ReactElement {
       }}>{t("К последним ↓")}</button>}
       </div>
 
-      {p.onQueueRemove && (agent.queue?.length || agent.queuePaused || qe.edit || qe.notice) ? (
+      {activeChild === null && views.length > 0 && <div className="subagent-track"><button type="button" className="subagent-pill" aria-haspopup="menu" aria-expanded={childrenMenu !== null} data-testid="subagents-open" onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); setChildrenMenu(childrenMenu ? null : { x: r.left, y: r.top - 6 }) }}><Icon name="agents" />{visibleChildren.length ? `${visibleChildren.length} ${plural(visibleChildren.length, t('субагент'), t('субагента'), t('субагентов'))}` : t('Архив субагентов')}</button></div>}
+      {childrenMenu && <ContextMenu at={childrenMenu} above label={t('Субагенты')} testId="subagents-menu" onClose={closeChildrenMenu} items={[
+        ...(visibleChildren.some((view) => view.item.state !== 'running') ? [{ label: t('Архивировать завершённые субагенты'), testId: 'archive-finished-subagents', onSelect: () => setHiddenChildren(archiveFinished(views, hiddenChildren)) }, 'sep' as const] : []),
+        ...(showArchived ? views : visibleChildren).map((view) => ({ label: `${view.item.subagentType ?? view.item.description ?? t('Субагент')} · ${view.item.state === 'running' ? t('Работает') : view.item.state === 'ok' ? t('Завершён') : view.item.state === 'error' ? t('Ошибка') : t('Остановлен')}`, onSelect: () => openChild(view.key), testId: 'subagent-open' })),
+        ...(hiddenChildren.size ? ['sep' as const, { label: showArchived ? t('Скрыть архив') : t('Показать архив'), onSelect: () => setShowArchived((before) => !before), testId: 'subagents-archive-toggle' }] : []),
+      ]} />}
+      {activeChild === null && p.onQueueRemove && (agent.queue?.length || agent.queuePaused || qe.edit || qe.notice) ? (
         <QueueList queue={agent.queue ?? []} paused={agent.queuePaused === true} onRemove={p.onQueueRemove}
           onMove={p.onQueueMove ?? (() => {})} onResume={p.onQueueResume ?? (() => {})}
           {...(p.onQueueSend ? { onSend: p.onQueueSend } : {})}
           {...(p.onQueueEdit ? { edit: qe.view } : {})} notice={qe.notice} />
       ) : null}
-      <Composer busy={sv.busy} needsYou={sv.needsYou} permFocused={p.focusedPerm !== null} link={p.link ?? 'up'} disabled={holds} sending={p.sending} error={p.sendError} onSend={p.onSend} agentName={agent.name} label={agentLabel(agent)} filePaths={p.filePaths ?? null}
+      <Composer hidden={activeChild !== null} busy={sv.busy} needsYou={sv.needsYou} permFocused={p.focusedPerm !== null} link={p.link ?? 'up'} disabled={holds} sending={p.sending} error={p.sendError} onSend={p.onSend} agentName={agent.name} label={agentLabel(agent)} filePaths={p.filePaths ?? null}
         accessRed={chip.red} accessNote={pendingStrip(agent)}
         onStop={p.onStop} steerable={agent.provider === 'codex'} queueable={!!p.onQueueRemove} inject={qe.inject} footer={<ChatFooter agent={agent} usage={p.usage} now={p.now} onReveal={p.onReveal} {...(p.onHelp ? { onHelp: p.onHelp } : {})}
         {...(p.onConfigure ? { onConfigure: p.onConfigure } : {})} catalog={p.catalog ?? null} windows={p.windows ?? EMPTY_WINDOWS} consent={p.consent ?? null} />} />
@@ -329,16 +384,41 @@ export function Conversation(p: ConversationProps): ReactElement {
   )
 }
 
+
+function SubagentHistory({ child, positions, props, parentLabel, onParent }: { child: SubagentView | null; positions: Map<string, number>; props: ConversationProps; parentLabel: string; onParent(): void }): ReactElement {
+  const box = useRef<HTMLDivElement>(null)
+  const prev = useRef<string | null>(null)
+  const follows = useRef(true)
+  useLayoutEffect(() => {
+    if (child && box.current && prev.current !== child.key) {
+      box.current.scrollTop = positions.get(child.key) ?? box.current.scrollHeight
+      follows.current = box.current.scrollHeight - box.current.scrollTop - box.current.clientHeight < 80
+      prev.current = child.key
+    }
+    else if (box.current && follows.current) box.current.scrollTop = box.current.scrollHeight
+  }, [child?.key, child?.item.items, positions])
+  return <div className="subagent-view" data-testid="subagent-view">
+    <div className="subagent-feed feed" ref={box} onScroll={() => { if (child && box.current) { positions.set(child.key, box.current.scrollTop); follows.current = box.current.scrollHeight - box.current.scrollTop - box.current.clientHeight < 80 } }}>
+      <div className="feed-inner"><div className="subagent-heading"><span>{child?.item.subagentType ?? t('Субагент')}</span>{child && <span className={`t-${stateTone(child.item.state)}`}>{child.item.state === 'running' ? t('Работает') : child.item.state === 'ok' ? t('Завершён') : child.item.state === 'error' ? t('Ошибка') : t('Остановлен')}</span>}</div>
+        {props.earlier?.more && <button type="button" className="btn earlier" disabled={props.earlier.loading} onClick={props.onLoadEarlier}>{props.earlier.loading ? t('Загружаю…') : t('Показать раньше')}</button>}
+        {child?.item.description && <p className="subagent-task">{child.item.description}</p>}
+        {child && child.item.items.length ? <ActivityItems items={child.item.items} props={props} /> : <p className="mut">{props.historyLoading ? t('Загружаю историю…') : t('История субагента пока недоступна')}</p>}
+      </div>
+    </div>
+    <div className="parent-callout"><Icon name="model" /><span>{parentLabel}</span><button type="button" className="btn" onClick={onParent} data-testid="subagent-return">← {t('Открыть родителя')}</button></div>
+  </div>
+}
+
 /**
  * Меню «⋯» в шапке разговора — те же пункты, что у строки сайдбара (переименовать, экспорт, архив,
  * браузер, удалить). Раньше здесь было одно-единственное действие «Удалить беседу»: самое заметное
  * меню состояло из самого опасного пункта (ревью UX 29.10.2026). Без `menu` (старая оболочка) —
  * прежний вид с одним удалением.
  */
-function ConversationMenu({ agent, menu, busy, onRemove }: { agent: AgentView; menu?: SessionMenuApi; busy: boolean; onRemove(): void }): ReactElement | null {
+function ConversationMenu({ agent, menu, extras, busy, onRemove }: { agent: AgentView; menu?: SessionMenuApi; extras?: readonly MenuEntry[]; busy: boolean; onRemove(): void }): ReactElement | null {
   const [at, setAt] = useState<{ x: number; y: number } | null>(null)
-  if (busy) return null
-  if (!menu) {
+  if (busy && !extras?.length) return null
+  if (!menu && !extras?.length) {
     return (
       <details className="conv-actions">
         <summary aria-label={t("Действия с беседой")}>···</summary>
@@ -353,7 +433,7 @@ function ConversationMenu({ agent, menu, busy, onRemove }: { agent: AgentView; m
         onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); setAt({ x: r.left, y: r.bottom + 2 }) }}>
         <span className="dots" aria-hidden="true">⋯</span>
       </button>
-      {at && <ContextMenu at={at} items={sessionMenuItems(agent, menu)} onClose={() => setAt(null)} testId="session-menu-list" label={t`Действия с беседой ${agentLabel(agent)}`} />}
+      {at && <ContextMenu at={at} items={[...(extras ?? []), ...(!busy && menu ? [...(extras?.length ? ['sep' as const] : []), ...sessionMenuItems(agent, menu)] : [])]} onClose={() => setAt(null)} testId="session-menu-list" label={t`Действия с беседой ${agentLabel(agent)}`} />}
     </>
   )
 }
@@ -439,7 +519,9 @@ function ChatFooter({ agent, usage, now, onReveal, onHelp, onConfigure, catalog,
   const windows = limitWindowsView(usage, now)
   const provider = agent.provider
   const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null)
+  const [selection, setSelection] = useState<'model'|'effort'|'approval'|'speed'>('model')
   const closeMenu = useCallback(() => setMenuAt(null), [])
+  const openSettings = (event: import('react').MouseEvent<HTMLButtonElement>, kind: typeof selection): void => { const r = event.currentTarget.getBoundingClientRect(); setSelection(kind); setMenuAt(menuAt && selection === kind ? null : { x: r.left, y: r.top - 6 }) }
   // Шаг A: чип доступа — желаемый уровень и что с ним сейчас («после хода», «ожидается», «не подтверждено», «не
   // разрешён»); красный — по действующему режиму (`access.red`), а не только по выбранному.
   const chip = accessChip(agent)
@@ -453,31 +535,27 @@ function ChatFooter({ agent, usage, now, onReveal, onHelp, onConfigure, catalog,
       {chip.red && <Icon name="shield" />}{chip.label.toLowerCase()}{chip.suffix && <span className="access-suffix" data-testid="conv-access-suffix"> · {chip.suffix}</span>}
     </span>
   )
-  const menuItems = (): MenuEntry[] => settingsMenu(agent, catalog, ctxWindows, consent).map((r): MenuEntry => {
-    if (r.type === 'sep') return 'sep'
-    if (r.type === 'heading') return { heading: r.label, ...(r.testId ? { testId: r.testId } : {}) }
-    if (r.type === 'note') return { note: r.label, ...(r.testId ? { testId: r.testId } : {}) }
-    return { label: r.label, checked: r.checked, testId: r.testId, onSelect: () => onConfigure?.(r.pick), ...(r.danger ? { danger: true } : {}), ...(r.title ? { title: r.title } : {}) }
-  })
+  const menuItems = (): MenuEntry[] => {
+    if (selection === 'speed') return [{ heading: t('Скорость') }, ...(['default','fast'] as const).map((serviceTier) => ({ label: serviceTier === 'fast' ? 'Fast' : 'Normal', checked: (agent.serviceTier ?? 'default') === serviceTier, testId: `settings-speed-${serviceTier}`, onSelect: () => onConfigure?.({ kind: 'speed', serviceTier }) })), { note: t('Доступность и расход зависят от модели и тарифа') }]
+    const rows = settingsMenu(agent, catalog, ctxWindows, consent).flatMap((r): MenuEntry[] => r.type === 'item' && r.pick.kind === selection ? [{ label: r.label, checked: r.checked, testId: r.testId, onSelect: () => onConfigure?.(r.pick), ...(r.danger ? { danger: true } : {}), ...(r.title ? { title: r.title } : {}) }] : [])
+    return [{ heading: selection === 'model' ? t('Модель') : selection === 'effort' ? t('Усилие') : t('Доступ агента') }, ...rows]
+  }
   const context = contextView(agent.context)
   return (
     <div className="chat-status" data-testid="chat-status">
       <span className="composer-preferences">
-        {onConfigure ? (
-          <button type="button" className="settings" data-testid="conv-settings" aria-haspopup="menu" aria-expanded={menuAt !== null}
-            title={t("Модель, усилие и подтверждения — со следующего хода")}
-            onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); setMenuAt(menuAt ? null : { x: r.left, y: r.top - 6 }) }}>
-            {modelSpan ?? <span>{provider === 'claude' ? 'Claude' : 'Codex'}</span>}{approvalSpan}<Icon name="chev" />
-          </button>
-        ) : <>{modelSpan}{approvalSpan}</>}
+        {onConfigure ? <>
+          <button type="button" className="settings model-picker" data-testid="conv-settings" aria-haspopup="menu" aria-expanded={menuAt !== null && selection === 'model'} title={t('Модель')} onClick={(e) => openSettings(e,'model')}><ProviderIcon provider={agent.provider} /><span data-testid="conv-model">{agent.model ?? (provider === 'claude' ? 'Claude' : provider === 'zcode' ? 'GLM' : 'Codex')}</span><Icon name="chevd" /></button>
+          {provider !== 'zcode' && <button type="button" className="settings effort-picker" data-testid="conv-effort" aria-haspopup="menu" aria-expanded={menuAt !== null && selection === 'effort'} title={t('Усилие')} aria-label={t`Усилие: ${agent.effort ?? t('по умолчанию')}`} onClick={(e) => openSettings(e,'effort')}><Icon name="gauge" /><span>{agent.effort ?? t('по умолчанию')}</span><Icon name="chevd" /></button>}
+          <button type="button" className="settings approval-picker" data-testid="conv-access" aria-haspopup="menu" aria-expanded={menuAt !== null && selection === 'approval'} title={approvalTitle} aria-label={approvalTitle} onClick={(e) => openSettings(e,'approval')}><Icon name="shield" />{approvalSpan}<Icon name="chevd" /></button>
+          {provider === 'codex' && <button type="button" className={`settings speed-picker${agent.serviceTier === 'fast' ? ' fast' : ''}`} data-testid="conv-speed" aria-haspopup="menu" aria-expanded={menuAt !== null && selection === 'speed'} title={`Speed: ${agent.serviceTier === 'fast' ? 'Fast' : 'Normal'}`} aria-label={`Speed: ${agent.serviceTier === 'fast' ? 'Fast' : 'Normal'}`} onClick={(e) => openSettings(e,'speed')}><Icon name="bolt" /></button>}
+        </> : <>{modelSpan}{approvalSpan}</>}
         {agent.background && <span className="bg" data-testid="conv-background" title={agent.background.tasks.join('\n')}>{t("в фоне · ")}{agent.background.count}</span>}
       </span>
       <details className="chat-info" data-testid="chat-info" onKeyDown={(e) => {
         if (e.key === 'Escape' && e.currentTarget.open) { e.preventDefault(); e.stopPropagation(); e.currentTarget.open = false; e.currentTarget.querySelector('summary')?.focus() }
       }}>
-        <summary title={context?.title ?? t('Папка, контекст и лимиты сессии')}>
-          <Icon name="info" />{context ? <span className={`t-${context.tone}`}>{t("Контекст ")}{context.short}</span> : t('Сведения')}
-        </summary>
+        <summary title={context?.title ?? t('Папка, контекст и лимиты сессии')} aria-label={context?.title ?? t('Сведения')}><svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><circle cx="9" cy="9" r="6.5" fill="none" stroke="var(--line)" strokeWidth="2"/><circle cx="9" cy="9" r="6.5" fill="none" stroke="currentColor" strokeWidth="2" strokeDasharray={`${Math.min(1, agent.context?.window ? agent.context.used / agent.context.window : 0) * 40.84} 40.84`} transform="rotate(-90 9 9)"/></svg></summary>
         <div className="chat-info-panel">
           <div className="chat-meta">
             <button type="button" className="path" title={t`Показать в Finder: ${agent.cwd}`} onClick={() => onReveal(agent.cwd)} data-testid="conv-path">{shortPath(agent.cwd, 40)}</button>
@@ -494,7 +572,7 @@ function ChatFooter({ agent, usage, now, onReveal, onHelp, onConfigure, catalog,
               <span className="k">{w.key}</span> {w.pct}{w.reset && <span className="reset"> · {w.reset}</span>}
             </span>)}
           </span>}
-          {onHelp && <button type="button" className="help-btn" onClick={(e) => { const info = e.currentTarget.closest('details'); if (info) { info.open = false; info.querySelector('summary')?.focus() }; onHelp() }} title={t`Горячие клавиши (${CMD}/)`} aria-label={t("Горячие клавиши")} data-testid="hotkeys-open">?</button>}
+          {onHelp && <button type="button" className="help-btn" onClick={(e) => { const info = e.currentTarget.closest('details'); if (info) { info.open = false; info.querySelector('summary')?.focus() }; onHelp() }} title={t("Горячие клавиши")} aria-label={t("Горячие клавиши")} data-testid="hotkeys-open">?</button>}
         </div>
       </details>
       {menuAt && <ContextMenu at={menuAt} items={menuItems()} onClose={closeMenu} testId="settings-menu" label={t("Настройки сессии")} above />}
@@ -539,7 +617,7 @@ export function UserRail({ marks, items, feed, onJump }: {
       {marks.map((m, i) => (
         <button key={m.key} type="button" className="user-mark" data-testid="user-mark" data-event-id={m.id}
           style={{ top: `${pos[m.id] ?? ((i + 0.5) / marks.length) * 100}%` }}
-          title={t`${hhmm(m.ts)} · ${m.text.replace(/\s+/g, ' ').slice(0, 80)}${m.text.length > 80 ? '…' : ''}\n${keys.prevUser} / ${keys.nextUser} — соседние реплики`}
+          title={`${hhmm(m.ts)} · ${m.text.replace(/\s+/g, ' ').slice(0, 80)}${m.text.length > 80 ? '…' : ''}`}
           aria-label={t`Реплика ${i + 1}: ${m.text.slice(0, 40)}`} onClick={() => onJump(m.id)} />
       ))}
     </div>
@@ -568,7 +646,7 @@ function lastLimitReset(items: readonly ConvItem[]): number | undefined {
 function Gutter({ who, cls, ts, copy }: { who: string; cls: string; ts: string; copy?: { text: string; what: string } }): ReactElement {
   return (
     <div className="gut">
-      <span className={`who ${cls}`}>{who}</span><span className="ts">{hhmm(ts)}</span>
+      <span className={`who ${cls}`}>{['claude','codex','zcode'].includes(who) ? <ProviderIcon provider={who} /> : who}</span><span className="ts">{hhmm(ts)}</span>
       {copy && <MsgCopy text={copy.text} what={copy.what} />}
     </div>
   )
@@ -612,14 +690,14 @@ function Item({ it, ...p }: { it: ConvItem } & ConversationProps): ReactElement 
         <div className="it it-user" data-testid="msg-user" data-event-id={it.id}>
           <Gutter who={t("ты")} cls="who-you" ts={it.ts} {...(src !== null ? { copy: { text: src, what: t('реплику') } } : {})} />
           {/* M8e: реплика человека — тот же безопасный Markdown, что у модели (ссылки, код, переносы строк). */}
-          <div className="body"><Markdown text={it.text} human /></div>
+          <div className="body"><UserAttachments items={it.attachments ?? []} /><Markdown text={it.text} human /></div>
         </div>
       )
     case 'model':
       return (
         <div className="it it-model" data-testid="msg-model" data-streaming={it.streaming ? '1' : '0'} data-event-id={it.id}>
           <Gutter who={prov} cls={`who-${prov}`} ts={it.ts} {...(src !== null ? { copy: { text: src, what: t('ответ') } } : {})} />
-          <div className={`body${it.error ? ' err' : ''}`}>{it.questions?.length ? <AsyncQuestion item={it} session={p.agent.name} now={p.now} {...(p.onAsyncAnswer ? { onAnswer: p.onAsyncAnswer } : {})} /> : <Markdown text={it.text} streaming={it.streaming} />}</div>
+          <div className={`body${it.error ? ' err' : ''}`}>{it.questions?.length && !p.readOnly ? <AsyncQuestion item={it} session={p.agent.name} now={p.now} {...(p.onAsyncAnswer ? { onAnswer: p.onAsyncAnswer } : {})} /> : <Markdown text={it.text} streaming={it.streaming} />}</div>
         </div>
       )
     case 'tool':
@@ -627,6 +705,7 @@ function Item({ it, ...p }: { it: ConvItem } & ConversationProps): ReactElement 
     case 'agent':
       return <SubAgent it={it} {...p} />
     case 'perm':
+      if (p.readOnly) return <article className="subagent-permission"><strong>{it.toolName}</strong><pre>{toolInputText(it.input)}</pre>{it.state === 'pending' ? <button type="button" className="btn" onClick={p.onOpenParent}>{t('Ответить в родительском чате')}</button> : <span>{it.state === 'allow' ? t('Разрешено') : it.state === 'deny' ? t('Отклонено') : t('Запрос завершён')}</span>}</article>
       return (
         <div className="it it-perm" data-event-id={it.id}>
           <Gutter who={t("запрос")} cls="t-wait" ts={it.ts} />
@@ -730,15 +809,14 @@ function SubAgent({ it, ...p }: { it: AgentItem } & ConversationProps): ReactEle
       <Gutter who={t("суб")} cls={`who-${p.agent.provider}`} ts={it.ts} />
       <div className="body">
         <div className="sub-head">
+          <button type="button" className="subagent-open-inline" onClick={() => { const view = subagentViews(p.items).find((v) => v.item === it); if (view) p.onOpenSubagent?.(view.key) }} data-testid="subagent-open-inline"><Icon name="agents" />{t("Открыть чат субагента")}</button>
           <span className="lbl">{t("субагент")}</span>
           <strong>{it.subagentType ?? 'agent'}</strong>
           <span className="desc">{it.description ?? ''}</span>
           <span className={`st t-${stateTone(it.state)}`} data-testid="subagent-state" data-state={it.state}><StateMark state={it.state} /></span>
         </div>
         {it.items.length > 0 && (
-          <div className="sub-body">
-            <ActivityItems items={it.items} props={p} />
-          </div>
+          <details className="sub-body"><summary>{t("История субагента")}</summary><ActivityItems items={it.items} props={p} /></details>
         )}
       </div>
     </div>
@@ -775,9 +853,9 @@ function placeholderFor(p: { link: ConnState['state']; needsYou: boolean; busy: 
   // 'connecting' — первый вход и ручной запуск/перезапуск: баннера с кнопкой в этот момент нет
   // (connView → banner:null), и «запусти кнопкой сверху» сразу после нажатия этой кнопки врало бы.
   if (p.link === 'connecting') return t('подключаюсь к демону…')
-  if (p.link === 'down') return t('демон недоступен — запусти его кнопкой сверху')
+  if (p.link === 'down') return t('демон недоступен — открой состояние подключения')
   if (p.needsYou) return p.queueable ? t('сессия ждёт твоего решения по запросу выше — реплика встанет в очередь') : t('сессия ждёт твоего решения по запросу выше')
-  if (p.busy) return p.queueable ? t`идёт ход — Enter поставит реплику в очередь, ${CMD}Enter прервёт ход и скажет` : t('сессия делает ход — дождись конца или нажми «Стоп»')
+  if (p.busy) return p.queueable ? t('Добавь уточнение или следующую задачу…') : t('сессия делает ход — дождись конца или нажми «Стоп»')
   if (p.disabled) return t('лимит исчерпан — дождись сброса')
   return t`реплика для ${p.label}`
 }
@@ -798,16 +876,16 @@ export interface QueueEditView {
  * (он пересоздаётся на каждую сессию — уход с сессии отпускает очередь), а не в списке: список пропадает,
  * когда очередь пустеет, а открытая правка с текстом человека пропадать не должна.
  */
-function useQueueEdit(api: QueueEditApi | undefined): { view: QueueEditView; notice: string | null; inject: { text: string; nonce: number } | null; edit: boolean } {
+function useQueueEdit(api: QueueEditApi | undefined, session: string): { view: QueueEditView; notice: string | null; inject: { text: string; nonce: number; attachments?: readonly PromptAttachment[] } | null; edit: boolean } {
   const [state, setState] = useState<QueueEditState | null>(null)
   const [opening, setOpening] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
-  const [inject, setInject] = useState<{ text: string; nonce: number } | null>(null)
+  const [inject, setInject] = useState<{ text: string; nonce: number; attachments?: readonly PromptAttachment[] } | null>(null)
   const cur = useRef<QueueEditState | null>(null)
   cur.current = state
   const apiRef = useRef(api)
   apiRef.current = api
-  const toComposer = (text: string): void => setInject((p) => ({ text, nonce: (p?.nonce ?? 0) + 1 }))
+  const toComposer = (text: string, attachments?: readonly PromptAttachment[]): void => setInject((p) => ({ text, nonce: (p?.nonce ?? 0) + 1, ...(attachments?.length ? { attachments: attachments.map((a) => ({ ...a })) } : {}) }))
   const apply = (step: QueueEditStep): void => { setState(step.next); if (step.notice !== null) setNotice(step.notice) }
   // Ушли с сессии или закрыли окно — очередь не ждёт брошенной правки (и той, что ещё берётся: `alive`).
   const alive = useRef(true)
@@ -837,6 +915,8 @@ function useQueueEdit(api: QueueEditApi | undefined): { view: QueueEditView; not
     state, opening,
     onStart: (id) => {
       if (!api || opening || cur.current) return
+      const attachmentNotice = queueAttachmentEditNotice(session)
+      if (attachmentNotice) { setNotice(attachmentNotice); return }
       setNotice(null)
       setOpening(id)
       api.hold(id).then((r) => { if (alive.current) setState(startQueueEdit(id, r)); else api.release(id) }, (e: unknown) => {
@@ -869,7 +949,8 @@ const draftStore: DraftStore = {
   set(k, v) { try { window.localStorage.setItem(k, v) } catch { /* хранилище недоступно */ } },
 }
 
-function Composer({ busy, needsYou, permFocused, link, disabled, sending, error, onSend, onStop, agentName, label, filePaths, queueable, steerable = false, inject, footer, accessRed = false, accessNote = null }: {
+function Composer({ hidden = false, busy, needsYou, permFocused, link, disabled, sending, error, onSend, onStop, agentName, label, filePaths, queueable, steerable = false, inject, footer, accessRed = false, accessNote = null }: {
+  hidden?: boolean
   /** Шаг A: красная рамка поля — чат с полным доступом (выбран или ещё жив процесс с полными правами). */
   accessRed?: boolean
   /** Шаг A: строка под полем при понижении во время хода с полными правами (кадр 11). */
@@ -879,7 +960,7 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
   busy: boolean; needsYou: boolean; link: ConnState['state']; disabled: boolean; sending: boolean; error: string | null
   /** `agentName` — ключ (смена агента возвращает фокус в поле), `label` — как агент подписан. */
   agentName: string; label: string
-  onSend(text: string, mode?: SendMode): Promise<boolean>
+  onSend(text: string, mode?: SendMode, attachments?: readonly PromptAttachment[]): Promise<boolean>
   onStop(): void
   footer: ReactNode
   filePaths: FilePathSource | null
@@ -890,7 +971,7 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
    * Текст из правки очереди, которую не удалось сохранить (реплика ушла или убрана, вышел срок): в поле по
    * правилу M8e — пустое поле получает его как есть, набранное остаётся под ним через пустую строку.
    */
-  inject?: { text: string; nonce: number } | null
+  inject?: { text: string; nonce: number; attachments?: readonly PromptAttachment[] } | null
 }): ReactElement {
   // 0.3.4: черновик сессии переживает закрытие окна (обновление окна закрывает его само) — model/drafts.ts.
   const [text, setText] = useState(() => (typeof window === 'undefined' ? '' : peekDraft(draftStore, agentName, Date.now()) ?? ''))
@@ -916,14 +997,6 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
   // Поле опустело (отправили, стёрли) — записи больше нет: после сбоя окна отправленное не вернётся в поле.
   const empty = !text.trim()
   useEffect(() => { if (empty) saveDraft(draftStore, agentName, '', Date.now()) }, [empty, agentName])
-  const injected = inject?.nonce ?? 0
-  useEffect(() => {
-    if (!inject || !injected) return
-    const r = restoreDraft(ta.current?.value ?? '', inject.text)
-    setText(r.text)
-    requestAnimationFrame(() => { const el = ta.current; if (el && el.value === r.text) { el.focus(); el.setSelectionRange(r.caret, r.caret) } })
-    // Только по новому nonce: тот же текст второй раз в поле не встаёт.
-  }, [injected])
   useLayoutEffect(() => {
     const el = ta.current
     if (!el) return
@@ -935,10 +1008,20 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
 
   // Идёт ход: со старым демоном поле заперто, как раньше; с очередью — открыто.
   const attached = useAttachments({ source: filePaths, box: ta, text, setText, session: agentName })
+  const injected = inject?.nonce ?? 0
+  useEffect(() => {
+    if (!inject || !injected) return
+    const current = ta.current?.value ?? ''
+    const r = inject.text.trim() ? restoreDraft(current, inject.text) : { text: current, caret: current.length }
+    setText(r.text)
+    if (inject.attachments?.length) attached.restore(inject.attachments)
+    requestAnimationFrame(() => { const el = ta.current; if (el && el.value === r.text) { el.focus(); el.setSelectionRange(r.caret, r.caret) } })
+    // Только по новому nonce: текст и вложения одного возврата восстанавливаются один раз.
+  }, [injected])
   const picker = useRef<HTMLInputElement>(null)
   const [dictating, setDictating] = useState(false)
   const sendLock = useRef(false)
-  const blocked = (busy && !queueable) || disabled || sending || link !== 'up' || attached.pending > 0
+  const blocked = hidden || (busy && !queueable) || disabled || sending || link !== 'up' || attached.pending > 0 || attached.tooMany
   // С очередью — всегда `queue`: свободную сессию демон и так пустит сразу, а `busy` в окне мог устареть.
   // M8e: поле чистится СРАЗУ — ответ демона приходит, когда ход запущен (страж сети, resume — до секунд), и
   // окно казалось зависшим. Отказ (`updating`, страж, таймаут «прервать и сказать», очередь) — черновик обратно:
@@ -947,6 +1030,7 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
     if (blocked || dictating || attached.isBusy() || sendLock.current) return
     if (attached.items.length) {
       sendLock.current = true
+      attached.beginSubmission()
       const original = attached.items
       const draft = textRef.current
       attached.clear()
@@ -954,9 +1038,9 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
       let ok = false
       try {
         const snapshot = await attached.finalize(agentName, original)
-        ok = await onSend(attachmentPrompt(draft, snapshot), mode === 'now' ? undefined : mode)
+        ok = await onSend(draft, mode === 'now' ? undefined : mode, snapshot)
       } catch (e) { attached.report(e instanceof Error ? e.message : t('Сообщение не отправлено. Попробуй ещё раз.')) }
-      finally { sendLock.current = false }
+      finally { sendLock.current = false; attached.endSubmission() }
       if (!ok) {
         attached.restore(original)
         const r = restoreDraft(ta.current?.value ?? peekDraft(draftStore, agentName, Date.now()) ?? '', draft)
@@ -1003,7 +1087,7 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
     }
   }
   return (
-    <ResizableComposer>
+    <ResizableComposer hidden={hidden}>
       <div className={`box${attached.over ? ' attachment-over' : ''}${accessRed ? ' access-full' : ''}`} data-access-full={accessRed ? '1' : undefined}>
         <AttachmentStrip items={attached.items} previews={attached.previews} pending={attached.pending} onRemove={attached.remove} />
         <textarea ref={ta} rows={3} value={text} onChange={(e) => setText(e.target.value)} onKeyDown={onKey}
@@ -1018,10 +1102,10 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
           requestAnimationFrame(() => ta.current?.focus())
         }} />
         {attached.enabled && <><input ref={picker} className="attach-picker-input" type="file" multiple data-testid="attachment-picker" onChange={(e) => { attached.addFiles(Array.from(e.target.files ?? [])); e.target.value = '' }} /><button type="button" className="btn attach-picker" title={t("Прикрепить файлы")} aria-label={t("Прикрепить файлы")} onClick={() => picker.current?.click()} disabled={blocked}>＋</button></>}
-        {steerable && busy && !needsYou && <button type="button" className="btn" data-testid="steer" title={t("Уточнить текущую задачу без остановки (⌥Enter)")} onClick={() => void send('steer')} disabled={blocked || dictating || (!text.trim() && !attached.items.length)}>{t("Уточнить сейчас")}</button>}
-        {busy && <button type="button" className="btn btn-danger composer-stop" onClick={onStop} data-testid="stop-turn" title={t("Остановить ход (Esc)")}><Icon name="stop" />{t("Стоп")}</button>}
+        {steerable && busy && !needsYou && <button type="button" className="btn" data-testid="steer" title={t("Уточнить текущую задачу без остановки")} onClick={() => void send('steer')} disabled={blocked || dictating || (!text.trim() && !attached.items.length)}>{t("Уточнить сейчас")}</button>}
+        {busy && <button type="button" className="btn btn-danger composer-stop" onClick={onStop} data-testid="stop-turn" title={t("Остановить ход")} aria-label={t("Остановить ход")}><Icon name="stop" />{t("Стоп")}</button>}
         <button type="button" className="btn btn-primary" onClick={() => void send()} disabled={blocked || dictating || (!text.trim() && !attached.items.length)} data-testid="send"
-          title={busy && queueable ? t`Идёт ход: реплика уйдёт, когда он кончится. ${CMD}Enter — прервать и сказать` : undefined}>
+          title={busy && queueable ? t("В очередь") : t("Отправить")} aria-label={busy && queueable ? t("В очередь") : t("Отправить")}>
           <Icon name="send" />{busy && queueable ? t('В очередь') : t('Отправить')}
         </button>
           </div>
@@ -1148,7 +1232,7 @@ export function QueueList({ queue, paused, onRemove, onMove, onResume, onSend, e
               data-dragging={dragView?.id === it.id ? '1' : undefined}
               data-drop={dragView?.target === it.id && dragView.id !== it.id ? dragView.after ? 'after' : 'before' : undefined}>
               <button type="button" className="btn btn-ghost btn-sm queue-drag-handle" disabled={blocked || queue.length < 2}
-                aria-label={t("Переместить реплику")} aria-keyshortcuts="ArrowUp ArrowDown" title={t("Перетащи за ручку или нажми ↑/↓")} data-testid="queue-drag"
+                aria-label={t("Переместить реплику")} aria-keyshortcuts="ArrowUp ArrowDown" title={t("Переместить реплику")} data-testid="queue-drag"
                 onPointerDown={(e) => {
                   if (drag.current || !e.isPrimary || e.button !== 0 || blocked || queue.length < 2) return
                   e.preventDefault(); e.currentTarget.focus(); e.currentTarget.setPointerCapture(e.pointerId)
@@ -1166,7 +1250,7 @@ export function QueueList({ queue, paused, onRemove, onMove, onResume, onSend, e
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true"><path d="M3 4h10M3 8h10M3 12h10" /></svg>
               </button>
               <span className="n mono">{i + 1}</span>
-              <span className="txt" title={it.text}>{it.text}</span>
+              <span className="queue-message"><span className="txt" title={it.text}>{it.text}</span><UserAttachments items={it.attachments ?? []} /></span>
               {edit && (
                 <button type="button" className="btn btn-ghost btn-sm" aria-label={t("Изменить реплику")} title={t("Изменить: очередь подождёт, пока правишь")}
                   disabled={blocked} aria-busy={edit.opening === it.id ? true : undefined}
@@ -1221,6 +1305,7 @@ function QueueEditor({ n, st, edit }: { n: number | null; st: QueueEditState; ed
         {/* `readOnly`, а не `disabled`, пока сохраняется: выключенное поле теряет фокус, и Esc ушёл бы в «Стоп». */}
         <textarea ref={ta} rows={3} value={st.text} readOnly={st.saving} onChange={(e) => edit.onChange(e.target.value)} onKeyDown={onKey}
           aria-label={t("Изменить реплику в очереди")} data-testid="queue-edit-text" />
+        {st.attachments?.length ? <UserAttachments items={st.attachments} /> : null}
         {n === null && <div className="queue-edit-note">{t("реплики уже нет в очереди — сохранение вернёт текст в поле ввода")}</div>}
         {st.error && <div className="queue-edit-err" role="alert" data-testid="queue-edit-error">{st.error}</div>}
       </div>

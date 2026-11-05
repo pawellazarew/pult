@@ -31,6 +31,28 @@ it; the remaining messages keep their order. Drag the **≡** handle to reorder,
 During a Codex turn, **Steer now** (Alt+Enter) adds a clarification without stopping the task. Enter still
 queues the next task, and Cmd/Ctrl+Enter still interrupts and sends. A rejected clarification returns to the composer.
 
+## Workspace and conversations
+
+Choose **Normal**, **Expanded** or **Focus** in the conversation menu or **Settings → Appearance**.
+Normal is the default; Expanded adds attention groups and a conversation summary, while Focus uses a compact project rail.
+Switching modes keeps the current conversation, draft and attachments. Appearance settings also include theme, fonts, text size and density.
+
+**New chat** starts a saved conversation **without a project** in the Conversations group. Use a project’s **+** button,
+or choose a folder in the draft header, to work in a project. Each conversation without a project has a separate managed
+working directory; global CLI instructions and account settings still apply. These are ordinary saved chats, not temporary chats.
+
+The sidebar footer contains Inbox, connection status, network guard, diagnostics, Help and Settings.
+Shortcut reminders are kept in Help. Usage is in **Settings → Usage**; attachment retention is in **Settings → Storage**
+(7, 30 or 90 days, or forever). Retention applies to Pult’s copies and leaves original files alone.
+
+Attachments remain named cards in the conversation. Images are passed as native image input to Claude and Codex;
+file context is separate from the visible message text. Codex’s lightning menu selects **Normal** or **Fast**;
+availability and usage depend on the model and account.
+
+Click a subagent card or the subagent counter to open its existing history in a read-only tab.
+**Open parent** returns to the original conversation and draft. Archiving completed subagents hides them from the list;
+it does not delete their history or stop running work. Provider icons identify chats; the blinking dot marks active work.
+
 ## New in 0.3.19
 
 - **Start with the task.** A new chat opens as a draft immediately. Pick a folder, write the task and send;

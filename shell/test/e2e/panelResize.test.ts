@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { after, afterEach, before, beforeEach, describe, it } from 'node:test'
-import { launch, waitFor } from './harness.js'
+import { launch, openDoctor, waitFor } from './harness.js'
 import type { Harness } from './harness.js'
 
 describe('регулируемые границы рабочего места', () => {
@@ -147,13 +147,13 @@ describe('регулируемые границы рабочего места', 
   })
 
   it('диагностика расширяется по двум осям и сохраняет выбранный размер', async () => {
-    await h.win.getByTestId('open-doctor').click()
+    await openDoctor(h)
     await h.win.getByTestId('doctor-panel').waitFor()
     const chosen = await expectDrag('doctor-width-resize', 'x', 130, 1, () => width('[data-testid="doctor-panel"]'))
     await h.win.getByTestId('doctor-height-resize').focus(); await h.win.getByTestId('doctor-height-resize').press('Home')
     assert.ok(Math.abs(await height('[data-testid="doctor-panel"]') - 260) < 2)
     await h.win.getByTestId('doctor-panel').getByRole('button', { name: 'Закрыть', exact: true }).click()
-    await h.win.getByTestId('open-doctor').click()
+    await openDoctor(h)
     assert.ok(Math.abs(await width('[data-testid="doctor-panel"]') - chosen) < 2)
     assert.ok(Math.abs(await height('[data-testid="doctor-panel"]') - 260) < 2)
     await h.shot('resize-doctor')

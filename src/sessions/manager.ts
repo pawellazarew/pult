@@ -27,6 +27,11 @@ import type { AppliedInfo, ApprovalMode, ProviderAdapter, SessionSettingsPatch, 
 import type { PermBroker } from '../perm/broker.js'
 import { mergeContext, parseContextData } from './context.js'
 import type { SessionContext } from './context.js'
+import { promptAttachmentContext, validateOwnedPromptAttachments } from '../core/promptAttachments.js'
+import type { PromptAttachment } from '../core/promptAttachments.js'
+import { isServiceTier } from '../adapters/types.js'
+import type { ServiceTier } from '../adapters/types.js'
+import { createGeneralWorkspace, validateGeneralWorkspace } from './generalWorkspace.js'
 import { createRegistry, isSessionName, normalizeTitle, QUEUE_MAX, SESSION_TITLE_MAX, titleLength } from './registry.js'
 import type { AppliedAccess, QueueItem, SessionBrowser, SessionMode, SessionRecord, SessionRegistry, SessionStatus, SessionWorktree } from './registry.js'
 import { expectedReport, isFullLevel, reportIsFull, reportWords } from './access.js'
@@ -78,9 +83,11 @@ export interface StartParams {
   /** Название для людей; его же потом меняет `rename`. */
   title?: string
   kind: 'claude' | 'codex' | 'zcode'
+  scope?: 'project' | 'general'
   cwd: string
   model?: string
   effort?: string
+  serviceTier?: ServiceTier
   mode?: SessionMode
   settingSources?: string
   /** `--worktree <ветка>`: завести агента в отдельном git worktree (docs/08 §6). */
@@ -167,6 +174,7 @@ export interface ConfigureResult {
 export type SayResult = { turnId: string } | { queued: true; id: string }
 
 export interface SayOptions {
+  attachments?: readonly PromptAttachment[]
   /** Сессия занята ходом — реплика встаёт в очередь и уйдёт сама, когда ход кончится `idle`. */
   queue?: boolean
   /** «Прервать и сказать»: стоп текущего хода, ждём, пока он осядет, затем реплика. */
@@ -203,7 +211,7 @@ const QUEUE_SENT_MEMORY = 50
 
 /** Ответ на взятие реплики в правку: очередь, полный текст реплики (в очереди — превью) и срок удержания. */
 export interface QueueEditHold extends QueueState {
-  edit: { id: string; text: string; holdMs: number }
+  edit: { id: string; text: string; holdMs: number; attachments?: readonly PromptAttachment[] }
 }
 
 /** Сколько «прервать и сказать» ждёт, пока прерванный ход осядет. */
@@ -256,7 +264,7 @@ export interface SessionManager {
    * Режим, в котором браузер не включается, выключает его (и возвращает, когда режим снова позволяет).
    */
   configure(params: ConfigureParams): Promise<ConfigureResult>
-  prompt(name: string, text: string, questionId?: number, queueItemId?: string, queueItemAt?: string): Promise<{ turnId: string }>
+  prompt(name: string, text: string, questionId?: number, queueItemId?: string, queueItemAt?: string, attachments?: readonly PromptAttachment[]): Promise<{ turnId: string }>
   answerQuestion(name: string, questionId: number, answers: string[]): Promise<SayResult>
   /**
    * `agent.prompt` с флагами О2: `queue` — в очередь, если сессия занята; `interrupt` — прервать и сказать.
@@ -756,7 +764,8 @@ export function createManager(opts: ManagerOptions): SessionManager {
   // ход прервал сервер (Codex), и событие пишет исход хода, иначе статус так и остался бы `working`.
   const stopRequested = new Set<string>()
   /** Общий объём очереди сессии в байтах: она живёт в sessions.json, а он пишется целиком на каждую правку. */
-  const queueBytes = (q: readonly QueueItem[]): number => q.reduce((n, it) => n + Buffer.byteLength(it.text), 0)
+  const attachmentBytes = (attachments: readonly PromptAttachment[] = []): number => attachments.length ? Buffer.byteLength(JSON.stringify(attachments)) : 0
+  const queueBytes = (q: readonly QueueItem[]): number => q.reduce((n, it) => n + Buffer.byteLength(it.text) + attachmentBytes(it.attachments), 0)
   const queueState = (rec: SessionRecord): QueueState =>
     ({ name: rec.name, queue: publicQueue(rec.queue), queuePaused: rec.queuePaused === true })
   const pauseQueue = (name: string, why: string): void => {
@@ -783,7 +792,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
     registry.update(name, { queue: rest.length ? rest : undefined })
     rememberSent(name, item.id)
     try {
-      const turn = await api.prompt(name, item.text)
+      const turn = await api.prompt(name, item.text, undefined, undefined, undefined, item.attachments)
       opts.logger.info('очередь: реплика ушла', { session: name, id: item.id, turnId: turn.turnId })
     } catch (e) {
       const cur = registry.get(name)
@@ -914,6 +923,13 @@ export function createManager(opts: ManagerOptions): SessionManager {
       let prepared: PreparedWorktree | null = null
       let created = false
       try {
+        if (params.serviceTier !== undefined && (params.kind !== 'codex' || !isServiceTier(params.serviceTier))) throw new ManagerError('invalid_params', 'serviceTier — default или fast, только для Codex')
+        if (params.scope !== undefined && params.scope !== 'project' && params.scope !== 'general') throw new ManagerError('invalid_params', 'scope — project | general')
+        if (params.scope === 'general') {
+          if (params.cwd || params.worktree || params.base) throw new ManagerError('invalid_params', 'разговор без проекта не принимает cwd, worktree или base')
+          try { params = { ...params, cwd: createGeneralWorkspace(opts.paths.home, params.name) } }
+          catch (e) { throw new ManagerError('invalid_params', (e as Error).message) }
+        }
         if (!params.cwd) throw new ManagerError('invalid_params', 'нужен --cwd')
         // Папку проверяем ЗДЕСЬ, а не у spawn: опечатка в `--cwd` иначе доходила до
         // `child_process.spawn`, и ошибка приезжала событием 'error' — то есть уже внутри хода.
@@ -972,12 +988,17 @@ export function createManager(opts: ManagerOptions): SessionManager {
           throw new ManagerError('internal', `каталог браузера прежней сессии ${params.name} не убран: ${(e as Error).message}`)
         }
         // Без ожиданий между проверкой и запуском: подмену папки или режим Claude настоящей папки (worktree) ловим здесь.
+        if (params.scope === 'general') {
+          try { validateGeneralWorkspace(opts.paths.home, params.name, sessionCwd) }
+          catch (e) { throw new ManagerError('invalid_params', (e as Error).message) }
+        }
         params.beforeSpawn?.(sessionCwd)
         const started = await adapter.startSession({
           name: params.name,
           cwd: sessionCwd,
           ...(params.model ? { model: params.model } : {}),
           ...(params.effort ? { effort: params.effort } : {}),
+          ...(params.serviceTier ? { serviceTier: params.serviceTier } : {}),
           mode,
           ...(params.settingSources ? { settingSources: params.settingSources } : {}),
           broker: true,
@@ -987,9 +1008,11 @@ export function createManager(opts: ManagerOptions): SessionManager {
           name: params.name,
           ...(title ? { title } : {}),
           provider: params.kind,
+          ...(params.scope === 'general' ? { scope: 'general' as const } : {}),
           cwd: sessionCwd,
           ...(params.model ? { model: params.model } : {}),
           ...(params.effort ? { effort: params.effort } : {}),
+          ...(params.serviceTier ? { serviceTier: params.serviceTier } : {}),
           mode,
           // Граница доступа переживает рестарт вместе с сессией: без этой строки агент,
           // заведённый с урезанным `--setting-sources`, после перезапуска демона читал бы
@@ -1103,11 +1126,13 @@ export function createManager(opts: ManagerOptions): SessionManager {
       try {
         changes = planConfigure({
           provider: cur.provider,
+          ...(cur.serviceTier ? { serviceTier: cur.serviceTier } : {}),
           ...(cur.model ? { model: cur.model } : {}),
           ...(cur.effort ? { effort: cur.effort } : {}),
           ...(cur.approval ? { approval: cur.approval } : {}),
           used,
         }, {
+          ...(p.serviceTier !== undefined ? { serviceTier: p.serviceTier } : {}),
           ...(p.model !== undefined ? { model: p.model } : {}),
           ...(p.effort !== undefined ? { effort: p.effort } : {}),
           ...(p.approval !== undefined ? { approval: p.approval } : {}),
@@ -1134,13 +1159,14 @@ export function createManager(opts: ManagerOptions): SessionManager {
         throw new ManagerError('invalid_params', pultHomeRefusal(name, cur.cwd, opts.paths.home))
       }
       const next: SessionSettingsPatch = {
+        ...((changes.serviceTier ? changes.serviceTier.to : cur.serviceTier) ? { serviceTier: (changes.serviceTier ? changes.serviceTier.to : cur.serviceTier) as ServiceTier } : {}),
         ...((changes.model ? changes.model.to : cur.model) ? { model: (changes.model ? changes.model.to : cur.model) as string } : {}),
         ...((changes.effort ? changes.effort.to : cur.effort) ? { effort: (changes.effort ? changes.effort.to : cur.effort) as string } : {}),
         ...(((changes.approval ? changes.approval.to : cur.approval) ?? 'ask') !== 'ask'
           ? { approval: (changes.approval ? changes.approval.to : cur.approval) as ApprovalMode } : {}),
       }
       const patch: Partial<Omit<SessionRecord, 'name'>> = {
-        model: next.model, effort: next.effort, approval: next.approval,
+        model: next.model, effort: next.effort, approval: next.approval, serviceTier: next.serviceTier,
       }
       // Шаг A: разовое разрешение CLI живёт ровно до смены режима: новый полный доступ — с новым `--yes` или на согласии.
       if (changes.approval) patch.grant = p.grant === 'cli-once' && (next.approval === 'full' || next.approval === 'inherit') ? 'cli-once' : undefined
@@ -1183,7 +1209,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
         // и адаптер остался бы на новых настройках, которых нет в реестре.
         try {
           adapter?.configure?.(name, {
-            ...(cur.model ? { model: cur.model } : {}), ...(cur.effort ? { effort: cur.effort } : {}), ...(cur.approval ? { approval: cur.approval } : {}),
+            ...(cur.model ? { model: cur.model } : {}), ...(cur.effort ? { effort: cur.effort } : {}), ...(cur.approval ? { approval: cur.approval } : {}), ...(cur.serviceTier ? { serviceTier: cur.serviceTier } : {}),
           }, true)
         } catch (re) { opts.logger.error('откат настроек в адаптере не удался', { session: name, error: (re as Error).message }) }
         throw e
@@ -1197,9 +1223,15 @@ export function createManager(opts: ManagerOptions): SessionManager {
       return { record, changes, when }
     },
 
-    async prompt(name, text, questionId, queueItemId, queueItemAt) {
+    async prompt(name, text, questionId, queueItemId, queueItemAt, inputAttachments) {
       const rec = needRec(name)
-      if (typeof text !== 'string' || !text.trim()) {
+      if (rec.scope === 'general') {
+        try { validateGeneralWorkspace(opts.paths.home, rec.name, rec.cwd) }
+        catch (e) { throw new ManagerError('invalid_params', (e as Error).message) }
+      }
+      let attachments: PromptAttachment[]
+      try { attachments = validateOwnedPromptAttachments(opts.paths.home, name, inputAttachments) } catch (e) { throw new ManagerError('invalid_params', (e as Error).message) }
+      if (typeof text !== 'string' || (!text.trim() && !attachments.length)) {
         throw new ManagerError('invalid_params', 'пустая реплика')
       }
       // Одна дверь на все пути хода: реплика, «Повторить», «прервать и сказать» и очередь идут через prompt.
@@ -1229,6 +1261,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
       const gate = opts.accessGate ? opts.accessGate(rec) : { approval: rec.approval }
       const at: TurnSettings = {
         ...(rec.model ? { model: rec.model } : {}), ...(rec.effort ? { effort: rec.effort } : {}),
+        ...(rec.serviceTier ? { serviceTier: rec.serviceTier } : {}), ...(attachments.length ? { attachments } : {}),
         ...(gate.approval ? { approval: gate.approval } : {}), browser: rec.browser ?? null,
       }
       // РЕПЛИКА ЧЕЛОВЕКА — В ЖУРНАЛ (Ф2, О1). Окну нужна лента разговора целиком, в том числе
@@ -1238,7 +1271,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
       // статус сессии и текст ответа (`agent read`) реплика человека менять не должна.
       // Текст — через ту же редакцию, что и ответы модели (инвариант 7).
       if (gate.notice) emit({ sessionId: name, provider: rec.provider, kind: 'session.configured', data: { changes: {}, notice: gate.notice, access: 'downgraded' } })
-      const emitUser = () => emit({ sessionId: name, provider: rec.provider, kind: 'message.user', data: { text: redactString(text), ...(questionId !== undefined ? { questionId } : {}), ...(queueItemId !== undefined ? { queueItemId, queueItemAt } : {}) } })
+      const emitUser = () => emit({ sessionId: name, provider: rec.provider, kind: 'message.user', data: { text: redactString(text), ...(attachments.length ? { attachments } : {}), ...(questionId !== undefined ? { questionId } : {}), ...(queueItemId !== undefined ? { queueItemId, queueItemAt } : {}) } })
       const user = questionId === undefined && queueItemId === undefined ? emitUser() : null
       phases.accepted(name)
       // Начало хода — время для порядка бесед в окне (`lastTurnAt`): одна запись реестра на ход, тем же `ts`, что у
@@ -1296,7 +1329,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
       // конца ждут отдельным `agent.wait`.
       let started
       try {
-        started = await adapter.send(name, text, at)
+        started = await adapter.send(name, rec.provider === 'zcode' ? promptAttachmentContext(text, attachments, true) : text, at)
       } catch (e) {
         releasePrompting(name)
         const message = (e as Error).message
@@ -1367,7 +1400,13 @@ export function createManager(opts: ManagerOptions): SessionManager {
 
     async say(name, text, sayOpts = {}) {
       const rec = needRec(name)
-      if (typeof text !== 'string' || !text.trim()) throw new ManagerError('invalid_params', 'пустая реплика')
+      if (rec.scope === 'general') {
+        try { validateGeneralWorkspace(opts.paths.home, rec.name, rec.cwd) }
+        catch (e) { throw new ManagerError('invalid_params', (e as Error).message) }
+      }
+      let attachments: PromptAttachment[]
+      try { attachments = validateOwnedPromptAttachments(opts.paths.home, name, sayOpts.attachments) } catch (e) { throw new ManagerError('invalid_params', (e as Error).message) }
+      if (typeof text !== 'string' || (!text.trim() && !attachments.length)) throw new ManagerError('invalid_params', 'пустая реплика')
       if ([sayOpts.queue, sayOpts.interrupt, sayOpts.steer].filter(Boolean).length > 1) {
         throw new ManagerError('invalid_params', 'выбери один способ отправки: очередь, остановка или уточнение')
       }
@@ -1378,10 +1417,10 @@ export function createManager(opts: ManagerOptions): SessionManager {
         if (rec.provider !== 'codex' || !adapter.steer) throw new ManagerError('invalid_params', 'уточнение по ходу доступно только для Codex')
         if (opts.broker.list(name).length > 0) throw new ManagerError('invalid_params', 'сначала ответь на вопрос Codex')
         let result: { turnId: string }
-        try { result = await adapter.steer(name, text) }
+        try { result = await adapter.steer(name, text, attachments) }
         catch (e) { throw new ManagerError('invalid_params', redactString((e as Error).message)) }
         // В журнал только после принятия сервером: отказ не оставляет ложной реплики в истории.
-        emit({ sessionId: name, provider: rec.provider, kind: 'message.user', data: { text: redactString(text), steering: true, turnId: result.turnId, ...(sayOpts.questionId !== undefined ? { questionId: sayOpts.questionId } : {}), ...(sayOpts.queueItemId !== undefined ? { queueItemId: sayOpts.queueItemId, queueItemAt: sayOpts.queueItemAt } : {}) } })
+        emit({ sessionId: name, provider: rec.provider, kind: 'message.user', data: { text: redactString(text), ...(attachments.length ? { attachments } : {}), steering: true, turnId: result.turnId, ...(sayOpts.questionId !== undefined ? { questionId: sayOpts.questionId } : {}), ...(sayOpts.queueItemId !== undefined ? { queueItemId: sayOpts.queueItemId, queueItemAt: sayOpts.queueItemAt } : {}) } })
         return result
       }
       // До «прервать»: иначе идущий ход остановился бы, а новый не завёлся. «В очередь» во время обновления
@@ -1410,7 +1449,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
               await new Promise<void>((r) => { const t = setTimeout(r, 40); t.unref?.() })
             }
           }
-          return await api.prompt(name, text)
+          return await api.prompt(name, text, undefined, undefined, undefined, attachments)
         } finally {
           holdDrain.delete(name)
         }
@@ -1421,20 +1460,20 @@ export function createManager(opts: ManagerOptions): SessionManager {
         if (busyNow(name) || (q.length > 0 && !rec.queuePaused)) {
           if (removing.has(name)) throw new ManagerError('invalid_params', `агент ${name} удаляется — очередь не принимает реплики`)
           if (q.length >= QUEUE_MAX) throw new ManagerError('invalid_params', `в очереди ${name} уже ${QUEUE_MAX} реплик — дождись хода или убери лишние`)
-          if (queueBytes(q) + Buffer.byteLength(text) > QUEUE_TOTAL_BYTES) {
+          if (queueBytes(q) + Buffer.byteLength(text) + attachmentBytes(attachments) > QUEUE_TOTAL_BYTES) {
             throw new ManagerError('invalid_params', `очередь ${name} больше ${QUEUE_TOTAL_BYTES / 1024} КБ — дождись хода или убери лишние реплики`)
           }
           if ([...text].length > QUEUE_TEXT_MAX) throw new ManagerError('invalid_params', `реплика для очереди длиннее ${QUEUE_TEXT_MAX} знаков — отправь её, когда ход кончится`)
           let id = randomUUID().slice(0, 8)
           while (q.some((it) => it.id === id)) id = randomUUID().slice(0, 8)
-          registry.update(name, { queue: [...q, { id, text, at: new Date().toISOString() }] })
+          registry.update(name, { queue: [...q, { id, text, ...(attachments.length ? { attachments } : {}), at: new Date().toISOString() }] })
           opts.logger.info('реплика встала в очередь', { session: name, id, count: q.length + 1 })
           // Ход мог кончиться, пока реплика вставала, — тогда она уйдёт сама, не дожидаясь следующего.
           scheduleDrain(name)
           return { queued: true, id }
         }
       }
-      return await api.prompt(name, text, sayOpts.questionId, sayOpts.queueItemId, sayOpts.queueItemAt)
+      return await api.prompt(name, text, sayOpts.questionId, sayOpts.queueItemId, sayOpts.queueItemAt, attachments)
     },
 
     startingTurns() {
@@ -1469,7 +1508,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
       const reservation = { id, createdAt: rec.createdAt }
       queueSending.set(name, reservation)
       try {
-        const result = await api.say(name, item.text, { ...(busyNow(name) ? { steer: true } : {}), queueItemId: id, queueItemAt: item.at })
+        const result = await api.say(name, item.text, { ...(busyNow(name) ? { steer: true } : {}), queueItemId: id, queueItemAt: item.at, ...(item.attachments ? { attachments: item.attachments } : {}) })
         const current = registry.get(name)
         if (current?.createdAt === rec.createdAt) {
           const rest = (current.queue ?? []).filter(it => it.id !== id)
@@ -1521,7 +1560,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
       timer.unref?.()
       holds.set(id, { owner: owner ?? null, timer })
       const item = (rec.queue ?? [])[at] as QueueItem
-      return { ...queueState(rec), edit: { id, text: item.text, holdMs } }
+      return { ...queueState(rec), edit: { id, text: item.text, holdMs, ...(item.attachments?.length ? { attachments: item.attachments } : {}) } }
     },
 
     queueRelease(name, id) {
@@ -1531,10 +1570,10 @@ export function createManager(opts: ManagerOptions): SessionManager {
     },
 
     queueEdit(name, id, text) {
-      if (typeof text !== 'string' || !text.trim()) throw new ManagerError('invalid_params', 'пустая реплика — убери её из очереди крестиком')
       const { rec, at } = findQueueItem(name, id)
       const q = [...(rec.queue ?? [])]
       const old = q[at] as QueueItem
+      if (typeof text !== 'string' || (!text.trim() && !old.attachments?.length)) throw new ManagerError('invalid_params', 'пустая реплика — убери её из очереди крестиком')
       if ([...text].length > QUEUE_TEXT_MAX) throw new ManagerError('invalid_params', `реплика для очереди длиннее ${QUEUE_TEXT_MAX} знаков — отправь её, когда ход кончится`)
       if (queueBytes(q) - Buffer.byteLength(old.text) + Buffer.byteLength(text) > QUEUE_TOTAL_BYTES) {
         throw new ManagerError('invalid_params', `очередь ${name} больше ${QUEUE_TOTAL_BYTES / 1024} КБ — сократи реплику или убери лишние`)
@@ -1583,7 +1622,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
       // вырезанный из реплики, не вернётся и в повторе — это осознанно, журнал его не хранит.
       const found = retryPrompt(opts.store.readSession(name), att)
       if (!('text' in found)) throw new ManagerError('invalid_params', `повторить нельзя: ${found.reason}`)
-      const turn = await this.prompt(name, found.text)
+      const turn = await this.prompt(name, found.text, undefined, undefined, undefined, found.attachments)
       // Повтор — ответ человека на ошибку: она прочитана, но только ПОСЛЕ того, как реплика ушла (отказ
       // `prompt` оставляет ошибку непрочитанной) и только до неё самой (новая ошибка останется видна).
       this.seen(name, false, att.id)

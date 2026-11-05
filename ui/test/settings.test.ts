@@ -89,8 +89,13 @@ describe('M8f: меню подвала', () => {
       ...(on ? { onConfigure: noop } : {}),
     })
     const withMenu = html(Conversation, props(true))
-    assert.match(withMenu, /<button[^>]*class="settings"[^>]*data-testid="conv-settings"[^>]*aria-haspopup="menu"/)
-    assert.match(withMenu, /data-testid="conv-model"[^>]*>opus · high</)
+    assert.match(withMenu, /<button[^>]*class="settings model-picker"[^>]*data-testid="conv-settings"[^>]*aria-haspopup="menu"/)
+    assert.match(withMenu, /data-testid="conv-model"[^>]*>opus</)
+    assert.match(withMenu, /data-testid="conv-effort"[^>]*>[\s\S]*?<span>high<\/span>/)
+    assert.match(withMenu, /data-testid="conv-access"/)
+    assert.doesNotMatch(withMenu, /data-testid="conv-speed"/, 'Claude не получает неработающую молнию')
+    const codex = html(Conversation, { ...props(true), agent: agent({ provider: 'codex', serviceTier: 'fast' }) })
+    assert.match(codex, /data-testid="conv-speed"[^>]*title="Speed: Fast"/)
     assert.doesNotMatch(html(Conversation, props(false)), /conv-settings/)
   })
   it('старая оболочка и старый демон: меню прячется, отказ — словами', () => {
@@ -139,14 +144,17 @@ describe('шаг B: черновик по умолчаниям Настроек 
     newSession: { rememberLast: true, defaults: { claude: { model: 'opus', effort: 'high', approval: 'read-only' }, codex: { effort: 'xhigh' }, zcode: {} }, ...over },
     lastUsed: last,
   })
-  it('нет настроек: claude, встроенные модель и усилие, новая папка — «Правки в папке»', () => {
+  it('нет настроек: general — «Спрашивать», новая папка проекта — «Правки в папке»', () => {
     const f = createDraft({ cwd: null }, env())
-    assert.deepEqual([f.provider, f.model, f.effort, f.approval, f.cwd, f.mode], ['claude', 'sonnet', 'medium', 'workspace', null, 'turn'])
+    assert.deepEqual([f.provider, f.model, f.effort, f.approval, f.cwd, f.mode], ['claude', 'sonnet', 'medium', 'ask', null, 'turn'])
+    assert.equal(f.scope, 'general')
+    assert.equal(createDraft({ cwd: '/p' }, env()).approval, 'workspace')
   })
   it('умолчания поверх встроенных; «последний выбор» черновик не берёт (шаг C переносит его в пресеты)', () => {
     const last = { provider: 'codex' as const, claude: { model: 'haiku', approval: 'workspace' as const, mode: 'warm' as const }, cwd: '/p/last' }
     const d = createDraft({ cwd: null }, env({ settings: settings({}, last) }))
-    assert.deepEqual([d.provider, d.model, d.effort, d.approval, d.cwd], ['claude', 'opus', 'high', 'read-only', null])
+    assert.deepEqual([d.provider, d.model, d.effort, d.approval, d.cwd], ['claude', 'opus', 'high', 'ask', null])
+    assert.equal(createDraft({ cwd: '/p' }, env({ settings: settings({}, last) })).approval, 'read-only')
     const warm = createDraft({ cwd: '/p' }, env({ settings: settings({ defaults: { claude: { mode: 'warm' }, codex: {}, zcode: {} } }) }))
     assert.equal(draftStartParams(warm, { prompt: '', inheritMode: null })['mode'], 'warm')
   })
@@ -199,7 +207,7 @@ describe('M8f: «Настройки» (⌘,)', () => {
     assert.match(out, /data-testid="settings-codex"/)
     // Шаг B: «Подставлять последний выбор» черновик не читает — переключателя нет; доступ папки помнит сама.
     assert.doesNotMatch(out, /settings-remember-last/)
-    assert.match(t, /Доступ каждая папка помнит свой/)
+    assert.match(t, /Разговор без проекта начинается с доступа «Спрашивать»/)
     assert.match(out, /<option value="" selected="">для новой папки — правки в папке без вопросов<\/option>/)
     assert.doesNotMatch(t, /Темы и цвета — после редизайна/); assert.match(out, /settings-nav-providers/)
     assert.doesNotMatch(out, /<option value="full"/, '«Полный доступ» умолчанием не ставится')

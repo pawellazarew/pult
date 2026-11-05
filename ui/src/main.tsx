@@ -10,6 +10,9 @@ import './pdf.css'
 import './resize.css'
 import './attachments.css'
 import './draft.css'
+import './appearance.css'
+import './workspace.css'
+import './components/user-attachments.css'
 
 async function start(): Promise<void> {
   await initializeLanguage()

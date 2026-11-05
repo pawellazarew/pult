@@ -11,7 +11,7 @@
 
 import assert from 'node:assert/strict'
 import { after, before, describe, it } from 'node:test'
-import { launch, waitFor } from './harness.js'
+import { launch, openDoctor, waitFor } from './harness.js'
 import type { Harness } from './harness.js'
 
 type Client = Awaited<ReturnType<Harness['client']>>
@@ -68,16 +68,19 @@ describe('скриншоты экранов (демо)', () => {
     assert.ok(await waitFor(async () => (await statusOf('codex-tests')) === 'blocked_permission', 20_000), 'codex-tests не спросил разрешения')
     assert.equal(await statusOf('ui-refactor'), 'working')
     assert.ok(await waitFor(async () => ((await h.win.getByTestId('inbox-count').textContent()) ?? '') === '2', 10_000), 'в Inbox не два запроса')
-    // Кадру «Где работаем?» нужен явно пустой черновик. Meta+N наследует текущую/последнюю
-    // папку: начальный refreshRecent может уже увидеть сессии, заведённые этим тестом.
-    // Ссылка без path открывает реальное состояние без папки независимо от скорости этого ответа.
+    // Ссылка без path открывает общий разговор. Недавние проекты доступны в компактном меню заголовка.
     await h.app.evaluate(({ app }) => {
       (app as unknown as { emit(e: string, ...a: unknown[]): boolean }).emit('open-url', { preventDefault() {} }, 'pult://new')
     })
     const d = h.win.getByTestId('draft')
     await d.getByTestId('draft-from-link').waitFor({ timeout: 3000 })
     assert.equal(await d.getByTestId('draft-chip-folder').getAttribute('data-path'), '', 'черновик не без папки')
-    assert.ok(await waitFor(async () => (await d.getByTestId('draft-recent-folder').count()) > 0, 5000), 'нет недавних папок')
+    assert.equal(await d.getByTestId('draft-heading').textContent(), 'О чём поговорим?')
+    await d.getByTestId('draft-chip-folder').click()
+    assert.ok(await waitFor(async () => (await h.win.getByTestId('draft-folder-item').count()) > 0, 5000), 'нет недавних папок в меню проекта')
+    assert.equal(await h.win.getByTestId('draft-folder-general').getAttribute('aria-checked'), 'true')
+    await h.win.keyboard.press('Escape')
+    await h.win.getByTestId('draft-menu-folder').waitFor({ state: 'detached', timeout: 3000 })
     await both('draft-no-folder')
     await h.win.keyboard.press('Escape')
     await d.waitFor({ state: 'detached', timeout: 3000 })
@@ -127,21 +130,24 @@ describe('скриншоты экранов (демо)', () => {
     await h.win.keyboard.press('Escape')
   })
 
-  it('черновик нового чата: поле по центру, чипы, меню у своего чипа; «Где работаем?»', async () => {
+  it('черновик нового чата: поле закреплено снизу, проект в заголовке, меню у своего чипа', async () => {
     const dir = h.workDir('landing-copy')
     await h.stubPickFolder(dir)
     await h.win.keyboard.press('Meta+N')
     const d = h.win.getByTestId('draft')
     await d.waitFor({ timeout: 3000 })
-    // Ряд чипов и поле не уезжают: верх поля — на закреплённой позиции, ввод и меню его не двигают.
+    // При росте текста composer растёт вверх, а его нижняя граница остаётся на месте.
     await d.getByTestId('draft-chip-folder').click()
     await h.win.getByTestId('draft-folder-other').click()
     assert.ok(await waitFor(async () => (await d.getByTestId('draft-chip-folder').getAttribute('data-path')) === dir, 3000))
-    const top = async (): Promise<number> => (await d.locator('.draft-box').boundingBox())?.y ?? -1
-    const y0 = await top()
+    const bottom = async (): Promise<number> => {
+      const box = await d.locator('.draft-box').boundingBox()
+      return box ? box.y + box.height : -1
+    }
+    const y0 = await bottom()
     await both('draft')
     await d.getByTestId('draft-input').fill('Перепиши первый экран лендинга короче: одна мысль, одна кнопка.')
-    assert.equal(await top(), y0, 'поле сдвинулось при вводе')
+    assert.equal(await bottom(), y0, 'нижняя граница поля сдвинулась при вводе')
     // Каждое меню встаёт у своего чипа (в прототипе меню доступа висело в правом верхнем углу — известный недочёт).
     for (const [chip, menu] of [['draft-chip-model', 'draft-menu-model'], ['draft-chip-effort', 'draft-menu-effort'], ['draft-chip-access', 'draft-menu-access'], ['draft-chip-more', 'draft-menu-more']] as const) {
       await d.getByTestId(chip).click()
@@ -152,7 +158,7 @@ describe('скриншоты экранов (демо)', () => {
       assert.ok(Math.abs(r.x - c.x) <= 2 || r.x + r.width <= (h.win.viewportSize()?.width ?? 1e9), `${menu} не у чипа`)
       assert.ok(r.y >= c.y + c.height - 1 || r.y + r.height <= c.y + 1, `${menu} перекрывает свой чип`)
       assert.ok(Math.abs(r.x - c.x) <= 40, `${menu} далеко от чипа по горизонтали: ${r.x} против ${c.x}`)
-      assert.equal(await top(), y0, `поле сдвинулось с открытым ${menu}`)
+      assert.equal(await bottom(), y0, `нижняя граница поля сдвинулась с открытым ${menu}`)
       if (menu === 'draft-menu-model' || menu === 'draft-menu-access') await both(menu)
       await h.win.keyboard.press('Escape')
       await m.waitFor({ state: 'detached', timeout: 3000 })
@@ -163,7 +169,7 @@ describe('скриншоты экранов (демо)', () => {
   })
 
   it('панель doctor', async () => {
-    await h.win.getByTestId('open-doctor').click()
+    await openDoctor(h)
     const panel = h.win.getByTestId('doctor-panel')
     await panel.waitFor({ timeout: 3000 })
     assert.ok(await waitFor(async () => (await panel.getByTestId('doctor-item').count()) > 3, 20_000), 'пункты доктора не пришли')
@@ -203,8 +209,12 @@ describe('скриншоты экранов (демо)', () => {
     assert.ok(await waitFor(async () => (await h.win.getAttribute('.app', 'data-conn')) === 'down', 15_000), 'окно не заметило остановку демона')
     await h.win.getByTestId('conn-banner').waitFor({ timeout: 5000 })
     await h.win.locator('[data-testid="agent-row"][data-agent="ui-refactor"]').click({ force: true }).catch(() => { /* строки неактивны */ })
-    // Шапка не выдаёт последнее известное за живое; ввод не зовёт печатать.
-    assert.match((await h.win.locator('header.hdr').getAttribute('class')) ?? '', /hdr-stale/)
+    // Сводка Mac не выдаёт последнее известное за живое; ввод не зовёт печатать.
+    const health = h.win.getByTestId('health-menu')
+    assert.match((await health.locator('summary').getAttribute('class')) ?? '', /t-fail/)
+    await health.locator('summary').click()
+    assert.match((await health.locator('.health-popover').getAttribute('class')) ?? '', /hdr-stale/)
+    assert.equal(await health.getByTestId('conn-state').isVisible(), true)
     assert.match((await h.win.getByTestId('composer').getAttribute('placeholder')) ?? '', /демон недоступен/)
     await both('daemon-down')
   })

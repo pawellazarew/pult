@@ -4,6 +4,10 @@ import path from 'node:path'
 import { after, before, describe, it } from 'node:test'
 import { launch, ONE_PX_PNG, waitFor } from './harness.js'
 import type { Harness } from './harness.js'
+import type { PromptAttachment } from '../../../src/core/promptAttachments.js'
+
+type UserMessage = { text?: string; attachments?: PromptAttachment[] }
+type CodexInput = { type: string; path?: string; text?: string }
 
 describe('вложения: карточки, временные файлы и отправка', () => {
   let h: Harness
@@ -12,7 +16,7 @@ describe('вложения: карточки, временные файлы и �
     h = await launch({ name: 'attachments' })
     assert.ok(await waitFor(async () => await h.win.getAttribute('.app', 'data-conn') === 'up', 20_000))
     client = await h.client()
-    h.codexConfig({ scenario: 'simple' })
+    h.codexConfig({ scenario: 'simple', logOut: path.join(h.home, 'codex-wire.jsonl') })
     await client.request('agent.start', { name: 'attached', kind: 'codex', cwd: h.workDir('project') })
     await h.win.locator('[data-testid="agent-row"][data-agent="attached"]').click()
     await h.win.getByTestId('composer').waitFor()
@@ -29,7 +33,16 @@ describe('вложения: карточки, временные файлы и �
   }
   const cards = () => h.win.getByTestId('attachment-card')
   const cardPaths = () => cards().evaluateAll((els) => els.map((el) => el.getAttribute('data-path')!))
-  const users = async (session: string) => ((await client.request('events.tail', { since: 0, sessionId: session })) as { events: Array<{ kind: string; data: { text?: string } }> }).events.filter((e) => e.kind === 'message.user').map((e) => e.data.text ?? '')
+  const userMessages = async (session: string): Promise<UserMessage[]> => ((await client.request('events.tail', { since: 0, sessionId: session })) as { events: Array<{ kind: string; data: UserMessage }> }).events.filter((e) => e.kind === 'message.user').map((e) => e.data)
+  const users = async (session: string): Promise<string[]> => (await userMessages(session)).map((m) => m.text ?? '')
+  const codexInputs = (): CodexInput[][] => {
+    try {
+      return readFileSync(path.join(h.home, 'codex-wire.jsonl'), 'utf8').trim().split('\n')
+        .map((line) => JSON.parse(line) as { ev: string; msg?: { method?: string; params?: { input?: CodexInput[] } } })
+        .filter((entry) => entry.ev === 'client' && entry.msg?.method === 'turn/start')
+        .map((entry) => entry.msg?.params?.input ?? [])
+    } catch { return [] }
+  }
 
   it('drop картинки из памяти и обычного файла показывает карточки; reload сохраняет их без исходника', async () => {
     const box = h.win.getByTestId('composer')
@@ -56,18 +69,26 @@ describe('вложения: карточки, временные файлы и �
     assert.ok(paths.every(existsSync), 'крестик не удаляет файл, который может быть в истории')
   })
 
-  it('вложение отправляется без текста; агент получает сохранённый путь, карточки очищаются', async () => {
+  it('картинка без текста идёт в Codex как localImage; история хранит метаданные и красивую карточку', async () => {
     const saved = (await cardPaths())[0]!
     await h.win.getByTestId('composer').fill('')
     await h.win.getByTestId('send').click()
-    assert.ok(await waitFor(async () => (await users('attached')).some((text) => text.includes(saved))))
+    assert.ok(await waitFor(async () => (await userMessages('attached')).some((m) => m.attachments?.some((a) => a.path === saved))))
+    assert.ok(await waitFor(() => codexInputs().some((input) => input.some((item) => item.type === 'localImage' && item.path === saved))), 'Codex не получил native localImage')
     assert.equal(await cards().count(), 0)
     assert.ok(existsSync(saved))
-    const messages = await users('attached')
-    assert.match(messages[0]!, /^Прикреплённые файлы:/)
+    const message = (await userMessages('attached'))[0]!
+    assert.equal(message.text, '')
+    assert.deepEqual(message.attachments, [{ path: saved, name: 'Снимок.png', bytes: Buffer.from(ONE_PX_PNG, 'base64').length, mime: 'image/png', kind: 'file' }])
+    const input = codexInputs().find((items) => items.some((item) => item.type === 'localImage' && item.path === saved))!
+    assert.equal(input.some((item) => item.type === 'text' && item.text?.includes(saved)), false, 'путь картинки попал в текст для модели')
     await h.win.reload()
     await h.win.getByTestId('composer').waitFor()
     assert.equal(await cards().count(), 0)
+    const historyCard = h.win.getByTestId('user-attachment')
+    await historyCard.waitFor()
+    assert.match(await historyCard.textContent() ?? '', /Снимок\.png/)
+    assert.equal((await h.win.getByTestId('feed').textContent())?.includes(saved), false, 'технический путь виден в сообщении')
   })
 
   it('черновик: вложить до имени чата, отправить — путь в папке итоговой сессии (имя выдал демон)', async () => {
@@ -94,10 +115,14 @@ describe('вложения: карточки, временные файлы и �
     await dlg.getByTestId('draft-send').click()
     await dlg.waitFor({ state: 'detached', timeout: 15_000 })
     assert.ok(await waitFor(async () => (await users('new-project')).length > 0, 15_000))
-    const text = (await users('new-project'))[0]!
-    assert.ok(text.includes(path.join(h.home, 'attachments', 'new-project')))
-    assert.ok(!text.includes(stage!))
-    const final = text.slice(text.indexOf('- ') + 2).trim().replace(/^'|'$/g, '')
+    const message = (await userMessages('new-project'))[0]!
+    assert.equal(message.text, '')
+    assert.equal(message.attachments?.length, 1)
+    const final = message.attachments![0]!.path
+    assert.ok(final.startsWith(path.join(h.home, 'attachments', 'new-project') + '/'))
+    assert.notEqual(final, stage)
+    assert.equal(message.attachments![0]!.name, 'draft.txt')
+    assert.equal(message.attachments![0]!.mime, 'text/plain')
     assert.equal(readFileSync(final, 'utf8'), 'draft contents')
   })
 

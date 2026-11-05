@@ -1,0 +1,13 @@
+.user-attachments { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 10px; }
+.user-attachment { min-width: 0; max-width: min(100%, 290px); border: 1px solid var(--line); border-radius: 10px; background: var(--ground); }
+.user-attachment-open { display: flex; align-items: center; gap: 9px; max-width: 100%; min-width: 0; padding: 7px 9px; border: 0; border-radius: 10px; background: none; color: var(--ink); text-align: left; cursor: pointer; }
+.user-attachment-open:disabled { cursor: default; }
+.user-attachment-open:not(:disabled):hover { background: var(--panel); }
+.user-attachment-thumb { display: grid; place-items: center; flex: 0 0 40px; width: 40px; height: 40px; overflow: hidden; border-radius: 5px; background: var(--panel); color: var(--mut); font-size: 10px; }
+.user-attachment-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.user-attachment-info { display: flex; flex-direction: column; min-width: 0; gap: 3px; }
+.user-attachment-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.user-attachment-size, .user-attachment-error { color: var(--mut); font-size: 11px; }
+.user-attachment-error { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 9px 7px; }
+.user-attachment-error button { border: 0; padding: 2px; background: none; color: var(--accent); cursor: pointer; font: inherit; }
+@media (max-width: 600px) { .user-attachment { max-width: 100%; } .user-attachment-open { min-height: 52px; } }

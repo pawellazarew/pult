@@ -79,7 +79,7 @@ export function Inbox({ items, cards = [], filter = 'all', counts, agents, focus
             title={t`Следующая сессия, которая ждёт тебя: ошибки → запросы → готовые (${attentionKeys(IS_MAC).next})`}
             onClick={onNextWaiting}>{t("ждут ")}{waitingCount}<Kbd>{attentionKeys(IS_MAC).next}</Kbd></button>
         )}
-        <button type="button" className="btn btn-ghost btn-sm" onClick={onClose} title={t`Скрыть (${CMD}I)`}><Icon name="x" /></button>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={onClose} title={t("Скрыть")} aria-label={t("Скрыть")}><Icon name="x" /></button>
       </div>
       <div className="inbox-list">
         {shown === 0 ? (
@@ -187,7 +187,7 @@ export const HOTKEYS: ReadonlyArray<readonly [string, string]> = [
   [`${CMD}↵`, t('разрешить выделенный запрос в Inbox')],
   // О2: «прервать и сказать» — только в поле реплики и только пока идёт ход.
   [t`${CMD}↵ в поле`, t('идёт ход — прервать его и сразу сказать реплику')],
-  [`${CMD}N`, t('новая сессия (в проекте текущей)')],
+  [`${CMD}N`, t('новый разговор без проекта')],
   [`${CMD}1…9`, t('первые беседы в списке слева')],
   [`${CMD}I`, t('показать или спрятать Inbox')],
   // О2: разборка очереди с клавиатуры (как в Conductor и cmux).

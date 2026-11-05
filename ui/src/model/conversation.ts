@@ -13,6 +13,7 @@ import { t as tr } from '../lib/i18n.js'
 //   permission.requested/resolved → карточка разрешения прямо в ленте;
 //   net.blocked, provider.blocked, limit.hit, status.changed failed|interrupted → строка-причина.
 
+import type { PromptAttachment } from '../../../src/core/promptAttachments.js'
 import type { PultEvent } from './types.js'
 import { num, obj, str } from './types.js'
 import { parseOffers } from './permissions.js'
@@ -32,7 +33,22 @@ interface Base {
   ts: string
 }
 
-export interface UserItem extends Base { type: 'user'; text: string; questionId?: number }
+export interface UserItem extends Base { type: 'user'; text: string; questionId?: number; attachments?: readonly PromptAttachment[] }
+/** Only stable bounded metadata is accepted from history; no native bytes or arbitrary extra fields survive. */
+export function parseUserAttachments(raw: unknown): PromptAttachment[] {
+  if (!Array.isArray(raw)) return []
+  const result: PromptAttachment[] = []
+  for (const value of raw.slice(0, 20)) {
+    const a = obj(value)
+    if (!a || typeof a['path'] !== 'string' || !a['path'].startsWith('/') || /[\0\r\n]/.test(a['path']) || a['path'].length > 16_384
+      || typeof a['name'] !== 'string' || !a['name'].trim() || a['name'].length > 512 || /[\0\r\n]/.test(a['name'])
+      || typeof a['bytes'] !== 'number' || !Number.isSafeInteger(a['bytes']) || a['bytes'] < 0 || a['bytes'] > 25 * 1024 * 1024
+      || typeof a['mime'] !== 'string' || !a['mime'] || a['mime'].length > 128 || (a['kind'] !== 'file' && a['kind'] !== 'directory')) continue
+    result.push({ path: a['path'], name: a['name'], bytes: a['bytes'], mime: a['mime'], kind: a['kind'] })
+  }
+  return result
+}
+
 export interface ModelItem extends Base {
   type: 'model'
   text: string
@@ -240,9 +256,10 @@ export function applyConversation(conv: Conversation, ev: PultEvent): Conversati
   switch (ev.kind) {
     case 'message.user': {
       const text = str(d['text']) ?? ''
+      const attachments = parseUserAttachments(d['attachments'])
       const questionId = num(d['questionId'])
       if (questionId !== undefined) conv = { ...conv, items: conv.items.map((it) => it.type === 'model' && it.questionEventId === questionId ? { ...it, questionAnswered: true } : it) }
-      return push(conv, ev, { ...base, type: 'user', text, ...(questionId !== undefined ? { questionId } : {}) })
+      return push(conv, ev, { ...base, type: 'user', text, ...(attachments.length ? { attachments } : {}), ...(questionId !== undefined ? { questionId } : {}) })
     }
 
     case 'message.delta': {

@@ -9,6 +9,7 @@
 //      `--mcp-config` и `--permission-prompt-tool mcp__pult__ask`. Полумеры («host без
 //      инструмента») не бывает: спросить будет некого, и ход встанет навсегда.
 
+import type { ClaudePromptAttachmentBlock } from '../../core/promptAttachments.js'
 import type { ApprovalMode } from '../types.js'
 
 export const PERMISSION_SERVER_NAME = 'pult'
@@ -174,10 +175,10 @@ export function buildClaudeArgv(opts: ClaudeArgvOptions): string[] {
  * (`result.user_message_uuids`), и шлёт `command_lifecycle` (`queued` → `started` →
  * `completed`). ИЗМЕРЕНО 08.10.2026, CLI 2.1.294; без `uuid` ни того ни другого нет.
  */
-export function userTurnLine(text: string, uuid?: string, runtimeContext?: string): string {
+export function userTurnLine(text: string, uuid?: string, runtimeContext?: string, attachments: readonly ClaudePromptAttachmentBlock[] = []): string {
   return JSON.stringify({
     type: 'user',
-    message: { role: 'user', content: [{ type: 'text', text }, ...(runtimeContext ? [{ type: 'text', text: runtimeContext }] : [])] },
+    message: { role: 'user', content: [...(text ? [{ type: 'text', text }] : []), ...attachments, ...(runtimeContext ? [{ type: 'text', text: runtimeContext }] : [])] },
     ...(uuid ? { uuid } : {}),
   }) + '\n'
 }

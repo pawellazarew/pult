@@ -35,6 +35,7 @@
 //     правило сети) — M8d, решение владельца 19.10.2026: ТОЛЬКО по явной кнопке человека и только когда
 //     сервер их на этот запрос предложил; ⌘Enter и голое `perm approve` — всегда один раз.
 
+import { codexPromptInput } from '../../core/promptAttachments.js'
 import { createImageCapture } from '../../core/images.js'
 import { randomUUID } from 'node:crypto'
 import { approvalContext } from '../approvalContext.js'
@@ -1790,6 +1791,7 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
       sandbox: policy.sandbox,
       approvalPolicy: policy.approvalPolicy,
       ...(flags.model ? { model: flags.model } : {}),
+      serviceTier: flags.serviceTier ?? 'default',
       // В Default mode Codex скрывает request_user_input без этого feature flag.
       // Вопросы обслуживает Inbox независимо от режима разрешений.
       config: {
@@ -1853,8 +1855,8 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
     const turnId = `t${++turnSeq}`
     // M8f (ревью, HIGH 3): снимок настроек хода — до первого `await`; `configure` после него — для следующего хода.
     const flags: TurnSettings = at
-      ? { ...(at.model ? { model: at.model } : {}), ...(at.effort ? { effort: at.effort } : {}), ...(at.approval ? { approval: at.approval } : {}), browser: at.browser ?? null }
-      : { ...(l.spec.model ? { model: l.spec.model } : {}), ...(l.spec.effort ? { effort: l.spec.effort } : {}), ...(l.spec.approval ? { approval: l.spec.approval } : {}) }
+      ? { ...(at.model ? { model: at.model } : {}), ...(at.effort ? { effort: at.effort } : {}), ...(at.approval ? { approval: at.approval } : {}), browser: at.browser ?? null, serviceTier: at.serviceTier ?? 'default', ...(at.attachments?.length ? { attachments: at.attachments.map((a) => ({ ...a })) } : {}) }
+      : { ...(l.spec.model ? { model: l.spec.model } : {}), ...(l.spec.effort ? { effort: l.spec.effort } : {}), ...(l.spec.approval ? { approval: l.spec.approval } : {}), serviceTier: l.spec.serviceTier ?? 'default' }
     const fail = (errorCode: string, message: string): TurnStarted =>
       ({ turnId, done: Promise.resolve({ turnId, ok: false, errorCode, message }) })
 
@@ -2078,7 +2080,8 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
         const res = await c.request('turn/start', {
           threadId: l.threadId,
           // Реплика уходит В ТЕЛЕ ЗАПРОСА, никогда в argv (инвариант «промпт не в argv»).
-          input: [{ type: 'text', text }, { type: 'text', text: approvalContext('codex', flags.approval, l.spec.broker) }],
+          input: [...codexPromptInput({ home: opts.paths.home, sessionId: name }, text, flags.attachments), { type: 'text', text: approvalContext('codex', flags.approval, l.spec.broker) }],
+          serviceTier: flags.serviceTier ?? 'default',
           ...(flags.model ? { model: flags.model } : {}),
           ...(flags.effort ? { effort: flags.effort } : {}),
           // M8f: режим снимка отличается от действующего у треда — по схеме «для этого хода и следующих».
@@ -2180,11 +2183,11 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
     },
 
     send(name, text, at) { return runTurn(need(name), text, at) },
-    async steer(name, text) {
+    async steer(name, text, attachments) {
       const l = need(name)
       const ctx = l.turn
       const providerTurnId = ctx?.providerTurnId ?? l.serverTurn?.providerTurnId
-      if (!text.trim()) throw new Error('пустое уточнение')
+      if (!text.trim() && !attachments?.length) throw new Error('пустое уточнение')
       if (!client?.alive() || !l.threadId || !providerTurnId || l.closing || l.stopRequested || ctx?.settled || l.starting) {
         throw new Error('нет активного хода Codex — уточнение не отправлено')
       }
@@ -2192,7 +2195,7 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
       // Никакого fallback в turn/start или interrupt: при отказе текст вернётся в composer.
       await client.request('turn/steer', {
         threadId: l.threadId, expectedTurnId: providerTurnId,
-        input: [{ type: 'text', text }],
+        input: codexPromptInput({ home: opts.paths.home, sessionId: name }, text, attachments),
       }, controlMs)
       return { turnId: ctx?.turnId ?? providerTurnId }
     },
@@ -2260,6 +2263,7 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
           cwd: rec.cwd,
           ...(rec.model ? { model: rec.model } : {}),
           ...(rec.effort ? { effort: rec.effort } : {}),
+          ...(rec.serviceTier ? { serviceTier: rec.serviceTier } : {}),
           mode: rec.mode,
           ...(rec.settingSources ? { settingSources: rec.settingSources } : {}),
           broker: true,
@@ -2311,7 +2315,7 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
           + 'пропустил бы его вызовы мимо Inbox. Выключи браузер, перезапусти демона (pult daemon stop), потом смени режим'), { code: 'invalid_params' })
       }
       const spec = l.spec as unknown as Record<string, unknown>
-      for (const k of ['model', 'effort', 'approval'] as const) {
+      for (const k of ['model', 'effort', 'approval', 'serviceTier'] as const) {
         if (next[k] === undefined) delete spec[k]
         else spec[k] = next[k]
       }

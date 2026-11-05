@@ -12,6 +12,7 @@ import { ProjectTree } from '../src/components/ProjectTree.js'
 import { SessionTabs } from '../src/components/SessionTabs.js'
 import { groupByProject } from '../src/model/projects.js'
 import { Conversation } from '../src/components/Conversation.js'
+import { UsageSection } from '../src/components/Settings.js'
 import { Header } from '../src/components/Header.js'
 import { clickActs, followLink, Markdown } from '../src/components/Markdown.js'
 import { DoctorPanel } from '../src/components/Panels.js'
@@ -177,7 +178,7 @@ describe('вопрос Claude в Inbox — карточка с выбором, �
   })
 })
 
-describe('шапка', () => {
+describe('служебное меню в подвале', () => {
   const base = {
     status: null, statusAt: 0, now: NOW,
     guard: { tone: 'ok', label: 'выход FI', checkedAt: '2026-09-28T09:58:00Z', detail: 'выход FI, страж RU' },
@@ -187,29 +188,34 @@ describe('шапка', () => {
 
   it('демон недоступен — страж и лимиты помечены устаревшими, а не «живым зелёным»', () => {
     const down = html(Header, { ...base, conn: { state: 'down', reason: 'x', attempt: 1, retryInMs: 1000 } })
-    assert.match(down, /class="hdr hdr-stale"/)
-    assert.match(down, /data-testid="hdr-guard"[^>]*title="[^"]*не обновляется/)
+    assert.match(down, /class="health-popover hdr-stale"/)
+    assert.match(down, /data-testid="conn-state">недоступен</)
+    assert.match(down, /data-testid="hdr-guard"[^>]*>[\s\S]*?<span class="t-mut">выход FI/)
+    assert.doesNotMatch(down, /data-testid="hdr-guard"[^>]*>[\s\S]*?<span class="t-ok">выход FI/)
+    assert.doesNotMatch(down, /hdr-usage-/, 'лимиты вынесены в настройки, а не показаны живыми в подвале')
     const up = html(Header, { ...base, conn: { state: 'up', daemon: { version: '0.1.0', pid: 1, startedAt: 'x' } } })
     assert.doesNotMatch(up, /hdr-stale/)
   })
 
-  it('технические статусы доступны по требованию в компактной шапке', () => {
+  it('технические статусы доступны в закрытом по умолчанию меню подвала', () => {
     const up = html(Header, { ...base, conn: { state: 'up', daemon: { version: '0.1.0', pid: 1, startedAt: 'x' } },
       providers: { checkedAt: 'x', claude: { provider: 'claude', state: 'ready', detail: 'Вход выполнен · готов', models: [] },
         codex: { provider: 'codex', state: 'login_required', detail: 'Нужен вход', fixCmd: 'codex login', models: [] } } })
     assert.match(up, /<details class="health-menu" data-testid="health-menu"><summary/)
     assert.doesNotMatch(up, /<details[^>]* open/)
-    assert.match(up, /Подключено/)
-    assert.match(up, /<div class="cell-top"><span class="lbl who-claude">claude<\/span><button[^>]*class="pstat t-ok"[^>]*>.*?готов<\/button><\/div>/)
-    assert.match(up, /class="pstat t-wait"[^>]*title="Нужен вход — починить: codex login/)
+    assert.match(up, /<footer[^>]*data-testid="sidebar-footer"/)
+    assert.match(up, /class="link-btn t-ok"[^>]*data-testid="provider-status-claude"[^>]*>готов<\/button>/)
+    assert.match(up, /class="link-btn t-wait"[^>]*title="Нужен вход — починить: codex login/)
+    assert.match(up, /data-testid="open-doctor"/)
     assert.doesNotMatch(up, /Вход выполнен · готов<\/button>/)
   })
 
-  it('подсказка лимита говорит «использовано», а не голые проценты', () => {
-    const up = html(Header, { ...base, conn: { state: 'up', daemon: { version: '0.1.0', pid: 1, startedAt: 'x' } } })
-    const title = /data-testid="hdr-usage-claude"[^>]*title="([^"]*)"/.exec(up)?.[1] ?? ''
-    assert.match(title, /использовано 42%/)
-    assert.match(title, /сброс через 1 ч/)
+  it('лимиты в настройках говорят «Использовано» и показывают реальное время сброса', () => {
+    const out = html(UsageSection, { usage: base.usage, now: NOW })
+    assert.match(out, /data-testid="settings-usage-claude"/)
+    assert.match(out, /Использовано: 42%/)
+    assert.match(out, /Сброс: через 1 ч/)
+    assert.match(out, /aria-valuenow="42"/)
   })
 })
 
@@ -319,7 +325,8 @@ describe('контекстное окно сессии', () => {
     const full = html(ProjectTree, tree([agent({ context: ctx(170_000, 200_000) })]))
     assert.match(full, /<span class="ctx t-wait"[^>]*data-testid="row-context"[^>]*>ctx 85%<\/span>/)
     const tabs = html(SessionTabs, { tabs: [agent({ context: ctx(48_000, 200_000) })], active: 'fix-limits', onSelect: noop, onClose: noop })
-    assert.match(tabs, /title="fix-limits · [^"]*1 · контекст 24%"/)
+    assert.match(tabs, /title="fix-limits · контекст 24%"/)
+    assert.doesNotMatch(tabs, /⌘|Ctrl|<kbd/, 'подсказки клавиш скрыты, контекст сохранён')
     const bare = html(SessionTabs, { tabs: [agent()], active: 'fix-limits', onSelect: noop, onClose: noop })
     assert.doesNotMatch(bare, /контекст/)
   })

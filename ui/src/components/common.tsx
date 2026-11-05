@@ -39,6 +39,12 @@ const PATHS: Record<string, ReactElement> = {
   gauge: <><path d="M2.5 11.5a5.5 5.5 0 1 1 11 0" /><path d="M8 11.5l2.6-3.2" /></>,
   more: <><circle cx="3.5" cy="8" r=".9" fill="currentColor" /><circle cx="8" cy="8" r=".9" fill="currentColor" /><circle cx="12.5" cy="8" r=".9" fill="currentColor" /></>,
   globe: <><circle cx="8" cy="8" r="6" /><path d="M2 8h12M8 2c1.8 1.7 2.6 3.7 2.6 6S9.8 12.3 8 14c-1.8-1.7-2.6-3.7-2.6-6S6.2 3.7 8 2z" /></>,
+  agents: <><circle cx="5" cy="5" r="2"/><circle cx="11.5" cy="5.5" r="1.5"/><path d="M1.5 13v-1a3.5 3.5 0 0 1 7 0v1M10 9a3 3 0 0 1 4 3v1"/></>,
+  bolt: <path d="M9 1.5 3.5 9H8l-1 5.5L12.5 7H8z" />,
+  help: <><circle cx="8" cy="8" r="6" /><path d="M6.5 6a1.7 1.7 0 1 1 2.4 1.6c-.6.3-.9.7-.9 1.4M8 11.5v.1" /></>,
+  machine: <><rect x="2" y="2.5" width="12" height="4" rx="1"/><rect x="2" y="9" width="12" height="4" rx="1"/><path d="M4 4.5h.1M4 11h.1"/></>,
+  settings: <><path d="M2 4h12M2 12h12"/><circle cx="6" cy="4" r="2" fill="var(--sidebar)"/><circle cx="10" cy="12" r="2" fill="var(--sidebar)"/></>,
+  'folder-plus': <><path d="M2 4h4l1.5 1.5H14V13H2zM8 7v4M6 9h4"/></>,
   pin: <path d="M6 2.5h4l-.5 4 2 2v1H4.5v-1l2-2zM8 9.5V14" />,
 }
 

@@ -4,10 +4,15 @@ import { getLanguage, t } from '../lib/i18n.js'
 // «Обновления» — версия, состояние канала, «Проверить сейчас», «Перезапустить и обновить» и флаг автопроверки (что писать —
 // model/update.ts); «Страж сети» (0.3.6) — режим deny/allow, страны, выходы провайдеров под черновиком
 // (model/netGuard.ts); «Правила „Всегда“» (план 16, № 11) — правила Codex с меткой Пульта и «Отозвать» (model/rules.ts);
-// «Внешний вид» пока пустой (темы и цвета — после редизайна, docs/15). Логика черновика —
-// model/sessionSettings.ts.
+// Оформление сохраняется сразу на устройстве; срок хранения — отдельно у демона.
+// Черновик умолчаний и языка по-прежнему применяется явным сохранением.
 
 import { useEffect, useRef, useState } from 'react'
+import { FONT_SIZES } from '../model/appearance.js'
+import type { AppearancePreferences, ThemePreference, Density, UiFont, CodeFont } from '../model/appearance.js'
+import { useAppearance } from '../useAppearance.js'
+import type { UsageState } from '../model/usage.js'
+import { formatClock, formatPct, formatResetIn, usageForDisplay, usageTone } from '../model/usage.js'
 import type { ReactElement } from 'react'
 import { AccessSection } from './Access.js'
 import type { ConsentView } from '../model/access.js'
@@ -26,7 +31,7 @@ import type { CodexRulesList } from '../model/rules.js'
 import { Dictation } from './Dictation.js'
 import { HOTKEYS } from './Panels.js'
 import './settings-screen.css'
-import { CMD, Kbd } from './common.js'
+import { Icon, Kbd } from './common.js'
 import { Dialog } from './Panels.js'
 
 const PROVIDERS: readonly Provider[] = ['claude', 'codex', 'zcode']
@@ -350,10 +355,123 @@ export function RulesSection({ panel }: { panel: RulesPanel }): ReactElement {
   )
 }
 
-export type SettingsSection = 'general' | 'access' | 'sessions' | 'providers' | 'voice' | 'network' | 'rules' | 'keys' | 'updates'
+export function AppearanceSection({ value, onChange }: { value: AppearancePreferences; onChange(patch: Partial<AppearancePreferences>): void }): ReactElement {
+  const modes = [
+    { id: 'normal' as const, title: t('Обычный'), description: t('Проекты и разговоры слева, чат по центру') },
+    { id: 'expanded' as const, title: t('Расширенный'), description: t('Состояния агентов и сводка рядом с чатом') },
+    { id: 'focus' as const, title: t('Фокус'), description: t('Компактная навигация и больше места для разговора') },
+  ]
+  return <section className="settings-sec" aria-labelledby="settings-appearance-h" data-testid="settings-appearance">
+    <h3 id="settings-appearance-h">{t('Внешний вид')}</h3>
+    <p className="settings-intro">{t('Применяется сразу на этом устройстве. Разговоры и настройки агентов сохраняются.')}</p>
+    <div className="appearance-group"><h4>{t('Режим интерфейса')}</h4><div className="appearance-modes" role="radiogroup" aria-label={t('Режим интерфейса')}>
+      {modes.map((mode) => <label className={`appearance-mode${value.mode === mode.id ? ' selected' : ''}`} key={mode.id}>
+        <input type="radio" name="interface-mode" checked={value.mode === mode.id} onChange={() => onChange({ mode: mode.id })} data-testid={`appearance-mode-${mode.id}`} />
+        <span className={`appearance-mode-preview preview-${mode.id}`} aria-hidden="true"><i /><i /><i /></span>
+        <b>{mode.title}</b><span>{mode.description}</span>{mode.id === 'normal' && <small>{t('По умолчанию')}</small>}
+      </label>)}
+    </div></div>
+    <div className="appearance-fields">
+      <label className="field" htmlFor="appearance-theme"><span className="lbl">{t('Тема')}</span>
+        <select id="appearance-theme" value={value.theme} onChange={(e) => onChange({ theme: e.target.value as ThemePreference })}>
+          <option value="system">{t('Как в системе')}</option><option value="light">{t('Светлая')}</option><option value="dark">{t('Тёмная')}</option>
+        </select>
+      </label>
+      <label className="field" htmlFor="appearance-density"><span className="lbl">{t('Плотность')}</span>
+        <select id="appearance-density" value={value.density} onChange={(e) => onChange({ density: e.target.value as Density })}>
+          <option value="comfortable">{t('Свободная')}</option><option value="compact">{t('Компактная')}</option>
+        </select>
+      </label>
+      <label className="field" htmlFor="appearance-ui-font"><span className="lbl">{t('Шрифт интерфейса')}</span>
+        <select id="appearance-ui-font" value={value.uiFont} onChange={(e) => onChange({ uiFont: e.target.value as UiFont })}>
+          <option value="onest">Onest</option><option value="geologica">Geologica</option><option value="system">{t('Системный')}</option>
+        </select>
+      </label>
+      <label className="field" htmlFor="appearance-code-font"><span className="lbl">{t('Шрифт кода')}</span>
+        <select id="appearance-code-font" value={value.codeFont} onChange={(e) => onChange({ codeFont: e.target.value as CodeFont })}>
+          <option value="jetbrains">JetBrains Mono</option><option value="sfmono">SF Mono</option><option value="menlo">Menlo</option>
+        </select>
+      </label>
+      <label className="field" htmlFor="appearance-font-size"><span className="lbl">{t('Размер текста')}</span>
+        <select id="appearance-font-size" value={value.fontSize} onChange={(e) => onChange({ fontSize: Number(e.target.value) })}>
+          {FONT_SIZES.map((size) => <option key={size} value={size}>{size} px</option>)}
+        </select>
+      </label>
+    </div>
+    <div className="appearance-type-preview" aria-label={t('Образец текста')}><p>{t('Место для хорошей мысли.')}</p><code>const idea = 'hello';</code></div>
+  </section>
+}
 
-export function SettingsDialog({ settings, catalog, updates, autoCheck = null, netGuard, rules, access, language = 'auto', languageSupported = false, languageOverride = null, onSave, onClose, initialSection = 'general' }: {
+export function UsageSection({ usage = {}, now, onRefresh, refreshing = false }: { usage?: UsageState; now: number; onRefresh?(): void; refreshing?: boolean }): ReactElement {
+  return <section className="settings-sec" aria-labelledby="settings-usage-h" data-testid="settings-usage">
+    <div className="settings-section-title"><h3 id="settings-usage-h">{t('Использование')}</h3>{onRefresh && <button type="button" className="btn btn-sm" disabled={refreshing} onClick={onRefresh} data-testid="settings-usage-refresh"><Icon name="refresh" />{refreshing ? t('Обновляю…') : t('Обновить')}</button>}</div>
+    <p className="settings-intro">{t('Лимиты подписок по последним данным провайдеров.')}</p>
+    {PROVIDERS.map((provider) => {
+      const u = usageForDisplay(usage[provider], now)
+      const windows = [
+        { name: t('Пять часов'), value: u?.fiveHour },
+        { name: t('Неделя'), value: u?.sevenDay },
+      ].filter((w) => w.value !== null && w.value !== undefined)
+      const blocked = u?.status === 'limited' || u?.status === 'blocked' || u?.status === 'rejected'
+      const updated = u ? Date.parse(u.updatedAt) : NaN
+      return <article className="usage-provider-card" key={provider} data-testid={`settings-usage-${provider}`}>
+        <div className="usage-provider-heading"><b>{provider === 'claude' ? 'Claude' : provider === 'codex' ? 'Codex' : 'ZCode'}</b>{blocked && <span className="t-fail">{t('Лимит достигнут')}</span>}</div>
+        {windows.length ? windows.map(({ name, value: w }) => {
+          const pct = w?.utilization
+          const valid = typeof pct === 'number' && Number.isFinite(pct)
+          return <div className={`usage-window t-${usageTone(pct, blocked ? 'limited' : undefined)}`} key={name}>
+            <div className="usage-window-label"><span>{name}</span><span>{t`Использовано: ${formatPct(pct)}`}</span></div>
+            <div className="usage-window-bar" role="progressbar" aria-label={name} aria-valuemin={0} aria-valuemax={100} aria-valuenow={valid ? Math.max(0, Math.min(100, Math.round(pct * 100))) : undefined} aria-valuetext={valid ? undefined : t('Нет свежих данных')}><i style={{ width: `${valid ? Math.max(0, Math.min(100, pct * 100)) : 0}%` }} /></div>
+            <span className="note">{w?.resetsAt != null ? t`Сброс: ${formatResetIn(w.resetsAt, now)}` : t('Время сброса неизвестно')}</span>
+          </div>
+        }) : <p className="usage-empty">{t('Провайдер ещё не передал лимиты.')}</p>}
+        {Number.isFinite(updated) && <span className="note usage-updated">{t`Данные на ${formatClock(updated, now)}`}</span>}
+      </article>
+    })}
+  </section>
+}
+
+export type AttachmentRetentionDays = 7 | 30 | 90 | null
+export function FilesStorageSection({ retentionDays, onRetentionChange }: { retentionDays?: AttachmentRetentionDays; onRetentionChange?(days: AttachmentRetentionDays): Promise<void> | void }): ReactElement {
+  const [value, setValue] = useState(retentionDays)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
+  useEffect(() => { setValue(retentionDays); setSaved(false) }, [retentionDays])
+  const change = async (next: AttachmentRetentionDays): Promise<void> => {
+    if (!onRetentionChange || busy) return
+    const previous = value
+    setValue(next); setBusy(true); setError(null); setSaved(false)
+    try { await onRetentionChange(next); setSaved(true) }
+    catch (e) { setValue(previous); setError(e instanceof Error ? e.message : t('Не удалось сохранить срок хранения.')) }
+    finally { setBusy(false) }
+  }
+  return <section className="settings-sec" aria-labelledby="settings-storage-h" data-testid="settings-storage">
+    <h3 id="settings-storage-h">{t('Файлы и хранение')}</h3>
+    <p className="settings-intro">{t('Срок касается копий вложений в Пульте. Оригиналы остаются у тебя.')}</p>
+    <label className="field" htmlFor="settings-retention"><span className="lbl">{t('Хранить копии вложений')}</span>
+      <select id="settings-retention" data-testid="settings-retention" disabled={retentionDays === undefined || !onRetentionChange || busy} value={value === undefined ? 'unavailable' : value === null ? 'forever' : String(value)} onChange={(e) => void change(e.target.value === 'forever' ? null : Number(e.target.value) as 7 | 30 | 90)}>
+        {value === undefined && <option value="unavailable">{t('Недоступно')}</option>}
+        <option value="7">{t('7 дней')}</option><option value="30">{t('30 дней')}</option><option value="90">{t('90 дней')}</option><option value="forever">{t('Бессрочно')}</option>
+      </select>
+      <span className="note">{retentionDays === undefined || !onRetentionChange ? t('Обнови Пульт, чтобы управлять сроком хранения.') : t('Копии старше выбранного срока будут удаляться автоматически. Изменение сохраняется сразу.')}</span>
+    </label>
+    {busy && <span className="note" role="status">{t('Сохраняю…')}</span>}
+    {saved && !busy && <span className="note" role="status">{t('Срок хранения сохранён.')}</span>}
+    {error && <span className="err" role="alert">{error}</span>}
+  </section>
+}
+
+export type SettingsSection = 'general' | 'appearance' | 'usage' | 'storage' | 'access' | 'sessions' | 'providers' | 'voice' | 'network' | 'rules' | 'keys' | 'updates'
+
+export function SettingsDialog({ settings, catalog, updates, autoCheck = null, netGuard, rules, access, language = 'auto', languageSupported = false, languageOverride = null, onSave, onClose, usage, now = Date.now(), onUsageRefresh, usageRefreshing = false, retentionDays, onRetentionChange, initialSection = 'appearance' }: {
   initialSection?: SettingsSection
+  usage?: UsageState
+  now?: number
+  onUsageRefresh?(): void
+  usageRefreshing?: boolean
+  retentionDays?: AttachmentRetentionDays
+  onRetentionChange?(days: AttachmentRetentionDays): Promise<void> | void
   settings: NewSessionSettings | null
   language?: LanguageSetting
   languageSupported?: boolean
@@ -376,6 +494,7 @@ export function SettingsDialog({ settings, catalog, updates, autoCheck = null, n
   onSave(next: NewSessionSettings, autoCheck: boolean | null, guard: { rule: GuardRule; expect: GuardRule } | null, language?: LanguageSetting): Promise<string | null>
   onClose(): void
 }): ReactElement {
+  const { appearance, setAppearance } = useAppearance()
   const [languageDraft, setLanguageDraft] = useState(language)
   const previousLanguage = useRef(language)
   useEffect(() => {
@@ -445,9 +564,12 @@ export function SettingsDialog({ settings, catalog, updates, autoCheck = null, n
     { id: 'sessions', label: t('Новые чаты'), group: t('Работа') },
     { id: 'providers', label: t('Модели и агенты'), group: t('Работа') },
     { id: 'voice', label: t('Диктовка'), group: t('Работа') },
+    { id: 'usage', label: t('Использование'), group: t('Работа') },
+    { id: 'storage', label: t('Файлы и хранение'), group: t('Работа') },
     ...(netGuard ? [{ id: 'network' as const, label: t('Страж сети'), group: t('Безопасность') }] : []),
     ...(access ? [{ id: 'access' as const, label: t('Доступ агентов'), group: t('Безопасность') }] : []),
     ...(rules ? [{ id: 'rules' as const, label: t('Постоянные разрешения'), group: t('Безопасность') }] : []),
+    { id: 'appearance', label: t('Внешний вид'), group: t('Приложение') },
     { id: 'general', label: t('Основные'), group: t('Приложение') },
     { id: 'keys', label: t('Сочетания клавиш'), group: t('Приложение') },
     ...(updates ? [{ id: 'updates' as const, label: t('Обновления'), group: t('Приложение') }] : []),
@@ -470,9 +592,9 @@ export function SettingsDialog({ settings, catalog, updates, autoCheck = null, n
           <button type="button" className="btn" onClick={onClose}>{t("Выйти без сохранения")}</button>
         </span> : <span className="settings-save-note" role="status">{dirty ? t('Есть несохранённые изменения') : t('Изменений нет')}</span>}
         <span className="grow" />
-        <button type="button" className="btn" onClick={close}>{t("К работе")}<Kbd>Esc</Kbd></button>
+        <button type="button" className="btn" onClick={close}>{t("К работе")}</button>
         <button type="button" className="btn btn-primary" disabled={busy || !!invalid} onClick={() => void save()} data-testid="settings-save">
-          {busy ? t('Сохраняю…') : t('Сохранить')} <Kbd>{`${CMD}↵`}</Kbd>
+          {busy ? t('Сохраняю…') : t('Сохранить')}
         </button>
       </>}>
       <div className="settings-layout">
@@ -486,6 +608,9 @@ export function SettingsDialog({ settings, catalog, updates, autoCheck = null, n
         </div>)}</nav>
       </aside>
       <div className="settings-content form-stack" onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); e.stopPropagation(); void save() } }}>
+        <div className="settings-page" hidden={section !== 'appearance'}><AppearanceSection value={appearance} onChange={setAppearance} /></div>
+        <div className="settings-page" hidden={section !== 'usage'}><UsageSection usage={usage} now={now} onRefresh={onUsageRefresh} refreshing={usageRefreshing} /></div>
+        <div className="settings-page" hidden={section !== 'storage'}><FilesStorageSection retentionDays={retentionDays} onRetentionChange={onRetentionChange} /></div>
         <div className="settings-page" hidden={section !== 'general'}><h3>{t('Основные')}</h3><section className="settings-sec">          <label className="field" htmlFor="settings-language">
             <span className="lbl">{t('Язык / Language')}</span>
             <select id="settings-language" data-testid="settings-language" value={languageDraft} disabled={busy || !languageSupported || !!languageOverride}
@@ -508,7 +633,7 @@ export function SettingsDialog({ settings, catalog, updates, autoCheck = null, n
               {PROVIDERS.map((p) => <option key={p} value={p}>{p}</option>)}
             </select>
           </label>
-          <span className="note" data-testid="settings-new-chat-note">{t("Новый чат (⌘N) начинается с этих умолчаний. Доступ каждая папка помнит свой — тот, что ты выбрал при отправке или сменил в чате; у новой папки — «Правки в папке без вопросов» или выбранное ниже.")}</span>
+          <span className="note" data-testid="settings-new-chat-note">{t("Эти параметры используются для новых чатов. Разговор без проекта начинается с доступа «Спрашивать»; выбранные настройки папок сохраняются отдельно.")}</span>
         </section></div>
         <div className="settings-page" hidden={section !== 'providers'}>
           <h3>{t("Модели и агенты")}</h3><p className="settings-intro">{t("Параметры новых чатов для каждого провайдера.")}</p>

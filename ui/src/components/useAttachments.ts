@@ -5,7 +5,7 @@ import type { AttachmentInput, SavedAttachment } from '../../../shell/src/contra
 import type { FilePathSource } from '../model/paths.js'
 import { insertText } from '../model/paths.js'
 import { hasFiles, pasteKind } from '../model/filePathsInput.js'
-import { AttachmentDraftOwner, MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, mergeAttachments, readAttachmentDraft, saveAttachmentDraft } from '../model/attachmentDrafts.js'
+import { AttachmentDraftOwner, MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, attachmentsOverLimit, mergeAttachments, readAttachmentDraft, saveAttachmentDraft } from '../model/attachmentDrafts.js'
 import type { DraftStore } from '../model/drafts.js'
 import { useFilePaths } from './useFilePaths.js'
 
@@ -28,6 +28,13 @@ function ownerFor(session: string, persist: boolean): AttachmentDraftOwner {
   if (persist) owners.set(session, owner)
   return owner
 }
+/** Keep recovery bounded to one current draft, one submission and one queue edit. */
+export function queueAttachmentEditNotice(session: string): string | null {
+  const owner = ownerFor(session, true)
+  if (owner.submitting) return t('Дождись отправки вложений, прежде чем править очередь.')
+  return attachmentsOverLimit(owner.items) ? t('Убери лишние вложения из поля ввода, прежде чем править очередь.') : null
+}
+
 const errorOf = (e: unknown): string => e && typeof e === 'object' && 'message' in e ? String(e.message) : t('Файл не удалось прикрепить. Попробуй ещё раз.')
 
 export function useAttachments({ source, box, text, setText, session, persist = true }: {
@@ -49,7 +56,16 @@ export function useAttachments({ source, box, text, setText, session, persist = 
     return () => { alive.current = false; off() }
   }, [owner])
   const replace = (next: SavedAttachment[]): void => owner.replace(next)
-  const restore = (snapshot: readonly SavedAttachment[]): void => replace(mergeAttachments(snapshot, owner.items))
+  const restore = (snapshot: readonly SavedAttachment[]): boolean => {
+    const restored = owner.recover(snapshot)
+    if (!restored) setNotice(t`К сообщению можно прикрепить до ${MAX_ATTACHMENTS} файлов. Убери лишние и попробуй снова.`)
+    return restored
+  }
+  const append = (item: SavedAttachment): void => {
+    // Recovery may have filled the draft while the shell was copying this new file.
+    if (owner.items.length >= MAX_ATTACHMENTS) throw new Error(t`К сообщению можно прикрепить до ${MAX_ATTACHMENTS} файлов. Убери лишние и попробуй снова.`)
+    replace(mergeAttachments(owner.items, [item]))
+  }
   useEffect(() => {
     const bridge = source?.attachments
     if (!bridge) return
@@ -72,7 +88,7 @@ export function useAttachments({ source, box, text, setText, session, persist = 
     if (owner.items.length >= MAX_ATTACHMENTS) throw new Error(t`К сообщению можно прикрепить до ${MAX_ATTACHMENTS} файлов. Убери лишние и попробуй снова.`)
     const r = await bridge.import(session, input)
     if ('error' in r) throw new Error(r.error)
-    replace(mergeAttachments(owner.items, [r]))
+    append(r)
   }
   const addFiles = (files: File[]): void => {
     const bridge = source?.attachments
@@ -84,7 +100,7 @@ export function useAttachments({ source, box, text, setText, session, persist = 
         const results = await bridge.files(session, [file])
         for (const r of results) {
           if ('error' in r) throw new Error(r.error)
-          replace(mergeAttachments(owner.items, [r]))
+          append(r)
         }
       })
     }
@@ -104,7 +120,7 @@ export function useAttachments({ source, box, text, setText, session, persist = 
       if (board.length) {
         for (const r of board) {
           if ('error' in r) { if (alive.current) setNotice(r.error); continue }
-          if (owner.items.length < MAX_ATTACHMENTS) replace(mergeAttachments(owner.items, [r]))
+          if (owner.items.length < MAX_ATTACHMENTS) append(r)
           else if (alive.current) setNotice(t`К сообщению можно прикрепить до ${MAX_ATTACHMENTS} файлов.`)
         }
         return
@@ -124,7 +140,7 @@ export function useAttachments({ source, box, text, setText, session, persist = 
             const results = await source.attachments!.files(session, [file])
             for (const r of results) {
               if ('error' in r) throw new Error(r.error)
-              replace(mergeAttachments(owner.items, [r]))
+              append(r)
             }
           } catch (err) { if (alive.current) setNotice(errorOf(err)) }
         }
@@ -150,6 +166,7 @@ export function useAttachments({ source, box, text, setText, session, persist = 
   }
   const finalize = async (target: string, snapshot: readonly SavedAttachment[] = owner.items): Promise<SavedAttachment[]> => {
     if (owner.pending) throw new Error(t('Дождись сохранения вложений.'))
+    if (attachmentsOverLimit(snapshot)) throw new Error(t`К сообщению можно прикрепить до ${MAX_ATTACHMENTS} файлов. Убери лишние и попробуй снова.`)
     if (!source?.attachments) return [...snapshot]
     const next: SavedAttachment[] = []
     for (const item of snapshot) {
@@ -161,9 +178,13 @@ export function useAttachments({ source, box, text, setText, session, persist = 
     return next
   }
   return {
-    items, previews, pending, notice: notice ?? legacy.notice, over: over || legacy.over,
+    items, previews, pending,
+    tooMany: attachmentsOverLimit(items),
+    notice: attachmentsOverLimit(items) ? t`К сообщению можно прикрепить до ${MAX_ATTACHMENTS} файлов. Убери лишние и попробуй снова.` : notice ?? legacy.notice,
+    over: over || legacy.over,
     enabled: !!source?.attachments, addFiles, finalize,
-    isBusy: () => owner.pending > 0,
+    isBusy: () => owner.pending > 0 || owner.submitting > 0,
+    beginSubmission: () => owner.beginSubmission(), endSubmission: () => owner.endSubmission(),
     clear: () => replace([]), restore, report: (message: string) => setNotice(message),
     remove: (path: string) => replace(owner.items.filter((x) => x.path !== path)),
     onPaste, onDragOver, onDragEnter: onDragOver,

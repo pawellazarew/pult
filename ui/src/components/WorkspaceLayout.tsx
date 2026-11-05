@@ -28,18 +28,20 @@ export function usePanelBox<T extends HTMLElement>(ref: RefObject<T | null>, def
 }
 
 /** The separators overlay the existing one-pixel borders instead of taking space from the panels. */
-export function WorkspaceLayout({ children, ...flags }: WorkspaceFlags & { children: ReactNode }): ReactElement {
+export function WorkspaceLayout({ children, mode = 'normal', ...flags }: WorkspaceFlags & { children: ReactNode; mode?: 'normal'|'expanded'|'focus' }): ReactElement {
   const root = useRef<HTMLElement>(null)
   const { width } = usePanelBox(root, { width: 1280, height: 720 })
   const [sidebar, setSidebar] = usePanelSize('pult.panel.sidebar.v1')
   const [inbox, setInbox] = usePanelSize('pult.panel.inbox.v1')
   const [files, setFiles] = usePanelSize('pult.panel.files.v1')
   const s = workspaceSizes(width, flags, { sidebar, right: flags.filesOpen ? files : inbox })
-  const columns = [!flags.sidebarHidden ? `${s.sidebar}px` : '', 'minmax(0, 1fr)', s.rightShown ? `${s.right}px` : ''].filter(Boolean).join(' ')
+  const narrow = width <= 760
+  const sidebarWidth = mode === 'focus' && !narrow ? 64 : s.sidebar
+  const columns = [!flags.sidebarHidden && !narrow ? `${sidebarWidth}px` : '', 'minmax(0, 1fr)', s.rightShown ? `${s.right}px` : ''].filter(Boolean).join(' ')
   return <main ref={root} className={`grid resizable-workspace${flags.sidebarHidden ? ' sidebar-hidden' : ''}${flags.inboxOpen ? ' with-inbox' : ''}${flags.filesOpen ? ` with-files${flags.filesExpanded ? ' files-focused' : ''}` : ''}`}
     style={{ gridTemplateColumns: columns }}>
     {children}
-    {!flags.sidebarHidden && <ResizeHandle label={t("Ширина списка проектов")} value={s.sidebar} min={s.sidebarMin} max={s.sidebarMax}
+    {!flags.sidebarHidden && !narrow && mode !== 'focus' && <ResizeHandle label={t("Ширина списка проектов")} value={s.sidebar} min={s.sidebarMin} max={s.sidebarMax}
       onChange={setSidebar} onReset={() => setSidebar(null)} testId="sidebar-resize" className="workspace-boundary" style={{ left: s.sidebar }} />}
     {s.rightShown && <ResizeHandle label={flags.filesOpen ? t('Ширина просмотра файлов') : t('Ширина списка ответов')} direction={-1}
       value={s.right} min={s.rightMin} max={s.rightMax} onChange={flags.filesOpen ? setFiles : setInbox}
@@ -48,7 +50,7 @@ export function WorkspaceLayout({ children, ...flags }: WorkspaceFlags & { child
 }
 
 /** A taller input is useful for long requests; the conversation always retains reading space. */
-export function ResizableComposer({ children }: { children: ReactNode }): ReactElement {
+export function ResizableComposer({ children, hidden = false }: { children: ReactNode; hidden?: boolean }): ReactElement {
   const root = useRef<HTMLDivElement>(null)
   const [size, setSize] = usePanelSize('pult.panel.composer.v1')
   const [max, setMax] = useState(300)
@@ -88,7 +90,7 @@ export function ResizableComposer({ children }: { children: ReactNode }): ReactE
     return () => observer.disconnect()
   }, [])
   const actual = clampSize(size ?? measuredInput, 78, max)
-  return <div ref={root} className="composer resizable-composer" data-input-resized={automatic ? undefined : '1'}
+  return <div ref={root} hidden={hidden} className="composer resizable-composer" data-input-resized={automatic ? undefined : '1'}
     style={{ '--composer-input-max': `${max}px`, ...(!automatic ? { '--composer-input-size': `${actual}px` } : {}) } as CSSProperties}>
     <ResizeHandle label={t("Высота поля ввода")} axis="y" direction={-1} value={actual} min={78} max={max} onChange={setSize}
       onReset={() => setSize(null)} testId="composer-resize" className="composer-boundary" />

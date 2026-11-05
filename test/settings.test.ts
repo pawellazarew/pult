@@ -647,7 +647,8 @@ describe('M8f: демон — settings.get|set и последний выбор'
     const c = await connectClient(home.paths)
     try {
       const got = (await c.request('settings.get')) as Record<string, unknown>
-      const { network, codexRules, access, language, ...rest } = got
+      const { network, codexRules, access, language, attachments, ...rest } = got
+      assert.deepEqual(attachments, { retentionDays: 30 })
       assert.equal(language, 'auto')
       assert.deepEqual(rest, { newSession: { rememberLast: true, defaults: { claude: {}, codex: {}, zcode: {} } }, lastUsed: {}, updates: { check: true } })
       // Шаг A: согласия нет; действующий defaultMode владельца (тестовый дом — файла настроек нет).
