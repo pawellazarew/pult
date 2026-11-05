@@ -7,7 +7,7 @@ import type { SubagentView } from '../model/subagents.js'
 // Центр окна: разговор с выбранным агентом (docs/12 §3 п.2). Вся логика ленты — в model/conversation.ts;
 // здесь только отрисовка, прокрутка «прилипает» к низу, пока человек сам не отлистал вверх.
 
-import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent, ReactElement, ReactNode } from 'react'
 import type { ConnState, PultEvent } from '../../../shell/src/contract.js'
 import type { AgentView } from '../model/agents.js'
@@ -35,7 +35,7 @@ import type { ConsentView } from '../model/access.js'
 import { Chip, CMD, hhmm, Icon, IS_MAC, Kbd, ProviderTag } from './common.js'
 import { ImageContext, ImageGallery } from './Images.js'
 import { plural } from '../lib/ru.js'
-import { friendlyTool, groupActivity } from '../model/activity.js'
+import { foldPath, friendlyTool, groupActivity, subagentBodyKey, toolsGroupKey } from '../model/activity.js'
 import { ContextMenu } from './ContextMenu.js'
 import type { MenuEntry } from './ContextMenu.js'
 import { sessionMenuItems } from './ProjectTree.js'
@@ -154,6 +154,14 @@ export type SendMode = 'now' | 'queue' | 'interrupt' | 'steer'
 /** Таймеры снятия подсветки по элементам ленты (переход из поиска, метки, ⌥↑/⌥↓). */
 const flashTimers = new WeakMap<Element, number>()
 
+/**
+ * Раскрытые блоки ленты (пачки «N действий», истории субагентов) — ключи из model/activity.ts. Состояние живёт в
+ * `Conversation`, а не в самом блоке: переход из поиска к строке внутри свёрнутого блока должен раскрыть его
+ * снаружи, до того как искать строку в DOM (свёрнутое не рисуется — см. `Fold`).
+ */
+interface FoldState { open: ReadonlySet<string>; set(key: string, open: boolean): void }
+const FoldContext = createContext<FoldState>({ open: new Set(), set: () => {} })
+
 export function Conversation(p: ConversationProps): ReactElement {
   const { agent } = p
   const imageBridge = useContext(MdBridgeContext)
@@ -163,6 +171,14 @@ export function Conversation(p: ConversationProps): ReactElement {
   const stick = useRef(true)
   const feedSize = useRef({ height: 0, viewport: 0 })
   const [away, setAway] = useState(false)
+  const [folds, setFolds] = useState<ReadonlySet<string>>(() => new Set())
+  const setFold = useCallback((key: string, open: boolean): void => setFolds((before) => {
+    if (before.has(key) === open) return before
+    const next = new Set(before)
+    if (open) next.add(key); else next.delete(key)
+    return next
+  }), [])
+  const foldState = useMemo<FoldState>(() => ({ open: folds, set: setFold }), [folds, setFold])
   const views = subagentViews(p.items)
   const stateKey = `pult.subagents.${agent.name}`
   const readKeys = (suffix: string): string[] => { try { return parseSubagentKeys(window.localStorage.getItem(`${stateKey}.${suffix}`)) } catch { return [] } }
@@ -260,11 +276,15 @@ export function Conversation(p: ConversationProps): ReactElement {
     // Reveal only after the parent feed has measurable geometry.
     if (activeChild !== null) { setActiveChild(null); return }
     const it = itemForEvent(p.items, t.eventId, { ...(t.kind !== undefined ? { kind: t.kind } : {}), ...(t.parentId !== undefined ? { parentId: t.parentId } : {}) })
-    if (it && reveal(it.id, 'center')) {
+    if (!it) return
+    // Цель в свёрнутой пачке или истории субагента: её ещё нет в DOM. Раскрываем путь — эффект придёт сюда снова.
+    const closed = (foldPath(p.items, it.key) ?? []).filter((key) => !folds.has(key))
+    if (closed.length) { setFolds((before) => new Set([...before, ...closed])); return }
+    if (reveal(it.id, 'center')) {
       doneJump.current = t.nonce
       p.onScrolled?.(t.nonce)
     }
-  }, [activeChild, p.scrollTo, p.items, reveal, p.onScrolled])
+  }, [activeChild, p.scrollTo, p.items, reveal, p.onScrolled, folds])
   const marks = userMarks(p.items)
   const lastUserJump = useRef<number | null>(null)
   useEffect(() => {
@@ -290,6 +310,7 @@ export function Conversation(p: ConversationProps): ReactElement {
 
   return (
     <ImageContext.Provider value={imageBridge ? { bridge: imageBridge, sessionId: agent.name } : null}>
+    <FoldContext.Provider value={foldState}>
     <section className="conv" aria-label={t`Разговор с ${agentLabel(agent)}`} data-testid="conversation" data-agent={agent.name}>
       <header className="conv-head">
         <div className="conv-title">
@@ -380,6 +401,7 @@ export function Conversation(p: ConversationProps): ReactElement {
         onStop={p.onStop} steerable={agent.provider === 'codex'} queueable={!!p.onQueueRemove} inject={qe.inject} footer={<ChatFooter agent={agent} usage={p.usage} now={p.now} onReveal={p.onReveal} {...(p.onHelp ? { onHelp: p.onHelp } : {})}
         {...(p.onConfigure ? { onConfigure: p.onConfigure } : {})} catalog={p.catalog ?? null} windows={p.windows ?? EMPTY_WINDOWS} consent={p.consent ?? null} />} />
     </section>
+    </FoldContext.Provider>
     </ImageContext.Provider>
   )
 }
@@ -670,14 +692,34 @@ export function MsgCopy({ text, what }: { text: string; what: string }): ReactEl
   )
 }
 
+/**
+ * Сворачиваемый блок ленты, содержимое которого рисуется ТОЛЬКО раскрытым. Обычный <details> монтирует и
+ * свёрнутое: в долгом ходе (сотни вызовов инструментов пачками) это были тысячи узлов DOM и секунды на открытие
+ * чата. Открыт ли — решает `FoldContext` (переход из поиска раскрывает путь к цели снаружи).
+ */
+function Fold({ id, className, testId, summary, children }: { id: string; className: string; testId?: string; summary: ReactNode; children: () => ReactNode }): ReactElement {
+  const fold = useContext(FoldContext)
+  const open = fold.open.has(id)
+  return (
+    // Щелчок по заголовку меняет состояние сам (как у «Разговоров» в ProjectTree): без этого `open` у details
+    // успевал перевернуться раньше, чем React узнавал о нём из `toggle`. `onToggle` ловит раскрытие снаружи —
+    // `reveal` ставит `open` предкам цели напрямую.
+    <details className={className} data-testid={testId} data-fold={id} open={open}
+      onToggle={(e) => { if (e.currentTarget.open !== open) fold.set(id, e.currentTarget.open) }}>
+      <summary onClick={(e) => { e.preventDefault(); fold.set(id, !open) }}>{summary}</summary>
+      {open && children()}
+    </details>
+  )
+}
+
 function ActivityItems({ items, props }: { items: readonly ConvItem[]; props: ConversationProps }): ReactElement {
   return <>{groupActivity(items).map((entry) => {
     if (entry.type === 'item') return <Item key={entry.item.key} it={entry.item} {...props} />
     const running = entry.items.findLast((it) => it.state === 'running')
-    return <details className="activity-group" key={entry.key} data-testid="activity-group">
-      <summary>{entry.items.length} {plural(entry.items.length, t('действие'), t('действия'), t('действий'))}<span className="activity-live">{running ? `· ${friendlyTool(running.name)} ${toolSummary(running.name, running.input)}` : t('· выполнено')}</span></summary>
-      {entry.items.map((it) => <Item key={it.key} it={it} {...props} />)}
-    </details>
+    return <Fold key={entry.key} id={toolsGroupKey(entry.key)} className="activity-group" testId="activity-group"
+      summary={<>{entry.items.length} {plural(entry.items.length, t('действие'), t('действия'), t('действий'))}<span className="activity-live">{running ? `· ${friendlyTool(running.name)} ${toolSummary(running.name, running.input)}` : t('· выполнено')}</span></>}>
+      {() => entry.items.map((it) => <Item key={it.key} it={it} {...props} />)}
+    </Fold>
   })}</>
 }
 
@@ -733,7 +775,11 @@ function StateMark({ state }: { state: ItemState }): ReactElement {
 /** Полный вход и вывод строки из лёгкой истории — из `tool.called` / `tool.finished` по номерам. */
 type ToolDetail = { input: Record<string, unknown>; result?: string } | 'loading' | 'error'
 
-function ToolRow({ it, loadEvents }: { it: ToolItem; loadEvents?: (ids: number[]) => Promise<PultEvent[]> }): ReactElement {
+/**
+ * Строка инструмента не зависит от часов окна и от чужих событий: `memo` по самому элементу (свёртка ленты
+ * сохраняет объект неизменённой строки) — иначе каждый тик и каждое событие перерисовывали все видимые строки.
+ */
+const ToolRow = memo(function ToolRow({ it, loadEvents }: { it: ToolItem; loadEvents?: (ids: number[]) => Promise<PultEvent[]> }): ReactElement {
   const [open, setOpen] = useState(it.state === 'error')
   useEffect(() => { if (it.state === 'error') setOpen(true) }, [it.state])
   const [detail, setDetail] = useState<ToolDetail | null>(null)
@@ -801,7 +847,7 @@ function ToolRow({ it, loadEvents }: { it: ToolItem; loadEvents?: (ids: number[]
       </div>
     </div>
   )
-}
+})
 
 function SubAgent({ it, ...p }: { it: AgentItem } & ConversationProps): ReactElement {
   return (
@@ -816,7 +862,7 @@ function SubAgent({ it, ...p }: { it: AgentItem } & ConversationProps): ReactEle
           <span className={`st t-${stateTone(it.state)}`} data-testid="subagent-state" data-state={it.state}><StateMark state={it.state} /></span>
         </div>
         {it.items.length > 0 && (
-          <details className="sub-body"><summary>{t("История субагента")}</summary><ActivityItems items={it.items} props={p} /></details>
+          <Fold id={subagentBodyKey(it.key)} className="sub-body" summary={t("История субагента")}>{() => <ActivityItems items={it.items} props={p} />}</Fold>
         )}
       </div>
     </div>

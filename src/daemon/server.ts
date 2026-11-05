@@ -26,7 +26,8 @@ import type { PultPaths } from '../core/paths.js'
 import { checkSockPath, ensureLayout } from '../core/paths.js'
 import type { DaemonStatus, RpcRequest } from '../core/rpc.js'
 import { ERROR_CODES, PROTOCOL_VERSION } from '../core/rpc.js'
-import { createStore, GET_LIMIT } from '../core/store.js'
+import { createStore, GET_LIMIT, sessionFileName } from '../core/store.js'
+import { createHistoryCache } from '../core/historyCache.js'
 import { clipEvent, compactHistory, fitEvent, HISTORY_PAGE_BYTES, LIVE_LINE_BYTES, pageHistory } from '../core/history.js'
 import { normalizeQuery, QUERY_MAX_CHARS, SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX, searchEvents } from '../core/search.js'
 import { exportSession } from '../core/exportMd.js'
@@ -280,6 +281,16 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
   const token = rotateToken(paths.token)
   const askKeys = createAskKeys()
   const store = createStore(paths)
+  // Сжатая история открытых чатов — готовой, пока файл сессии не менялся (src/core/historyCache.ts).
+  const history = createHistoryCache({
+    stamp: (sessionId) => {
+      try {
+        const st = statSync(join(paths.events, sessionFileName(sessionId)))
+        return `${st.size}:${st.mtimeMs}:${st.ino}`
+      } catch { return null }
+    },
+    load: (sessionId) => compactHistory(store.readSession(sessionId)),
+  })
   const bus = createBus()
   const startedAt = new Date().toISOString()
   const startedAtMs = Date.now()
@@ -2116,7 +2127,7 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
         // Бюджет страницы можно только уменьшить (тесты): больше — ответ перерастёт строку клиента.
         const budget = Number.isSafeInteger(params['budget']) ? Math.max(1024, Math.min(params['budget'] as number, HISTORY_PAGE_BYTES)) : HISTORY_PAGE_BYTES
         // Чтение файла и курсор — в одном синхронном куске: append между ними не вклинится.
-        const page = pageHistory(compactHistory(store.readSession(sessionId)), before, budget)
+        const page = pageHistory(history.get(sessionId), before, budget)
         send({ id: req.id, result: { ...page, cursor: store.lastId } })
         return
       }
