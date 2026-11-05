@@ -96,7 +96,7 @@ or the update button in the window.
   question lands in one list. Answer from the window or from the terminal.
 - **Your own CLIs and subscriptions.** Pult starts the `claude` and `codex` you already installed and logged into.
   It has no account and no server, and it never reads your tokens.
-- **A window and a CLI over the same agents.** Everything you do in the window you can script with `pult …`.
+- **A window and a CLI over the same saved agents.** Start and control them from the window or with `pult …`.
 
 ## How it works
 
@@ -749,7 +749,8 @@ copy you installed and logged into, on your own machine.
 - It never reads `~/.claude/.credentials.json`, the macOS keychain or `~/.codex/auth.json`. From `claude auth status` it
   takes only the plan type and login method; your email and organization never reach its reports or logs.
 - No proxying of requests, no server, no accounts: everything runs on your machine, as your user.
-- Its name and logo contain no Claude, Anthropic or Codex branding; it only says, in plain text, that it runs these CLIs.
+- Pult has its own name and logo. Provider names and icons identify the CLIs used by each conversation;
+  [asset notices](ui/assets/providers/NOTICE.txt) accompany the icons.
 
 **The honest risk.** Whether many agents running in parallel still count as «ordinary, individual usage» is not defined
 anywhere. If a provider decides it is not, enforcement would hit **your** account, not Pult. You are responsible for
