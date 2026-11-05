@@ -94,7 +94,7 @@ declare global {
 }
 
 type Modal = null | { type: 'external' } | { type: 'doctor' } | { type: 'mcp' } | { type: 'stop'; name: string } | { type: 'rm'; name: string } | { type: 'hide'; path: string; sessions: readonly string[]; busy: readonly string[] } | { type: 'rename'; name: string } | { type: 'help' } | { type: 'search' }
-  | { type: 'settings' } | { type: 'configure'; name: string; pick: SettingsPick; reason: 'misfit'; text?: string }
+  | { type: 'settings'; section?: import('./components/Settings.js').SettingsSection } | { type: 'configure'; name: string; pick: SettingsPick; reason: 'misfit'; text?: string }
   /** Шаг A: полный доступ без согласия — один диалог на всё время; после «Разрешить» смена уходит сама. */
   | { type: 'consent'; name: string; pick: SettingsPick }
   /** Шаг B: полный доступ в черновике без согласия — тот же диалог; после «Разрешить» уровень встаёт в черновик. */
@@ -361,6 +361,11 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   }, [bridge])
 
   // «Настройки» открылись — перечитать (правило стража могли сменить из терминала): диалог встанет на свежее.
+  useEffect(() => {
+    const open = (e: Event): void => { if ((e as CustomEvent).detail === 'voice') setModal({ type: 'settings', section: 'voice' }) }
+    window.addEventListener('pult:settings', open)
+    return () => window.removeEventListener('pult:settings', open)
+  }, [])
   const settingsOpen = modal?.type === 'settings'
   useEffect(() => { if (settingsOpen) void refreshSettings() }, [settingsOpen, refreshSettings])
 
@@ -1666,7 +1671,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
       )}
       {modal?.type === 'help' && <HotkeysHelp onClose={() => setModal(null)} />}
       {modal?.type === 'settings' && (
-        <SettingsDialog settings={settings?.newSession ?? null} catalog={providers} onSave={saveSettings} onClose={() => setModal(null)}
+        <SettingsDialog initialSection={modal.section} settings={settings?.newSession ?? null} catalog={providers} onSave={saveSettings} onClose={() => setModal(null)}
           language={settings?.language ?? 'auto'}
           languageSupported={!!bridge.reloadWindow && !!bridge.language}
           languageOverride={bridge.languageOverride ?? null}

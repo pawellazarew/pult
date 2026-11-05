@@ -17,6 +17,8 @@ import { obj } from '../model/types.js'
 import type { QueueItem } from '../model/types.js'
 import type { ProviderUsage } from '../model/usage.js'
 import { formatClock, formatResetIn, limitHolds, limitWindowsView } from '../model/usage.js'
+import { Dictation } from './Dictation.js'
+import { appendDictation } from '../model/speech.js'
 import { useAttachments } from './useAttachments.js'
 import { AttachmentStrip } from './AttachmentStrip.js'
 import { attachmentPrompt } from '../model/attachmentDrafts.js'
@@ -927,6 +929,7 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
   // Идёт ход: со старым демоном поле заперто, как раньше; с очередью — открыто.
   const attached = useAttachments({ source: filePaths, box: ta, text, setText, session: agentName })
   const picker = useRef<HTMLInputElement>(null)
+  const [dictating, setDictating] = useState(false)
   const sendLock = useRef(false)
   const blocked = (busy && !queueable) || disabled || sending || link !== 'up' || attached.pending > 0
   // С очередью — всегда `queue`: свободную сессию демон и так пустит сразу, а `busy` в окне мог устареть.
@@ -934,7 +937,7 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
   // окно казалось зависшим. Отказ (`updating`, страж, таймаут «прервать и сказать», очередь) — черновик обратно:
   // в пустое поле как был, к набранному за это время — первым, через пустую строку (model/pending.ts).
   const send = async (mode: SendMode = queueable ? 'queue' : 'now'): Promise<void> => {
-    if (blocked || attached.isBusy() || sendLock.current) return
+    if (blocked || dictating || attached.isBusy() || sendLock.current) return
     if (attached.items.length) {
       sendLock.current = true
       const original = attached.items
@@ -997,9 +1000,13 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
         <div className="composer-toolbar">
           {footer}
           <div className="composer-actions">
+        <Dictation key={agentName} disabled={blocked} onBusy={setDictating} onText={(spoken) => {
+          setText((draft) => appendDictation(draft, spoken))
+          requestAnimationFrame(() => ta.current?.focus())
+        }} />
         {attached.enabled && <><input ref={picker} className="attach-picker-input" type="file" multiple data-testid="attachment-picker" onChange={(e) => { attached.addFiles(Array.from(e.target.files ?? [])); e.target.value = '' }} /><button type="button" className="btn attach-picker" title={t("Прикрепить файлы")} aria-label={t("Прикрепить файлы")} onClick={() => picker.current?.click()} disabled={blocked}>＋</button></>}
         {busy && <button type="button" className="btn btn-danger composer-stop" onClick={onStop} data-testid="stop-turn" title={t("Остановить ход (Esc)")}><Icon name="stop" />{t("Стоп")}</button>}
-        <button type="button" className="btn btn-primary" onClick={() => void send()} disabled={blocked || (!text.trim() && !attached.items.length)} data-testid="send"
+        <button type="button" className="btn btn-primary" onClick={() => void send()} disabled={blocked || dictating || (!text.trim() && !attached.items.length)} data-testid="send"
           title={busy && queueable ? t`Идёт ход: реплика уйдёт, когда он кончится. ${CMD}Enter — прервать и сказать` : undefined}>
           <Icon name="send" />{busy && queueable ? t('В очередь') : t('Отправить')}
         </button>

@@ -3,7 +3,7 @@ import { after, before, describe, it } from 'node:test'
 import { launch, waitFor } from './harness.js'
 import type { Harness } from './harness.js'
 
-describe('раскрытие проектов и размер недавних', () => {
+describe('раскрытие проектов и свободная боковая панель', () => {
   let h: Harness
   before(async () => {
     h = await launch({ name: 'projects-layout' })
@@ -16,7 +16,7 @@ describe('раскрытие проектов и размер недавних',
   })
   after(async () => { await h?.close() })
 
-  it('все три свёрнутых проекта и первая недавняя беседа видны на трёх размерах окна', async () => {
+  it('все три свёрнутых проекта видны на трёх размерах окна', async () => {
     for (const project of await h.win.getByTestId('project').all()) if (await project.getAttribute('open') !== null) await project.getByTestId('project-toggle').click()
     for (const [width, height] of [[1280, 800], [1024, 642], [900, 560]]) {
       await h.app.evaluate(({ BrowserWindow }, [w, hh]) => BrowserWindow.getAllWindows()[0]?.setContentSize(w!, hh!), [width, height])
@@ -54,24 +54,10 @@ describe('раскрытие проектов и размер недавних',
     assert.equal(duration, '0s')
   })
 
-  it('граница недавних работает мышью и клавиатурой; размер сохраняется после reload', async () => {
-    const splitter = h.win.getByTestId('recent-resize')
-    const height = () => h.win.getByTestId('chats-recent').evaluate((el) => el.getBoundingClientRect().height)
-    const before = await height(), box = await splitter.boundingBox()
-    assert.ok(box)
-    await h.win.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
-    await h.win.mouse.down(); await h.win.mouse.move(box.x + box.width / 2, box.y - 70, { steps: 8 }); await h.win.mouse.up()
-    assert.ok(await height() > before + 30)
-    const dragged = await height()
-    await splitter.focus(); await splitter.press('ArrowDown')
-    assert.ok(await height() < dragged - 5)
-    await splitter.press('End')
-    const saved = await splitter.getAttribute('aria-valuenow')
-    await h.win.reload()
-    assert.ok(await waitFor(async () => await h.win.getByTestId('recent-resize').getAttribute('aria-valuenow') === saved))
-    assert.ok(await h.win.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1))
-    await h.win.getByTestId('recent-resize').dblclick()
-    assert.ok(Number(await h.win.getByTestId('recent-resize').getAttribute('aria-valuenow')) < 55)
+  it('проекты используют всю высоту: списка недавних и разделителя нет', async () => {
+    assert.equal(await h.win.getByTestId('chats-recent').count(), 0)
+    assert.equal(await h.win.getByTestId('recent-resize').count(), 0)
+    assert.ok(await h.win.getByTestId('sidebar-projects').evaluate((el) => el.clientHeight > 200))
   })
 
   it('«+» в проекте открывает черновик в его папке и не сворачивает проект', async () => {

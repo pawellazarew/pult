@@ -21,6 +21,8 @@ import { APPROVAL_LABEL, approvalBlocksBrowser, approvalHint, approvalLevels, pr
 import { folderFromDrop, hasFiles } from '../model/filePathsInput.js'
 import type { FilePathSource } from '../model/paths.js'
 import type { AgentProvider, ProviderCatalog } from '../model/types.js'
+import { Dictation } from './Dictation.js'
+import { appendDictation } from '../model/speech.js'
 import { AttachmentStrip } from './AttachmentStrip.js'
 import { useAttachments } from './useAttachments.js'
 import { CMD, Icon, IS_MAC, Kbd } from './common.js'
@@ -203,6 +205,8 @@ function Toggle({ on }: { on: boolean }): ReactElement {
 
 export function DraftView(p: DraftViewProps): ReactElement {
   const d = p.draft
+  const textRef = useRef(d.text); textRef.current = d.text
+  const [dictating, setDictating] = useState(false)
   const [menu, setMenu] = useState<MenuKind | null>(p.initialMenu ?? null)
   const firstReset = useRef(p.menuReset)
   const box = useRef<HTMLTextAreaElement>(null)
@@ -268,6 +272,7 @@ export function DraftView(p: DraftViewProps): ReactElement {
   const hasText = !!d.text.trim() || files.items.length > 0
   const empty = draftEmpty(d, files.items.length)
   const send = (): void => {
+    if (dictating) return
     const decision = submitDecision({ composing: false, repeat: false, busy: p.sending, linkLocked: Date.now() < armedAt, hasFolder: !!d.cwd, hasText, blocked })
     if (decision === 'folder') { setMenu('folder'); return }
     if (decision !== 'send') return
@@ -604,9 +609,10 @@ export function DraftView(p: DraftViewProps): ReactElement {
                   <button ref={refs.more} type="button" className="dchip icon-only" aria-haspopup="menu" aria-expanded={menu === 'more'}
                     data-testid="draft-chip-more" title={t('Ещё: ветка, браузер')} aria-label={t('Ещё: ветка, браузер')} onClick={() => toggle('more')}><Icon name="more" /></button>
                 </div>
+                <Dictation key={d.id} disabled={p.sending || p.obstructed} onBusy={setDictating} onText={(spoken) => { p.onText(appendDictation(textRef.current, spoken)); requestAnimationFrame(() => box.current?.focus()) }} />
                 {files.enabled && <AttachButton disabled={p.sending || files.pending > 0} onFiles={files.addFiles} />}
                 <button type="button" className="btn btn-primary draft-send" data-testid="draft-send" onClick={send}
-                  disabled={p.sending || linkLocked || !hasText || blocked} aria-busy={p.sending || undefined}>
+                  disabled={p.sending || dictating || linkLocked || !hasText || blocked} aria-busy={p.sending || undefined}>
                   <Icon name="send" />{p.sending ? t('Завожу…') : t('Отправить')}
                 </button>
               </div>

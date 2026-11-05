@@ -78,7 +78,8 @@ describe('окно: настройки сессии M8f', () => {
     await h.win.keyboard.press('Meta+,')
     const dlg = h.win.getByTestId('settings-dialog')
     await dlg.waitFor({ timeout: 5000 })
-    assert.match((await h.win.getByTestId('settings-appearance').textContent()) ?? '', /после редизайна/)
+    await h.win.getByTestId('settings-nav-providers').click()
+    assert.equal(await h.win.getByTestId('settings-appearance').count(), 0)
     await h.screen('m8f-settings')
     await h.win.getByTestId('settings-claude-model').selectOption('opus')
     await h.win.getByTestId('settings-claude-effort').selectOption('high')
@@ -106,6 +107,7 @@ describe('окно: настройки сессии M8f', () => {
     await h.win.keyboard.press('Meta+,')
     const dlg = h.win.getByTestId('settings-dialog')
     await dlg.waitFor({ timeout: 5000 })
+    await h.win.getByTestId('settings-nav-network').click()
     await h.win.getByTestId('settings-net-guard').waitFor({ timeout: 5000 })
     // Тестовый страж (PULT_TEST_NET=ok) отвечает выходом XX. Выход известен по doctor при подключении окна; нет —
     // «Проверить сеть».
@@ -146,6 +148,7 @@ describe('окно: настройки сессии M8f', () => {
     await h.win.keyboard.press('Meta+,')
     const dlg = h.win.getByTestId('settings-dialog')
     await dlg.waitFor({ timeout: 5000 })
+    await h.win.getByTestId('settings-nav-network').click()
     await chip('CN').waitFor({ timeout: 5000 })
     assert.equal(await h.win.getByTestId('guard-mode-deny').isChecked(), true, 'диалог встал на свежее правило')
     assert.equal(await chip('DE').count(), 0)
@@ -159,6 +162,7 @@ describe('окно: настройки сессии M8f', () => {
     assert.ok(await waitFor(async () => /изменилось снаружи/.test((await h.win.getByTestId('settings-error').textContent().catch(() => '')) ?? ''), 5000), 'отказа нет')
     assert.equal(readFileSync(h.paths.config, 'utf8'), before, 'правило из терминала не затёрто')
     await h.win.keyboard.press('Escape')
+    await h.win.getByRole('button', { name: 'Выйти без сохранения' }).click()
     assert.ok(await waitFor(async () => (await dlg.count()) === 0, 5000))
   })
 
@@ -175,6 +179,7 @@ describe('окно: настройки сессии M8f', () => {
     await h.win.keyboard.press('Meta+,')
     const dlg = h.win.getByTestId('settings-dialog')
     await dlg.waitFor({ timeout: 5000 })
+    await h.win.getByTestId('settings-nav-rules').click()
     const sec = h.win.getByTestId('settings-rules')
     const row = h.win.locator('[data-testid="rule-row"][data-id="r-e2e00001"]')
     await row.waitFor({ timeout: 5000 })

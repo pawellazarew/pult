@@ -138,6 +138,7 @@ describe('окно: доступ — согласие один раз и мет�
     const dlg = h.win.getByTestId('settings-dialog')
     await dlg.waitFor({ timeout: 5000 })
     assert.match((await h.win.getByTestId('access-consent-line').textContent()) ?? '', /Полный доступ разрешён \d\d\.\d\d\.\d{4}/)
+    await h.win.getByTestId('settings-nav-access').click()
     await h.win.getByTestId('access-revoke').click()
     assert.ok(await waitFor(async () => /отозван/.test((await h.win.getByTestId('access-consent-line').textContent()) ?? ''), 5000), 'строка не сменилась')
     await h.win.keyboard.press('Escape')

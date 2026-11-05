@@ -4,8 +4,8 @@
 .sidebar-filter span { color: var(--faint); font-size: 10px; }
 .sidebar-filter:hover { background: var(--ground); }
 .sidebar-filter.active { background: var(--panel); border-color: var(--line); color: var(--ink); }
-.tree.project-sidebar { display: grid; grid-template-rows: minmax(0, 1fr) 8px clamp(104px, var(--recent-share, 30%), 55%); padding: 0; overflow: hidden; }
-.project-sidebar .sidebar-projects { min-height: 0; max-height: none; overflow: auto; scrollbar-gutter: stable; overflow-anchor: none; }
+.tree.project-sidebar { display: flex; flex-direction: column; flex: 1; min-height: 0; padding: 0; overflow: hidden; }
+.project-sidebar .sidebar-projects { flex: 1; min-height: 0; max-height: none; overflow: auto; scrollbar-gutter: stable; overflow-anchor: none; }
 .project-sidebar .project-manager { margin: 0 8px; border: 0; }
 .projects-heading { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; height: 34px; padding: 0 9px; background: var(--sidebar); }
 .projects-heading h3 { margin: 0; color: var(--mut); font: 500 11.5px var(--body); display: flex; align-items: center; gap: 8px; }
@@ -35,12 +35,6 @@
 .project-more:hover, .project-empty:hover { background: var(--ground); color: var(--ink); }
 .project-sidebar .proj-archive { border: 0; margin: 8px 9px; }
 .archive-toggle { width: 100%; border: 0; background: none; text-align: left; color: var(--mut); }
-.sidebar-splitter { display: flex; justify-content: center; align-items: center; cursor: row-resize; touch-action: none; border-top: 1px solid var(--hair); outline-offset: -2px; }
-.sidebar-splitter span { width: 28px; height: 2px; background: var(--line); border-radius: 2px; }
-.sidebar-splitter:hover span, .sidebar-splitter:focus-visible span { background: var(--accent); }
-.project-sidebar .chat-recent { min-height: 0; border: 0; padding-top: 0; overflow: hidden; }
-.project-sidebar .chat-recent .chat-section-title { padding-top: 5px; }
-.project-sidebar .chat-recent .ag { padding-top: 8px; padding-bottom: 8px; }
 @media (prefers-reduced-motion: reduce) { .project-group::details-content { transition: none; } }
 
 @media (max-width: 950px) {

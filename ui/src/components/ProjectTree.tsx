@@ -3,7 +3,6 @@ import { t } from '../lib/i18n.js'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { MouseEvent, ReactElement } from 'react'
-import { SidebarSplit } from './SidebarSplit.js'
 import type { ProjectFilter } from '../model/navigation.js'
 import { ContextMenu } from './ContextMenu.js'
 import type { MenuEntry } from './ContextMenu.js'
@@ -137,7 +136,6 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
     lastReveal.current = `${selectedProject}:${p.selected}`
     if (p.collapsed.has(selectedProject)) p.onToggle(selectedProject)
   }, [p.selected, selectedProject, p.collapsed, p.onToggle])
-  const recent = sections.find((s) => s.key === 'recent')!
   useEffect(() => {
     if (!p.selected) return
     const timer = window.setTimeout(() => {
@@ -225,7 +223,7 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
             data-testid={`filter-${key}`} onClick={() => setFilter(key)}>{key === 'all' ? t('Все') : key === 'working' ? t('В работе') : t('Ждут')}<span>{count}</span></button>
         })}
       </div>
-      <SidebarSplit projects={<div className="sidebar-projects" data-testid="sidebar-projects" ref={projectArea}>
+      <div className="tree project-sidebar" data-testid="agent-list"><div className="sidebar-projects" data-testid="sidebar-projects" ref={projectArea}>
         <div className="project-manager" data-testid="project-manager">
           <div className="projects-heading"><h3>{t("Проекты")}<span className="count">{list.length}</span></h3>
             <button type="button" className="proj-btn project-add" onClick={p.onAddProject} data-testid="add-project" title={t("Добавить папку проекта")} aria-label={t("Добавить проект")}><Icon name="plus" /></button>
@@ -267,11 +265,7 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
           </button>
           {archiveOpen && <ul className="ag-list" role="listbox" aria-label={t("Сессии в архиве")}>{archived.map((a) => row(a, a.repo ?? a.cwd))}</ul>}
         </section>}
-      </div>} recent={<section className="chat-section chat-recent" data-testid="chats-recent">
-        <h3 className="chat-section-title">{t("Недавние")}<span>{recent.rows.length}</span></h3>
-        <ul className="ag-list" role="listbox" aria-label={t("Недавние")}>{recent.rows.map(({ agent: a, projectPath }) => row(a, projectPath, true))}</ul>
-        {recent.rows.length === 0 && <div className="recent-empty">{query ? t('Нет совпадений среди недавних') : t('Здесь будут недавние беседы')}</div>}
-      </section>} />
+      </div></div>
       {menu && <ContextMenu at={menu.at} items={menu.items} onClose={closeMenu} testId={menu.testId} />}
     </nav>
   )

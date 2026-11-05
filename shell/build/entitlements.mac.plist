@@ -1,14 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Права Pult.app под hardened runtime (scripts/after-pack.cjs). Ровно два, и только нужные:
+<!-- Права Pult.app под hardened runtime (scripts/after-pack.cjs). Только необходимые права:
      allow-jit — V8 компилирует JS в память; disable-library-validation — ad-hoc подпись не даёт
-     Team ID, и без этого фреймворк Electron не загрузится в процесс. НАРОЧНО НЕТ
+     Team ID, и без этого фреймворк Electron не загрузится в процесс; audio-input — запись диктовки. НАРОЧНО НЕТ
      allow-dyld-environment-variables: ради запрета DYLD_INSERT_LIBRARIES runtime и включён. -->
 <plist version="1.0">
 <dict>
   <key>com.apple.security.cs.allow-jit</key>
   <true/>
   <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+  <key>com.apple.security.device.audio-input</key>
   <true/>
 </dict>
 </plist>

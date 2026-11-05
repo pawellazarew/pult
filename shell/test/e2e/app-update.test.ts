@@ -115,6 +115,7 @@ describe('окно обновляется само: окно не из банд�
     assert.equal(await h.win.getByTestId('update-available').count(), 0, 'кнопка не обновит это окно — плашки нет')
     await h.win.keyboard.press('Meta+,')
     await h.win.getByTestId('settings-dialog').waitFor({ timeout: 5000 })
+    await h.win.getByTestId('settings-nav-updates').click()
     const row = h.win.getByTestId('settings-app-update')
     await row.waitFor({ timeout: 5000 })
     assert.equal(await row.getAttribute('data-state'), 'elsewhere')
