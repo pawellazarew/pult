@@ -1,3 +1,4 @@
+import './queue.css'
 import { AsyncQuestion } from './AsyncQuestion.js'
 import { t } from '../lib/i18n.js'
 // Центр окна: разговор с выбранным агентом (docs/12 §3 п.2). Вся логика ленты — в model/conversation.ts;
@@ -81,6 +82,8 @@ export interface ConversationProps {
   onQueueRemove?(id: string): void
   onQueueMove?(id: string, to: number): void
   onQueueResume?(): void
+  /** Отправить выбранную реплику в текущую работу Codex без остановки. */
+  onQueueSend?(id: string): Promise<void>
   /**
    * Правка реплики в очереди (0.3.2): «Изменить» держит очередь на реплике, пока правка открыта. Нет — старый
    * демон: кнопки нет.
@@ -314,6 +317,7 @@ export function Conversation(p: ConversationProps): ReactElement {
       {p.onQueueRemove && (agent.queue?.length || agent.queuePaused || qe.edit || qe.notice) ? (
         <QueueList queue={agent.queue ?? []} paused={agent.queuePaused === true} onRemove={p.onQueueRemove}
           onMove={p.onQueueMove ?? (() => {})} onResume={p.onQueueResume ?? (() => {})}
+          {...(p.onQueueSend ? { onSend: p.onQueueSend } : {})}
           {...(p.onQueueEdit ? { edit: qe.view } : {})} notice={qe.notice} />
       ) : null}
       <Composer busy={sv.busy} needsYou={sv.needsYou} permFocused={p.focusedPerm !== null} link={p.link ?? 'up'} disabled={holds} sending={p.sending} error={p.sendError} onSend={p.onSend} agentName={agent.name} label={agentLabel(agent)} filePaths={p.filePaths ?? null}
@@ -1038,43 +1042,140 @@ function Composer({ busy, needsYou, permFocused, link, disabled, sending, error,
  * реплике стоит. Ход упал, упёрся в лимит или его прервали — очередь стоит до «Продолжить»: следующая реплика
  * могла держаться на результате упавшего хода.
  */
-export function QueueList({ queue, paused, onRemove, onMove, onResume, edit, notice }: {
+export function QueueList({ queue, paused, onRemove, onMove, onResume, onSend, edit, notice }: {
   queue: readonly QueueItem[]; paused: boolean
   onRemove(id: string): void; onMove(id: string, to: number): void; onResume(): void
+  onSend?(id: string): Promise<void>
   /** Правка реплики; нет — старый демон, кнопки «Изменить» нет. */
   edit?: QueueEditView
   /** Заметка над списком: «Реплика уже ушла…», «Время правки вышло…». */
   notice?: string | null
 }): ReactElement {
   const st = edit?.state ?? null
+  const [sending, setSending] = useState<string | null>(null)
+  const sendLock = useRef(false)
+  const [sendError, setSendError] = useState<string | null>(null)
+  const [announcement, setAnnouncement] = useState('')
+  const blocked = sending !== null || st !== null || edit?.opening != null
+  const list = useRef<HTMLOListElement>(null)
+  type Drag = { id: string; target: string | null; after: boolean; moved: boolean; x: number; y: number; pointerId: number; handle: HTMLButtonElement }
+  const drag = useRef<Drag | null>(null)
+  const [dragView, setDragView] = useState<Pick<Drag, 'id' | 'target' | 'after'> | null>(null)
+  const latest = useRef({ queue, onMove, blocked })
+  latest.current = { queue, onMove, blocked }
+  const cancelDrag = (): void => {
+    const active = drag.current
+    drag.current = null
+    setDragView(null)
+    if (active?.handle.hasPointerCapture(active.pointerId)) active.handle.releasePointerCapture(active.pointerId)
+  }
+  useEffect(() => {
+    const cancel = (): void => cancelDrag()
+    const move = (e: globalThis.PointerEvent): void => {
+      const active = drag.current
+      if (!active || active.pointerId !== e.pointerId) return
+      const current = latest.current
+      if (current.blocked || !current.queue.some(item => item.id === active.id)) { cancel(); return }
+      if (!active.moved && Math.hypot(e.clientX - active.x, e.clientY - active.y) < 5) return
+      active.moved = true
+      const row = document.elementsFromPoint(e.clientX, e.clientY)
+        .map(el => el.closest<HTMLElement>('[data-testid="queue-item"]'))
+        .find(el => el && list.current?.contains(el))
+      const target = row?.dataset['id']
+      active.target = target && current.queue.some(item => item.id === target) ? target : null
+      active.after = row ? e.clientY >= row.getBoundingClientRect().top + row.getBoundingClientRect().height / 2 : false
+      setDragView({ id: active.id, target: active.target, after: active.after })
+    }
+    const finish = (e: globalThis.PointerEvent): void => {
+      const active = drag.current
+      if (!active || active.pointerId !== e.pointerId) return
+      const current = latest.current
+      cancel()
+      if (!active.moved || current.blocked || !active.target) return
+      const from = current.queue.findIndex(item => item.id === active.id)
+      const target = current.queue.findIndex(item => item.id === active.target)
+      if (from < 0 || target < 0) return
+      let to = target + (active.after ? 1 : 0)
+      if (from < to) to--
+      if (to !== from) { current.onMove(active.id, to); setAnnouncement(t`Позиция ${to + 1} из ${current.queue.length}`) }
+    }
+    const escape = (e: globalThis.KeyboardEvent): void => {
+      if (e.key !== 'Escape' || !drag.current) return
+      e.preventDefault(); e.stopPropagation(); cancel()
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', finish)
+    window.addEventListener('pointercancel', cancel)
+    window.addEventListener('blur', cancel)
+    window.addEventListener('keydown', escape, true)
+    return () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', finish)
+      window.removeEventListener('pointercancel', cancel)
+      window.removeEventListener('blur', cancel)
+      window.removeEventListener('keydown', escape, true)
+    }
+  }, [])
+  useEffect(() => {
+    const active = drag.current
+    if (active && (blocked || !queue.some(item => item.id === active.id) || (active.target !== null && !queue.some(item => item.id === active.target)))) cancelDrag()
+  }, [queue, blocked])
+  const send = async (id: string): Promise<void> => {
+    if (!onSend || sendLock.current || blocked) return
+    sendLock.current = true; setSending(id); setSendError(null); cancelDrag()
+    try { await onSend(id) }
+    catch (error) { setSendError(errorText(error)) }
+    finally { sendLock.current = false; setSending(null) }
+  }
   // Правленую реплику убрали из очереди, пока правка открыта, — правка остаётся (там текст человека) последней строкой.
   const orphan = st !== null && !queue.some((it) => it.id === st.id)
   return (
-    <div className="queue" data-testid="queue" data-paused={paused ? '1' : '0'}>
+    <div className="queue" data-testid="queue" data-paused={paused ? '1' : '0'} data-sending={sending ?? undefined}>
       {paused && (
         <div className="queue-paused" role="status" data-testid="queue-paused">
           <Icon name="alert" />
-          <span className="grow">{t("Очередь стоит: ход не удался. Реплики ниже не уйдут, пока не скажешь.")}</span>
-          {queue.length > 0 && <button type="button" className="btn btn-sm" onClick={onResume} data-testid="queue-resume">{t("Продолжить")}</button>}
+          <span className="grow">{t("Очередь стоит: реплики ниже не уйдут, пока не скажешь.")}</span>
+          {queue.length > 0 && <button type="button" className="btn btn-sm" disabled={sending !== null} onClick={onResume} data-testid="queue-resume">{t("Продолжить")}</button>}
         </div>
       )}
       {notice ? <div className="queue-notice" role="status" data-testid="queue-notice">{notice}</div> : null}
+      {sendError && <div className="queue-notice err" role="alert" data-testid="queue-send-error">{sendError}</div>}
+      <span className="queue-announcement" role="status" aria-live="polite">{announcement}</span>
       {(queue.length > 0 || orphan) && (
-        <ol className="queue-list" aria-label={t("Очередь реплик")}>
+        <ol ref={list} className="queue-list" aria-label={t("Очередь реплик")}>
           {queue.map((it, i) => (st && st.id === it.id && edit ? <QueueEditor key={it.id} n={i + 1} st={st} edit={edit} /> : (
-            <li key={it.id} className="queue-item" data-testid="queue-item" data-id={it.id}>
+            <li key={it.id} className="queue-item" data-testid="queue-item" data-id={it.id}
+              data-dragging={dragView?.id === it.id ? '1' : undefined}
+              data-drop={dragView?.target === it.id && dragView.id !== it.id ? dragView.after ? 'after' : 'before' : undefined}>
+              <button type="button" className="btn btn-ghost btn-sm queue-drag-handle" disabled={blocked || queue.length < 2}
+                aria-label={t("Переместить реплику")} aria-keyshortcuts="ArrowUp ArrowDown" title={t("Перетащи за ручку или нажми ↑/↓")} data-testid="queue-drag"
+                onPointerDown={(e) => {
+                  if (drag.current || !e.isPrimary || e.button !== 0 || blocked || queue.length < 2) return
+                  e.preventDefault(); e.currentTarget.focus(); e.currentTarget.setPointerCapture(e.pointerId)
+                  drag.current = { id: it.id, target: null, after: false, moved: false, x: e.clientX, y: e.clientY, pointerId: e.pointerId, handle: e.currentTarget }
+                }}
+                onLostPointerCapture={() => { if (drag.current) cancelDrag() }}
+                onKeyDown={(e) => {
+                  if (blocked || e.repeat || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return
+                  e.preventDefault(); e.stopPropagation()
+                  const current = latest.current
+                  const from = current.queue.findIndex(item => item.id === it.id)
+                  const to = from + (e.key === 'ArrowUp' ? -1 : 1)
+                  if (from >= 0 && to >= 0 && to < current.queue.length) { current.onMove(it.id, to); setAnnouncement(t`Позиция ${to + 1} из ${current.queue.length}`) }
+                }}>
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true"><path d="M3 4h10M3 8h10M3 12h10" /></svg>
+              </button>
               <span className="n mono">{i + 1}</span>
               <span className="txt" title={it.text}>{it.text}</span>
               {edit && (
                 <button type="button" className="btn btn-ghost btn-sm" aria-label={t("Изменить реплику")} title={t("Изменить: очередь подождёт, пока правишь")}
-                  disabled={st !== null || edit.opening !== null} aria-busy={edit.opening === it.id ? true : undefined}
+                  disabled={blocked} aria-busy={edit.opening === it.id ? true : undefined}
                   onClick={() => edit.onStart(it.id)} data-testid="queue-edit">{t("Изменить")}</button>
               )}
-              <button type="button" className="btn btn-ghost btn-sm" aria-label={t("Выше")} title={t("Выше")} disabled={i === 0}
-                onClick={() => onMove(it.id, i - 1)} data-testid="queue-up">↑</button>
-              <button type="button" className="btn btn-ghost btn-sm" aria-label={t("Ниже")} title={t("Ниже")} disabled={i === queue.length - 1}
-                onClick={() => onMove(it.id, i + 1)} data-testid="queue-down">↓</button>
-              <button type="button" className="btn btn-ghost btn-sm" aria-label={t("Убрать из очереди")} title={t("Убрать из очереди")}
+              {onSend && <button type="button" className="btn btn-ghost btn-sm queue-send-now" disabled={blocked}
+                title={t("Отправить в текущую задачу без остановки")} aria-busy={sending === it.id ? true : undefined}
+                onClick={() => void send(it.id)} data-testid="queue-send">{sending === it.id ? <span className="spin" /> : <Icon name="send" />}{t("Отправить сейчас")}</button>}
+              <button type="button" className="btn btn-ghost btn-sm" aria-label={t("Убрать из очереди")} title={t("Убрать из очереди")} disabled={sending !== null}
                 onClick={() => onRemove(it.id)} data-testid="queue-remove"><Icon name="x" /></button>
             </li>
           )))}

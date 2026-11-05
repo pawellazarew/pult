@@ -68,11 +68,14 @@ describe('скриншоты экранов (демо)', () => {
     assert.ok(await waitFor(async () => (await statusOf('codex-tests')) === 'blocked_permission', 20_000), 'codex-tests не спросил разрешения')
     assert.equal(await statusOf('ui-refactor'), 'working')
     assert.ok(await waitFor(async () => ((await h.win.getByTestId('inbox-count').textContent()) ?? '') === '2', 10_000), 'в Inbox не два запроса')
-    // Шаг B, кадр «Где работаем?»: ни один чат не открыт, из окна чатов не заводили — черновик без папки с недавними
-    // папками (сессии демона и история Claude Code/Codex).
-    await h.win.keyboard.press('Meta+N')
+    // Кадру «Где работаем?» нужен явно пустой черновик. Meta+N наследует текущую/последнюю
+    // папку: начальный refreshRecent может уже увидеть сессии, заведённые этим тестом.
+    // Ссылка без path открывает реальное состояние без папки независимо от скорости этого ответа.
+    await h.app.evaluate(({ app }) => {
+      (app as unknown as { emit(e: string, ...a: unknown[]): boolean }).emit('open-url', { preventDefault() {} }, 'pult://new')
+    })
     const d = h.win.getByTestId('draft')
-    await d.waitFor({ timeout: 3000 })
+    await d.getByTestId('draft-from-link').waitFor({ timeout: 3000 })
     assert.equal(await d.getByTestId('draft-chip-folder').getAttribute('data-path'), '', 'черновик не без папки')
     assert.ok(await waitFor(async () => (await d.getByTestId('draft-recent-folder').count()) > 0, 5000), 'нет недавних папок')
     await both('draft-no-folder')

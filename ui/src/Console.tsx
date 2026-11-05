@@ -1613,6 +1613,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
             onQueueRemove={(id) => queueCall('agent.queue.remove', { name: current.name, id })}
             onQueueMove={(id, to) => queueCall('agent.queue.move', { name: current.name, id, to })}
             onQueueResume={() => queueCall('agent.queue.resume', { name: current.name })}
+            {...(current.provider === 'codex' ? { onQueueSend: async (id: string) => { try { await bridge.call('agent.queue.send', { name: current.name, id }) } finally { await refreshAgents() } } } : {})}
             onQueueEdit={queueEditApi(current.name)} onHelp={() => setModal({ type: 'help' })} onRename={(title) => renameAgent(current.name, title)}
             onStop={() => setModal({ type: 'stop', name: current.name })}
             onRemove={() => setModal({ type: 'rm', name: current.name })}

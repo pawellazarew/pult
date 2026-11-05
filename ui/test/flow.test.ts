@@ -118,20 +118,27 @@ describe('очередь реплик под полем ввода', () => {
     assert.equal(buildAgents([{ ...rec, queue: [], queuePaused: false }], {})[0]?.queue, undefined)
   })
 
-  it('идёт ход: поле открыто, «В очередь», подсказка про ⌘Enter; очередь — текст, ↑↓ и ×', () => {
+  it('идёт ход: поле открыто, «В очередь», подсказка про ⌘Enter; очередь — текст, ручка перемещения и ×', () => {
     const a = ag({ status: 'working', queue: [{ id: 'a1', text: 'первая', at: '' }, { id: 'b2', text: 'вторая', at: '' }] })
     const h = html(Conversation, convProps(a))
     assert.match(h, /data-testid="send"[^>]*>.*В очередь/)
     assert.doesNotMatch(h, /data-testid="send"[^>]*disabled/, 'кнопка не заперта ходом (заперта только пустым полем)')
     assert.match(h, /Enter поставит реплику в очередь/)
     assert.equal((h.match(/data-testid="queue-item"/g) ?? []).length, 2)
-    assert.match(text(h), /1 первая .* 2 вторая/)
-    // Первую выше не поднять, последнюю ниже не опустить.
-    const items = h.split('data-testid="queue-item"').slice(1)
-    assert.match(items[0] ?? '', /disabled=""[^>]*data-testid="queue-up"/)
-    assert.doesNotMatch(items[1] ?? '', /disabled=""[^>]*data-testid="queue-up"/)
-    assert.match(items[1] ?? '', /disabled=""[^>]*data-testid="queue-down"/)
+    assert.match(text(h), /1 первая.*2 вторая/)
+    assert.equal((h.match(/data-testid="queue-drag"/g) ?? []).length, 2)
+    assert.match(h, /Перетащи за ручку или нажми ↑\/↓/)
+    assert.doesNotMatch(h, /queue-up|queue-down|draggable="true"/)
     assert.doesNotMatch(h, /queue-paused/)
+  })
+
+  it('отправка выбранной реплики предлагается только при наличии callback', () => {
+    const props = { queue: [{ id: 'a', text: 'потом', at: '' }], paused: false, onRemove: noop, onMove: noop, onResume: noop }
+    assert.doesNotMatch(html(QueueList, props), /data-testid="queue-send"/)
+    const h = html(QueueList, { ...props, onSend: async () => {} })
+    assert.match(h, /data-testid="queue-send"/)
+    assert.match(text(h), /Отправить сейчас/)
+    assert.match(h, /disabled=""[^>]*data-testid="queue-drag"/, 'единственную реплику некуда перемещать')
   })
 
   it('старый демон (без очереди): поле заперто ходом, как раньше', () => {
@@ -144,7 +151,7 @@ describe('очередь реплик под полем ввода', () => {
   it('очередь стоит: плашка и «Продолжить»', () => {
     const h = html(QueueList, { queue: [{ id: 'a1', text: 'после падения', at: '' }], paused: true, onRemove: noop, onMove: noop, onResume: noop })
     assert.match(h, /data-testid="queue-paused"/)
-    assert.match(text(h), /Очередь стоит: ход не удался/)
+    assert.match(text(h), /Очередь стоит: реплики ниже не уйдут/)
     assert.match(h, /data-testid="queue-resume"[^>]*>Продолжить/)
     // Значок плашки — со своим размером: без него SVG растягивался на всю беседу и сжимал текст в столбик.
     assert.match(h, /data-testid="queue-paused"><svg class="ic" width="16" height="16" viewBox="0 0 16 16"/)

@@ -25,6 +25,9 @@ Codex questions appear as forms with choices and a custom answer field. Draft an
 between a chat and Inbox; use Cmd/Ctrl+Enter to submit. Asynchronous questions stay available while Codex
 continues working. Their replies update the active turn, or start the next turn if work has already finished.
 
+For queued Codex messages, **Send now** delivers any selected message to the active turn without stopping
+it; the remaining messages keep their order. Drag the **≡** handle to reorder, or focus it and press ↑/↓.
+
 During a Codex turn, **Steer now** (Alt+Enter) adds a clarification without stopping the task. Enter still
 queues the next task, and Cmd/Ctrl+Enter still interrupts and sends. A rejected clarification returns to the composer.
 

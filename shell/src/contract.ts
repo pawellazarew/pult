@@ -48,6 +48,7 @@ export const ALLOWED_METHODS = [
   'agent.retry',
   // О2: очередь реплик во время хода — «Продолжить» после неудачи, × и ↑/↓ под полем ввода.
   'agent.queue.resume',
+  'agent.queue.send',
   'agent.queue.remove',
   'agent.queue.move',
   // О3: браузер для агента вкл/выкл (со следующего хода) и свои MCP-серверы владельца — список и выбор.

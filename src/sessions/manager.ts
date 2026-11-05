@@ -175,6 +175,9 @@ export interface SayOptions {
   steer?: boolean
   /** Id асинхронного вопроса, на который отвечает реплика. */
   questionId?: number
+  /** Id реплики очереди: receipt для защиты от повторной отправки после рестарта. */
+  queueItemId?: string
+  queueItemAt?: string
 }
 
 /** Очередь сессии наружу: превью реплик и пауза. */
@@ -253,7 +256,7 @@ export interface SessionManager {
    * Режим, в котором браузер не включается, выключает его (и возвращает, когда режим снова позволяет).
    */
   configure(params: ConfigureParams): Promise<ConfigureResult>
-  prompt(name: string, text: string, questionId?: number): Promise<{ turnId: string }>
+  prompt(name: string, text: string, questionId?: number, queueItemId?: string, queueItemAt?: string): Promise<{ turnId: string }>
   answerQuestion(name: string, questionId: number, answers: string[]): Promise<SayResult>
   /**
    * `agent.prompt` с флагами О2: `queue` — в очередь, если сессия занята; `interrupt` — прервать и сказать.
@@ -272,6 +275,7 @@ export interface SessionManager {
   resumeQueues(): void
   /** Очередь стоит после неудачного хода — пустить дальше (следующая реплика уходит сразу, если сессия свободна). */
   queueResume(name: string): QueueState
+  queueSend(name: string, id: string): Promise<SayResult>
   queueRemove(name: string, id: string): QueueState
   /** Переставить реплику на место `to` (индекс; за краями — к краю). */
   queueMove(name: string, id: string, to: number): QueueState
@@ -452,6 +456,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
   // заводящегося хода. `removing` — агенты под `rm --worktree`, `prompting` — счётчик prompt,
   // ещё не записавших ход в `inflight`. Обе брони ставятся синхронно, до первого await.
   const removing = new Set<string>()
+  const queueSending = new Map<string, { id: string; createdAt: string }>()
   const answeringQuestions = new Set<string>()
   const prompting = new Map<string, number>()
   const releasePrompting = (name: string): void => {
@@ -485,7 +490,13 @@ export function createManager(opts: ManagerOptions): SessionManager {
     }
   })
   if (turnsSeeded) opts.logger.info('начало последнего хода проставлено старым сессиям', { count: turnsSeeded })
-  for (const rec of registry.list()) {
+  for (let rec of registry.list()) {
+    if (rec.queue?.length) {
+      // Crash между receipt и записью sessions.json: уже принятая реплика повторно не уйдёт.
+      const accepted = new Set(opts.store.readSession(rec.name).filter(e => e.kind === 'message.user' && typeof e.data['queueItemId'] === 'string').map(e => `${e.data['queueItemId']}:${e.data['queueItemAt']}`))
+      const remaining = rec.queue.filter(item => !accepted.has(`${item.id}:${item.at}`))
+      if (remaining.length !== rec.queue.length) rec = registry.update(rec.name, { queue: remaining.length ? remaining : undefined, ...(remaining.length ? {} : { queuePaused: undefined }) }) as SessionRecord
+    }
     statuses.set(rec.name, rec.lastStatus)
     if (rec.context) contexts.set(rec.name, rec.context)
     // Очередь пережила рестарт, ход — нет: он умер вместе с прошлым демоном. Сама очередь не тронется —
@@ -764,7 +775,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
    */
   async function drain(name: string): Promise<void> {
     const rec = registry.get(name)
-    if (!rec?.queue?.length || rec.queuePaused || holdDrain.has(name) || removing.has(name) || busyNow(name)) return
+    if (!rec?.queue?.length || rec.queuePaused || holdDrain.has(name) || queueSending.has(name) || removing.has(name) || busyNow(name)) return
     if (opts.holdTurns?.()) return
     const [item, ...rest] = rec.queue as [QueueItem, ...QueueItem[]]
     // Голову правят — очередь стоит на ней: ни она, ни те, что за ней, не обгоняют правку.
@@ -794,6 +805,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
   }
   const needQueueItem = (name: string, id: string): { rec: SessionRecord; at: number } => {
     const rec = needRec(name)
+    if (queueSending.get(name)?.id === id) throw new ManagerError('invalid_params', 'реплика уже отправляется — дождись результата')
     const at = (rec.queue ?? []).findIndex((it) => it.id === id)
     if (at < 0) throw new ManagerError('not_found', `в очереди ${name} нет реплики ${id}`)
     return { rec, at }
@@ -839,6 +851,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
   }
   const findQueueItem = (name: string, id: string): { rec: SessionRecord; at: number } => {
     const rec = registry.get(name)
+    if (queueSending.get(name)?.id === id) throw new ManagerError('invalid_params', 'реплика уже отправляется — дождись результата')
     const at = rec ? (rec.queue ?? []).findIndex((it) => it.id === id) : -1
     if (!rec || at < 0) throw goneItem(name, id)
     return { rec, at }
@@ -1184,7 +1197,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
       return { record, changes, when }
     },
 
-    async prompt(name, text, questionId) {
+    async prompt(name, text, questionId, queueItemId, queueItemAt) {
       const rec = needRec(name)
       if (typeof text !== 'string' || !text.trim()) {
         throw new ManagerError('invalid_params', 'пустая реплика')
@@ -1225,8 +1238,8 @@ export function createManager(opts: ManagerOptions): SessionManager {
       // статус сессии и текст ответа (`agent read`) реплика человека менять не должна.
       // Текст — через ту же редакцию, что и ответы модели (инвариант 7).
       if (gate.notice) emit({ sessionId: name, provider: rec.provider, kind: 'session.configured', data: { changes: {}, notice: gate.notice, access: 'downgraded' } })
-      const emitUser = () => emit({ sessionId: name, provider: rec.provider, kind: 'message.user', data: { text: redactString(text), ...(questionId !== undefined ? { questionId } : {}) } })
-      const user = questionId === undefined ? emitUser() : null
+      const emitUser = () => emit({ sessionId: name, provider: rec.provider, kind: 'message.user', data: { text: redactString(text), ...(questionId !== undefined ? { questionId } : {}), ...(queueItemId !== undefined ? { queueItemId, queueItemAt } : {}) } })
+      const user = questionId === undefined && queueItemId === undefined ? emitUser() : null
       phases.accepted(name)
       // Начало хода — время для порядка бесед в окне (`lastTurnAt`): одна запись реестра на ход, тем же `ts`, что у
       // `message.user`, — окно поднимает строку по событию, и `agent.list` её уже не сдвинет.
@@ -1290,7 +1303,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
         emit({ sessionId: name, provider: rec.provider, kind: 'status.changed', data: { status: 'failed', error: message } })
         throw new ManagerError((e as { code?: string }).code ?? 'internal', message)
       }
-      if (questionId !== undefined) {
+      if (questionId !== undefined || queueItemId !== undefined) {
         // Некоторые отказы (сеть, turn/start) возвращаются уже завершённым TurnStarted.
         // До подтверждения не закрываем форму и не пишем receipt, который запретил бы повтор.
         const immediate: { outcome?: TurnOutcome } = {}
@@ -1368,7 +1381,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
         try { result = await adapter.steer(name, text) }
         catch (e) { throw new ManagerError('invalid_params', redactString((e as Error).message)) }
         // В журнал только после принятия сервером: отказ не оставляет ложной реплики в истории.
-        emit({ sessionId: name, provider: rec.provider, kind: 'message.user', data: { text: redactString(text), steering: true, turnId: result.turnId, ...(sayOpts.questionId !== undefined ? { questionId: sayOpts.questionId } : {}) } })
+        emit({ sessionId: name, provider: rec.provider, kind: 'message.user', data: { text: redactString(text), steering: true, turnId: result.turnId, ...(sayOpts.questionId !== undefined ? { questionId: sayOpts.questionId } : {}), ...(sayOpts.queueItemId !== undefined ? { queueItemId: sayOpts.queueItemId, queueItemAt: sayOpts.queueItemAt } : {}) } })
         return result
       }
       // До «прервать»: иначе идущий ход остановился бы, а новый не завёлся. «В очередь» во время обновления
@@ -1421,7 +1434,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
           return { queued: true, id }
         }
       }
-      return await api.prompt(name, text, sayOpts.questionId)
+      return await api.prompt(name, text, sayOpts.questionId, sayOpts.queueItemId, sayOpts.queueItemAt)
     },
 
     startingTurns() {
@@ -1439,6 +1452,39 @@ export function createManager(opts: ManagerOptions): SessionManager {
       const next = rec.queuePaused ? registry.update(name, { queuePaused: undefined }) as SessionRecord : rec
       if (next.queue?.length) scheduleDrain(name)
       return queueState(next)
+    },
+
+    async queueSend(name, id) {
+      if (queueSending.has(name)) throw new ManagerError('invalid_params', 'реплика уже отправляется — дождись результата')
+      const { rec, at } = findQueueItem(name, id)
+      if (rec.provider !== 'codex') throw new ManagerError('invalid_params', 'отправка из очереди в текущую задачу доступна только для Codex')
+      if (editHolds.get(name)?.has(id)) throw new ManagerError('invalid_params', 'сначала сохрани или отмени правку реплики')
+      const item = rec.queue![at]!
+      if (opts.store.readSession(name).some(e => e.kind === 'message.user' && e.data['queueItemId'] === id && e.data['queueItemAt'] === item.at)) {
+        const rest = (rec.queue ?? []).filter(it => it.id !== id)
+        registry.update(name, { queue: rest.length ? rest : undefined, ...(rest.length ? {} : { queuePaused: undefined }) })
+        rememberSent(name, id)
+        throw goneItem(name, id)
+      }
+      const reservation = { id, createdAt: rec.createdAt }
+      queueSending.set(name, reservation)
+      try {
+        const result = await api.say(name, item.text, { ...(busyNow(name) ? { steer: true } : {}), queueItemId: id, queueItemAt: item.at })
+        const current = registry.get(name)
+        if (current?.createdAt === rec.createdAt) {
+          const rest = (current.queue ?? []).filter(it => it.id !== id)
+          registry.update(name, { queue: rest.length ? rest : undefined, ...(rest.length ? {} : { queuePaused: undefined }) })
+          rememberSent(name, id)
+        }
+        return result
+      } catch (e) {
+        const current = registry.get(name)
+        if (current?.createdAt === rec.createdAt) pauseQueue(name, 'queue_send_failed')
+        throw e
+      } finally {
+        if (queueSending.get(name) === reservation) queueSending.delete(name)
+        scheduleDrain(name)
+      }
     },
 
     queueRemove(name, id) {
