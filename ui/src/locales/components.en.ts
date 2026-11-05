@@ -154,6 +154,8 @@ export const componentsEn: Readonly<Record<string, string>> = {
   "Остановить ход (Esc)": "Stop turn (Esc)",
   "Стоп": "Stop",
   "Идёт ход: реплика уйдёт, когда он кончится. {0}Enter — прервать и сказать": "A turn is running: your message will be sent when it finishes. {0}Enter interrupts and sends now",
+  "Уточнить сейчас": "Steer now",
+  "Уточнить текущую задачу без остановки (⌥Enter)": "Add to the current task without stopping it (Alt+Enter)",
   "В очередь": "Queue",
   "Отправить": "Send",
   "Очередь стоит: ход не удался. Реплики ниже не уйдут, пока не скажешь.": "Queue paused: the turn failed. Messages below will wait for your decision.",

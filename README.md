@@ -19,6 +19,15 @@ For a single CLI command, override the setting with `PULT_LANG=en pult --help` (
 The saved setting is `language: "auto" | "ru" | "en"` in `~/.pult/config.json`. Model responses and your own text are
 shown as written; changing the interface language does not translate your conversations.
 
+## Codex questions and mid-turn updates
+
+Codex questions appear as forms with choices and a custom answer field. Draft answers survive switching
+between a chat and Inbox; use Cmd/Ctrl+Enter to submit. Asynchronous questions stay available while Codex
+continues working. Their replies update the active turn, or start the next turn if work has already finished.
+
+During a Codex turn, **Steer now** (Alt+Enter) adds a clarification without stopping the task. Enter still
+queues the next task, and Cmd/Ctrl+Enter still interrupts and sends. A rejected clarification returns to the composer.
+
 ## New in 0.3.19
 
 - **Start with the task.** A new chat opens as a draft immediately. Pick a folder, write the task and send;

@@ -36,7 +36,7 @@ export function questionsOf(toolName: string, input: Record<string, unknown>): Q
     const id = text(q['id'])
     if (!id) return []
     const options = optionsOf(q['options'])
-    return [{ key: id, header: text(q['header']), question: text(q['question']), options, multi: true, other: !options.length || q['isOther'] === true, secret: q['isSecret'] === true }]
+    return [{ key: id, header: text(q['header']), question: text(q['question']), options, multi: q['multiSelect'] !== false, other: !options.length || q['isOther'] === true, secret: q['isSecret'] === true }]
   })
 }
 
@@ -55,3 +55,27 @@ export function buildAnswers(questions: readonly QuestionView[], chosen: Readonl
 
 export const answersReady = (answers: Record<string, { answers: string[] }>, questions: readonly QuestionView[]): boolean =>
   questions.length > 0 && questions.every((q) => (answers[q.key]?.answers.length ?? 0) > 0)
+
+/** Unsent answers stay in memory while moving between the chat and Inbox. Nothing, including
+ * secret answers, is written to storage. Clear on resolution; bound abandoned pending requests. */
+export interface QuestionDraft {
+  chosen: Readonly<Record<string, readonly string[]>>
+  other: Readonly<Record<string, string>>
+}
+const EMPTY_DRAFT: QuestionDraft = { chosen: {}, other: {} }
+const questionDrafts = new Map<string, QuestionDraft>()
+const draftListeners = new Map<string, Set<() => void>>()
+export const questionDraft = (id: string): QuestionDraft => questionDrafts.get(id) ?? EMPTY_DRAFT
+export function saveQuestionDraft(id: string, draft: QuestionDraft): void {
+  questionDrafts.delete(id)
+  questionDrafts.set(id, draft)
+  if (questionDrafts.size > 256) questionDrafts.delete(questionDrafts.keys().next().value!)
+  for (const notify of draftListeners.get(id) ?? []) notify()
+}
+export function clearQuestionDraft(id: string): void { questionDrafts.delete(id) }
+export function subscribeQuestionDraft(id: string, notify: () => void): () => void {
+  const listeners = draftListeners.get(id) ?? new Set<() => void>()
+  listeners.add(notify)
+  draftListeners.set(id, listeners)
+  return () => { listeners.delete(notify); if (!listeners.size) draftListeners.delete(id) }
+}

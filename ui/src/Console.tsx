@@ -1,3 +1,5 @@
+import { reconcileAsyncAnswers } from './model/conversation.js'
+import { clearQuestionDraft } from './model/questions.js'
 import type { LanguageSetting } from '../../src/i18n/core.js'
 import { settleAttachmentDrafts } from './components/useAttachments.js'
 import { getLanguage, t as tr } from './lib/i18n.js'
@@ -123,7 +125,7 @@ const JUMP_TIMEOUT_MS = 30_000
 function withEarlier(ui: UiState, name: string): readonly ConvItem[] {
   const items = ui.sessions[name]?.conv.items ?? []
   const early = ui.earlier[name]?.items
-  return early && early.length ? [...early, ...items] : items
+  return reconcileAsyncAnswers(early && early.length ? [...early, ...items] : items)
 }
 
 export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
@@ -477,6 +479,10 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
       timer = null
       const evs = queue.splice(0)
       if (!evs.length) return
+      for (const e of evs) {
+        if (e.kind === 'permission.resolved' && typeof e.data['id'] === 'string') clearQuestionDraft(e.data['id'])
+        if (e.kind === 'message.user' && typeof e.data['questionId'] === 'number') clearQuestionDraft(`${e.sessionId}:async:${e.data['questionId']}`)
+      }
       setUi((s) => applyEvents(s, evs))
       if (evs.some((e) => refreshesAgents(e) || (e.sessionId !== 'daemon' && !known.current.has(e.sessionId)))) scheduleRefresh()
       const t = Date.now()
@@ -776,7 +782,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     try {
       // О2: идёт ход — в очередь демона; ⌘Enter — прервать и сказать (демон ждёт, пока ход осядет).
       const r = (await bridge.call('agent.prompt', {
-        name, text, ...(mode === 'queue' ? { queue: true } : {}), ...(mode === 'interrupt' ? { interrupt: true } : {}),
+        name, text, ...(mode === 'queue' ? { queue: true } : {}), ...(mode === 'interrupt' ? { interrupt: true } : {}), ...(mode === 'steer' ? { steer: true } : {}),
       })) as { queued?: boolean } | null
       setSend({ sending: false, error: null })
       if (r?.queued) {
@@ -1603,7 +1609,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
             usage={ui.usage[current.provider]} focusedPerm={ownFocused?.id ?? null} permBusy={permBusy} link={conn.state}
             sending={send.sending} sendError={send.error}
             pending={pendingBubble(outgoing, current.name, withEarlier(ui, current.name))}
-            onSend={sendPrompt} filePaths={filePaths}
+            onSend={sendPrompt} onAsyncAnswer={async (questionId, answers) => { await bridge.call('agent.question.answer', { name: current.name, questionId, answers }); await refreshAgents() }} filePaths={filePaths}
             onQueueRemove={(id) => queueCall('agent.queue.remove', { name: current.name, id })}
             onQueueMove={(id, to) => queueCall('agent.queue.move', { name: current.name, id, to })}
             onQueueResume={() => queueCall('agent.queue.resume', { name: current.name })}

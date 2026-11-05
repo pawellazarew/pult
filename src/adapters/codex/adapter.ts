@@ -2180,6 +2180,22 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
     },
 
     send(name, text, at) { return runTurn(need(name), text, at) },
+    async steer(name, text) {
+      const l = need(name)
+      const ctx = l.turn
+      const providerTurnId = ctx?.providerTurnId ?? l.serverTurn?.providerTurnId
+      if (!text.trim()) throw new Error('пустое уточнение')
+      if (!client?.alive() || !l.threadId || !providerTurnId || l.closing || l.stopRequested || ctx?.settled || l.starting) {
+        throw new Error('нет активного хода Codex — уточнение не отправлено')
+      }
+      // expectedTurnId не даёт опоздавшему уточнению попасть в следующий ход.
+      // Никакого fallback в turn/start или interrupt: при отказе текст вернётся в composer.
+      await client.request('turn/steer', {
+        threadId: l.threadId, expectedTurnId: providerTurnId,
+        input: [{ type: 'text', text }],
+      }, controlMs)
+      return { turnId: ctx?.turnId ?? providerTurnId }
+    },
 
     /**
      * ПРЯМОЙ ответ по id запроса провайдера. В Ф1 этим путём НИКТО не ходит, и это не забытый

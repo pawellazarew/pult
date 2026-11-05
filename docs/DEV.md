@@ -2604,3 +2604,18 @@ SettingsDialog, выбор микрофона/языка сохраняется 
 Проверки: `ui/test/speech.test.ts`, `shell/test/unit/speech.test.ts`, e2e `dictation.test.ts`
 (подставные устройства, без микрофона пользователя) и `settingsScreen.test.ts`. Для ручной проверки
 реального аудио нужны разрешение macOS и пробная диктовка. Автотесты их не запрашивают.
+
+
+### Codex: асинхронные вопросы и steering
+
+`agentMessage.questions` из Codex 0.166 (`AsyncUserInputQuestion {title, options?: string[] | null}`)
+сохраняется mapper-ом в `message.done.data.questions`. UI показывает форму только по этим метаданным;
+Markdown не разбирается как вопрос. Вопросы субагентов остаются текстом до поддержки маршрутизации ответа в их треды.
+`agent.question.answer {name, questionId, answers: string[]}` принимает id события `message.done`, проверяет
+число непустых ответов и запрещает дубли. Ответ становится `message.user {text, questionId}`: replay закрывает форму.
+Если ход идёт, ответ доставляется через `turn/steer`; после конца — через обычный `turn/start`.
+
+`agent.prompt {name, text, steer: true}` поддерживается для Codex и несовместим с `queue`/`interrupt`.
+Адаптер отправляет `turn/steer {threadId, expectedTurnId, input}`: id защищает от попадания в другой ход.
+Отказ не переключается на новый ход и не прерывает старый. Запись уточнения в журнал — после принятия сервером.
+Черновики форм живут только в памяти интерфейса; очистка — при разрешении вопроса/ответе, лимит — 256 форм.

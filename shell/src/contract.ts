@@ -39,6 +39,7 @@ export const ALLOWED_METHODS = [
   'agent.rename',
   'agent.archive',
   'agent.prompt',
+  'agent.question.answer',
   'agent.read',
   'agent.wait',
   'agent.list',

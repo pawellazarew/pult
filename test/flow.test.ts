@@ -504,3 +504,61 @@ describe('правка реплики в очереди (0.3.2): agent.queue.mov
     } finally { c.close(); await d.stop('конец теста'); home.remove(); rmSync(cwd, { recursive: true, force: true }) }
   })
 })
+
+
+describe('уточнение в текущий ход Codex', () => {
+  it('RPC принимает steer без очереди/остановки; отказ и завершённый ход не оставляют ложных реплик', async () => {
+    const home = tempHome()
+    const cwd = mkdtempSync(join(tmpdir(), 'pt-steer-'))
+    writeFileSync(join(home.paths.home, '.pult-fake-codex.json'), JSON.stringify({ scenario: 'hang', speed: 0 }))
+    const d = await startTestDaemon(home)
+    const c = await connectClient(home.paths)
+    try {
+      await c.request('agent.start', { name: 'steer', kind: 'codex', cwd })
+      const start = await c.request('agent.prompt', { name: 'steer', text: 'исходная задача' }) as { turnId: string }
+      await assert.rejects(c.request('agent.prompt', { name: 'steer', text: 'неоднозначно', steer: true, queue: true }), code('invalid_params'))
+      const result = await c.request('agent.prompt', { name: 'steer', text: 'сначала тесты', steer: true }) as { turnId: string }
+      assert.equal(result.turnId, start.turnId)
+      assert.equal((await record(c, 'steer'))['lastStatus'], 'working')
+      assert.deepEqual((await queueOf(c, 'steer')).texts, [])
+      assert.deepEqual(await userTexts(c, 'steer'), ['исходная задача', 'сначала тесты'])
+      await assert.rejects(c.request('agent.prompt', { name: 'steer', text: 'reject this steering', steer: true }), code('invalid_params'))
+      assert.deepEqual(await userTexts(c, 'steer'), ['исходная задача', 'сначала тесты'])
+      await c.request('agent.stop', { name: 'steer' })
+      await assert.rejects(c.request('agent.prompt', { name: 'steer', text: 'слишком поздно', steer: true }), code('invalid_params'))
+      assert.deepEqual(await userTexts(c, 'steer'), ['исходная задача', 'сначала тесты'])
+      await c.request('agent.start', { name: 'claude', kind: 'claude', cwd })
+      await assert.rejects(c.request('agent.prompt', { name: 'claude', text: 'уточнение', steer: true }), code('invalid_params'))
+    } finally { c.close(); await d.stop('конец теста'); home.remove(); rmSync(cwd, { recursive: true, force: true }) }
+  })
+})
+
+
+describe('асинхронные вопросы Codex', () => {
+  it('ответ steering во время хода, новый ход после конца, защита от дублей и неверных ответов', async () => {
+    const home = tempHome()
+    const cwd = mkdtempSync(join(tmpdir(), 'pt-async-q-'))
+    writeFileSync(join(home.paths.home, '.pult-fake-codex.json'), JSON.stringify({ scenario: 'hang', speed: 0 }))
+    const d = await startTestDaemon(home)
+    const c = await connectClient(home.paths)
+    try {
+      await c.request('agent.start', { name: 'aq', kind: 'codex', cwd })
+      const original = await c.request('agent.prompt', { name: 'aq', text: 'работай' }) as { turnId: string }
+      const question = () => d.emit({ sessionId: 'aq', provider: 'codex', kind: 'message.done', data: { itemId: 'async-q', text: 'Какой цвет?', questions: [{ title: 'Какой цвет?', options: ['Синий', 'Зелёный'] }] } })
+      const q = question()
+      await assert.rejects(c.request('agent.question.answer', { name: 'aq', questionId: q.id, answers: [] }), code('invalid_params'))
+      const answer = await c.request('agent.question.answer', { name: 'aq', questionId: q.id, answers: ['Синий'] }) as { turnId: string }
+      assert.equal(answer.turnId, original.turnId)
+      assert.equal((await record(c, 'aq'))['lastStatus'], 'working')
+      assert.deepEqual((await queueOf(c, 'aq')).texts, [])
+      assert.ok((await events(c, 'aq')).some(e => e.kind === 'message.user' && e.data['questionId'] === q.id && e.data['steering'] === true))
+      await assert.rejects(c.request('agent.question.answer', { name: 'aq', questionId: q.id, answers: ['Зелёный'] }), code('invalid_params'))
+      await c.request('agent.stop', { name: 'aq' })
+      const later = question()
+      const next = await c.request('agent.question.answer', { name: 'aq', questionId: later.id, answers: ['Зелёный'] }) as { turnId: string }
+      assert.notEqual(next.turnId, original.turnId)
+      assert.ok((await events(c, 'aq')).some(e => e.kind === 'message.user' && e.data['questionId'] === later.id))
+      await c.request('agent.stop', { name: 'aq' })
+    } finally { c.close(); await d.stop('конец теста'); home.remove(); rmSync(cwd, { recursive: true, force: true }) }
+  })
+})

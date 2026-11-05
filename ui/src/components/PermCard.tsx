@@ -7,7 +7,7 @@ import { byHuman, concealedNote, describePermission, gutterNo, optionsLine, scop
 import type { PermKind } from '../model/permissions.js'
 import type { PermissionOffers, PermissionScope } from '../../../src/adapters/types.js'
 import type { DiffBlock } from '../model/permissions.js'
-import { answersReady, buildAnswers, isQuestionTool, questionsOf } from '../model/questions.js'
+import { answersReady, buildAnswers, clearQuestionDraft, isQuestionTool, questionDraft, questionsOf, saveQuestionDraft, subscribeQuestionDraft } from '../model/questions.js'
 import type { QuestionView } from '../model/questions.js'
 import { ago, shortPath } from '../model/agents.js'
 import { CMD, Icon, Kbd, ProviderTag } from './common.js'
@@ -39,6 +39,7 @@ export interface PermCardProps {
   /** Без аргумента — один раз (так зовёт и ⌘↵); `session` / `rule` — только из своих кнопок. */
   onApprove?(scope?: Exclude<PermissionScope, 'once'>): void
   onDeny?(reason: string): void
+  allowSkip?: boolean
   onAnswer?(answers: Record<string, { answers: string[] }>): void
 }
 
@@ -152,27 +153,41 @@ export function PermCard(p: PermCardProps): ReactElement {
 
 function QuestionCard(p: PermCardProps): ReactElement {
   const questions = questionsOf(p.toolName, p.input)
-  const [chosen, setChosen] = useState<Record<string, string[]>>({})
-  const [other, setOther] = useState<Record<string, string>>({})
+  const [draft, setDraft] = useState(() => questionDraft(p.permId))
+  const { chosen, other } = draft
+  useEffect(() => {
+    if (p.state !== 'pending') { clearQuestionDraft(p.permId); return }
+    setDraft(questionDraft(p.permId))
+    return subscribeQuestionDraft(p.permId, () => setDraft(questionDraft(p.permId)))
+  }, [p.permId, p.state])
   const answers = buildAnswers(questions, chosen, other)
   const ready = answersReady(answers, questions)
-  const pick = (q: QuestionView, label: string, on: boolean): void => setChosen((s) => ({
-    ...s, [q.key]: q.multi ? (on ? [...(s[q.key] ?? []), label] : (s[q.key] ?? []).filter((v) => v !== label)) : (on ? [label] : []),
-  }))
-  return <article className="perm" data-state={p.state} data-testid="perm-card" data-perm-id={p.permId} data-question="1" onMouseDown={p.onFocus}>
+  const pick = (q: QuestionView, label: string, on: boolean): void => {
+    const current = questionDraft(p.permId)
+    saveQuestionDraft(p.permId, { ...current, ...(!q.multi && on ? { other: { ...current.other, [q.key]: '' } } : {}), chosen: {
+      ...current.chosen, [q.key]: q.multi ? (on ? [...(current.chosen[q.key] ?? []), label] : (current.chosen[q.key] ?? []).filter((v) => v !== label)) : (on ? [label] : []),
+    } })
+  }
+  return <article className="perm" data-state={p.state} data-testid="perm-card" data-perm-id={p.permId} data-question="1" data-focused={p.focused ? 'true' : 'false'} onMouseDown={p.onFocus} onFocusCapture={p.onFocus}
+    onKeyDown={(e) => {
+      if (p.state !== 'pending' || e.nativeEvent.isComposing || e.key !== 'Enter' || !(e.metaKey || e.ctrlKey)) return
+      e.preventDefault()
+      e.stopPropagation()
+      if (ready && !p.busy) p.onAnswer?.(answers)
+    }}>
     <div className="perm-h"><span className="lbl">{t("Вопрос")}{p.agent ? ` ${p.agent.provider === 'codex' ? 'Codex' : 'Claude'}` : ''}</span>{p.agent && <><span className="who">{p.agent.name}</span><ProviderTag provider={p.agent.provider} /></>}{p.state === 'pending' && <span className="waited">{t("ждёт ")}{ago(p.createdAt, p.now)}</span>}</div>
     {p.state === 'pending' && p.concealed && <Concealed kind="question" />}
     {questions.map((q) => <fieldset key={q.key} className="question-field" disabled={p.busy || p.state !== 'pending'}>
-      {q.header && <legend>{q.header}</legend>}<div className="perm-reason">{q.question}</div>
+      <legend>{q.header || q.question}</legend>{q.header && <div className="perm-reason">{q.question}</div>}
       {q.options.map((o) => <label key={o.label} className="question-option">
         <input type={q.multi ? 'checkbox' : 'radio'} name={`${p.permId}-${q.key}`} checked={(chosen[q.key] ?? []).includes(o.label)}
           onChange={(e) => pick(q, o.label, e.target.checked)} /> {o.label}
         {o.description && <span className="perm-opts">{o.description}</span>}
       </label>)}
       {q.other && <input className="question-answer" aria-label={q.options.length ? t`${q.header || q.question}: свой ответ` : q.header || q.question} type={q.secret ? 'password' : 'text'}
-        value={other[q.key] ?? ''} placeholder={q.options.length ? t('Свой ответ') : t('Ответ')} onChange={(e) => setOther((s) => ({ ...s, [q.key]: e.target.value }))} />}
+        value={other[q.key] ?? ''} placeholder={q.options.length ? t('Свой ответ') : t('Ответ')} onChange={(e) => { const current = questionDraft(p.permId); saveQuestionDraft(p.permId, { ...current, ...(!q.multi ? { chosen: { ...current.chosen, [q.key]: [] } } : {}), other: { ...current.other, [q.key]: e.target.value } }) }} />}
     </fieldset>)}
-    {p.state === 'pending' ? <div className="perm-actions"><button type="button" className="btn btn-ok" disabled={p.busy || !ready} onClick={() => p.onAnswer?.(answers)} data-testid="question-send">{t("Отправить ответ")}</button><button type="button" className="btn btn-ghost" disabled={p.busy} onClick={() => p.onDeny?.('')}>{t("Пропустить")}</button></div> : <div className="perm-done">{p.state === 'allow' ? t('Ответ отправлен') : p.state === 'expired' ? t('Вопрос устарел') : t('Вопрос пропущен')}</div>}
+    {p.state === 'pending' ? <div className="perm-actions"><button type="button" className="btn btn-ok" disabled={p.busy || !ready} onClick={() => p.onAnswer?.(answers)} data-testid="question-send">{t("Отправить ответ")} <Kbd>{`${CMD}↵`}</Kbd></button>{p.allowSkip !== false && <button type="button" className="btn btn-ghost" disabled={p.busy} onClick={() => p.onDeny?.('')}>{t("Пропустить")}</button>}</div> : <div className="perm-done">{p.state === 'allow' ? t('Ответ отправлен') : p.state === 'expired' ? t('Вопрос устарел') : t('Вопрос пропущен')}</div>}
   </article>
 }
 

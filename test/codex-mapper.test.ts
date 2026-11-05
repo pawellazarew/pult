@@ -311,3 +311,30 @@ describe('переводчик codex: контекстное окно (context.u
     assert.deepEqual(ctxOf(mapper.push('thread/tokenUsage/updated', usage({ totalTokens: 120 }, null)).drafts), [{ used: 120, window: null, model: 'gpt-6-mini' }])
   })
 })
+
+describe('Codex async input questions on completed agent messages', () => {
+  const done = (questions?: unknown) => createCodexMapper({ sessionId: 'q' }).push('item/completed', {
+    threadId: 'thread', turnId: 'turn', item: { type: 'agentMessage', id: 'message', text: 'Please choose', ...(questions === undefined ? {} : { questions }) },
+  }).drafts.find((event) => event.kind === 'message.done')?.data as Record<string, unknown>
+
+  it('preserves the structured async question titles and options from the actual schema', () => {
+    const questions = [{ title: 'Which part?', options: ['UI', 'Backend'] }, { title: 'What should change?', options: null }]
+    assert.deepEqual(done(questions), { text: 'Please choose', itemId: 'message', questions })
+    assert.deepEqual(done([{ title: 'A free-form question' }])['questions'], [{ title: 'A free-form question', options: null }])
+  })
+
+  it('redacts both the question title and option labels before emitting or journalling', () => {
+    const serialized = JSON.stringify(done([{ title: 'Contact person@example.com?', options: ['person@example.com', 'No'] }]))
+    assert.ok(!serialized.includes('person@example.com'))
+    assert.ok(serialized.includes('<email>'))
+  })
+
+  it('keeps ordinary messages unchanged and rejects malformed or excessive question forms as a whole', () => {
+    const ordinary = { text: 'Please choose', itemId: 'message' }
+    for (const questions of [undefined, null, [], 'Which?', [{ title: 1 }], [{ title: '' }], [{ title: 'Q', options: 'A' }], [{ title: 'Q', options: [1] }],
+      [{ title: 'Good', options: ['A'] }, { title: 'Bad', options: [{}] }],
+      Array.from({ length: 9 }, () => ({ title: 'Q' })),
+      [{ title: 'Q'.repeat(2001) }], [{ title: 'Q', options: ['A'.repeat(501)] }], [{ title: 'Q', options: Array(13).fill('A') }],
+    ]) assert.deepEqual(done(questions), ordinary)
+  })
+})

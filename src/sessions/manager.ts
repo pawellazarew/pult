@@ -171,6 +171,10 @@ export interface SayOptions {
   queue?: boolean
   /** «Прервать и сказать»: стоп текущего хода, ждём, пока он осядет, затем реплика. */
   interrupt?: boolean
+  /** Уточнить текущий ход Codex без остановки и без очереди. */
+  steer?: boolean
+  /** Id асинхронного вопроса, на который отвечает реплика. */
+  questionId?: number
 }
 
 /** Очередь сессии наружу: превью реплик и пауза. */
@@ -249,7 +253,8 @@ export interface SessionManager {
    * Режим, в котором браузер не включается, выключает его (и возвращает, когда режим снова позволяет).
    */
   configure(params: ConfigureParams): Promise<ConfigureResult>
-  prompt(name: string, text: string): Promise<{ turnId: string }>
+  prompt(name: string, text: string, questionId?: number): Promise<{ turnId: string }>
+  answerQuestion(name: string, questionId: number, answers: string[]): Promise<SayResult>
   /**
    * `agent.prompt` с флагами О2: `queue` — в очередь, если сессия занята; `interrupt` — прервать и сказать.
    * Без флагов — то же, что `prompt`.
@@ -447,6 +452,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
   // заводящегося хода. `removing` — агенты под `rm --worktree`, `prompting` — счётчик prompt,
   // ещё не записавших ход в `inflight`. Обе брони ставятся синхронно, до первого await.
   const removing = new Set<string>()
+  const answeringQuestions = new Set<string>()
   const prompting = new Map<string, number>()
   const releasePrompting = (name: string): void => {
     const n = (prompting.get(name) ?? 1) - 1
@@ -1178,7 +1184,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
       return { record, changes, when }
     },
 
-    async prompt(name, text) {
+    async prompt(name, text, questionId) {
       const rec = needRec(name)
       if (typeof text !== 'string' || !text.trim()) {
         throw new ManagerError('invalid_params', 'пустая реплика')
@@ -1219,7 +1225,8 @@ export function createManager(opts: ManagerOptions): SessionManager {
       // статус сессии и текст ответа (`agent read`) реплика человека менять не должна.
       // Текст — через ту же редакцию, что и ответы модели (инвариант 7).
       if (gate.notice) emit({ sessionId: name, provider: rec.provider, kind: 'session.configured', data: { changes: {}, notice: gate.notice, access: 'downgraded' } })
-      const user = emit({ sessionId: name, provider: rec.provider, kind: 'message.user', data: { text: redactString(text) } })
+      const emitUser = () => emit({ sessionId: name, provider: rec.provider, kind: 'message.user', data: { text: redactString(text), ...(questionId !== undefined ? { questionId } : {}) } })
+      const user = questionId === undefined ? emitUser() : null
       phases.accepted(name)
       // Начало хода — время для порядка бесед в окне (`lastTurnAt`): одна запись реестра на ход, тем же `ts`, что у
       // `message.user`, — окно поднимает строку по событию, и `agent.list` её уже не сдвинет.
@@ -1227,7 +1234,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
       // Запись — украшение порядка, а не часть хода: диск полон или реестр не пишется — ход всё равно идёт (иначе
       // строка висела бы «запускается…», а реплика из очереди после повтора задвоилась бы в журнале).
       try {
-        registry.update(name, { lastTurnAt: user.ts, ...(rec.archived ? { archived: undefined } : {}) })
+        registry.update(name, { lastTurnAt: user?.ts ?? new Date().toISOString(), ...(rec.archived ? { archived: undefined } : {}) })
       } catch (e) {
         opts.logger.warn('начало хода не записано в реестр', { session: name, error: (e as Error).message })
       }
@@ -1283,6 +1290,18 @@ export function createManager(opts: ManagerOptions): SessionManager {
         emit({ sessionId: name, provider: rec.provider, kind: 'status.changed', data: { status: 'failed', error: message } })
         throw new ManagerError((e as { code?: string }).code ?? 'internal', message)
       }
+      if (questionId !== undefined) {
+        // Некоторые отказы (сеть, turn/start) возвращаются уже завершённым TurnStarted.
+        // До подтверждения не закрываем форму и не пишем receipt, который запретил бы повтор.
+        const immediate: { outcome?: TurnOutcome } = {}
+        void started.done.then((outcome) => { immediate.outcome = outcome }, () => {})
+        await Promise.resolve()
+        if (immediate.outcome && !immediate.outcome.ok) {
+          releasePrompting(name)
+          throw new ManagerError(immediate.outcome.errorCode ?? 'internal', immediate.outcome.message ?? 'ответ не отправлен')
+        }
+        emitUser()
+      }
       const entry: Inflight = { turnId: started.turnId, promise: started.done, outcome: null }
       inflight.set(name, entry)
       // Новый ход: стоп, попрошенный до него, к нему не относится.
@@ -1316,9 +1335,42 @@ export function createManager(opts: ManagerOptions): SessionManager {
       return { turnId: entry.turnId }
     },
 
+    async answerQuestion(name, questionId, answers) {
+      const rec = needRec(name)
+      if (rec.provider !== 'codex' || !Number.isSafeInteger(questionId) || questionId <= 0) throw new ManagerError('invalid_params', 'некорректный вопрос Codex')
+      const key = `${name}:${questionId}`
+      if (answeringQuestions.has(key)) throw new ManagerError('invalid_params', 'ответ уже отправляется')
+      const events = opts.store.readSession(name)
+      const question = events.find((e) => e.id === questionId && e.kind === 'message.done' && !e.parentId)
+      const questions = question?.data['questions']
+      if (!Array.isArray(questions) || !questions.length) throw new ManagerError('not_found', 'вопрос Codex не найден')
+      if (events.some((e) => e.kind === 'message.user' && e.data['questionId'] === questionId)) throw new ManagerError('invalid_params', 'на этот вопрос уже ответили')
+      if (!Array.isArray(answers) || answers.length !== questions.length || answers.some((a) => typeof a !== 'string' || !a.trim() || a.length > 10_000)) throw new ManagerError('invalid_params', 'ответь на каждый вопрос')
+      const text = questions.map((q, i) => `${String((q as { title: string }).title)}\n${answers[i]!.trim()}`).join('\n\n')
+      answeringQuestions.add(key)
+      try { return await api.say(name, text, { ...(busyNow(name) ? { steer: true } : {}), questionId }) }
+      finally { answeringQuestions.delete(key) }
+    },
+
     async say(name, text, sayOpts = {}) {
       const rec = needRec(name)
       if (typeof text !== 'string' || !text.trim()) throw new ManagerError('invalid_params', 'пустая реплика')
+      if ([sayOpts.queue, sayOpts.interrupt, sayOpts.steer].filter(Boolean).length > 1) {
+        throw new ManagerError('invalid_params', 'выбери один способ отправки: очередь, остановка или уточнение')
+      }
+      if (sayOpts.steer) {
+        if (opts.holdTurns?.()) throw new ManagerError('updating', UPDATING_MESSAGE)
+        if (removing.has(name) || prompting.has(name)) throw new ManagerError('invalid_params', 'сессия ещё не готова к уточнению')
+        const adapter = adapterFor(rec.provider)
+        if (rec.provider !== 'codex' || !adapter.steer) throw new ManagerError('invalid_params', 'уточнение по ходу доступно только для Codex')
+        if (opts.broker.list(name).length > 0) throw new ManagerError('invalid_params', 'сначала ответь на вопрос Codex')
+        let result: { turnId: string }
+        try { result = await adapter.steer(name, text) }
+        catch (e) { throw new ManagerError('invalid_params', redactString((e as Error).message)) }
+        // В журнал только после принятия сервером: отказ не оставляет ложной реплики в истории.
+        emit({ sessionId: name, provider: rec.provider, kind: 'message.user', data: { text: redactString(text), steering: true, turnId: result.turnId, ...(sayOpts.questionId !== undefined ? { questionId: sayOpts.questionId } : {}) } })
+        return result
+      }
       // До «прервать»: иначе идущий ход остановился бы, а новый не завёлся. «В очередь» во время обновления
       // встаёт в очередь, только если реплика и так ждала бы (идёт ход или очередь не пуста): уйдёт после
       // рестарта или после провала обновления (`resumeQueues`). Свободной сессии — отказ: окно шлёт `queue`
@@ -1369,7 +1421,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
           return { queued: true, id }
         }
       }
-      return await api.prompt(name, text)
+      return await api.prompt(name, text, sayOpts.questionId)
     },
 
     startingTurns() {

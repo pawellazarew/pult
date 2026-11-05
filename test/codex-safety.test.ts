@@ -741,3 +741,40 @@ describe('codex: фон — чистый счёт (background.ts)', () => {
     assert.equal(b.sweep().length, 1, 'замолчали все — снят')
   })
 })
+
+
+describe('codex: same-turn steering', () => {
+  it('уточнение идёт в текущий provider turn без interrupt/start; завершённый ход не запускается заново', async () => {
+    const r = rig()
+    try {
+      await r.adapter.startSession(spec(r, 'w'))
+      const turn = await r.adapter.send('w', 'работай [[hang]]')
+      assert.ok(r.adapter.steer, 'Codex должен поддерживать уточнение по ходу')
+      const started = r.client().find((m) => m.method === 'turn/start')!
+      const result = await r.adapter.steer('w', 'сначала проверь тесты')
+      assert.equal(result.turnId, turn.turnId)
+      const sent = r.client().find((m) => m.method === 'turn/steer')!
+      assert.equal(sent.params?.['threadId'], started.params?.['threadId'])
+      assert.match(String(sent.params?.['expectedTurnId']), /^sc-turn/)
+      assert.deepEqual(sent.params?.['input'], [{ type: 'text', text: 'сначала проверь тесты' }])
+      assert.equal(r.client().filter((m) => m.method === 'turn/start').length, 1)
+      assert.equal(r.client().filter((m) => m.method === 'turn/interrupt').length, 0)
+      await r.adapter.interrupt('w')
+      await turn.done
+      await assert.rejects(r.adapter.steer('w', 'поздно'), /нет активного хода/)
+      assert.equal(r.client().filter((m) => m.method === 'turn/start').length, 1)
+    } finally { await r.adapter.shutdown(); r.remove() }
+  })
+  it('отказ app-server не прерывает исходный ход и не запускает новый', async () => {
+    const r = rig({ fake: { rejectSteer: true } })
+    try {
+      await r.adapter.startSession(spec(r, 'w'))
+      const turn = await r.adapter.send('w', 'работай [[hang]]')
+      assert.ok(r.adapter.steer)
+      await assert.rejects(r.adapter.steer('w', 'уточни'), /steering rejected/)
+      assert.equal(r.client().filter((m) => m.method === 'turn/start').length, 1)
+      assert.equal(r.client().filter((m) => m.method === 'turn/interrupt').length, 0)
+      await r.adapter.interrupt('w'); await turn.done
+    } finally { await r.adapter.shutdown(); r.remove() }
+  })
+})

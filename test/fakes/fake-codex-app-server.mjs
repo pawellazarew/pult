@@ -257,6 +257,7 @@ async function onRequest(id, method, params) {
       return
     }
     case 'turn/start': {
+      if (cfg.turnStartFails) { replyErr(id, -32600, 'turn/start rejected'); return }
       const t = threads.get(params.threadId)
       if (!t) { replyErr(id, -32600, `unknown thread ${params.threadId}`); return }
       if (t.turn) { replyErr(id, -32600, 'activeTurnNotSteerable'); return }
@@ -285,6 +286,13 @@ async function onRequest(id, method, params) {
       void playTurn(scenario, params.threadId, turnId, state).then(() => {
         if (t.turn && t.turn.id === turnId) t.turn = null
       })
+      return
+    }
+    case 'turn/steer': {
+      const t = threads.get(params.threadId)
+      if (!t?.turn || t.turn.id !== params.expectedTurnId) { replyErr(id, -32600, 'no matching active turn'); return }
+      if (cfg.rejectSteer || params.input?.some(i => i.text === 'reject this steering')) { replyErr(id, -32600, 'steering rejected'); return }
+      replyOk(id, { turnId: t.turn.id })
       return
     }
     case 'turn/interrupt': {

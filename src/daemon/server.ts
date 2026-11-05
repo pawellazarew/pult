@@ -1658,6 +1658,8 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
           throw new ManagerError(ERROR_CODES.invalidParams, 'agent.rename: нужен строковый title (пустая строка — снять название)')
         }
         return publicRecord(manager.rename(String(p['name'] ?? ''), p['title']))
+      case 'agent.question.answer':
+        return await manager.answerQuestion(String(p['name'] ?? ''), p['questionId'] as number, p['answers'] as string[])
       case 'agent.prompt':
         // О2: `queue` — в очередь, если идёт ход; `interrupt` — прервать и сказать. Оба — только `true`.
         if (p['queue'] === true && p['interrupt'] === true) {
@@ -1666,6 +1668,7 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
         return await manager.say(String(p['name'] ?? ''), String(p['text'] ?? ''), {
           ...(p['queue'] === true ? { queue: true } : {}),
           ...(p['interrupt'] === true ? { interrupt: true } : {}),
+          ...(p['steer'] === true ? { steer: true } : {}),
         })
       case 'agent.queue.resume':
         return manager.queueResume(String(p['name'] ?? ''))
@@ -2158,6 +2161,7 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
       case 'mcp.select':
       case 'agent.rename':
       case 'agent.archive':
+      case 'agent.question.answer':
       case 'agent.prompt':
       case 'agent.read':
       case 'agent.wait':
