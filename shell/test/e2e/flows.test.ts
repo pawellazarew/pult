@@ -1,5 +1,5 @@
 // e2e ноги 2 (docs/12 §3, §5): окно как рабочий инструмент на фальшивых CLI. Завести агента
-// черновиком (⌘N → текст → ↵, шаг B быстрого старта) и получить ответ; разрешение из Inbox — «разрешить» (⌘Enter) и «отказать» с причиной;
+// черновиком (⌘N → выбрать проект → текст → ↵) и получить ответ; разрешение из Inbox — «разрешить» (⌘Enter) и «отказать» с причиной;
 // «Стоп» посреди хода; закрыть окно посреди хода — ход дошёл, после открытия история на месте.
 
 import assert from 'node:assert/strict'
@@ -42,9 +42,14 @@ describe('окно: рабочие сценарии', () => {
     await h.win.locator(`[data-testid="agent-row"][data-agent="${name}"]`).click()
     await h.win.locator(`[data-testid="conversation"][data-agent="${name}"]`).waitFor({ timeout: 10_000 })
   }
-  const inboxCount = async (): Promise<string> => (await h.win.getByTestId('inbox-count').textContent()) ?? ''
+  const inboxCount = async (): Promise<string> => {
+    const badge = h.win.getByTestId('inbox-count')
+    // Нулевой badge удаляется. Читаем атомарно: между count() и textContent() он мог исчезнуть,
+    // и Playwright ждал бы его возвращения 30 с вместо проверки пустого Inbox.
+    return badge.evaluateAll((els) => els[0]?.textContent ?? '0')
+  }
 
-  it('⌘N → черновик: печатать сразу; без папки ↵ — меню папки; модель и усилие чипами; ↵ → чат и ответ в ленте', async () => {
+  it('⌘N → чистый черновик; явный выбор проекта, модели и усилия; ↵ → чат проекта и ответ в ленте', async () => {
     const dir = h.workDir('alpha', { scenario: 'simple' })
     await h.stubPickFolder(dir)
     await h.win.keyboard.press('Meta+N')
@@ -52,9 +57,12 @@ describe('окно: рабочие сценарии', () => {
     // Фокус уже в поле: модала нет, ⌘N → текст.
     await h.win.keyboard.type('Скажи одно слово')
     assert.equal(await h.win.getByTestId('draft-input').inputValue(), 'Скажи одно слово')
-    assert.match((await h.win.getByTestId('draft-heading').textContent()) ?? '', /Где работаем\?/)
-    // Без папки ↵ не отправляет, а открывает меню папки у её чипа.
-    await h.win.keyboard.press('Enter')
+    assert.match((await h.win.getByTestId('draft-heading').textContent()) ?? '', /О чём поговорим\?/)
+    assert.equal(await h.win.getByTestId('draft-chip-folder').getAttribute('data-path'), '')
+    assert.equal(await h.win.getByTestId('draft-chip-access').getAttribute('data-approval'), 'ask')
+    // Для рабочего сценария явно выбираем проект. Без проекта отдельный разговор уже можно отправить.
+    assert.equal(await h.win.getByTestId('draft-send').isEnabled(), true)
+    await h.win.getByTestId('draft-chip-folder').click()
     await h.win.getByTestId('draft-menu-folder').waitFor({ timeout: 3000 })
     await h.win.getByTestId('draft-folder-other').click()
     assert.ok(await waitFor(async () => (await h.win.getByTestId('draft-chip-folder').getAttribute('data-path')) === dir, 5000), 'папка не выбралась')
@@ -481,7 +489,7 @@ describe('окно: рабочие сценарии', () => {
     const titleOf = async (): Promise<string | undefined> => (await list()).find((r) => r.name === 'eps')?.title
     assert.equal(await title.textContent(), 'eps')
 
-    await h.win.getByTestId('rename-agent').click()
+    await title.dblclick()
     assert.equal(await input.inputValue(), 'eps', 'правка начинается с того, что написано в шапке')
     await input.fill('Починить округление')
     // ⌘Enter — горячая клавиша окна, не «сохранить название»: правка остаётся открытой.
@@ -522,7 +530,7 @@ describe('окно: рабочие сценарии', () => {
     await stop.waitFor({ state: 'detached', timeout: 3000 })
 
     // Стёр название — оно снято: в шапке и списке снова имя.
-    await h.win.getByTestId('rename-agent').click()
+    await title.dblclick()
     await input.fill('')
     await input.press('Enter')
     assert.ok(await waitFor(async () => (await title.count()) === 1 && (await title.textContent()) === 'eps', 5000), 'название не снялось')
@@ -551,8 +559,8 @@ describe('окно: рабочие сценарии', () => {
     assert.match((await help.textContent()) ?? '', /Shift\+Enter/)
     await h.win.keyboard.press('Escape')
     await help.waitFor({ state: 'detached', timeout: 3000 })
-    await h.win.getByTestId('chat-info').locator('summary').click()
-    await h.win.getByTestId('hotkeys-open').click()
+    await h.win.getByTestId('open-help').click()
+    await h.win.getByTestId('help-shortcuts').click()
     await help.waitFor({ timeout: 3000 })
     await h.win.keyboard.press('Escape')
     await help.waitFor({ state: 'detached', timeout: 3000 })

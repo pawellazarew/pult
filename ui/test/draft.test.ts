@@ -127,30 +127,33 @@ describe('шаг B: снимок у демона (§3.2)', () => {
 })
 
 describe('шаг B: вид черновика (кадры 01, 08, 12)', () => {
-  it('пустой: «Что делаем в <папка>?», поле, чипы, подсказка «Esc — убрать пустой черновик»; отправить нельзя', () => {
+  it('пустой проектный чат: задача, компактный ввод и выбор проекта в заголовке; отправить нельзя', () => {
     const out = html(DraftView, draftProps())
     const t = text(out)
-    assert.match(t, /Новый чат черновик · ещё не заведён/)
+    assert.match(t, /Новый чат/)
+    assert.doesNotMatch(t, /черновик · ещё не заведён/)
     assert.match(t, /Что делаем в acme-api ?\?/)
     for (const id of ['draft-input', 'draft-chip-folder', 'draft-chip-model', 'draft-chip-effort', 'draft-chip-access', 'draft-chip-more']) assert.match(out, new RegExp(`data-testid="${id}"`), id)
-    assert.match(t, /убрать пустой черновик/)
+    assert.doesNotMatch(out, /draft-esc-hint|draft-hint|<kbd/)
     assert.match(out, /data-testid="draft-send"[^>]*disabled=""/)
     assert.doesNotMatch(out, /draft-chip-preset/, 'чип пресета — шагом C')
   })
-  it('с текстом: «черновик сохранится, если уйти», отправка доступна', () => {
+  it('с текстом: без постоянных служебных подсказок, отправка доступна', () => {
     const out = html(DraftView, draftProps({ draft: { ...draft(), text: 'Почини импорт' } }))
-    assert.match(text(out), /черновик сохранится, если уйти/)
+    assert.doesNotMatch(text(out), /черновик сохранится, если уйти/)
     assert.doesNotMatch(out, /data-testid="draft-send"[^>]*disabled=""/)
   })
-  it('без папки: «Где работаем?», недавние папки, «Другая папка…», чип «Выбери папку»', () => {
-    const out = html(DraftView, draftProps({ draft: draft(null), recent: [{ path: '/w/docs-site', at: '2026-11-02T10:00:00Z', source: 'codex' }] }))
-    const t = text(out)
-    assert.match(t, /Где работаем\?/)
-    assert.match(out, /data-testid="draft-recent-folder" data-path="\/w\/docs-site"/)
-    assert.match(t, /Codex · 1 дн/)
-    assert.match(t, /Другая папка…/)
-    assert.match(out, /class="dchip warn"[^>]*data-testid="draft-chip-folder"/)
-    assert.match(out, /Можно начать писать — папку выберешь до отправки/)
+  it('без проекта: можно начать разговор без выбора папки, а проекты доступны в меню заголовка', () => {
+    const recent = [{ path: '/w/docs-site', at: '2026-11-02T10:00:00Z', source: 'codex' as const }]
+    const out = html(DraftView, draftProps({ draft: draft(null), recent }))
+    assert.match(text(out), /О чём поговорим\?/)
+    assert.match(text(out), /Без проекта/)
+    assert.doesNotMatch(out, /draft-recent-folder|draft-pick-folder|draft-hint|<kbd/)
+    assert.doesNotMatch(out, /Выбери папку|папку выберешь до отправки/)
+    const menu = html(DraftView, draftProps({ draft: draft(null), recent, initialMenu: 'folder' }))
+    assert.match(menu, /data-testid="draft-folder-general"/)
+    assert.match(menu, /data-value="\/w\/docs-site"/)
+    assert.match(text(menu), /Другая папка…/)
   })
   it('из ссылки: плашка, строка «Включить для этого чата», чужая папка — пометка', () => {
     const link = createDraft({ cwd: '/w/acme-api', origin: { kind: 'link' }, text: 'Собери changelog' }, env({ consent: CONSENT, folder: FULL_FOLDER }))
@@ -187,7 +190,7 @@ describe('шаг B: вид черновика (кадры 01, 08, 12)', () => {
     })
     assert.match(out, /data-testid="draft-row"/)
     assert.match(text(out), /Почини импорт заказов черновик ⋯ acme-api/)
-    assert.match(text(out), /Новый чат черновик ⋯ папка не выбрана/)
+    assert.match(text(out), /Новый чат черновик ⋯ Без проекта/)
   })
 })
 

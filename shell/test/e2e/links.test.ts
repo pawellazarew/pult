@@ -118,7 +118,8 @@ describe('ссылки pult://', () => {
     await d.getByTestId('draft-link-path-rejected').waitFor({ timeout: 2000 })
     assert.equal(await d.getByTestId('draft-chip-folder').getAttribute('data-path'), '')
     await h.stubPickFolder(dir)
-    await d.getByTestId('draft-pick-folder').click()
+    await d.getByTestId('draft-chip-folder').click()
+    await h.win.getByTestId('draft-folder-other').click()
     assert.ok(await waitFor(async () => (await d.getByTestId('draft-chip-folder').getAttribute('data-path')) === dir, 5000), 'выбор папки не сработал')
     assert.equal(await d.getByTestId('draft-link-path-rejected').count(), 0, 'пометка ушла с выбором папки')
     // Пустой черновик Esc убирает.

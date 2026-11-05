@@ -38,8 +38,8 @@ describe('English application screens', () => {
     assert.match(settings, />System default</)
     assert.match(settings, /value="en" selected=""/)
     assert.match(settings, /Full access cannot be a default/)
-    assert.match(settings, /New chat \(⌘N\) starts with these defaults/)
-    assert.match(settings, />Save /)
+    assert.match(settings, /without a project starts with Ask access/)
+    assert.match(settings, />Save</)
     // Language names are intentionally displayed in their native language.
     assert.doesNotMatch(settings.replace('Русский', ''), /[А-Яа-яЁё]/)
 
@@ -52,8 +52,10 @@ describe('English application screens', () => {
     assert.match(access, /Full access/)
     assert.match(access, /This chat only/)
     const pick = html(DraftView, draftProps({ draft: { ...draftProps().draft, cwd: null } }))
-    assert.match(pick, /Where are we working\?/)
+    assert.match(pick, /Choose a project/)
     assert.doesNotMatch(pick, /[А-Яа-яЁё]/)
+    const general = html(DraftView, draftProps({ draft: { ...draftProps().draft, cwd: null, scope: 'general' } }))
+    assert.match(general, /What would you like to discuss\?/); assert.doesNotMatch(general, /[А-Яа-яЁё]/)
   })
 
   it('conversation chrome is English while Russian message text is untouched', () => {

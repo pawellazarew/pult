@@ -6,6 +6,8 @@
 
 import { t as tr } from '../lib/i18n.js'
 import type { ApprovalMode } from '../../../src/adapters/types.js'
+import { isServiceTier } from '../../../src/adapters/types.js'
+import type { ServiceTier } from '../../../src/adapters/types.js'
 import { isApprovalMode } from '../../../src/adapters/types.js'
 import { resolveNewChat, shouldRemember } from '../../../src/sessions/resolve.js'
 import type { FieldOrigin, ResolveNote } from '../../../src/sessions/resolve.js'
@@ -55,9 +57,12 @@ export interface DraftChat {
   /** Номер записи у демона; 0 — ещё не сохранён (пустой черновик не сохраняется). */
   rev: number
   cwd: string | null
+  /** general не требует папку; старые снимки определяют scope по наличию cwd. */
+  scope: 'project' | 'general'
   provider: AgentProvider
   model: string | null
   effort: string
+  serviceTier?: ServiceTier
   approval: ApprovalMode
   browser: boolean
   browserHeaded: boolean
@@ -153,13 +158,19 @@ export function resolveDraft(d: DraftChat, env: DraftEnv): DraftChat {
     next.approvalOrigin = 'default'
     next.notes = [...next.notes.filter((n) => n !== 'full-revoked'), 'full-revoked']
   }
+  if (d.scope === 'general') {
+    if (!d.picked.approval) { next.approval = 'ask'; next.approvalOrigin = 'builtin'; delete next.blockedApproval }
+    next.worktree = false
+    if (!d.picked.browser) next.browser = false
+    next.folder = null
+  }
   return next
 }
 
 /** Новый черновик: папка (или нет), откуда пришёл, текст и провайдер ссылки; поля — по резолверу. */
 export function createDraft(ctx: { id?: string; cwd: string | null; origin?: DraftOrigin; text?: string; now?: Date }, env: DraftEnv): DraftChat {
   const base: DraftChat = {
-    id: ctx.id ?? newDraftId(), rev: 0, cwd: ctx.cwd, provider: 'claude', model: null, effort: '', approval: 'ask',
+    id: ctx.id ?? newDraftId(), rev: 0, cwd: ctx.cwd, scope: ctx.cwd || (ctx.origin?.kind === 'link' && ctx.origin.pathRejected) ? 'project' : 'general', provider: 'claude', model: null, effort: '', approval: 'ask',
     browser: false, browserHeaded: false, worktree: false, branch: '', mode: 'turn', text: ctx.text ?? '',
     origin: ctx.origin ?? { kind: 'user' }, picked: {}, chatOnly: false, consentRev: env.consent?.rev ?? null,
     approvalOrigin: 'builtin', notes: [], createdAt: (ctx.now ?? new Date()).toISOString(),
@@ -172,7 +183,7 @@ export function createDraft(ctx: { id?: string; cwd: string | null; origin?: Dra
 export function withDraftFolder(d: DraftChat, cwd: string | null, env: DraftEnv): DraftChat {
   const origin = d.origin.kind === 'link' ? { ...d.origin, pathRejected: false } : d.origin
   const { restored: _r, folder: _f, ...rest } = d
-  return resolveDraft({ ...rest, cwd, origin }, env)
+  return resolveDraft({ ...rest, cwd, scope: cwd ? 'project' : 'general', origin }, env)
 }
 
 /**
@@ -184,6 +195,7 @@ export function pickModel(d: DraftChat, provider: AgentProvider, model: string |
   const picked: DraftPicked = { ...d.picked, provider: true, model: true }
   const { restored: _r, ...rest } = d
   let next: DraftChat = { ...rest, provider, model, picked }
+  if (provider !== 'codex') delete next.serviceTier
   if (switched && next.picked.approval && next.approval === 'inherit' && provider !== 'claude') {
     next = { ...next, approval: 'ask' }
   }
@@ -242,7 +254,7 @@ export function draftFull(d: Pick<DraftChat, 'provider' | 'approval'>, inheritMo
 
 /** Пишет ли старт память доступа папки (§3.7): явный выбор, не «Только этот чат», не полный из ссылки. */
 export function remembersAccess(d: DraftChat, inheritMode: string | null): boolean {
-  return shouldRemember({ approvalOrigin: d.approvalOrigin, chatOnly: d.chatOnly, entry: d.origin.kind === 'link' ? 'link' : 'user', full: draftFull(d, inheritMode) })
+  return d.scope !== 'general' && shouldRemember({ approvalOrigin: d.approvalOrigin, chatOnly: d.chatOnly, entry: d.origin.kind === 'link' ? 'link' : 'user', full: draftFull(d, inheritMode) })
 }
 
 /**
@@ -257,9 +269,10 @@ export function draftStartParams(d: DraftChat, opts: { prompt: string; consentRe
   return {
     requestId: d.id,
     kind: d.provider,
-    cwd: d.cwd ?? '',
+    ...(d.scope === 'general' ? { scope: 'general' } : { cwd: d.cwd ?? '' }),
     ...(d.provider !== 'zcode' && d.model ? { model: d.model } : {}),
     ...(d.provider !== 'zcode' && d.effort ? { effort: d.effort } : {}),
+    ...(d.provider === 'codex' && d.serviceTier ? { serviceTier: d.serviceTier } : {}),
     ...(d.worktree ? { worktree: d.branch.trim() || true } : {}),
     ...(d.browser ? { browser: d.browserHeaded ? { headed: true } : true } : {}),
     approval: d.approval,
@@ -268,7 +281,7 @@ export function draftStartParams(d: DraftChat, opts: { prompt: string; consentRe
     ...(opts.prompt.trim() ? { prompt: opts.prompt } : {}),
     origin: d.origin.kind,
     ...(d.approvalOrigin === 'explicit' ? { approvalOrigin: 'explicit' } : {}),
-    ...(d.folder ? { folder: d.folder } : {}),
+    ...(d.scope !== 'general' && d.folder ? { folder: d.folder } : {}),
     ...(opts.owner && d.rev > 0 ? { draft: { id: d.id, rev: d.rev, owner: opts.owner } } : {}),
     ...(remembersAccess(d, opts.inheritMode) ? { rememberAccess: true } : {}),
   }
@@ -279,10 +292,10 @@ export function draftStartParams(d: DraftChat, opts: { prompt: string; consentRe
 /** Снимок для `draft.put`: полный набор полей, происхождение, источник и номер согласия — не отличия. */
 export function draftSnapshot(d: DraftChat): Record<string, unknown> {
   return {
-    v: 1, cwd: d.cwd, provider: d.provider, model: d.model, effort: d.effort, approval: d.approval, browser: d.browser,
+    v: 1, scope: d.scope, ...(d.provider === 'codex' && d.serviceTier ? { serviceTier: d.serviceTier } : {}), cwd: d.cwd, provider: d.provider, model: d.model, effort: d.effort, approval: d.approval, browser: d.browser,
     browserHeaded: d.browserHeaded, worktree: d.worktree, branch: d.branch, mode: d.mode, text: d.text, origin: d.origin,
     picked: d.picked, chatOnly: d.chatOnly, consentRev: d.consentRev, approvalOrigin: d.approvalOrigin, createdAt: d.createdAt,
-    ...(d.folder ? { folder: d.folder } : {}), ...(d.attachments?.length ? { attachments: d.attachments } : {}),
+    ...(d.scope !== 'general' && d.folder ? { folder: d.folder } : {}), ...(d.attachments?.length ? { attachments: d.attachments } : {}),
     ...(d.linkText !== undefined ? { linkText: d.linkText } : {}),
   }
 }
@@ -307,8 +320,9 @@ export function draftFromSnapshot(id: string, rev: number, raw: unknown, env: Dr
   const picked: DraftPicked = {}
   for (const k of ['provider', 'model', 'effort', 'approval', 'browser', 'worktree'] as const) if (pk[k] === true) picked[k] = true
   const cwd = typeof o['cwd'] === 'string' && o['cwd'].startsWith('/') ? o['cwd'] : null
+  const scope = o['scope'] === 'general' ? 'general' : o['scope'] === 'project' ? 'project' : cwd || (origin.kind === 'link' && origin.pathRejected) ? 'project' : 'general'
   const consentRev = typeof o['consentRev'] === 'number' ? o['consentRev'] : null
-  let approval: ApprovalMode = isApprovalMode(o['approval']) ? o['approval'] : 'ask'
+  let approval: ApprovalMode = scope === 'general' && !picked.approval ? 'ask' : isApprovalMode(o['approval']) ? o['approval'] : 'ask'
   const notes: ResolveNote[] = []
   let blockedApproval: ApprovalMode | undefined
   let downgraded = false
@@ -320,16 +334,16 @@ export function draftFromSnapshot(id: string, rev: number, raw: unknown, env: Dr
     downgraded = true
   }
   const d: DraftChat = {
-    id, rev, cwd, provider, model: typeof o['model'] === 'string' ? o['model'] : null, effort: str('effort'), approval,
-    browser: o['browser'] === true && !approvalBlocksBrowser(provider, approval), browserHeaded: o['browserHeaded'] === true,
-    worktree: o['worktree'] === true, branch: str('branch'), mode: o['mode'] === 'warm' ? 'warm' : 'turn', text: str('text'), origin, picked,
+    id, rev, cwd: scope === 'general' ? null : cwd, scope, provider, ...(provider === 'codex' && isServiceTier(o['serviceTier']) ? { serviceTier: o['serviceTier'] } : {}), model: typeof o['model'] === 'string' ? o['model'] : null, effort: str('effort'), approval,
+    browser: o['browser'] === true && (scope !== 'general' || picked.browser === true) && !approvalBlocksBrowser(provider, approval), browserHeaded: o['browserHeaded'] === true,
+    worktree: scope === 'project' && o['worktree'] === true, branch: str('branch'), mode: o['mode'] === 'warm' ? 'warm' : 'turn', text: str('text'), origin, picked,
     // Опущенный до «Спрашивать» уровень человек не выбирал (ревью m1): в память папки он не пойдёт.
     chatOnly: o['chatOnly'] === true, consentRev,
     approvalOrigin: downgraded ? 'default' : ORIGINS.includes(o['approvalOrigin'] as FieldOrigin) ? o['approvalOrigin'] as FieldOrigin : 'default',
     notes, restored: true, createdAt: str('createdAt', new Date(0).toISOString()),
   }
   const fo = o['folder'] && typeof o['folder'] === 'object' ? o['folder'] as Record<string, unknown> : null
-  if (fo && typeof fo['key'] === 'string' && typeof fo['dev'] === 'string' && typeof fo['ino'] === 'string') d.folder = { key: fo['key'], dev: fo['dev'], ino: fo['ino'] }
+  if (scope === 'project' && fo && typeof fo['key'] === 'string' && typeof fo['dev'] === 'string' && typeof fo['ino'] === 'string') d.folder = { key: fo['key'], dev: fo['dev'], ino: fo['ino'] }
   if (Array.isArray(o['attachments'])) {
     d.attachments = (o['attachments'] as unknown[]).flatMap((x): SavedAttachment[] => {
       const a = x && typeof x === 'object' ? x as Record<string, unknown> : null
@@ -393,6 +407,7 @@ export interface SubmitState {
   /** Замок ссылки (1 с после черновика из ссылки) — для всех путей отправки. */
   linkLocked: boolean
   hasFolder: boolean
+  scope?: 'project' | 'general'
   hasText: boolean
   /** Отправка выключена по другой причине (папка нельзя, провайдер без входа, демон не на связи, вложения пишутся). */
   blocked: boolean
@@ -404,7 +419,7 @@ export interface SubmitState {
  */
 export function submitDecision(s: SubmitState): 'send' | 'folder' | null {
   if (s.composing || s.repeat || s.busy || s.linkLocked) return null
-  if (!s.hasFolder) return 'folder'
+  if (!s.hasFolder && s.scope !== 'general') return 'folder'
   if (!s.hasText || s.blocked) return null
   return 'send'
 }

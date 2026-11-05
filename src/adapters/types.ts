@@ -16,6 +16,7 @@
 // Единственное, что пришлось заложить заранее, — `shutdown()` уровня адаптера и то, что
 // `startSession` возвращает `providerSessionId` как строку без обещаний о её смысле.
 
+import type { PromptAttachment } from '../core/promptAttachments.js'
 import type { EventDraft } from '../core/events.js'
 import type { SessionMode, SessionProvider, SessionRecord } from '../sessions/registry.js'
 import type { LiveSignal } from '../sessions/phaseTracker.js'
@@ -83,7 +84,12 @@ export function approvalFits(provider: 'claude' | 'codex' | 'zcode', mode: Appro
 export const APPROVAL_LIST = 'read-only | ask | workspace | full | inherit (только claude)'
 
 /** M8f: то, что меняет `agent.configure` у живой сессии. */
+export type ServiceTier = 'default' | 'fast'
+
+export function isServiceTier(value: unknown): value is ServiceTier { return value === 'default' || value === 'fast' }
+
 export interface SessionSettingsPatch {
+  serviceTier?: ServiceTier
   model?: string
   effort?: string
   approval?: ApprovalMode
@@ -95,10 +101,13 @@ export interface SessionSettingsPatch {
  * заводится, — для следующего хода. `browser` — `null`/нет: браузера нет.
  */
 export interface TurnSettings extends SessionSettingsPatch {
+  /** Validated session-owned attachments; metadata only, never base64 in snapshots. */
+  attachments?: readonly PromptAttachment[]
   browser?: { headed?: boolean } | null
 }
 
 export interface SessionSpec {
+  serviceTier?: ServiceTier
   name: string
   cwd: string
   model?: string
@@ -235,7 +244,7 @@ export interface ProviderAdapter {
    */
   send(name: string, text: string, at?: TurnSettings): Promise<TurnStarted>
   /** Уточнение в текущий ход без остановки. Только у провайдеров с same-turn steering. */
-  steer?(name: string, text: string): Promise<{ turnId: string }>
+  steer?(name: string, text: string, attachments?: readonly PromptAttachment[]): Promise<{ turnId: string }>
   /** Ответ на запрос разрешения по непрозрачному id провайдера (у Claude не используется). */
   respondPermission(name: string, requestId: string, decision: PermissionDecision): Promise<void>
   /**

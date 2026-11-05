@@ -15,12 +15,16 @@ import { closeSync, copyFileSync, constants as fsConstants, fsyncSync, mkdirSync
 import { dirname, join } from 'node:path'
 import type { PultPaths } from '../core/paths.js'
 import { readMigrationMarker, writeMigrationMarker } from '../core/config.js'
+import { isServiceTier } from '../adapters/types.js'
+import type { ServiceTier } from '../adapters/types.js'
+import type { PromptAttachment } from '../core/promptAttachments.js'
 import { isApprovalMode } from '../adapters/types.js'
 import type { ApprovalMode } from '../adapters/types.js'
 import { parseSessionContext } from './context.js'
 import type { SessionContext } from './context.js'
 
 export type SessionMode = 'turn' | 'warm'
+export type SessionScope = 'project' | 'general'
 export type SessionProvider = 'claude' | 'codex' | 'zcode'
 
 /** Словарь статусов — план Ф1 §3 и §6. Порядок в массиве смысла не несёт. */
@@ -101,9 +105,12 @@ export interface SessionRecord {
    */
   title?: string
   provider: SessionProvider
+  /** Отсутствие у старых записей означает проект; general — управляемая нейтральная папка. */
+  scope?: SessionScope
   cwd: string
   model?: string
   effort?: string
+  serviceTier?: ServiceTier
   mode: SessionMode
   /**
    * `--setting-sources` хода: какие наборы настроек CLI вообще разрешено читать.
@@ -257,12 +264,29 @@ export function parseBrowser(x: unknown): SessionBrowser | null {
 export interface QueueItem {
   id: string
   text: string
+  attachments?: PromptAttachment[]
   /** Когда встала в очередь (ISO). */
   at: string
 }
 
 /** Предел очереди одной сессии: дальше — отказ, а не тихий рост sessions.json. */
 export const QUEUE_MAX = 20
+
+function storedAttachments(raw: unknown): PromptAttachment[] | null {
+  if (raw === undefined) return []
+  if (!Array.isArray(raw) || raw.length > 20) return null
+  const out: PromptAttachment[] = []
+  for (const value of raw) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+    const a = value as Record<string, unknown>
+    if (typeof a['path'] !== 'string' || !a['path'].startsWith('/') || a['path'].length > 16384
+      || typeof a['name'] !== 'string' || !a['name'] || a['name'].length > 512
+      || typeof a['bytes'] !== 'number' || !Number.isSafeInteger(a['bytes']) || a['bytes'] < 0 || a['bytes'] > 25 * 1024 * 1024
+      || typeof a['mime'] !== 'string' || !a['mime'] || a['mime'].length > 128 || (a['kind'] !== 'file' && a['kind'] !== 'directory')) return null
+    out.push({ path: a['path'], name: a['name'], bytes: a['bytes'], mime: a['mime'], kind: a['kind'] })
+  }
+  return out
+}
 
 function parseQueue(x: unknown): QueueItem[] {
   if (!Array.isArray(x)) return []
@@ -272,9 +296,10 @@ function parseQueue(x: unknown): QueueItem[] {
     if (it === null || typeof it !== 'object') continue
     const o = it as Record<string, unknown>
     if (typeof o['id'] !== 'string' || !o['id'] || ids.has(o['id'])) continue
-    if (typeof o['text'] !== 'string' || !o['text'].trim()) continue
+    const attachments = storedAttachments(o['attachments'])
+    if (!attachments || typeof o['text'] !== 'string' || (!o['text'].trim() && !attachments.length)) continue
     ids.add(o['id'])
-    out.push({ id: o['id'], text: o['text'], at: typeof o['at'] === 'string' ? o['at'] : new Date(0).toISOString() })
+    out.push({ id: o['id'], text: o['text'], ...(attachments.length ? { attachments } : {}), at: typeof o['at'] === 'string' ? o['at'] : new Date(0).toISOString() })
   }
   return out.slice(0, QUEUE_MAX)
 }
@@ -331,9 +356,11 @@ export function parseSessions(raw: unknown): SessionRecord[] {
       name: o['name'],
       ...(title ? { title: [...title].slice(0, SESSION_TITLE_MAX).join('') } : {}),
       provider: o['provider'],
+      ...(o['scope'] === 'general' ? { scope: 'general' as const } : {}),
       cwd: o['cwd'],
       ...(typeof o['model'] === 'string' ? { model: o['model'] } : {}),
       ...(typeof o['effort'] === 'string' ? { effort: o['effort'] } : {}),
+      ...(o['provider'] === 'codex' && isServiceTier(o['serviceTier']) ? { serviceTier: o['serviceTier'] } : {}),
       mode,
       ...(typeof o['settingSources'] === 'string' ? { settingSources: o['settingSources'] } : {}),
       ...(typeof o['providerSessionId'] === 'string' ? { providerSessionId: o['providerSessionId'] } : {}),

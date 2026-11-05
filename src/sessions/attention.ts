@@ -186,7 +186,7 @@ export function needsYouCount(
  * `session.ended {reason: rm}`: до неё файл принадлежит удалённой сессии с тем же именем. После ошибки
  * не должно быть новой реплики — человек уже ответил иначе. Не вышло — `{reason}` по-русски.
  */
-export function retryPrompt(events: readonly PultEvent[], att: Attention): { text: string } | { reason: string } {
+export function retryPrompt(events: readonly PultEvent[], att: Attention): { text: string; attachments?: import('../core/promptAttachments.js').PromptAttachment[] } | { reason: string } {
   if (!isRetryable(att)) return { reason: 'ошибка случилась вне хода (лимит аккаунта, фоновый ход, страж до хода) — повторять нечего' }
   const at = events.findIndex((e) => e.id === att.id)
   if (at < 0) return { reason: 'событие ошибки не найдено в журнале сессии' }
@@ -205,7 +205,8 @@ export function retryPrompt(events: readonly PultEvent[], att: Attention): { tex
     const e = events[i] as PultEvent
     if (removed(e)) break
     const t = e.data?.['text']
-    if (e.kind === 'message.user' && typeof t === 'string' && t.trim()) return { text: t }
+    const attachments = Array.isArray(e.data?.['attachments']) ? e.data['attachments'] as import('../core/promptAttachments.js').PromptAttachment[] : undefined
+    if (e.kind === 'message.user' && typeof t === 'string' && (t.trim() || attachments?.length)) return { text: t, ...(attachments?.length ? { attachments } : {}) }
   }
   return { reason: `реплика хода ${att.turnId ?? ''} не найдена в журнале сессии` }
 }

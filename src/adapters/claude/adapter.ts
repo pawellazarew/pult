@@ -54,6 +54,7 @@ import type {
   AdapterDeps, ApprovalMode, PermissionDecision, ProviderAdapter, SessionMcpExtras, SessionSpec, StartedSession, TurnOutcome, TurnSettings, TurnStarted,
 } from '../types.js'
 import { APPROVAL_WORDS } from '../../sessions/settings.js'
+import { claudePromptAttachmentBlocks } from '../../core/promptAttachments.js'
 import { buildClaudeArgv, mcpConfigBody, userTurnLine } from './argv.js'
 import { approvalContext } from '../approvalContext.js'
 import { createAskKeys } from '../../perm/askKeys.js'
@@ -583,7 +584,7 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
     const name = l.spec.name
     const turnId = `t${++turnSeq}`
     const flags: TurnFlags = at
-      ? { ...(at.model ? { model: at.model } : {}), ...(at.effort ? { effort: at.effort } : {}), ...(at.approval ? { approval: at.approval } : {}), browser: at.browser ?? null }
+      ? { ...(at.model ? { model: at.model } : {}), ...(at.effort ? { effort: at.effort } : {}), ...(at.approval ? { approval: at.approval } : {}), browser: at.browser ?? null, ...(at.attachments?.length ? { attachments: at.attachments.map((a) => ({ ...a })) } : {}) }
       : { ...(l.spec.model ? { model: l.spec.model } : {}), ...(l.spec.effort ? { effort: l.spec.effort } : {}), ...(l.spec.approval ? { approval: l.spec.approval } : {}) }
     const fail = (errorCode: string, message: string): TurnStarted =>
       ({ turnId, done: Promise.resolve({ turnId, ok: false, errorCode, message }) })
@@ -652,6 +653,9 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
     const name = l.spec.name
     const fail = (errorCode: string, message: string): TurnStarted =>
       ({ turnId, done: Promise.resolve({ turnId, ok: false, errorCode, message }) })
+    let attachmentBlocks: ReturnType<typeof claudePromptAttachmentBlocks>
+    try { attachmentBlocks = claudePromptAttachmentBlocks({ home: opts.paths.home, sessionId: name }, flags.attachments ?? []) }
+    catch (e) { statusL('failed', { turnId, reason: 'invalid_attachment' }); return fail('invalid_attachment', (e as Error).message) }
     dropDeadChild(l)
 
     // M8f: процесс жив со старыми флагами и фоновой работы у него нет — граница хода: он уходит (stdin закрыт,
@@ -1168,7 +1172,7 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
       // Промпт идёт в stdin, НИКОГДА в argv. И stdin НЕ закрывается здесь даже в режиме
       // «процесс на ход»: закрой мы его сейчас — второй ход после фонового субагента не
       // пришёл бы. Закрытие делает finish().
-      try { stdin.write(userTurnLine(text, userUuid, approvalContext('claude', flags.approval, l.spec.broker))) } catch { /* обработает close */ }
+      try { stdin.write(userTurnLine(text, userUuid, approvalContext('claude', flags.approval, l.spec.broker), attachmentBlocks)) } catch { /* обработает close */ }
     })
     return { turnId, done }
   }

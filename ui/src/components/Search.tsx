@@ -8,7 +8,7 @@ import type { KeyboardEvent, ReactElement } from 'react'
 import { errorText, isBridgeError } from '../bridge.js'
 import type { SearchGroup, SearchHit, SearchReply } from '../model/search.js'
 import { flatHits, groupHits, kindView, splitSnippet } from '../model/search.js'
-import { hhmm, Icon, Kbd } from './common.js'
+import { hhmm, Icon } from './common.js'
 import { Dialog } from './Panels.js'
 
 export const SEARCH_DEBOUNCE_MS = 200
@@ -133,7 +133,6 @@ export function SearchDialog({ run, labelOf, now, onOpen, onClose }: {
             : t('реплики, ответы модели и вызовы инструментов всех сессий')}
         </span>
         <span className="grow" />
-        <span className="note"><Kbd>↑↓</Kbd>{t(" выбрать · ")}<Kbd>↵</Kbd>{t(" открыть · ")}<Kbd>Esc</Kbd>{t(" закрыть")}</span>
       </>}>
       <label className="field search-field">
         <Icon name="search" />

@@ -162,7 +162,7 @@ export function Dictation({ disabled, onText, onBusy, settingsOnly = false }: { 
     {!settingsOnly && <>
     <button type="button" className={`btn dictation-mic${phase === 'recording' ? ' recording' : ''}`} disabled={disabled || phase === 'starting' || phase === 'transcribing'}
       aria-label={phase === 'recording' ? t('Завершить диктовку') : t('Диктовать сообщение')} aria-pressed={phase === 'recording'} data-testid="dictation-toggle"
-      title={t("Диктовка · удерживай Ctrl+Shift+Space или нажми для начала и завершения записи")} onClick={() => phase === 'recording' ? stop() : void start()}>
+      title={phase === 'recording' ? t('Завершить диктовку') : t('Диктовать сообщение')} onClick={() => phase === 'recording' ? stop() : void start()}>
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8"/></svg>
       {phase === 'recording' ? t`${seconds} с · Готово` : phase === 'transcribing' ? t('Распознаю…') : phase === 'starting' ? t('Подключаю…') : null}
     </button>

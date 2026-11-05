@@ -118,16 +118,17 @@ describe('очередь реплик под полем ввода', () => {
     assert.equal(buildAgents([{ ...rec, queue: [], queuePaused: false }], {})[0]?.queue, undefined)
   })
 
-  it('идёт ход: поле открыто, «В очередь», подсказка про ⌘Enter; очередь — текст, ручка перемещения и ×', () => {
+  it('идёт ход: поле открыто без подсказок клавиш; очередь — текст, ручка перемещения и ×', () => {
     const a = ag({ status: 'working', queue: [{ id: 'a1', text: 'первая', at: '' }, { id: 'b2', text: 'вторая', at: '' }] })
     const h = html(Conversation, convProps(a))
     assert.match(h, /data-testid="send"[^>]*>.*В очередь/)
     assert.doesNotMatch(h, /data-testid="send"[^>]*disabled/, 'кнопка не заперта ходом (заперта только пустым полем)')
-    assert.match(h, /Enter поставит реплику в очередь/)
+    assert.match(h, /Добавь уточнение или следующую задачу/)
+    assert.doesNotMatch(h, /Enter поставит|нажми ↑\/↓/)
     assert.equal((h.match(/data-testid="queue-item"/g) ?? []).length, 2)
     assert.match(text(h), /1 первая.*2 вторая/)
     assert.equal((h.match(/data-testid="queue-drag"/g) ?? []).length, 2)
-    assert.match(h, /Перетащи за ручку или нажми ↑\/↓/)
+    assert.match(h, /title="Переместить реплику"/)
     assert.doesNotMatch(h, /queue-up|queue-down|draggable="true"/)
     assert.doesNotMatch(h, /queue-paused/)
   })

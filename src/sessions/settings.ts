@@ -4,8 +4,8 @@ import { tr } from '../i18n/shared.js'
 // (`pult agent set`, умолчания `pult agent start`) и окно (меню подвала, форма, «Настройки») — ответ на
 // один и тот же вход обязан быть одним.
 
-import type { ApprovalMode } from '../adapters/types.js'
-import { APPROVAL_LIST, approvalFits, isApprovalMode } from '../adapters/types.js'
+import type { ApprovalMode, ServiceTier } from '../adapters/types.js'
+import { APPROVAL_LIST, approvalFits, isApprovalMode, isServiceTier } from '../adapters/types.js'
 
 export type Provider = 'claude' | 'codex' | 'zcode'
 
@@ -64,6 +64,7 @@ export const HOME_CWD_WARNING = homeCwdWarning()
 export interface Change<T> { from: T | null; to: T | null }
 
 export interface ConfigureChanges {
+  serviceTier?: Change<ServiceTier>
   model?: Change<string>
   effort?: Change<string>
   approval?: Change<ApprovalMode>
@@ -75,6 +76,7 @@ export interface ConfigureChanges {
 export type ConfigureWhen = 'next_turn' | 'after_background'
 
 export interface ConfigureRequest {
+  serviceTier?: ServiceTier
   model?: string
   effort?: string
   approval?: ApprovalMode
@@ -83,6 +85,7 @@ export interface ConfigureRequest {
 }
 
 export interface ConfigureTarget {
+  serviceTier?: ServiceTier
   provider: Provider
   model?: string
   effort?: string
@@ -145,6 +148,11 @@ function choiceFor(list: readonly ModelChoice[], model: string | null | undefine
  */
 export function planConfigure(cur: ConfigureTarget, req: ConfigureRequest, list: readonly ModelChoice[] | null, windows: ReadonlyMap<string, number>): ConfigureChanges {
   const changes: ConfigureChanges = {}
+  if (req.serviceTier !== undefined) {
+    if (cur.provider !== 'codex') throw new ConfigureError('invalid_params', tr('скорость ответа переключается только у Codex'))
+    if (!isServiceTier(req.serviceTier)) throw new ConfigureError('invalid_params', tr('скорость — default или fast'))
+    if (req.serviceTier !== (cur.serviceTier ?? 'default')) changes.serviceTier = { from: cur.serviceTier ?? 'default', to: req.serviceTier }
+  }
   // ZCode (маршрут A): у его CLI нет флага модели и усилия — смена честно отклоняется, а не молча
   // запоминается и не применяется. Режим подтверждений (`--mode`) меняется как у всех.
   if (cur.provider === 'zcode') {
@@ -196,13 +204,14 @@ export function planConfigure(cur: ConfigureTarget, req: ConfigureRequest, list:
 }
 
 export function hasChanges(c: ConfigureChanges): boolean {
-  return c.model !== undefined || c.effort !== undefined || c.approval !== undefined || c.browser !== undefined
+  return c.serviceTier !== undefined || c.model !== undefined || c.effort !== undefined || c.approval !== undefined || c.browser !== undefined
 }
 
 /** Строка ленты: «модель: opus → sonnet · усилие: high → medium · режим: спрашивать → только чтение — со следующего хода». */
 export function describeChanges(c: ConfigureChanges, when: ConfigureWhen = 'next_turn'): string {
   const v = (x: string | null): string => x ?? tr('по умолчанию')
   const parts: string[] = []
+  if (c.serviceTier) parts.push(tr`скорость: ${c.serviceTier.from === 'fast' ? 'Fast' : 'Normal'} → ${c.serviceTier.to === 'fast' ? 'Fast' : 'Normal'}`)
   if (c.model) parts.push(tr`модель: ${v(c.model.from)} → ${v(c.model.to)}`)
   if (c.effort) parts.push(tr`усилие: ${v(c.effort.from)} → ${v(c.effort.to)}`)
   if (c.approval) parts.push(tr`режим: ${APPROVAL_WORDS[c.approval.from ?? 'ask']} → ${APPROVAL_WORDS[c.approval.to ?? 'ask']}`)

@@ -1,3 +1,4 @@
+import { ProviderIcon } from './ProviderIcon.js'
 import { t } from '../lib/i18n.js'
 // Основная навигация — проекты с чатами; недавние остаются отдельными ярлыками снизу.
 
@@ -20,6 +21,7 @@ import type { DraftChat } from '../model/draft.js'
 import { draftLabel, folderName } from '../model/draft.js'
 
 export interface ProjectTreeProps {
+  mode?: 'normal'|'expanded'|'focus'
   groups: readonly ProjectGroup[]
   selected: string | null
   /**
@@ -116,6 +118,8 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
   const [filter, setFilter] = useState<ProjectFilter>('all')
   const [longProjects, setLongProjects] = useState(new Set<string>())
   const list = projectChats(p.groups, query, filter)
+  const general = list.find((entry) => entry.group.scope === 'general')
+  const projectList = list.filter((entry) => entry.group.scope !== 'general')
   const selectedProject = p.groups.find((g) => g.sessions.some((a) => a.name === p.selected))?.path
   // Выбранная беседа начала ход по реплике из этого окна и встала наверх проекта — строку возвращаем в виду (прокрутка,
   // только если она ушла из виду). Ход из очереди или из CLI список не дёргает: человек мог прокрутить его в другое место.
@@ -176,11 +180,17 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
       if (shortcut) { if (p.collapsed.has(project)) p.onToggle(project); setRevealRequest((n) => n + 1) }
       p.onSelect(name)
     }} onMenu={sessionMenu} />
+  if (p.mode === 'focus') return <nav className="agents project-rail" aria-label={t("Проекты и сессии")}>
+    <span className="sidebar-brand-mark" aria-hidden="true"><Icon name="mark" /></span>
+    <button type="button" className="rail-new" onClick={() => p.onNew(null)} aria-label={t('Новый чат')} title={t('Новый чат')} data-testid="new-agent"><Icon name="plus" /></button>
+    <div className="rail-groups">{p.groups.map((group) => <button key={group.path} type="button" className="rail-group" aria-current={group.path === selectedProject} title={group.name} aria-label={group.name} data-testid="rail-project" onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); setMenu({ at: { x: r.right + 6, y: r.top }, testId: 'rail-chats', items: [{ heading: group.name }, { label: t('Новый чат'), testId: 'rail-new-chat', onSelect: () => p.onNew(group.scope === 'general' ? null : group.path) }, 'sep', ...group.sessions.map((a) => ({ label: agentLabel(a), checked: a.name === p.selected, testId: 'rail-chat', onSelect: () => p.onSelect(a.name) }))] }) }}>{group.scope === 'general' ? <Icon name="model" /> : group.name.slice(0,2)}{group.waiting > 0 && <span className="rail-wait" />}</button>)}</div>
+    {menu && <ContextMenu at={menu.at} items={menu.items} onClose={closeMenu} testId={menu.testId} />}
+  </nav>
   return (
     <nav className="agents" aria-label={t("Проекты и сессии")}>
-      <div className="sidebar-top">
-        <button type="button" className="btn btn-primary new-chat" onClick={() => p.onNew(null)} data-testid="new-agent">
-          <Icon name="plus" />{t("Новый чат")}<span className="grow" /><Kbd>{`${CMD}N`}</Kbd>
+      <div className="sidebar-top"><div className="sidebar-brand"><span className="sidebar-brand-mark" aria-hidden="true"><Icon name="mark" /></span>{t("Пульт")}</div>
+        <button type="button" className="btn new-chat" onClick={() => p.onNew(null)} data-testid="new-agent">
+          <Icon name="edit" />{t("Новый чат")}<span className="grow" /><Kbd>{`${CMD}N`}</Kbd>
         </button>
         <label className="chat-search"><Icon name="search" /><input value={query} onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => {
@@ -193,7 +203,7 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
               if (first) { e.preventDefault(); e.stopPropagation(); p.onSelect(first.name); setQuery(''); requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('[data-testid="composer"]')?.focus()) }
             }
           }}
-          placeholder={t("Поиск бесед и проектов")} aria-label={t("Поиск бесед и проектов")} data-testid="chat-filter" title={t`Поиск бесед (${CMD}K)`} /><Kbd>{`${CMD}K`}</Kbd>
+          placeholder={t("Поиск бесед и проектов")} aria-label={t("Поиск бесед и проектов")} data-testid="chat-filter" title={t("Поиск бесед и проектов")} /><Kbd>{`${CMD}K`}</Kbd>
           {query && <button type="button" className="row-btn" onClick={() => setQuery('')} aria-label={t("Очистить поиск")}><Icon name="x" /></button>}
         </label>
       </div>
@@ -211,7 +221,7 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
                 <button type="button" className="row-btn" data-testid="draft-row-menu" title={t('Действия с черновиком')} aria-label={t('Действия с черновиком')}
                   onClick={(e) => { e.stopPropagation(); setMenu({ at: menuAt(e), testId: 'draft-menu-list', items: [{ label: t('Удалить черновик'), danger: true, onSelect: () => p.onDiscardDraft?.(d.id), testId: 'draft-remove' }] }) }}><span className="dots" aria-hidden="true">⋯</span></button>
               </span>
-              <span className="ag-meta"><span className="chat-project">{d.cwd ? folderName(d.cwd) : t('папка не выбрана')}</span></span>
+              <span className="ag-meta"><span className="chat-project">{d.scope === 'general' ? t('Без проекта') : d.cwd ? folderName(d.cwd) : t('папка не выбрана')}</span></span>
             </li>
           ))}
         </ul>
@@ -224,11 +234,19 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
         })}
       </div>
       <div className="tree project-sidebar" data-testid="agent-list"><div className="sidebar-projects" data-testid="sidebar-projects" ref={projectArea}>
+        {p.mode === 'expanded' && <div className="attention-sections" data-testid="attention-sections">{sections.map((section) => {
+          const rows = section.key === 'recent' ? section.rows.filter(({ agent }) => agent.status === 'done' || agent.status === 'idle') : section.rows
+          return rows.length ? <section key={section.key} className={`attention-section ${section.key}`}><h3>{section.key === 'waiting' ? t('Ждёт тебя') : section.key === 'working' ? t('Работает') : t('Готово')}<span>{rows.length}</span></h3><ul className="ag-list" role="listbox" aria-label={section.label}>{rows.map(({ agent, projectPath }) => row(agent,projectPath,true))}</ul></section> : null
+        })}</div>}
+        {general && <details className="general-conversations" open={!p.collapsed.has(general.group.path) || !!query} onToggle={(e) => { const want = !p.collapsed.has(general.group.path) || !!query; if (e.currentTarget.open !== want && !query) p.onToggle(general.group.path) }} data-testid="general-conversations">
+          <summary onClick={(e) => { e.preventDefault(); p.onToggle(general.group.path) }}><Icon name="chev" /><span>{t('Разговоры')}</span><span className="count">{general.rows.length}</span><span className="grow" /><button type="button" className="proj-btn" aria-label={t('Новый разговор без проекта')} onClick={(e) => { e.preventDefault(); e.stopPropagation(); p.onNew(null) }} data-testid="general-new"><Icon name="plus" /></button></summary>
+          <ul className="ag-list" role="listbox" aria-label={t('Разговоры без проекта')}>{general.rows.map((a) => row(a,general.group.path))}</ul>
+        </details>}
         <div className="project-manager" data-testid="project-manager">
-          <div className="projects-heading"><h3>{t("Проекты")}<span className="count">{list.length}</span></h3>
+          <div className="projects-heading"><h3>{t("Проекты")}<span className="count">{projectList.length}</span></h3>
             <button type="button" className="proj-btn project-add" onClick={p.onAddProject} data-testid="add-project" title={t("Добавить папку проекта")} aria-label={t("Добавить проект")}><Icon name="plus" /></button>
           </div>
-          {list.map(({ group: g, rows, working, waiting }) => {
+          {projectList.map(({ group: g, rows, working, waiting }) => {
             const closed = !query && p.collapsed.has(g.path)
             const full = !!query || filter !== 'all' || longProjects.has(g.path)
             const shown = projectPreview(rows, p.selected, full)
@@ -243,7 +261,7 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
                 {closed && waiting > 0 && <span className="project-state t-wait" title={`${waitLabel}${working ? t` · ${working} в работе` : ''}`} aria-label={waitLabel}>● {waiting}</span>}
                 {closed && waiting === 0 && working > 0 && <span className="project-state t-run" title={t`${working} в работе`} aria-label={t`${working} в работе`}>● {working}</span>}
                 {g.unread > 0 && <span className="proj-unread" data-testid="project-unread" title={`${g.unread} ${plural(g.unread, t('непрочитанная беседа'), t('непрочитанные беседы'), t('непрочитанных бесед'))}`}>{g.unread}</span>}
-                <button type="button" className="proj-btn" title={t`Новый чат в ${shortPath(g.path, 60)}`} aria-label={t`Новый чат в ${g.name}`} data-testid="project-new-session"
+                <button type="button" className="proj-btn" title={t`Новый чат в ${g.name}`} aria-label={t`Новый чат в ${g.name}`} data-testid="project-new-session"
                   onKeyDown={(e) => e.stopPropagation()} onClick={(e) => { e.preventDefault(); e.stopPropagation(); p.onNew(g.path) }}><Icon name="plus" /></button>
                 <button type="button" className="proj-btn" data-testid="project-menu" title={t("Действия с проектом")} aria-label={t`Действия с проектом ${g.name}`}
                   onKeyDown={(e) => e.stopPropagation()} onClick={(e) => projectMenu(e, g)}><span className="dots" aria-hidden="true">⋯</span></button>
@@ -283,6 +301,7 @@ function SessionRow({ a, project, selected, now, onSelect, onMenu, shortcut = fa
       data-provider={a.provider} data-needs={needs ? '1' : '0'} data-unread={a.unread ? '1' : '0'} data-testid={shortcut ? 'recent-row' : 'agent-row'} data-agent={a.name} data-sidebar-chat="1"
       tabIndex={0} onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onSelect(a.name) } }}
       onClick={() => onSelect(a.name)} onContextMenu={(e) => onMenu(e, a)}>
+      <span className="row-provider" title={a.provider === 'claude' ? 'Claude' : a.provider === 'codex' ? 'Codex' : 'ZCode'}><ProviderIcon provider={a.provider} /><span className={`row-live-dot t-${sv.tone}`} data-state={sv.tone} data-working={sv.tone === 'run' ? 'true' : 'false'} aria-label={sv.label} /></span>
       <span className="ag-name" title={a.title ? t`${a.title} · имя для CLI: ${a.name}` : undefined}>
         {a.unread && <UnreadDot a={a} testId={shortcut ? 'recent-unread' : 'row-unread'} />}{agentLabel(a)}
       </span>
@@ -294,7 +313,7 @@ function SessionRow({ a, project, selected, now, onSelect, onMenu, shortcut = fa
       </span>
       <span className="ag-meta">
         {shortcut && <span className="chat-project" title={a.cwd}>{projectName(project)}</span>}
-        <span className={`chat-provider who-${a.provider}`}>{a.provider === 'claude' ? 'Claude' : a.provider === 'codex' ? 'Codex' : a.provider}</span>
+
         {/* Шаг A: щит «полный» — выбран полный доступ или ещё жив процесс с полными правами (та же метка, что в чате). */}
         {sidebarFull(a) && <span className="row-access" data-testid="row-access-full" title={t("Полный доступ: агент работает без вопросов и без песочницы")}><Icon name="shield" />{t("полный")}</span>}
         {a.status === 'working' && <span className="chat-action" title={sv.detail}>{sv.detail}</span>}

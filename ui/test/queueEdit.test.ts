@@ -166,3 +166,41 @@ describe('правка реплики в очереди: сохранение, �
     assert.equal(b.io.composer(), 'почти дописал')
   })
 })
+
+describe('правка очереди с нативными вложениями', () => {
+  const attachment = { path: '/pult/attachments/w/2026-11-05/image.png', name: 'image.png', bytes: 55, mime: 'image/png', kind: 'file' as const }
+  it('снимок правки удерживает метаданные и image-only no-op просто отпускает очередь', async () => {
+    const attachments = [attachment]
+    const state = startQueueEdit('img', { text: '', holdMs: 1000, attachments })
+    attachments.length = 0
+    assert.deepEqual(state.attachments, [attachment], 'snapshot is detached from the reply array')
+    const calls: string[] = []
+    const result = await saveQueueEdit(state, { save: async () => { calls.push('save') }, release: () => calls.push('release'), toComposer: () => calls.push('restore'), errorOf: () => ({ code: null, text: '' }) })
+    assert.deepEqual(result, { next: null, notice: null })
+    assert.deepEqual(calls, ['release'])
+  })
+  it('можно стереть подпись, сохранив файлы; без файлов пустая реплика запрещена', async () => {
+    const calls: string[] = []
+    const io = { save: async (_id: string, text: string) => { calls.push(text) }, release: noop, toComposer: noop, errorOf: () => ({ code: null, text: '' }) }
+    const state = { ...startQueueEdit('img', { text: 'caption', holdMs: 1000, attachments: [attachment] }), text: '' }
+    assert.deepEqual(await saveQueueEdit(state, io), { next: null, notice: null })
+    assert.deepEqual(calls, [''])
+    assert.match((await saveQueueEdit({ ...state, attachments: [] }, io)).next?.error ?? '', /Пустая/)
+  })
+  it('удалённая в другом окне реплика восстанавливает и текст, и файлы', async () => {
+    const state = { ...startQueueEdit('img', { text: 'caption', holdMs: 1000, attachments: [attachment] }), text: 'changed caption' }
+    let restored: unknown
+    const result = await saveQueueEdit(state, { save: async () => { throw new Error('removed') }, release: noop, toComposer: (text, attachments) => { restored = { text, attachments } }, errorOf: () => ({ code: 'queue_item_removed', text: 'removed' }) })
+    assert.equal(result.next, null)
+    assert.deepEqual(restored, { text: 'changed caption', attachments: [attachment] })
+    assert.match(result.notice ?? '', /вложения/)
+  })
+  it('при истёкшем удержании восстановление не теряет файл после удаления подписи', () => {
+    const state = { ...startQueueEdit('img', { text: 'caption', holdMs: 1000, attachments: [attachment] }), text: '' }
+    let restored: unknown
+    const result = expireQueueEdit(state, { release: noop, toComposer: (text, attachments) => { restored = { text, attachments } } })
+    assert.equal(result.next, null)
+    assert.deepEqual(restored, { text: '', attachments: [attachment] })
+    assert.match(result.notice ?? '', /вложения/)
+  })
+})

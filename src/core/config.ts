@@ -36,6 +36,9 @@ export interface NetworkProfile {
   noProxy?: string[]
 }
 
+export type AttachmentRetentionDays = 7 | 30 | 90 | null
+export const isAttachmentRetentionDays = (value: unknown): value is AttachmentRetentionDays => value === null || value === 7 || value === 30 || value === 90
+
 export interface PultConfig {
   version: 1
   language: LanguageSetting
@@ -95,6 +98,8 @@ export interface PultConfig {
    * `pult agent start` без флагов берёт отсюда умолчания (не последний выбор: скрипты должны быть предсказуемы).
    */
   newSession: NewSessionSettings
+  /** Копии вложений; null — бессрочно. Оригиналы не затрагиваются. */
+  attachments: { retentionDays: AttachmentRetentionDays }
 }
 
 /** latest.json последнего релиза: GitHub сам ведёт `releases/latest` на свежий не-пререлиз. */
@@ -153,6 +158,7 @@ export function defaultConfig(): PultConfig {
     mcp: { servers: [] },
     updates: { check: true, url: DEFAULT_UPDATE_URL },
     newSession: defaultNewSession(),
+    attachments: { retentionDays: 30 },
   }
 }
 
@@ -338,6 +344,13 @@ export function validateConfig(raw: unknown): { config: PultConfig; warnings: st
     }
   }
 
+  if (o['attachments'] !== undefined) {
+    const a = o['attachments']
+    const value = a !== null && typeof a === 'object' && !Array.isArray(a) ? (a as Record<string, unknown>)['retentionDays'] : undefined
+    if (isAttachmentRetentionDays(value)) cfg.attachments.retentionDays = value
+    else warnings.push('config.json: attachments.retentionDays — 7, 30, 90 или null; взято 30 дней')
+  }
+
   if (o['newSession'] !== undefined) {
     const ns = parseNewSession(o['newSession'], false)
     cfg.newSession = ns.value
@@ -393,6 +406,12 @@ export function writeConfig(file: string, cfg: PultConfig): void {
  */
 export function writeMcpSelection(file: string, servers: readonly string[]): void {
   writeConfigSubtree(file, 'mcp', (prev) => ({ ...prev, servers: [...servers] }), 'выбор серверов не записан')
+}
+
+/** Save the retention choice without rewriting unrelated configuration. */
+export function writeAttachmentRetention(file: string, retentionDays: AttachmentRetentionDays): void {
+  if (!isAttachmentRetentionDays(retentionDays)) throw new Error('attachments.retentionDays — 7, 30, 90 или null')
+  writeConfigSubtree(file, 'attachments', (prev) => ({ ...prev, retentionDays }), 'срок хранения вложений не записан')
 }
 
 /** Persist only the interface language; preserve unknown user configuration. */

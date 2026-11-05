@@ -95,6 +95,13 @@ export interface Harness {
   close(): Promise<void>
 }
 
+/** Диагностика открывается из сводки Mac в нижней панели навигации. */
+export async function openDoctor(h: Pick<Harness, 'win'>): Promise<void> {
+  const health = h.win.getByTestId('health-menu')
+  if (await health.getAttribute('open') === null) await health.locator('summary').click()
+  await h.win.getByTestId('open-doctor').click()
+}
+
 export async function launch(opts: {
   backoff?: string; name: string; args?: string[]; env?: Record<string, string>
   /** Тот же PULT_HOME (и userData окна), что у прошлого запуска: «перезапуск» окна новым процессом. */

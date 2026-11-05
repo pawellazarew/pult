@@ -1,0 +1,67 @@
+/* Explicit themes reuse the current Pult palette, including when they override the system theme. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --ground: #FAFAF9; --panel: #FFFFFF; --sunk: #F1F2EE; --sidebar: #F1F2EE;
+  --hair: #E3E5DF; --line: #D4D8D0;
+  /* Самый приглушённый текст остаётся читаемым и на поверхностях, и в строках внимания. */
+  --ink: #252924; --mut: #535B54; --faint: #5A635B;
+  --accent: #3D60BE; --accent-soft: rgba(66,103,200,.08); --accent-edge: rgba(66,103,200,.42);
+  --selected: #E9EDF5; --user-surface: #EFF1ED;
+  --claude: #B04A28; --claude-soft: rgba(176,74,40,.09); --claude-edge: rgba(176,74,40,.32);
+  --amber: #86551A; --amber-soft: rgba(155,94,31,.09); --amber-edge: rgba(155,94,31,.32);
+  --teal: #236A61; --teal-soft: rgba(40,118,108,.09); --teal-edge: rgba(40,118,108,.32);
+  --glm: #A23A78; --glm-soft: rgba(162,58,120,.09); --glm-edge: rgba(162,58,120,.32);
+  --oc: #7154A8; --oc-soft: rgba(113,84,168,.09); --oc-edge: rgba(113,84,168,.32);
+  --ok: #28734D; --ok-soft: rgba(40,115,77,.10);
+  --run: #3D60BE; --run-soft: rgba(66,103,200,.09);
+  --wait: #86570F; --wait-soft: rgba(149,98,24,.10);
+  --queued: #626E64; --queued-soft: rgba(98,110,100,.10);
+  --fail: #B33A31; --fail-soft: rgba(179,58,49,.08); --fail-edge: rgba(179,58,49,.32);
+  --add: #28734D; --add-soft: rgba(40,115,77,.08);
+  --del: #B33A31; --del-soft: rgba(179,58,49,.08);
+  --shadow: 0 2px 6px rgba(30,35,30,.04), 0 16px 44px -14px rgba(30,35,30,.18);
+  --scrim: rgba(24,28,25,.30);
+  --disp: "Geologica", "Onest", "Helvetica Neue", Arial, sans-serif;
+  --body: "Onest", "Helvetica Neue", Arial, sans-serif;
+  --mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+
+:root[data-theme="dark"] {
+    color-scheme: dark;
+    --ground: #191B1D; --panel: #232527; --sunk: #2A2D2F; --sidebar: #141617;
+    --hair: #303537; --line: #41484A;
+    --ink: #EDEEEB; --mut: #B5BDB6; --faint: #A2ACA4;
+    --accent: #8CAAF0; --accent-soft: rgba(140,170,240,.10); --accent-edge: rgba(140,170,240,.46);
+    --selected: #293139; --user-surface: #252A2C;
+    --claude: #E48A66; --claude-soft: rgba(228,138,102,.10); --claude-edge: rgba(228,138,102,.36);
+    --amber: #DFA664; --amber-soft: rgba(223,166,100,.10); --amber-edge: rgba(223,166,100,.36);
+    --teal: #74C5B3; --teal-soft: rgba(116,197,179,.10); --teal-edge: rgba(116,197,179,.36);
+    --glm: #E08FBE; --glm-soft: rgba(224,143,190,.10); --glm-edge: rgba(224,143,190,.36);
+    --oc: #BBA5E0; --oc-soft: rgba(187,165,224,.10); --oc-edge: rgba(187,165,224,.36);
+    --ok: #78C69A; --ok-soft: rgba(120,198,154,.11);
+    --run: #8CAAF0; --run-soft: rgba(140,170,240,.10);
+    --wait: #E4B36B; --wait-soft: rgba(228,179,107,.11);
+    --queued: #A1ACA5; --queued-soft: rgba(161,172,165,.10);
+    --fail: #F29389; --fail-soft: rgba(242,147,137,.09); --fail-edge: rgba(242,147,137,.36);
+    --add: #78C69A; --add-soft: rgba(120,198,154,.10);
+    --del: #F29389; --del-soft: rgba(242,147,137,.10);
+    --shadow: 0 2px 6px rgba(0,0,0,.14), 0 18px 44px -12px rgba(0,0,0,.48);
+    --scrim: rgba(7,9,10,.62);
+  }
+
+/* Font choices use the installed, bundled fonts; no remote font request is made. */
+:root[data-theme] body { font-size: var(--ui-font-size, 14px); }
+:root[data-theme] .btn { font-size: calc(var(--ui-font-size, 14px) - 1.5px); }
+:root[data-theme] .btn-sm { font-size: calc(var(--ui-font-size, 14px) - 2px); }
+:root[data-theme] :is(.field input, .field select, .field textarea) { font-size: var(--ui-font-size, 14px); }
+:root[data-theme] .settings-nav-item { font-size: calc(var(--ui-font-size, 14px) - 1px); }
+:root[data-theme] .settings-intro { font-size: calc(var(--ui-font-size, 14px) - 1px); }
+:root[data-theme="light"] .btn-primary, :root[data-theme="light"] .btn-ok { color: #fff; }
+:root[data-theme="dark"] .btn-primary { color: #0B1220; }
+:root[data-theme="dark"] .btn-ok { color: #07140C; }
+:root[data-density="compact"] .settings-nav-item { padding-block: 8px; }
+:root[data-density="compact"] .settings-content { padding-block: 30px; }
+:root[data-density="compact"] .settings-page .check { padding-block: 11px; }
+
+:root[data-theme="light"] .badge { color: #fff; }
+:root[data-theme="dark"] .badge { color: #1B1206; }

@@ -4,6 +4,7 @@
 // до 8 с), `resume` и у Codex рукопожатия app-server (0,3–1 с холодным) и `thread/resume`. А `message.user`
 // демон пишет в журнал ДО всего этого — оно и есть подтверждение. Чистые функции; состояние держит Console.
 
+import type { PromptAttachment } from '../../../src/core/promptAttachments.js'
 import type { ConvItem } from './conversation.js'
 
 /** Отправленная окном реплика, которую демон ещё не подтвердил. */
@@ -12,6 +13,7 @@ export interface PendingSend {
   name: string
   /** Текст, как ушёл (без обрезки по краям). */
   text: string
+  attachments?: readonly PromptAttachment[]
   /** Время нажатия — подпись пузыря. */
   ts: string
   /**
@@ -44,9 +46,9 @@ export function pendingConfirmed(items: readonly ConvItem[], afterId: number): b
 }
 
 /** Бледный пузырь в ленте этой сессии — или `null`: нет отправки, чужая сессия, очередь, уже подтверждена. */
-export function pendingBubble(p: PendingSend | null, name: string, items: readonly ConvItem[]): { text: string; ts: string } | null {
+export function pendingBubble(p: PendingSend | null, name: string, items: readonly ConvItem[]): { text: string; ts: string; attachments?: readonly PromptAttachment[] } | null {
   if (!p || p.name !== name || !p.inFeed || pendingConfirmed(items, p.afterId)) return null
-  return { text: p.text, ts: p.ts }
+  return { text: p.text, ts: p.ts, ...(p.attachments?.length ? { attachments: p.attachments } : {}) }
 }
 
 /**

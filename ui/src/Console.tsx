@@ -1,4 +1,4 @@
-import { reconcileAsyncAnswers } from './model/conversation.js'
+import { parseUserAttachments, reconcileAsyncAnswers } from './model/conversation.js'
 import { clearQuestionDraft } from './model/questions.js'
 import type { LanguageSetting } from '../../src/i18n/core.js'
 import { settleAttachmentDrafts } from './components/useAttachments.js'
@@ -15,6 +15,8 @@ import { CMD, Icon, IS_MAC, Kbd } from './components/common.js'
 import { Conversation } from './components/Conversation.js'
 import type { SendMode } from './components/Conversation.js'
 import { Header } from './components/Header.js'
+import { useAppearance } from './useAppearance.js'
+import { WorkspaceActions, ConversationSummary, modeMenuItems } from './components/WorkspaceChrome.js'
 import { FileWorkspace } from './components/FileWorkspace.js'
 import { RuntimePanel } from './components/RuntimePanel.js'
 import { WorkspaceLayout } from './components/WorkspaceLayout.js'
@@ -62,7 +64,7 @@ import { readAttachmentDraft, saveAttachmentDraft } from './model/attachmentDraf
 import { saveDraft } from './model/drafts.js'
 import type { DraftStore } from './model/drafts.js'
 import type { SavedAttachment } from '../../shell/src/contract.js'
-import { attachmentPrompt } from './model/attachmentDrafts.js'
+import type { PromptAttachment } from '../../src/core/promptAttachments.js'
 import { needsConsent } from './model/access.js'
 import type { ApprovalMode } from '../../src/adapters/types.js'
 import { armLinkGuard, keysGuarded, swallowsKey } from './lib/linkGuard.js'
@@ -129,6 +131,10 @@ function withEarlier(ui: UiState, name: string): readonly ConvItem[] {
 }
 
 export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
+  const { appearance, setAppearance } = useAppearance()
+  const [mobile, setMobile] = useState(() => window.innerWidth <= 760)
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  useEffect(() => { const update = (): void => setMobile(window.innerWidth <= 760); window.addEventListener('resize', update); return () => window.removeEventListener('resize', update) }, [])
   const [conn, setConn] = useState<ConnState>({ state: 'connecting', attempt: 0 })
   const [ui, setUi] = useState<UiState>(EMPTY_STATE)
   // 0.3.5: фазы ходов из живого канала демона (кадры `turn.phase` мимо журнала).
@@ -227,6 +233,10 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     if (id) setDrafts((ds) => ds.filter((x) => x.id !== id || !draftEmpty(x)))
   }, [])
   const [focusChosen, setFocusChosen] = useState<string | null>(null)
+  const [hiddenParent, setHiddenParent] = useState<string | null>(null)
+  const onParentVisibility = useCallback((name: string, visible: boolean): void => {
+    setHiddenParent((before) => visible ? (before === name ? null : before) : name)
+  }, [])
   const [permBusy, setPermBusy] = useState<Set<string>>(() => new Set())
   const [send, setSend] = useState<{ sending: boolean; error: string | null }>({ sending: false, error: null })
   // M8e: реплика «отправляется…» — поле уже пустое, демон ещё не подтвердил (model/pending.ts).
@@ -265,6 +275,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     leaveDraft()
     setTabs((t) => openTab(t, name))
     setSelected(name)
+    setMobileNavOpen(false)
     // Пришёл к сессии сам (клик, вкладка, ⌘⌥L, уведомление) — она больше не отложена (О2, ⌃⌘L).
     setSnoozed((s) => unsnooze(s, name))
   }, [leaveDraft])
@@ -598,6 +609,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   const current = draft ? null : agents.find((a) => a.name === selected && tabs.includes(a.name)) ?? tabViews[0] ?? null
   const showFiles = (source?: string): void => {
     if (!current || !bridge.previewFile || !bridge.listFiles) return
+    setMobileNavOpen(false)
     setFilesOpen(true); setInboxOpen(false); setFilesExpanded(window.innerWidth < 1200)
     setFileRequest((r) => ({ sessionId: current.name, path: source ?? '', nonce: (r?.nonce ?? 0) + 1 }))
   }
@@ -730,12 +742,11 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     [bridge],
   )
   /** Проект текущей сессии: ⌘N заводит новую сессию в нём же. */
-  const currentProject = current ? groups.find((g) => g.sessions.some((s) => s.name === current.name))?.path ?? null : null
   const inbox = useMemo(() => inboxList(ui.inbox), [ui.inbox])
   // Inbox по фильтру (О2): запросы, ошибки, непрочитанное — model/inbox.ts.
   const inboxShown = useMemo(() => inboxView(inboxFilter, inbox, agents), [inboxFilter, inbox, agents])
   // ⌘↵ разрешает только видимую карточку: закрытый Inbox чужих запросов не показывает.
-  const focused = focusedRequest(inbox, focusChosen, current?.name ?? null, inboxOpen ? inboxShown.perms : [], historyShown)
+  const focused = focusedRequest(inbox, focusChosen, current?.name ?? null, inboxOpen ? inboxShown.perms : [], historyShown && hiddenParent !== current?.name)
   // Поле реплики знает только запрос СВОЕЙ сессии: ⌘↵ в нём не разрешает карточку другой сессии из Inbox.
   const ownFocused = composerApproves(focused, current?.name ?? null)
   const inboxNums = useMemo(() => inboxCounts(inbox, agents), [inbox, agents])
@@ -764,14 +775,14 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   const deny = (id: string, reason: string): void =>
     withPerm(id, () => bridge.call('perm.resolve', { id, decision: 'deny', ...(reason ? { message: reason } : {}) }))
 
-  const sendPrompt = async (text: string, mode?: SendMode): Promise<boolean> => {
+  const sendPrompt = async (text: string, mode?: SendMode, attachments?: readonly PromptAttachment[]): Promise<boolean> => {
     if (!current) return false
     const name = current.name
     const sv = statusView(current.status)
     const nonce = ++pendingSeq.current
     // M8e: пузырь «отправляется…» сразу; реплика, которая встанет в очередь, ждёт под полем, а не в ленте.
     setOutgoing({
-      name, text, ts: new Date().toISOString(), afterId: ui.lastId, phase: 'sending', nonce,
+      name, text, ...(attachments?.length ? { attachments } : {}), ts: new Date().toISOString(), afterId: ui.lastId, phase: 'sending', nonce,
       inFeed: !willQueue(mode === 'queue' || mode === 'interrupt' ? mode : undefined,
         { busy: sv.busy, needsYou: sv.needsYou, queueLen: current.queue?.length ?? 0, queuePaused: current.queuePaused === true }),
     })
@@ -782,7 +793,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     try {
       // О2: идёт ход — в очередь демона; ⌘Enter — прервать и сказать (демон ждёт, пока ход осядет).
       const r = (await bridge.call('agent.prompt', {
-        name, text, ...(mode === 'queue' ? { queue: true } : {}), ...(mode === 'interrupt' ? { interrupt: true } : {}), ...(mode === 'steer' ? { steer: true } : {}),
+        name, text, ...(attachments?.length ? { attachments } : {}), ...(mode === 'queue' ? { queue: true } : {}), ...(mode === 'interrupt' ? { interrupt: true } : {}), ...(mode === 'steer' ? { steer: true } : {}),
       })) as { queued?: boolean } | null
       setSend({ sending: false, error: null })
       if (r?.queued) {
@@ -823,11 +834,11 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
    */
   const queueEditApi = (name: string): QueueEditApi => ({
     hold: async (id) => {
-      const r = (await bridge.call('agent.queue.move', { name, id, hold: true })) as { edit?: { text?: unknown; holdMs?: unknown } } | null
+      const r = (await bridge.call('agent.queue.move', { name, id, hold: true })) as { edit?: { text?: unknown; holdMs?: unknown; attachments?: unknown } } | null
       const text = r?.edit?.text
       // Старый демон молча переставил бы реплику вместо правки — без полного текста правку не открываем.
       if (typeof text !== 'string') throw new Error(tr('демон не умеет править очередь — обнови Пульт'))
-      return { text, holdMs: typeof r?.edit?.holdMs === 'number' ? r.edit.holdMs : 10 * 60_000 }
+      return { text, holdMs: typeof r?.edit?.holdMs === 'number' ? r.edit.holdMs : 10 * 60_000, attachments: parseUserAttachments(r?.edit?.attachments) }
     },
     save: async (id, text) => {
       try { await bridge.call('agent.queue.move', { name, id, text }) } finally { void refreshAgents() }
@@ -915,13 +926,13 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [folderInfo, settings, providers])
   /** Последняя папка (§3.1): последняя из чатов Пульта, если она ещё та же (ключ и inode сверил демон). */
-  const lastFolder = recent?.find((f) => f.source === 'pult')?.path ?? null
   const focusDraftInput = (): void => { requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('[data-testid="draft-input"]')?.focus()) }
   /**
    * Открыть черновик (§3.1): в этой папке (или без папки — «Где работаем?»). Пустой черновик той же папки не дублируется —
    * фокус возвращается в него. Ссылка всегда заводит новый черновик `origin: link`.
    */
   const openDraft = (cwd: string | null, link?: NewSessionPrefill): void => {
+    setMobileNavOpen(false)
     if (!link) {
       const same = drafts.find((x) => x.origin.kind === 'user' && x.cwd === cwd && draftEmpty(x) && !foreignDrafts.has(x.id))
       if (same) {
@@ -961,9 +972,9 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     if (d && d.rev > 0 && draftsRemote.current) bridge.call('draft.remove', { id, owner: windowId }).catch(() => { /* уже нет */ })
     savedDrafts.current.delete(id)
   }
-  const setDraftFolder = (id: string, cwd: string): void => {
+  const setDraftFolder = (id: string, cwd: string | null): void => {
     updateDraft(id, (d) => fitEffort(withDraftFolder(d, cwd, envFor(cwd)), providers))
-    void preflight(cwd)
+    if (cwd) void preflight(cwd)
     // Папку выбрали (меню, системный выбор, бросок) — дальше печатать: фокус снова в поле.
     if (activeDraftRef.current === id) focusDraftInput()
   }
@@ -998,7 +1009,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
    */
   const startDraft = async (id: string, files: DraftFiles | null): Promise<void> => {
     const d0 = draftsRef.current.find((x) => x.id === id)
-    if (!d0 || !d0.cwd || draftStateRef.current[id]?.sending || goneDrafts.has(id)) return
+    if (!d0 || (!d0.cwd && d0.scope !== 'general') || draftStateRef.current[id]?.sending || goneDrafts.has(id)) return
     const cwd = d0.cwd
     setDraftState((m) => ({ ...m, [id]: { sending: true, error: null } }))
     const fail = (error: DraftNotice): void => setDraftState((m) => ({ ...m, [id]: { sending: false, error } }))
@@ -1006,35 +1017,37 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     const pending = saveTimers.current.get(id)
     if (pending !== undefined) { clearTimeout(pending); saveTimers.current.delete(id) }
     try {
-      const pre = await preflight(cwd, d0.worktree)
+      const pre = cwd ? await preflight(cwd, d0.worktree) : null
       if (pre && !pre.ok) { setDraftState((m) => ({ ...m, [id]: { sending: false, error: null } })); return }
       // Свежая память и идентичность папки (ревью m3, Codex 2): изменился доступ — не отправлять молча.
-      const env = envFor(cwd, pre ? { ...folderInfo, [cwd]: pre } : folderInfo)
+      const env = envFor(cwd, pre && cwd ? { ...folderInfo, [cwd]: pre } : folderInfo)
       const fresh = refreshBeforeStart(d0, env)
       const d = fitEffort(fresh.draft, providers)
       updateDraft(id, () => d)
       if (fresh.changed) { fail({ text: tr('Папка или её память изменились — доступ пересчитан. Проверь его и отправь снова.'), retry: false }); return }
       const consentRev = settings?.access?.consent.rev ?? null
       const base = { consentRev, inheritMode: env.inheritMode, owner: windowId }
-      let prompt = d.text
+      const prompt = d.text
+      let attachments: readonly SavedAttachment[] = []
       if (files && files.count) {
         const r = (await bridge.call('agent.start', { ...draftStartParams(d, { ...base, prompt: '' }), reserveOnly: true })) as { name: string }
         const done = finalized.current.get(id)
         const items = done && done.name === r.name ? done.items : await files.finalize(r.name)
         finalized.current.set(id, { name: r.name, items })
-        prompt = attachmentPrompt(d.text, items)
+        attachments = items
       }
-      const r = (await bridge.call('agent.start', draftStartParams(d, { ...base, prompt }))) as
+      const r = (await bridge.call('agent.start', { ...draftStartParams(d, { ...base, prompt }), ...(attachments.length ? { attachments } : {}) })) as
         { name: string; promptError?: { code: string; message: string }; duplicate?: boolean; promptSent?: boolean; promptDiffers?: boolean }
       void refreshRecent()
       // Память папки могла смениться этим стартом — следующий ⌘N в ней сразу увидит новую (кэш `agent.preflight`).
-      void preflight(cwd)
+      if (cwd) void preflight(cwd)
       await refreshAgents()
       if (r.promptError) { fail({ text: tr`Чат ${r.name} заведён, но реплика не ушла: ${r.promptError.message} (${r.promptError.code})`, retry: true }); return }
       discardDraft(id)
-      if (r.duplicate && r.promptDiffers && prompt.trim()) {
+      if (r.duplicate && r.promptDiffers && (prompt.trim() || attachments.length)) {
         // Ответ на первую отправку потерялся, а текст с тех пор правили (ревью M3): правка не выбрасывается — она в поле чата.
         saveDraft(draftsStore, r.name, d.text, Date.now())
+        if (attachments.length) saveAttachmentDraft(attachmentStore, r.name, attachments, Date.now())
         setBannerError(tr`Этот черновик уже отправлен — чат ${r.name}. Исправленный текст не ушёл: он в поле ввода чата.`)
       }
       select(r.name)
@@ -1048,7 +1061,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         setModal({ type: 'consent-draft', id, approval: d0.approval })
         return
       }
-      if (code === 'folder_changed') { void preflight(cwd); fail({ text: tr('Папку заменили или перенаправили с тех пор, как черновик её видел — доступ пересчитан. Проверь его и отправь снова.'), retry: false }); return }
+      if (code === 'folder_changed') { if (cwd) void preflight(cwd); fail({ text: tr('Папку заменили или перенаправили с тех пор, как черновик её видел — доступ пересчитан. Проверь его и отправь снова.'), retry: false }); return }
       if (code === 'draft_conflict' || code === 'draft_owned') { fail({ text: errorText(e), retry: false }); void rereadDraft(id); return }
       if (code === 'draft_starting') { fail({ text: tr('Этот черновик уже отправляется (в другом окне или прошлой попыткой) — подожди чат.'), retry: true }); return }
       if (code === 'start_changed') {
@@ -1263,7 +1276,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     setModal(null)
     const full = pick.kind === 'approval' && isFullLevel(a.provider, pick.approval, inheritMode)
     // Шаг B (§3.7): смена доступа в живом чате пишет память папки — следующий ⌘N в ней начнётся с этого уровня.
-    bridge.call('agent.configure', { ...configureParams(name, pick, confirmed || full, consent?.rev), ...(pick.kind === 'approval' ? { rememberAccess: true } : {}) }).then(() => { void refreshAgents(); void refreshFolderOf(a.repo ?? a.cwd) }, (e: unknown) => {
+    bridge.call('agent.configure', { ...configureParams(name, pick, confirmed || full, consent?.rev), ...(pick.kind === 'approval' && a.scope !== 'general' ? { rememberAccess: true } : {}) }).then(() => { void refreshAgents(); void refreshFolderOf(a.repo ?? a.cwd) }, (e: unknown) => {
       // Окно не знало окна модели, а демон знает: спросить человека и повторить с подтверждением.
       if (isBridgeError(e) && e.code === 'needs_confirm') { setModal({ type: 'configure', name, pick, reason: 'misfit', text: e.message }); return }
       if (isBridgeError(e) && (e.code === 'consent_changed' || e.code === 'consent_required')) void refreshSettings()
@@ -1417,7 +1430,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         // открытое меню черновика закрывается само (черновик сменился).
         if (modal) return
         e.preventDefault()
-        openDraft(draft ? draft.cwd : currentProject ?? lastFolder)
+        openDraft(null)
         return
       case 'selectAgent': {
         // ⌘1…9 — первые видимые беседы единственного списка, с учётом поиска.
@@ -1478,6 +1491,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         const fromComposer = (e.target as { getAttribute?(n: string): string | null } | null)?.getAttribute?.('data-testid') === 'composer'
         const target = fromComposer ? composerApproves(focused, current?.name ?? null) : focused
         if (modal || !target || (filesOpen && filesExpanded)) return
+        if (hiddenParent === target.sessionId && !(inboxOpen && inboxShown.perms.some((p) => p.id === target.id))) return
         // Вопрос модели ⌘↵ не «разрешает»: на него отвечают выбором в карточке.
         if (isQuestionTool(target.toolName)) return
         e.preventDefault()
@@ -1506,19 +1520,20 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     return () => window.removeEventListener('keydown', h)
   }, [])
 
+  const effectiveSidebarHidden = mobile ? !mobileNavOpen : sidebarHidden
+  const summaryShown = appearance.mode === 'expanded' && !!current && !draft && !inboxOpen && !filesOpen && !runtimeOpen && !mobile
+  const toggleNavigation = (): void => { if (mobile) setMobileNavOpen((v) => !v); else setSidebarHidden((v) => !v) }
+  const workspaceActions = <WorkspaceActions sidebarHidden={effectiveSidebarHidden} onSidebar={toggleNavigation}
+    filesOpen={filesOpen} runtimeOpen={runtimeOpen}
+    {...(current && bridge.listFiles && bridge.previewFile ? { onFiles: () => filesOpen ? closeFiles() : showFiles() } : {})}
+    {...(current && conn.state === 'up' ? { onRuntime: () => { setMobileNavOpen(false); setRuntimeOpen((v) => !v); setFilesOpen(false); setInboxOpen(false) } } : {})}
+    {...(draft || !current ? { mode: appearance.mode, onMode: (mode) => setAppearance({ mode }) } : {})} />
   return (
     // Реплики модели копируют код и открывают ссылки через мост — без прокидывания пропсов по ленте.
     <MdBridgeContext.Provider value={bridge}>
     <FilePreviewContext.Provider value={current && bridge.previewFile && bridge.listFiles ? { open: showFiles, basePath: current.cwd } : null}>
-    <div className="app" data-conn={conn.state}>
-      <Header conn={conn} status={status} statusAt={statusAt} now={now} guard={guard} usage={ui.usage}
-        providers={providers} providersChecking={providersChecking} onProvidersCheck={() => void checkProviders()}
-        doctorTone={doctorTone(doctor.report)} inboxCount={inboxNums.all} inboxOpen={inboxOpen}
-        sidebarHidden={sidebarHidden} onToggleSidebar={() => setSidebarHidden((v) => !v)}
-        runtimeOpen={runtimeOpen} runtimeAvailable={!!current && conn.state === 'up'} onRuntime={() => { setRuntimeOpen((v) => !v); setFilesOpen(false); setInboxOpen(false) }}
-        filesOpen={filesOpen} filesAvailable={!!current && !!bridge.listFiles && !!bridge.previewFile} onFiles={() => filesOpen ? closeFiles() : showFiles()}
-        onDoctor={() => { setModal({ type: 'doctor' }); if (!doctor.loading) void runDoctor() }}
-        onInbox={() => { setFilesOpen(false); setRuntimeOpen(false); setInboxOpen((v) => !v) }} />
+    <div className="app" data-conn={conn.state} data-interface-mode={appearance.mode} data-nav-open={mobileNavOpen ? "true" : "false"}>
+
 
       {view.banner && (
         <div className="banner banner-fail" role="alert" data-testid="conn-banner">
@@ -1566,29 +1581,40 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         </div>
       )}
 
-      <WorkspaceLayout sidebarHidden={sidebarHidden} inboxOpen={inboxOpen} filesOpen={filesOpen || (!!current && runtimeOpen)} filesExpanded={filesOpen && filesExpanded}>
+      {mobile && mobileNavOpen && <button type="button" className="navigation-scrim" aria-label={tr("Закрыть навигацию")} onClick={() => setMobileNavOpen(false)} />}
+      <WorkspaceLayout mode={appearance.mode} sidebarHidden={effectiveSidebarHidden} inboxOpen={inboxOpen || summaryShown} filesOpen={filesOpen || (!!current && runtimeOpen)} filesExpanded={filesOpen && filesExpanded}>
         <div className="agents-col">
-          <ProjectTree groups={groups} selected={current?.name ?? null} revealSend={revealSend} now={now} collapsed={collapsed}
+          <ProjectTree mode={appearance.mode} groups={groups} selected={current?.name ?? null} revealSend={revealSend} now={now} collapsed={collapsed}
             drafts={drafts} activeDraft={draft?.id ?? null} onDiscardDraft={discardDraft}
             onOpenDraft={(id) => {
+              setMobileNavOpen(false)
               // Открыл сам — поле черновика из ссылки дальше ведёт себя как обычное (фокус).
               setQuietDrafts((q) => { if (!q.has(id)) return q; const n = new Set(q); n.delete(id); return n })
               if (id !== activeDraft) { leaveDraft(); setActiveDraft(id) }
             }}
-            onSelect={select} onNew={(cwd) => openDraft(cwd ?? (draft ? draft.cwd : currentProject ?? lastFolder))} onToggle={toggleProject}
+            onSelect={select} onNew={(cwd) => openDraft(cwd)} onToggle={toggleProject}
             onAddProject={() => void addProject()} onPin={pinProject}
             onHide={(path, sessions, busy) => setModal({ type: 'hide', path, sessions, busy })}
             archived={archivedViews} onRename={(name) => setModal({ type: 'rename', name })}
             onArchive={archiveSession} onRemove={(name) => setModal({ type: 'rm', name })} onExport={exportAgent}
             onReveal={(p) => void bridge.revealPath(p)} onBrowser={setBrowser} />
-          <button type="button" className="btn external-open" disabled={conn.state !== 'up'} onClick={() => setModal({ type: 'external' })} data-testid="open-external-sessions"><Icon name="folder" />{tr("Существующие чаты")}</button>
-          <button type="button" className="btn sidebar-settings" onClick={() => setModal({ type: 'settings' })} data-testid="open-settings"><Icon name="tool" />{tr("Настройки")}<Kbd>{`${CMD},`}</Kbd></button>
+      <Header conn={conn} status={status} statusAt={statusAt} now={now} guard={guard} usage={ui.usage}
+        providers={providers} providersChecking={providersChecking} onProvidersCheck={() => void checkProviders()}
+        doctorTone={doctorTone(doctor.report)} inboxCount={inboxNums.all} inboxOpen={inboxOpen}
+        sidebarHidden={sidebarHidden} onToggleSidebar={() => setSidebarHidden((v) => !v)}
+        runtimeOpen={runtimeOpen} runtimeAvailable={!!current && conn.state === 'up'} onRuntime={() => { setMobileNavOpen(false); setRuntimeOpen((v) => !v); setFilesOpen(false); setInboxOpen(false) }}
+        filesOpen={filesOpen} filesAvailable={!!current && !!bridge.listFiles && !!bridge.previewFile} onFiles={() => filesOpen ? closeFiles() : showFiles()}
+        onDoctor={() => { setModal({ type: 'doctor' }); if (!doctor.loading) void runDoctor() }}
+        onAddProject={() => void addProject()} onExternal={() => setModal({ type: 'external' })}
+        onHelp={() => setModal({ type: 'help' })} onSettings={() => setModal({ type: 'settings' })}
+        onNews={() => { void followLink(bridge, 'https://github.com/pawellazarew/pult/releases', 'https://github.com/pawellazarew/pult/releases') }}
+        onInbox={() => { setMobileNavOpen(false); setFilesOpen(false); setRuntimeOpen(false); setInboxOpen((v) => !v) }} />
           <div className="ag-foot mono journal" data-testid="event-count" title={tr("Курсор журнала демона (служебный, скрыт с экрана)")}>{tr("журнал #")}{ui.lastId}</div>
         </div>
         <div className="conv-col">
         {draft ? (
-          <DraftView key={draft.id} draft={draft} env={envFor(draft.cwd)} catalog={providers} checking={providersChecking} now={now}
-            recent={recent} projects={groups.map((g) => g.path)} sending={!!draftState[draft.id]?.sending} error={draftState[draft.id]?.error ?? null}
+          <DraftView key={draft.id} headerActions={workspaceActions} draft={draft} env={envFor(draft.cwd)} catalog={providers} checking={providersChecking} now={now}
+            recent={recent} projects={groups.filter((g) => g.scope !== 'general').map((g) => g.path)} sending={!!draftState[draft.id]?.sending} error={draftState[draft.id]?.error ?? null}
             online={conn.state === 'up'} foreign={foreignDrafts.has(draft.id)} obstructed={modal !== null} filePaths={filePaths}
             noAutoFocus={quietDrafts.has(draft.id)} menuReset={draftMenuReset}
             onAttachments={(items) => updateDraft(draft.id, (x) => ({ ...x, attachments: items }))}
@@ -1600,12 +1626,12 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
             onApproval={(a) => draftApproval(draft.id, a)} onSend={(f) => void startDraft(draft.id, f)} onDiscard={() => discardDraft(draft.id)}
             onCheckProviders={() => void checkProviders()} onClaim={() => void claimDraft(draft.id)} />
         ) : current ? (
-          <Conversation key={current.name} agent={current} items={withEarlier(ui, current.name)} now={now}
+          <Conversation key={current.name} headerActions={workspaceActions} menuExtras={modeMenuItems(appearance.mode, (mode) => setAppearance({ mode }))} agent={current} items={withEarlier(ui, current.name)} now={now}
             historyLoading={ui.hydration[current.name] === 'loading'} loadEvents={loadEvents}
             earlier={ui.earlier[current.name]} onLoadEarlier={() => loadEarlier(current.name)}
             scrollTo={jump && jump.name === current.name && jumpState === 'ready'
               ? { eventId: jump.eventId, nonce: jump.nonce, kind: jump.kind, ...(jump.parentId !== undefined ? { parentId: jump.parentId } : {}) } : null}
-            onScrolled={onScrolled} userJump={userJump}
+            onScrolled={onScrolled} onParentVisibility={onParentVisibility} userJump={userJump}
             usage={ui.usage[current.provider]} focusedPerm={ownFocused?.id ?? null} permBusy={permBusy} link={conn.state}
             sending={send.sending} sendError={send.error}
             pending={pendingBubble(outgoing, current.name, withEarlier(ui, current.name))}
@@ -1631,17 +1657,17 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
             {...(settingsOk && conn.state === 'up' ? { onConfigure: (pick: SettingsPick) => configureAgent(current.name, pick) } : {})}
             catalog={providers} windows={windows} consent={consentNow} />
         ) : (
-          <section className="conv">
+          <section className="conv"><header className="conv-head"><div className="conv-title"><h2>{tr("Пульт")}</h2></div>{workspaceActions}</header>
             <div className="conv-empty" data-testid="conv-empty">
               <h3>{conn.state !== 'up' ? tr('Жду демона') : agents.length ? tr('Открой сессию слева') : tr('Здесь будет разговор')}</h3>
               <div>{agents.length
                 ? tr('Выбери беседу слева. Вверху списка — агенты, которые ждут ответа, затем работающие и недавние.')
                 : tr('Нажми «Новый чат» и напиши, что сделать — папка и настройки уже подставлены. Разрешения всех чатов собираются в Inbox справа.')}</div>
-              <div className="keys mono"><span>{CMD}{tr("N — новый чат")}</span><span>{CMD}{tr("1…9 — беседы")}</span><span>{CMD}I — Inbox</span><span>{CMD}{tr("⇧F — поиск")}</span><span>{CMD}{tr("/ — все клавиши")}</span></div>
             </div>
           </section>
         )}
         </div>
+        {summaryShown && current && <ConversationSummary agent={current} items={withEarlier(ui, current.name)} />}
         {current && bridge.previewFile && bridge.listFiles && <FileWorkspace bridge={bridge} sessionId={current.name} cwd={current.cwd}
           open={filesOpen} expanded={filesExpanded} request={fileRequest} onClose={closeFiles}
           onExpand={() => setFilesExpanded((v) => window.innerWidth < 1200 ? true : !v)} />}
@@ -1680,6 +1706,8 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
       {modal?.type === 'settings' && (
         <SettingsDialog initialSection={modal.section} settings={settings?.newSession ?? null} catalog={providers} onSave={saveSettings} onClose={() => setModal(null)}
           language={settings?.language ?? 'auto'}
+          usage={ui.usage} now={now} usageRefreshing={providersChecking} onUsageRefresh={() => { void checkProviders(); void refreshStatus() }}
+          {...(settings?.attachments ? { retentionDays: settings.attachments.retentionDays, onRetentionChange: async (retentionDays: 7|30|90|null) => { setSettings(await bridge.call('settings.set', { attachments: { retentionDays } }) as SettingsReply) } } : {})}
           languageSupported={!!bridge.reloadWindow && !!bridge.language}
           languageOverride={bridge.languageOverride ?? null}
           autoCheck={settings?.updates?.check ?? null}

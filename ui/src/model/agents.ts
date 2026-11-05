@@ -48,11 +48,13 @@ export interface AgentView {
   provider: AgentProvider
   status: SessionStatus
   cwd: string
+  scope?: 'general' | 'project'
   branch?: string
   /** Корень исходного репозитория, если сессия в worktree: по нему сессия встаёт в проект. */
   repo?: string
   model?: string
   effort?: string
+  serviceTier?: 'default' | 'fast'
   pending: number
   /** ISO последней активности: последнее событие сессии или момент заведения. */
   lastActivity: string
@@ -151,6 +153,8 @@ export function buildAgents(
       provider: r.provider,
       status: l.status ?? r.lastStatus,
       cwd: r.cwd,
+      ...(r.scope ? { scope: r.scope } : {}),
+      ...(r.serviceTier ? { serviceTier: r.serviceTier } : {}),
       ...(r.worktree?.branch ? { branch: r.worktree.branch } : {}),
       ...(r.worktree?.repo ? { repo: r.worktree.repo } : {}),
       ...(r.archived ? { archived: true } : {}),

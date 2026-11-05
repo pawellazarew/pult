@@ -51,3 +51,68 @@
 .settings-screen .settings-back { background: transparent; border-color: transparent; color: var(--mut); }
 
 .settings-screen .settings-provider-tabs .btn[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-edge); }
+
+/* Presentation controls share the workspace palette and apply without a settings reload. */
+.settings-section-title { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.settings-section-title h3 { font: 600 24px/1.3 var(--body); letter-spacing: -.02em; margin: 0; }
+.appearance-group h4 { font-size: 13px; font-weight: 550; margin: 0 0 12px; }
+.appearance-modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.appearance-mode { position: relative; display: flex; flex-direction: column; gap: 9px; border: 1px solid var(--line); border-radius: 12px; padding: 14px; cursor: pointer; font-size: 12px; line-height: 1.5; background: var(--panel); }
+.appearance-mode:hover { border-color: var(--mut); }
+.appearance-mode.selected { border-color: var(--accent); background: var(--accent-soft); box-shadow: 0 0 0 1px var(--accent); }
+.appearance-mode input { position: absolute; top: 12px; right: 10px; accent-color: var(--accent); }
+.appearance-mode:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 3px; }
+.appearance-mode input:focus-visible { outline: 0; }
+.appearance-mode b { font-size: 13px; font-weight: 550; }
+.appearance-mode > span:not(.appearance-mode-preview) { color: var(--mut); }
+.appearance-mode small { color: var(--accent); font-size: 10px; margin-top: auto; }
+.appearance-mode-preview { display: grid; grid-template-columns: 1fr 2.4fr; gap: 4px; height: 60px; width: calc(100% - 18px); padding: 5px; border: 1px solid var(--hair); border-radius: 5px; background: var(--ground); }
+.appearance-mode-preview i { background: var(--sunk); border-radius: 2px; }
+.appearance-mode-preview i:nth-child(2) { background: var(--selected); }
+.appearance-mode-preview i:nth-child(3) { display: none; }
+.preview-expanded { grid-template-columns: 1fr 1.8fr .9fr; }
+.preview-expanded i:nth-child(3) { display: block; }
+.preview-focus { grid-template-columns: 8px 1fr; }
+.appearance-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; margin-top: 4px; }
+.settings-page .appearance-fields .field { min-width: 0; margin: 0; }
+.settings-page .appearance-fields select { width: 100%; }
+.appearance-type-preview { padding: 22px; border: 1px solid var(--hair); border-radius: 12px; background: var(--panel); }
+.appearance-type-preview p { margin: 0 0 14px; font-size: var(--ui-font-size, 14px); }
+.appearance-type-preview code { font-family: var(--mono); font-size: var(--ui-font-size, 14px); color: var(--mut); }
+.usage-provider-card { padding: 22px; border: 1px solid var(--hair); border-radius: 12px; background: var(--panel); }
+.usage-provider-heading { display: flex; justify-content: space-between; align-items: center; gap: 14px; font-size: 12px; margin-bottom: 20px; }
+.usage-provider-heading b { font-size: 15px; font-weight: 550; color: var(--ink); }
+.usage-window + .usage-window { margin-top: 20px; }
+.usage-window-label { display: flex; justify-content: space-between; gap: 14px; margin-bottom: 8px; font-size: 12px; color: var(--ink); }
+.usage-window-bar { height: 5px; overflow: hidden; border-radius: 4px; margin-bottom: 7px; background: var(--sunk); }
+.usage-window-bar i { display: block; height: 100%; background: currentColor; }
+.usage-window .note, .usage-updated { display: block; font-size: 11px; }
+.usage-updated { margin-top: 18px; }
+.usage-empty { margin: 0; color: var(--mut); font-size: 12px; }
+
+@media (max-width: 980px) {
+  .appearance-modes { grid-template-columns: 1fr; }
+  .appearance-mode { min-height: 112px; padding-left: 118px; justify-content: center; }
+  .appearance-mode-preview { position: absolute; top: 20px; left: 14px; width: 88px; height: 64px; }
+  .appearance-mode input { right: 12px; }
+  .appearance-mode small { margin-top: 0; }
+}
+@media (max-width: 760px) {
+  .settings-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .settings-navigation { display: flex; align-items: center; gap: 10px; padding: 8px; border-right: 0; border-bottom: 1px solid var(--hair); overflow: hidden; }
+  .settings-navigation h2, .settings-group-label { display: none; }
+  .settings-navigation .settings-back { flex: none; width: auto; min-height: 38px; padding-inline: 8px; }
+  .settings-navigation nav { display: flex; gap: 3px; min-width: 0; overflow-x: auto; scrollbar-width: thin; }
+  .settings-navigation nav > div { flex: none; }
+  .settings-nav-item { padding: 11px 10px; white-space: nowrap; min-height: 38px; }
+  .settings-content { padding: 24px 18px; }
+  .appearance-fields { grid-template-columns: 1fr; gap: 20px; }
+  .settings-page select { min-height: 38px; }
+  .settings-screen .dlg-f { gap: 8px; }
+  .settings-save-note { flex: 1; }
+  .usage-provider-card { padding: 18px; }
+  .usage-window-label { flex-wrap: wrap; gap: 3px 10px; }
+}
+
+/* Shortcut labels are shown only inside the explicitly opened reference. */
+.settings-keys .kbd { display: inline-block; }

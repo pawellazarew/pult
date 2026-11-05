@@ -64,6 +64,10 @@ describe('окно: границы безопасности и тема', () => 
       // доходит — переключаем тему тем же способом, каким Chromium сообщает системную: медиазапросом.
       await h.win.emulateMedia({ colorScheme: theme })
       assert.ok(await waitFor(async () => (await h.win.evaluate(() => matchMedia('(prefers-color-scheme: dark)').matches)) === (theme === 'dark')))
+      // matchMedia меняется раньше доставки change-события. Теперь палитру задаёт useAppearance
+      // через data-theme, поэтому ждём применения системной темы самим приложением.
+      assert.ok(await waitFor(async () => await h.win.locator('html').getAttribute('data-theme') === theme), `приложение не применило системную тему ${theme}`)
+      assert.equal(await h.win.locator('html').getAttribute('data-theme-preference'), 'system')
       const bg = await h.win.evaluate(() => getComputedStyle(document.body).backgroundColor)
       assert.equal(bg, theme === 'dark' ? 'rgb(25, 27, 29)' : 'rgb(250, 250, 249)')
       await sleep(100)
@@ -73,9 +77,17 @@ describe('окно: границы безопасности и тема', () => 
 
   it('шрифты загружены локально', async () => {
     const fonts = await h.win.evaluate(async () => {
+      // Unselected appearance fonts are loaded on demand rather than by the initial layout.
+      await Promise.all(['Onest', 'Geologica', 'JetBrains Mono'].map((f) => document.fonts.load(`16px "${f}"`, 'Пульт')))
       await document.fonts.ready
-      return ['Onest', 'Geologica', 'JetBrains Mono'].map((f) => document.fonts.check(`16px "${f}"`, 'Пульт'))
+      return {
+        ready: ['Onest', 'Geologica', 'JetBrains Mono'].map((f) => document.fonts.check(`16px "${f}"`, 'Пульт')),
+        sources: Array.from(document.styleSheets).flatMap((sheet) => Array.from(sheet.cssRules).flatMap((rule) =>
+          rule instanceof CSSFontFaceRule ? Array.from(rule.style.getPropertyValue('src').matchAll(/url\(["']?([^"')]+)["']?\)/g), (match) => new URL(match[1]!, document.baseURI).href) : [])),
+      }
     })
-    assert.deepEqual(fonts, [true, true, true])
+    assert.deepEqual(fonts.ready, [true, true, true])
+    assert.ok(fonts.sources.length >= 3)
+    assert.ok(fonts.sources.every((source) => { const url = new URL(source); return url.protocol === 'app:' && url.hostname === 'pult' && url.pathname.startsWith('/fonts/') }))
   })
 })

@@ -1,5 +1,5 @@
 // Уборка `PULT_HOME/attachments` — картинок, вставленных из буфера в окне (окно 0.1.16, shell/src/clipboardImage.ts):
-// `attachments/<сессия>/<день>/paste-*.png`. Демон удаляет файлы старше 30 дней на старте и раз в сутки, потом —
+// `attachments/<сессия>/<день>/paste-*.png`. Демон удаляет файлы по выбранному сроку (по умолчанию 30 дней), потом —
 // опустевшие старые папки. Здесь же — папка сессии для `--add-dir` claude (`sessionAttachmentsDirs`).
 //
 // Границы, которые нельзя нарушать:
@@ -20,8 +20,9 @@ const MAX_DEPTH = 4
 export interface SweepResult { files: number; dirs: number; errors: number }
 
 /** Удалить файлы старше `maxAgeMs` (по mtime) и опустевшие папки под `dir`. Сама `dir` остаётся. */
-export function sweepAttachments(dir: string, now: number = Date.now(), maxAgeMs: number = ATTACHMENTS_MAX_AGE_MS): SweepResult {
+export function sweepAttachments(dir: string, now: number = Date.now(), maxAgeMs: number | null = ATTACHMENTS_MAX_AGE_MS): SweepResult {
   const r: SweepResult = { files: 0, dirs: 0, errors: 0 }
+  if (maxAgeMs === null) return r
   let top
   try { top = lstatSync(dir) } catch { return r }
   if (top.isSymbolicLink() || !top.isDirectory()) return r
