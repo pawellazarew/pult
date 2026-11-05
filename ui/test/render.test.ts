@@ -455,3 +455,20 @@ describe('реплика модели: Markdown', () => {
     assert.deepEqual(bad, [])
   })
 })
+
+describe('большой ход: свёрнутое не рисуется', () => {
+  const tool = (id: number, over: Record<string, unknown> = {}): Record<string, unknown> => ({ key: `e${id}`, id, ts: '2026-10-14T10:00:00.000Z', type: 'tool', toolUseId: `u${id}`, name: 'Bash', input: { command: `ls ${id}` }, state: 'ok', ...over })
+
+  it('пачка «N действий» и история субагента свёрнуты: заголовки есть, строк внутри нет; ошибка — на виду', () => {
+    const sub = { key: 'e50', id: 50, ts: '2026-10-14T10:00:00.000Z', type: 'agent', toolUseId: 'a', state: 'ok', subagentType: 'explorer', items: [tool(51), tool(52)] }
+    const items = [...Array.from({ length: 40 }, (_, i) => tool(i + 1)), tool(45, { state: 'error' }), sub]
+    const out = html(Conversation, convProps(agent(), { items }))
+    assert.match(text(out), /40 действий · выполнено/)
+    assert.match(out, /data-testid="activity-group"[^>]*data-fold="tools:e1"/)
+    assert.match(out, /История субагента/)
+    // На виду — только строка с ошибкой: 40 строк пачки и строки субагента не смонтированы.
+    assert.equal((out.match(/data-testid="tool-row"/g) ?? []).length, 1)
+    assert.match(out, /data-testid="tool-row" data-event-id="45"/)
+    assert.doesNotMatch(out, /<details[^>]*data-testid="activity-group"[^>]*open=""/)
+  })
+})
