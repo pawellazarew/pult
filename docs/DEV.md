@@ -2659,6 +2659,6 @@ Receipt `message.user {queueItemId, queueItemAt}` пишется после пр
   текст приходит из журнала. Родительский composer остаётся смонтированным и скрытым.
   Архивирование скрывает завершённые узлы, не удаляя события и не скрывая работающие.
 
-Проверки: `paseo-ui.test.ts`, `subagent-safety.test.ts`, `workspace-mobile.test.ts` в shell/e2e;
+Проверки: `paseo-ui.test.ts`, `subagent-safety.test.ts`, `workspace-mobile.test.ts` в shell/test/e2e;
 модельные проверки appearance/general-chat/subagents/attachments и native-input/RPC в backend.
 Временный разговор без сохранения в этот этап не входит.

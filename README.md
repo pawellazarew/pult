@@ -10,7 +10,7 @@
   <img alt="The Pult window: conversations grouped by project on the left, a Claude conversation in the middle and collapsed tool activity" src="docs/images/hero-light.png" width="100%">
 </picture>
 
-**English and Russian are supported** in the window, notifications and CLI. Choose **Settings → Appearance → Language**
+**English and Russian are supported** in the window, notifications and CLI. Choose **Settings → General → Language**
 (English, Русский or System default). Unsupported system languages use English. Click Save to apply a language change and reload the window;
 conversations and saved drafts remain in place. Commands, flags and JSON fields keep their original names.
 The screenshots and some older examples below show the Russian interface.
@@ -42,7 +42,7 @@ or choose a folder in the draft header, to work in a project. Each conversation 
 working directory; global CLI instructions and account settings still apply. These are ordinary saved chats, not temporary chats.
 
 The sidebar footer contains Inbox, connection status, network guard, diagnostics, Help and Settings.
-Shortcut reminders are kept in Help. Usage is in **Settings → Usage**; attachment retention is in **Settings → Storage**
+Shortcut reminders are kept in Help. Usage is in **Settings → Usage**; attachment retention is in **Settings → Files and storage**
 (7, 30 or 90 days, or forever). Retention applies to Pult’s copies and leaves original files alone.
 
 Attachments remain named cards in the conversation. Images are passed as native image input to Claude and Codex;

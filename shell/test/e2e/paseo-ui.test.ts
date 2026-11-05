@@ -7,6 +7,7 @@ describe('accepted workspace: modes, general conversations and subagent history'
   let h: Harness
   before(async () => {
     h = await launch({ name: 'paseo-ui' })
+    await h.scheme('dark')
     assert.ok(await waitFor(async () => await h.win.getAttribute('.app','data-conn') === 'up',20_000))
     const c = await h.client()
     await c.request('agent.start', { name: 'parent', kind: 'codex', cwd: h.workDir('parent') })
