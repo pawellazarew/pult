@@ -78,6 +78,7 @@ describe('белый список моста', () => {
       'mcp.list', 'mcp.select', 'perm.list', 'perm.resolve', 'project.add', 'project.list', 'project.remove', 'provider.reset', 'providers.check',
       'runtime.discover', 'runtime.perform', 'runtime.release', 'runtime.setup.list', 'runtime.setup.request', 'runtime.setup.resolve', 'runtime.takeover',
       'sessions.external.list', 'sessions.external.read', 'settings.get', 'settings.set',
+      'temporary.configure', 'temporary.draft', 'temporary.list', 'temporary.prompt', 'temporary.read', 'temporary.remove', 'temporary.start', 'temporary.stop',
       'update.apply', 'update.check', 'update.status', 'usage.get',
     ])
   })

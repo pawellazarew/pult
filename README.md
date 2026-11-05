@@ -53,6 +53,25 @@ Click a subagent card or the subagent counter to open its existing history in a 
 **Open parent** returns to the original conversation and draft. Archiving completed subagents hides them from the list;
 it does not delete their history or stop running work. Provider icons identify chats; the blinking dot marks active work.
 
+## Temporary chats
+
+Open the arrow beside **New chat → Temporary chat**. These text-only conversations have their own
+**Temporary chats** group. They have no project, attachments, dictation, tools, or user extensions.
+The conversation and draft stay in the Mac daemon’s memory when you switch chats, close the window,
+or reconnect from another client. **End and delete**, or restarting the daemon, clears them.
+A dead provider process is never resumed as a saved chat.
+
+Currently available with the audited **Claude Code 2.1.317**, using your existing subscription login
+and one live process for multiple messages. Project/user instructions and memory are disabled;
+built-in provider security instructions and managed policy remain. Codex and ZCode are unavailable
+until their complete privacy contract is verified. If the network route or its configuration changes,
+start a new temporary chat: a live process keeps its original route.
+
+Pult and the local CLI do not save this conversation to history. The provider’s own data-retention
+policy still applies; this does not promise removal of operating-system copies, crash dumps, or text
+you explicitly copy elsewhere. Memory limits are 8 open chats, 512 KiB per chat snapshot and 4 MiB total;
+exceeding a limit returns an error without falling back to disk. See [the developer contract](docs/DEV.md#временные-чаты-отдельный-контур-в-памяти).
+
 ## New in 0.3.19
 
 - **Start with the task.** A new chat opens as a draft immediately. Pick a folder, write the task and send;

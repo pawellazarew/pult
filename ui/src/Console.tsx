@@ -16,6 +16,10 @@ import { Conversation } from './components/Conversation.js'
 import type { SendMode } from './components/Conversation.js'
 import { Header } from './components/Header.js'
 import { useAppearance } from './useAppearance.js'
+import { useTemporaryChats } from './useTemporaryChats.js'
+import { TemporaryChat } from './components/TemporaryChat.js'
+import { temporaryErrorMessage } from './model/temporary.js'
+import type { TemporaryIdentity } from '../../src/temporary/types.js'
 import { WorkspaceActions, ConversationSummary, modeMenuItems } from './components/WorkspaceChrome.js'
 import { FileWorkspace } from './components/FileWorkspace.js'
 import { RuntimePanel } from './components/RuntimePanel.js'
@@ -98,6 +102,7 @@ declare global {
 }
 
 type Modal = null | { type: 'external' } | { type: 'doctor' } | { type: 'mcp' } | { type: 'stop'; name: string } | { type: 'rm'; name: string } | { type: 'hide'; path: string; sessions: readonly string[]; busy: readonly string[] } | { type: 'rename'; name: string } | { type: 'help' } | { type: 'search' }
+  | { type: 'temporary-end'; identity: TemporaryIdentity }
   | { type: 'settings'; section?: import('./components/Settings.js').SettingsSection } | { type: 'configure'; name: string; pick: SettingsPick; reason: 'misfit'; text?: string }
   /** Шаг A: полный доступ без согласия — один диалог на всё время; после «Разрешить» смена уходит сама. */
   | { type: 'consent'; name: string; pick: SettingsPick }
@@ -136,6 +141,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
   useEffect(() => { const update = (): void => setMobile(window.innerWidth <= 760); window.addEventListener('resize', update); return () => window.removeEventListener('resize', update) }, [])
   const [conn, setConn] = useState<ConnState>({ state: 'connecting', attempt: 0 })
+  const temporaryChats = useTemporaryChats(bridge, conn.state === 'up')
   const [ui, setUi] = useState<UiState>(EMPTY_STATE)
   // 0.3.5: фазы ходов из живого канала демона (кадры `turn.phase` мимо журнала).
   const [phases, setPhases] = useState<PhaseMap>(EMPTY_PHASES)
@@ -272,13 +278,14 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   useEffect(() => { store.set('pult.collapsed', JSON.stringify([...collapsed])) }, [collapsed])
   /** Открыть сессию: вкладка (если её нет) и активная. Сюда ведут дерево, уведомления, ⌘1…9, импорт. */
   const select = useCallback((name: string): void => {
+    temporaryChats.activate(null)
     leaveDraft()
     setTabs((t) => openTab(t, name))
     setSelected(name)
     setMobileNavOpen(false)
     // Пришёл к сессии сам (клик, вкладка, ⌘⌥L, уведомление) — она больше не отложена (О2, ⌃⌘L).
     setSnoozed((s) => unsnooze(s, name))
-  }, [leaveDraft])
+  }, [leaveDraft, temporaryChats.activate])
   useEffect(() => { store.set('pult.inbox', inboxOpen ? '1' : '0') }, [inboxOpen])
   useEffect(() => { store.set('pult.inboxFilter', inboxFilter) }, [inboxFilter])
   useEffect(() => {
@@ -605,8 +612,8 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   const archivedViews = useMemo(() => agents.filter((a) => a.archived), [agents])
   const tabViews = useMemo(() => tabs.flatMap((n) => agents.filter((a) => a.name === n)), [tabs, agents])
   // Черновик открыт — разговора на экране нет: шапка, файлы и «прочитал» его не касаются.
-  const draft = activeDraft ? drafts.find((d) => d.id === activeDraft) ?? null : null
-  const current = draft ? null : agents.find((a) => a.name === selected && tabs.includes(a.name)) ?? tabViews[0] ?? null
+  const draft = !temporaryChats.activeId && activeDraft ? drafts.find((d) => d.id === activeDraft) ?? null : null
+  const current = temporaryChats.activeId || draft ? null : agents.find((a) => a.name === selected && tabs.includes(a.name)) ?? tabViews[0] ?? null
   const showFiles = (source?: string): void => {
     if (!current || !bridge.previewFile || !bridge.listFiles) return
     setMobileNavOpen(false)
@@ -932,6 +939,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
    * фокус возвращается в него. Ссылка всегда заводит новый черновик `origin: link`.
    */
   const openDraft = (cwd: string | null, link?: NewSessionPrefill): void => {
+    temporaryChats.activate(null)
     setMobileNavOpen(false)
     if (!link) {
       const same = drafts.find((x) => x.origin.kind === 'user' && x.cwd === cwd && draftEmpty(x) && !foreignDrafts.has(x.id))
@@ -1487,6 +1495,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         markUnread(current.name)
         return
       case 'approveFocused': {
+        if ((e.target as Element | null)?.closest?.('.temporary-chat')) { e.preventDefault(); return }
         // ⌘↵ из поля реплики — только свой запрос текущей сессии; вне поля — любой видимый (свой или в открытом Inbox).
         const fromComposer = (e.target as { getAttribute?(n: string): string | null } | null)?.getAttribute?.('data-testid') === 'composer'
         const target = fromComposer ? composerApproves(focused, current?.name ?? null) : focused
@@ -1521,6 +1530,16 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   }, [])
 
   const effectiveSidebarHidden = mobile ? !mobileNavOpen : sidebarHidden
+  const openTemporary = (id: string): void => {
+    leaveDraft()
+    setFilesOpen(false); setRuntimeOpen(false); setInboxOpen(false); setMobileNavOpen(false)
+    temporaryChats.activate(id)
+  }
+  const newTemporary = (): void => {
+    leaveDraft()
+    setFilesOpen(false); setRuntimeOpen(false); setInboxOpen(false); setMobileNavOpen(false)
+    void temporaryChats.start()
+  }
   const summaryShown = appearance.mode === 'expanded' && !!current && !draft && !inboxOpen && !filesOpen && !runtimeOpen && !mobile
   const toggleNavigation = (): void => { if (mobile) setMobileNavOpen((v) => !v); else setSidebarHidden((v) => !v) }
   const workspaceActions = <WorkspaceActions sidebarHidden={effectiveSidebarHidden} onSidebar={toggleNavigation}
@@ -1585,8 +1604,12 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
       <WorkspaceLayout mode={appearance.mode} sidebarHidden={effectiveSidebarHidden} inboxOpen={inboxOpen || summaryShown} filesOpen={filesOpen || (!!current && runtimeOpen)} filesExpanded={filesOpen && filesExpanded}>
         <div className="agents-col">
           <ProjectTree mode={appearance.mode} groups={groups} selected={current?.name ?? null} revealSend={revealSend} now={now} collapsed={collapsed}
+            temporaryChats={temporaryChats.listing?.chats ?? []} activeTemporaryId={temporaryChats.activeId}
+            onSelectTemporary={openTemporary} onNewTemporary={newTemporary}
+            temporaryAvailable={conn.state === 'up' && !!temporaryChats.listing?.capabilities.some((item) => item.available)} temporaryStarting={temporaryChats.starting}
             drafts={drafts} activeDraft={draft?.id ?? null} onDiscardDraft={discardDraft}
             onOpenDraft={(id) => {
+              temporaryChats.activate(null)
               setMobileNavOpen(false)
               // Открыл сам — поле черновика из ссылки дальше ведёт себя как обычное (фокус).
               setQuietDrafts((q) => { if (!q.has(id)) return q; const n = new Set(q); n.delete(id); return n })
@@ -1612,7 +1635,14 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
           <div className="ag-foot mono journal" data-testid="event-count" title={tr("Курсор журнала демона (служебный, скрыт с экрана)")}>{tr("журнал #")}{ui.lastId}</div>
         </div>
         <div className="conv-col">
-        {draft ? (
+        {!!temporaryChats.error && <div className="strip strip-fail" role="status" data-testid="temporary-error">{temporaryErrorMessage(temporaryChats.error)}<button type="button" className="chrome-icon" aria-label={tr('Закрыть')} onClick={temporaryChats.clearError}><Icon name="x" /></button></div>}
+        {temporaryChats.activeId ? (temporaryChats.snapshot ? (
+          <TemporaryChat key={`${temporaryChats.snapshot.epoch}:${temporaryChats.snapshot.id}`} chat={temporaryChats.snapshot}
+            capabilities={temporaryChats.listing?.capabilities ?? []} catalog={providers} online={conn.state === 'up'} headerActions={workspaceActions}
+            onDraft={temporaryChats.draft} onConfigure={temporaryChats.configure} onPrompt={temporaryChats.prompt} onStop={temporaryChats.stop}
+            onEnd={(identity) => setModal({ type: 'temporary-end', identity })}
+            copyText={(text) => bridge.copyText(text)} openExternal={async (url) => { await followLink(bridge, url, url) }} />
+        ) : <section className="conv temporary-chat" data-testid="temporary-loading"><header className="conv-head"><h2>{tr('Временный чат')}</h2>{workspaceActions}</header><div className="conv-empty">{tr('Загружаю временный чат…')}</div></section>) : draft ? (
           <DraftView key={draft.id} headerActions={workspaceActions} draft={draft} env={envFor(draft.cwd)} catalog={providers} checking={providersChecking} now={now}
             recent={recent} projects={groups.filter((g) => g.scope !== 'general').map((g) => g.path)} sending={!!draftState[draft.id]?.sending} error={draftState[draft.id]?.error ?? null}
             online={conn.state === 'up'} foreign={foreignDrafts.has(draft.id)} obstructed={modal !== null} filePaths={filePaths}
@@ -1702,6 +1732,9 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
           text={<>{tr("Сессия ")}{whoIs(modal.name)}{tr(" прервёт текущий ход. Разговор сохранится — можно продолжить новой репликой.")}</>}
           onOk={() => stopAgent(modal.name)} onCancel={() => setModal(null)} />
       )}
+      {modal?.type === 'temporary-end' && <Confirm title={tr('Завершить временный чат?')} testId="temporary-end-confirm" action={tr('Завершить и удалить')} danger
+        text={tr('Разговор и черновик будут удалены из памяти Пульта. Восстановить их не получится.')}
+        onOk={() => { const identity = modal.identity; void temporaryChats.remove(identity).then(() => setModal(null), () => setModal(null)) }} onCancel={() => setModal(null)} />}
       {modal?.type === 'help' && <HotkeysHelp onClose={() => setModal(null)} />}
       {modal?.type === 'settings' && (
         <SettingsDialog initialSection={modal.section} settings={settings?.newSession ?? null} catalog={providers} onSave={saveSettings} onClose={() => setModal(null)}
