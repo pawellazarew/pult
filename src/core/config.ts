@@ -4,6 +4,8 @@
 // Разбор мягкий: кривое поле заменяется значением по умолчанию и даёт предупреждение,
 // демон из-за одной опечатки в конфиге не падает.
 
+import { DEFAULT_DISK_SETTINGS, parseDiskSettings } from './disk.js'
+import type { DiskSettings } from './disk.js'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { isLanguageSetting } from '../i18n/core.js'
 import type { LanguageSetting } from '../i18n/core.js'
@@ -98,6 +100,8 @@ export interface PultConfig {
    * `pult agent start` без флагов берёт отсюда умолчания (не последний выбор: скрипты должны быть предсказуемы).
    */
   newSession: NewSessionSettings
+  /** Global low-space threshold and optional custom cleanup prompt. */
+  disk: DiskSettings
   /** Копии вложений; null — бессрочно. Оригиналы не затрагиваются. */
   attachments: { retentionDays: AttachmentRetentionDays }
 }
@@ -158,6 +162,7 @@ export function defaultConfig(): PultConfig {
     mcp: { servers: [] },
     updates: { check: true, url: DEFAULT_UPDATE_URL },
     newSession: defaultNewSession(),
+    disk: { ...DEFAULT_DISK_SETTINGS },
     attachments: { retentionDays: 30 },
   }
 }
@@ -344,6 +349,10 @@ export function validateConfig(raw: unknown): { config: PultConfig; warnings: st
     }
   }
 
+  if (o['disk'] !== undefined) {
+    try { cfg.disk = parseDiskSettings(o['disk']) } catch { warnings.push('config.json: invalid disk settings; using defaults') }
+  }
+
   if (o['attachments'] !== undefined) {
     const a = o['attachments']
     const value = a !== null && typeof a === 'object' && !Array.isArray(a) ? (a as Record<string, unknown>)['retentionDays'] : undefined
@@ -406,6 +415,11 @@ export function writeConfig(file: string, cfg: PultConfig): void {
  */
 export function writeMcpSelection(file: string, servers: readonly string[]): void {
   writeConfigSubtree(file, 'mcp', (prev) => ({ ...prev, servers: [...servers] }), 'выбор серверов не записан')
+}
+
+export function writeDiskSettings(file: string, value: DiskSettings): void {
+  const parsed = parseDiskSettings(value)
+  writeConfigSubtree(file, 'disk', () => ({ ...parsed }), 'disk settings were not saved')
 }
 
 /** Save the retention choice without rewriting unrelated configuration. */

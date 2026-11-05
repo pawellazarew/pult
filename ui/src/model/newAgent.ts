@@ -128,6 +128,7 @@ export function approvalBlocksBrowser(provider: AgentProvider, mode: ApprovalMod
 
 /** Ответ `settings.get` (M8f). */
 export interface SettingsReply {
+  disk?: { settings: import('../../../src/core/disk.js').DiskSettings; status: import('../../../src/core/disk.js').DiskStatus }
   attachments?: { retentionDays: 7 | 30 | 90 | null }
   language?: 'auto' | 'ru' | 'en'
   newSession: NewSessionSettings
