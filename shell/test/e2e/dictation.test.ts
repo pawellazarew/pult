@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import { after, before, describe, it } from 'node:test'
 import { build } from 'esbuild'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { launch, REPO, waitFor } from './harness.js'
 import type { Harness } from './harness.js'
 import type { Page } from 'playwright-core'
@@ -84,28 +86,15 @@ describe('dictation: browser capture and draft lifecycle', () => {
     assert.equal(await page.getByTestId('draft').inputValue(), 'Допечатал голосом')
     assert.ok(await waitFor(() => page.getByTestId('send').isEnabled()))
   })
-  it('real Chromium WebM/Opus decodes to the canonical 16 kHz WAV without microphone access', async () => {
-    const result = await page.evaluate(async () => {
+  it('real Chromium WebM/Opus decodes to canonical 16 kHz WAV without audio hardware', { timeout: 15_000 }, async () => {
+    // Generated 350 ms / 440 Hz tone: 48 kHz mono, libopus 24 kbps. No microphone or user audio.
+    const bytes = Array.from(readFileSync(join(REPO, 'shell/test/fixtures/speech-tone.webm')))
+    const result = await page.evaluate(async (bytes) => {
       const native = (window as any).nativeSpeechCodec
-      const context = new native.AudioContext()
-      try {
-        const destination = context.createMediaStreamDestination()
-        const oscillator = context.createOscillator()
-        oscillator.connect(destination); oscillator.start()
-        await context.resume()
-        const chunks: Blob[] = []
-        const recorder = new native.MediaRecorder(destination.stream, { mimeType: 'audio/webm;codecs=opus' })
-        recorder.ondataavailable = (e: BlobEvent) => chunks.push(e.data)
-        const stopped = new Promise<void>((resolve) => { recorder.onstop = () => resolve() })
-        recorder.start()
-        await new Promise((resolve) => setTimeout(resolve, 350))
-        recorder.stop(); oscillator.stop(); destination.stream.getTracks().forEach((track: MediaStreamTrack) => track.stop())
-        await stopped
-        const decoded = await new native.OfflineAudioContext(1, 1, 16000).decodeAudioData(await new Blob(chunks).arrayBuffer())
-        const wav = native.pcmWav([decoded.getChannelData(0)]) as Uint8Array
-        return { rate: decoded.sampleRate, length: wav.length, riff: new TextDecoder().decode(wav.subarray(0, 4)) }
-      } finally { await context.close() }
-    })
+      const decoded = await new native.OfflineAudioContext(1, 1, 16000).decodeAudioData(new Uint8Array(bytes).buffer)
+      const wav = native.pcmWav([decoded.getChannelData(0)]) as Uint8Array
+      return { rate: decoded.sampleRate, length: wav.length, riff: new TextDecoder().decode(wav.subarray(0, 4)) }
+    }, bytes)
     assert.equal(result.rate, 16000); assert.equal(result.riff, 'RIFF'); assert.ok(result.length > 3244)
   })
   it('missing model opens a concrete download proposal without recording', async () => {
