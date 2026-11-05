@@ -1,3 +1,4 @@
+import { defaultCleanupPrompt, freeDiskText } from './components/DiskSettings.js'
 import { parseUserAttachments, reconcileAsyncAnswers } from './model/conversation.js'
 import { clearQuestionDraft } from './model/questions.js'
 import type { LanguageSetting } from '../../src/i18n/core.js'
@@ -373,6 +374,22 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     try { setSettings(await bridge.call('settings.get') as SettingsReply) } catch { /* старый демон или оболочка — черновик на встроенных умолчаниях */ }
     finally { setSettingsTried(true) }
   }, [bridge])
+  useEffect(() => {
+    if (conn.state !== 'up') return
+    let alive = true
+    const refreshDisk = async () => {
+      try {
+        const r = await bridge.call('settings.get') as SettingsReply
+        if (alive) setSettings(cur => cur ? { ...cur, ...(r.disk ? { disk: r.disk } : {}) } : r)
+      } catch {
+        if (alive) setSettings(cur => cur?.disk ? { ...cur, disk: { ...cur.disk, status: { ...cur.disk.status, state: 'unknown', freeBytes: null } } } : cur)
+      }
+    }
+    void refreshDisk()
+    const timer = setInterval(() => void refreshDisk(), 60_000)
+    return () => { alive = false; clearInterval(timer) }
+  }, [bridge, conn.state])
+  const cleanupDraft = useRef<{ id: string; text: string } | null>(null)
   const checkProviders = useCallback(async (): Promise<void> => {
     setProvidersChecking(true)
     try { setProviders(await bridge.call('providers.check') as ProviderCatalog) }
@@ -966,6 +983,15 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     // Готовность провайдера проверяется в фоне: черновик открывается сразу (§4).
     if (conn.state === 'up' && !providersChecking && (!providers || Date.now() - Date.parse(providers.checkedAt) > READINESS_STALE_MS)) void checkProviders()
   }
+  const openCleanupDraft = (): void => {
+    const text = settings?.disk?.settings.prompt ?? defaultCleanupPrompt()
+    const previous = cleanupDraft.current
+    const existing = previous?.text === text && draftsRef.current.find(d => d.id === previous.id && d.text === previous.text && d.scope === 'general' && !d.attachments?.length && !foreignDrafts.has(d.id) && !draftStateRef.current[d.id]?.sending)
+    if (existing) { leaveDraft(); setActiveDraft(existing.id); setMobileNavOpen(false); focusDraftInput(); return }
+    const d = fitEffort(createDraft({ cwd: null, text }, envFor(null)), providers)
+    cleanupDraft.current = { id: d.id, text }
+    leaveDraft(); setDrafts(ds => [d, ...ds]); setActiveDraft(d.id); setMobileNavOpen(false); focusDraftInput()
+  }
   openDraftRef.current = openDraft
   const discardDraft = (id: string): void => {
     const d = draftsRef.current.find((x) => x.id === id)
@@ -1554,6 +1580,11 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     <div className="app" data-conn={conn.state} data-interface-mode={appearance.mode} data-nav-open={mobileNavOpen ? "true" : "false"}>
 
 
+      {conn.state === 'up' && settings?.disk?.status.state === 'low' && <div className="banner" role="status" data-testid="disk-warning" style={{ flexWrap: 'wrap' }}>
+        <Icon name="alert" /><span className="grow" style={{ flex: '1 1 240px', minWidth: 0 }} title={settings.disk.status.path}>{tr('Мало места на диске с данными Pult.')} {freeDiskText(settings.disk.status)}</span>
+        <button type="button" className="btn" onClick={openCleanupDraft} data-testid="disk-cleanup">{tr('Начать уборку')}</button>
+        <button type="button" className="btn" onClick={() => setModal({ type: 'settings', section: 'storage' })}>{tr('Настройки хранения')}</button>
+      </div>}
       {view.banner && (
         <div className="banner banner-fail" role="alert" data-testid="conn-banner">
           <Icon name="alert" />
@@ -1737,7 +1768,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         onOk={() => { const identity = modal.identity; void temporaryChats.remove(identity).then(() => setModal(null), () => setModal(null)) }} onCancel={() => setModal(null)} />}
       {modal?.type === 'help' && <HotkeysHelp onClose={() => setModal(null)} />}
       {modal?.type === 'settings' && (
-        <SettingsDialog initialSection={modal.section} settings={settings?.newSession ?? null} catalog={providers} onSave={saveSettings} onClose={() => setModal(null)}
+        <SettingsDialog disk={settings?.disk} onDiskSave={async disk => { setSettings(await bridge.call('settings.set', { disk }) as SettingsReply) }} initialSection={modal.section} settings={settings?.newSession ?? null} catalog={providers} onSave={saveSettings} onClose={() => setModal(null)}
           language={settings?.language ?? 'auto'}
           usage={ui.usage} now={now} usageRefreshing={providersChecking} onUsageRefresh={() => { void checkProviders(); void refreshStatus() }}
           {...(settings?.attachments ? { retentionDays: settings.attachments.retentionDays, onRetentionChange: async (retentionDays: 7|30|90|null) => { setSettings(await bridge.call('settings.set', { attachments: { retentionDays } }) as SettingsReply) } } : {})}

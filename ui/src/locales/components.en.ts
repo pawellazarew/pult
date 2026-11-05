@@ -1,5 +1,20 @@
 /** English translations of application-owned component text. Placeholder values remain untouched. */
 export const componentsEn: Readonly<Record<string, string>> = {
+  "Помоги почистить диск": "Help me free up disk space",
+  "Не удалось определить свободное место": "Could not determine free disk space",
+  "Сейчас свободно: {0} ГБ": "Currently free: {0} GB",
+  "Не удалось сохранить настройки диска.": "Could not save disk settings.",
+  "Свободное место на диске": "Free disk space",
+  "Предупреждать, когда свободно меньше (ГБ)": "Warn when free space is below (GB)",
+  "Фраза для уборки диска": "Disk cleanup prompt",
+  "Пустое поле — стандартная фраза на языке интерфейса. Свой текст не меняется при смене языка.": "Leave empty for the default prompt in the interface language. Custom text stays unchanged when the language changes.",
+  "Восстановить по умолчанию": "Restore default",
+  "Сохранить настройки диска": "Save disk settings",
+  "Настройки диска сохранены.": "Disk settings saved.",
+  "Мало места на диске с данными Pult.": "Low disk space on the Pult data drive.",
+  "Начать уборку": "Start cleanup",
+  "Настройки хранения": "Storage settings",
+
   "Язык": "Language",
   "AirPods, название гарнитуры": "AirPods, headset name",
   "{0} с · Готово": "{0} s · Finish",

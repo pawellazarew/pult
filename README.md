@@ -130,6 +130,14 @@ Xcode and an iOS runtime are required for iOS; Android needs its SDK, Emulator a
 
 The built-in browser requires an open Pult window. Only virtual devices are supported. Model-requested screenshots are sent to the selected provider. Text-only models can use UI trees but cannot visually evaluate screenshots. iOS text input uses the simulator clipboard and supports Unicode; Android input currently supports ASCII only.
 
+## Disk space warning
+
+Pult checks the drive containing its data once a minute and shows a warning below 6 GB free.
+**Start cleanup** opens a new general chat with a prepared prompt; you review and send it yourself.
+In **Settings → Files and storage**, change the threshold and cleanup prompt. The default prompt follows
+English/Russian interface language; custom text stays unchanged. Clear the field to restore the default.
+Disk figures use decimal GB. If disk statistics are unavailable, Settings shows that status.
+
 ## Dictation and settings
 
 Settings (`⌘,`) opens a separate workspace with sections for new chats, providers, dictation,

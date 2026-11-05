@@ -1,4 +1,4 @@
-import { createDiskMonitor } from '../core/disk.js'
+import { GB, parseDiskSettings, createDiskMonitor } from '../core/disk.js'
 import { fileURLToPath } from 'node:url'
 import { createRuntimeService, RuntimeError } from '../runtimes/service.js'
 import { discoverMobile, performMobile, installMobileSetup } from '../runtimes/mobile.js'
@@ -102,7 +102,7 @@ import type { BrowserInstaller, InstallResult } from '../mcp/browser.js'
 import { browserDoctorItems, bypassDoctorItems, mcpDoctorItems } from '../mcp/doctor.js'
 import { createMcpExtras } from '../mcp/session.js'
 import { listServers, RESERVED_MCP_NAMES } from '../mcp/servers.js'
-import { MCP_SERVER_NAME_RE, MCP_SERVERS_MAX, isAttachmentRetentionDays, writeAttachmentRetention, writeMcpSelection, writeNetworkGuard, writeLanguage, writeNewSession, writeUpdatesCheck } from '../core/config.js'
+import { MCP_SERVER_NAME_RE, MCP_SERVERS_MAX, isAttachmentRetentionDays, writeDiskSettings, writeAttachmentRetention, writeMcpSelection, writeNetworkGuard, writeLanguage, writeNewSession, writeUpdatesCheck } from '../core/config.js'
 import { GuardError, guardLine, guardVerdict, parseGuardShape, parseGuardStrict, sameGuard } from '../core/guard.js'
 import type { GuardRule } from '../core/guard.js'
 import type { SessionBrowser, SessionRecord, SessionStatus } from '../sessions/registry.js'
@@ -903,8 +903,10 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
   // `updates` — только флаг автопроверки: адрес канала окну не нужен и окном не пишется.
   // `network` — только правило стража и последние известные выходы (из кэша проверок, без новой пробы): прокси,
   // профили и noProxy окну не отдаются.
+  const checkDisk = createDiskMonitor(paths.home, logger, { thresholdBytes: () => config.disk.thresholdGb * GB })
   const settingsReply = (): Record<string, unknown> => ({
     language: config.language,
+    disk: { settings: { ...config.disk }, status: checkDisk() },
     attachments: { ...config.attachments },
     newSession: config.newSession, lastUsed: readLastUsed(), updates: { check: config.updates.check },
     network: { guard: { mode: config.guard.mode, countries: [...config.guard.countries] }, exits: lastNetExits() },
@@ -1439,8 +1441,8 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
         // `network.guard` (0.3.6): профили сети, прокси, noProxy, команды, адрес канала (`updates.url`) и всё прочее
         // config.json отсюда не достать. Разбор строгий — кривое поле отказывает целиком, и тогда файл не трогается вовсе.
         const keys = Object.keys(p)
-        if (!keys.length || keys.some((k) => k !== 'language' && k !== 'newSession' && k !== 'updates' && k !== 'network' && k !== 'codexRules' && k !== 'attachments')) {
-          throw new ManagerError(ERROR_CODES.invalidParams, 'settings.set: можно менять только language, newSession, updates.check, network.guard, attachments.retentionDays и codexRules.revoke')
+        if (!keys.length || keys.some((k) => k !== 'language' && k !== 'newSession' && k !== 'updates' && k !== 'network' && k !== 'codexRules' && k !== 'attachments' && k !== 'disk')) {
+          throw new ManagerError(ERROR_CODES.invalidParams, 'settings.set: можно менять только language, newSession, updates.check, network.guard, attachments.retentionDays, disk и codexRules.revoke')
         }
         // План 16, № 11: «Отозвать» из «Настроек» — через уже разрешённый оболочке метод (Pult.app не меняется).
         // Только `{revoke: id}` и только отдельным вызовом: отзыв — живая кнопка, а не часть черновика «Сохранить».
@@ -1464,6 +1466,10 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
             if (e instanceof ConfigureError) throw new ManagerError(ERROR_CODES.invalidParams, `settings.set: ${e.message}`)
             throw e
           }
+        }
+        let disk: ReturnType<typeof parseDiskSettings> | undefined
+        if (p['disk'] !== undefined) {
+          try { disk = parseDiskSettings(p['disk']) } catch (e) { throw new ManagerError(ERROR_CODES.invalidParams, (e as Error).message) }
         }
         let retentionDays: AttachmentRetentionDays | undefined
         if (p['attachments'] !== undefined) {
@@ -1503,12 +1509,14 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
           }
         }
         try {
+          if (disk !== undefined) writeDiskSettings(paths.config, disk)
           if (retentionDays !== undefined) writeAttachmentRetention(paths.config, retentionDays)
           if (language !== undefined) writeLanguage(paths.config, language)
           if (ns !== undefined) writeNewSession(paths.config, ns)
           if (check !== undefined) writeUpdatesCheck(paths.config, check)
           if (guard !== undefined) writeNetworkGuard(paths.config, guard)
         } catch (e) { throw new ManagerError(ERROR_CODES.internal, (e as Error).message) }
+        if (disk !== undefined) config.disk = disk
         if (retentionDays !== undefined) config.attachments.retentionDays = retentionDays
         if (language !== undefined) config.language = language
         if (ns !== undefined) {
@@ -2486,7 +2494,6 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
   const attachmentsTimer = setInterval(sweepAttachmentsNow, ATTACHMENTS_SWEEP_MS)
   attachmentsTimer.unref?.()
 
-  const checkDisk = createDiskMonitor(paths.home, logger)
   checkDisk()
   const diskTimer = setInterval(checkDisk, 60_000)
   diskTimer.unref()
