@@ -31,6 +31,7 @@ describe('полировка: фокус, управление у ввода и 
   it('ошибка компактна, полный лог закрыт, режим доступа и действия находятся в composer', async () => {
     const preview = h.win.getByTestId('tool-error-preview')
     assert.ok(await waitFor(async () => (await preview.count()) === 1))
+    assert.ok(await waitFor(async () => /Не найден тестовый пакет/.test((await preview.textContent()) ?? '')), 'полный вывод ошибки ещё не загружен')
     assert.doesNotMatch((await preview.textContent()) ?? '', /LONG_INPUT_|строка 0/)
     assert.match((await preview.textContent()) ?? '', /Не найден тестовый пакет/)
     assert.equal(await h.win.locator('.tool-raw').getAttribute('open'), null)
@@ -47,6 +48,7 @@ describe('полировка: фокус, управление у ввода и 
   })
 
   it('⌘B освобождает место, ⌘K возвращает список и фокусирует поиск; вниз возвращает к новым', async () => {
+    await h.win.getByTestId('composer').fill('Проверь ещё контраст подписи')
     const width = () => h.win.getByTestId('feed').evaluate((el) => el.getBoundingClientRect().width)
     const before = await width()
     await h.win.keyboard.press('Meta+B')
