@@ -24,6 +24,8 @@ export const BRIDGE_VERSION = 1
  *   - `daemon.stop` — только отдельным вызовом моста `stopDaemon()` с подтверждением в системном диалоге.
  */
 export const ALLOWED_METHODS = [
+  'temporary.list', 'temporary.start', 'temporary.read', 'temporary.draft',
+  'temporary.configure', 'temporary.prompt', 'temporary.stop', 'temporary.remove',
   'daemon.status',
   'runtime.discover', 'runtime.perform', 'runtime.takeover', 'runtime.release',
   'runtime.setup.request', 'runtime.setup.resolve', 'runtime.setup.list',

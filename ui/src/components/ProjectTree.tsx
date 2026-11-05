@@ -19,6 +19,9 @@ import { plural } from '../lib/ru.js'
 import { CMD, Icon, Kbd } from './common.js'
 import type { DraftChat } from '../model/draft.js'
 import { draftLabel, folderName } from '../model/draft.js'
+import type { TemporarySummary } from '../../../src/temporary/types.js'
+import { temporaryBusy } from '../model/temporary.js'
+import './temporary-chat.css'
 
 export interface ProjectTreeProps {
   mode?: 'normal'|'expanded'|'focus'
@@ -59,6 +62,13 @@ export interface ProjectTreeProps {
   activeDraft?: string | null
   onOpenDraft?(id: string): void
   onDiscardDraft?(id: string): void
+  /** RAM-only conversations never enter groups, AgentView, ordinary search, menus or saved tabs. */
+  temporaryChats?: readonly TemporarySummary[]
+  activeTemporaryId?: string | null
+  onSelectTemporary?(id: string): void
+  onNewTemporary?(): void
+  temporaryAvailable?: boolean
+  temporaryStarting?: boolean
 }
 
 type OpenMenu = { at: { x: number; y: number }; items: MenuEntry[]; testId: string }
@@ -110,6 +120,7 @@ export function sessionMenuItems(a: AgentView, api: SessionMenuApi): MenuEntry[]
 
 export function ProjectTree(p: ProjectTreeProps): ReactElement {
   const archived = p.archived ?? []
+  const temporaryChats = p.temporaryChats ?? []
   const [menu, setMenu] = useState<OpenMenu | null>(null)
   const [archiveOpen, setArchiveOpen] = useState(false)
   const [query, setQuery] = useState('')
@@ -120,7 +131,7 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
   const list = projectChats(p.groups, query, filter)
   const general = list.find((entry) => entry.group.scope === 'general')
   const projectList = list.filter((entry) => entry.group.scope !== 'general')
-  const selectedProject = p.groups.find((g) => g.sessions.some((a) => a.name === p.selected))?.path
+  const selectedProject = p.activeTemporaryId ? undefined : p.groups.find((g) => g.sessions.some((a) => a.name === p.selected))?.path
   // Выбранная беседа начала ход по реплике из этого окна и встала наверх проекта — строку возвращаем в виду (прокрутка,
   // только если она ушла из виду). Ход из очереди или из CLI список не дёргает: человек мог прокрутить его в другое место.
   const selectedTurn = p.groups.flatMap((g) => g.sessions).find((a) => a.name === p.selected)?.lastTurnAt
@@ -152,6 +163,19 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
     return () => window.clearTimeout(timer)
   }, [p.selected, selectedProject, revealRequest])
   const closeMenu = useCallback(() => setMenu(null), [])
+  const newTemporaryItem = (): MenuEntry => ({ label: t('Новый временный чат'), testId: 'temporary-new', disabled: !p.temporaryAvailable || p.temporaryStarting === true, title: !p.temporaryAvailable ? t('Временный чат недоступен') : undefined, onSelect: () => p.onNewTemporary?.() })
+  const openNewMenu = (event: MouseEvent<HTMLButtonElement>): void => {
+    setMenu({ at: menuAt(event), testId: 'temporary-new-menu-list', items: [
+      { label: t('Новый чат'), onSelect: () => p.onNew(null), testId: 'new-menu-saved' }, newTemporaryItem(),
+    ] })
+  }
+  const openTemporaryRail = (event: MouseEvent<HTMLButtonElement>): void => {
+    const rect = event.currentTarget.getBoundingClientRect()
+    setMenu({ at: { x: rect.right + 6, y: rect.top }, testId: 'temporary-rail-menu', items: [
+      { heading: t('Временные чаты') }, newTemporaryItem(), ...(temporaryChats.length ? ['sep' as const] : []),
+      ...temporaryChats.map((chat, index) => ({ label: `${t('Временный чат')} ${index + 1} · ${chat.settings.provider === 'claude' ? 'Claude' : 'Codex'}`, checked: chat.id === p.activeTemporaryId, testId: 'temporary-rail-chat', onSelect: () => p.onSelectTemporary?.(chat.id) })),
+    ] })
+  }
 
   const projectMenu = (e: MouseEvent<HTMLElement>, g: ProjectGroup): void => {
     e.preventDefault(); e.stopPropagation()
@@ -176,22 +200,23 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
     setMenu({ at: menuAt(e), testId: 'session-menu-list', items: sessionMenuItems(a, p) })
   }
   const row = (a: AgentView, project: string, shortcut = false): ReactElement =>
-    <SessionRow key={a.name} a={a} project={project} shortcut={shortcut} selected={a.name === p.selected} now={p.now} onSelect={(name) => {
+    <SessionRow key={a.name} a={a} project={project} shortcut={shortcut} selected={!p.activeTemporaryId && a.name === p.selected} now={p.now} onSelect={(name) => {
       if (shortcut) { if (p.collapsed.has(project)) p.onToggle(project); setRevealRequest((n) => n + 1) }
       p.onSelect(name)
     }} onMenu={sessionMenu} />
   if (p.mode === 'focus') return <nav className="agents project-rail" aria-label={t("Проекты и сессии")}>
     <span className="sidebar-brand-mark" aria-hidden="true"><Icon name="mark" /></span>
     <button type="button" className="rail-new" onClick={() => p.onNew(null)} aria-label={t('Новый чат')} title={t('Новый чат')} data-testid="new-agent"><Icon name="plus" /></button>
+    {(p.onNewTemporary || temporaryChats.length > 0) && <button type="button" className="rail-group temporary-rail" aria-label={t('Временные чаты')} title={t('Временные чаты')} aria-current={p.activeTemporaryId ? 'true' : undefined} data-testid="temporary-rail" onClick={openTemporaryRail}><Icon name="clock" />{temporaryChats.some((chat) => temporaryBusy(chat.status)) && <span className="temporary-busy-dot" />}</button>}
     <div className="rail-groups">{p.groups.map((group) => <button key={group.path} type="button" className="rail-group" aria-current={group.path === selectedProject} title={group.name} aria-label={group.name} data-testid="rail-project" onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); setMenu({ at: { x: r.right + 6, y: r.top }, testId: 'rail-chats', items: [{ heading: group.name }, { label: t('Новый чат'), testId: 'rail-new-chat', onSelect: () => p.onNew(group.scope === 'general' ? null : group.path) }, 'sep', ...group.sessions.map((a) => ({ label: agentLabel(a), checked: a.name === p.selected, testId: 'rail-chat', onSelect: () => p.onSelect(a.name) }))] }) }}>{group.scope === 'general' ? <Icon name="model" /> : group.name.slice(0,2)}{group.waiting > 0 && <span className="rail-wait" />}</button>)}</div>
-    {menu && <ContextMenu at={menu.at} items={menu.items} onClose={closeMenu} testId={menu.testId} />}
+    {menu && <ContextMenu at={menu.at} items={menu.items.map((entry) => typeof entry === 'object' && 'testId' in entry && entry.testId === 'temporary-new' ? newTemporaryItem() : entry)} onClose={closeMenu} testId={menu.testId} />}
   </nav>
   return (
     <nav className="agents" aria-label={t("Проекты и сессии")}>
       <div className="sidebar-top"><div className="sidebar-brand"><span className="sidebar-brand-mark" aria-hidden="true"><Icon name="mark" /></span>{t("Пульт")}</div>
-        <button type="button" className="btn new-chat" onClick={() => p.onNew(null)} data-testid="new-agent">
+        <div className="temporary-new-chooser"><button type="button" className="btn new-chat" onClick={() => p.onNew(null)} data-testid="new-agent">
           <Icon name="edit" />{t("Новый чат")}<span className="grow" /><Kbd>{`${CMD}N`}</Kbd>
-        </button>
+        </button>{p.onNewTemporary && <button type="button" className="chrome-icon temporary-new-menu" aria-label={t('Выбрать тип нового чата')} title={t('Выбрать тип нового чата')} aria-haspopup="menu" aria-expanded={menu?.testId === 'temporary-new-menu-list'} data-testid="temporary-new-menu" onClick={openNewMenu}><Icon name="chevd" /></button>}</div>
         <label className="chat-search"><Icon name="search" /><input value={query} onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Escape') {
@@ -238,6 +263,15 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
           const rows = section.key === 'recent' ? section.rows.filter(({ agent }) => agent.status === 'done' || agent.status === 'idle') : section.rows
           return rows.length ? <section key={section.key} className={`attention-section ${section.key}`}><h3>{section.key === 'waiting' ? t('Ждёт тебя') : section.key === 'working' ? t('Работает') : t('Готово')}<span>{rows.length}</span></h3><ul className="ag-list" role="listbox" aria-label={section.label}>{rows.map(({ agent, projectPath }) => row(agent,projectPath,true))}</ul></section> : null
         })}</div>}
+        {temporaryChats.length > 0 && <section className="temporary-sidebar-group" data-testid="temporary-group">
+          <h3><Icon name="clock" />{t('Временные чаты')}<span>{temporaryChats.length}</span></h3>
+          <div className="temporary-sidebar-list" role="listbox" aria-label={t('Временные чаты')}>
+            {temporaryChats.map((chat, index) => <button key={chat.id} type="button" role="option" className="temporary-sidebar-row" aria-selected={chat.id === p.activeTemporaryId} aria-busy={temporaryBusy(chat.status)} aria-label={t`Временный чат ${index + 1}`}
+              data-testid="temporary-row" data-temporary-id={chat.id} onClick={() => p.onSelectTemporary?.(chat.id)}>
+              <ProviderIcon provider={chat.settings.provider} /><span>{t('Временный чат')}</span><span className="temporary-row-number">{index + 1}</span>{temporaryBusy(chat.status) && <span className="temporary-busy-dot" />}
+            </button>)}
+          </div>
+        </section>}
         {general && <details className="general-conversations" open={!p.collapsed.has(general.group.path) || !!query} onToggle={(e) => { const want = !p.collapsed.has(general.group.path) || !!query; if (e.currentTarget.open !== want && !query) p.onToggle(general.group.path) }} data-testid="general-conversations">
           <summary onClick={(e) => { e.preventDefault(); p.onToggle(general.group.path) }}><Icon name="chev" /><span>{t('Разговоры')}</span><span className="count">{general.rows.length}</span><span className="grow" /><button type="button" className="proj-btn" aria-label={t('Новый разговор без проекта')} onClick={(e) => { e.preventDefault(); e.stopPropagation(); p.onNew(null) }} data-testid="general-new"><Icon name="plus" /></button></summary>
           <ul className="ag-list" role="listbox" aria-label={t('Разговоры без проекта')}>{general.rows.map((a) => row(a,general.group.path))}</ul>
@@ -274,7 +308,7 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
               </div>
             </details>
           })}
-          {list.length === 0 && <div className="empty-hint" data-testid="agents-empty"><h3>{query ? t('Ничего не найдено') : filter === 'all' ? t('Начни с нового чата') : t('Таких чатов пока нет')}</h3>
+          {list.length === 0 && (temporaryChats.length === 0 || !!query || filter !== 'all') && <div className="empty-hint" data-testid="agents-empty"><h3>{query ? t('Ничего не найдено') : filter === 'all' ? t('Начни с нового чата') : t('Таких чатов пока нет')}</h3>
             {query ? t('Попробуй другое название или имя проекта.') : t('Выбери другой фильтр или создай новый чат.')}</div>}
         </div>
         {archived.length > 0 && <section className="proj proj-archive" data-testid="archive-section">
@@ -284,7 +318,7 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
           {archiveOpen && <ul className="ag-list" role="listbox" aria-label={t("Сессии в архиве")}>{archived.map((a) => row(a, a.repo ?? a.cwd))}</ul>}
         </section>}
       </div></div>
-      {menu && <ContextMenu at={menu.at} items={menu.items} onClose={closeMenu} testId={menu.testId} />}
+      {menu && <ContextMenu at={menu.at} items={menu.items.map((entry) => typeof entry === 'object' && 'testId' in entry && entry.testId === 'temporary-new' ? newTemporaryItem() : entry)} onClose={closeMenu} testId={menu.testId} />}
     </nav>
   )
 }

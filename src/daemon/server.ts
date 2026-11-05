@@ -36,6 +36,10 @@ import { ATTACHMENTS_SWEEP_MS, sweepAttachments } from '../core/attachments.js'
 /** Строка события в `events.get` — до этой длины: окно показывает вывод до 4000 знаков, вход — целиком. */
 const GET_STRING_CHARS = 100_000
 import type { EventStore } from '../core/store.js'
+import { createTemporaryChatService } from '../temporary/service.js'
+import { createTemporaryProviderFactory, readTemporaryProviderCapabilities } from '../temporary/providers.js'
+import { TemporaryChatError } from '../temporary/types.js'
+import type { TemporaryCapability, TemporaryChatService, TemporaryConfigureRequest, TemporaryDraftRequest, TemporaryIdentity, TemporaryPromptRequest, TemporaryReadRequest, TemporaryServiceOptions, TemporaryStartRequest } from '../temporary/types.js'
 import { rotateToken, tokenEquals } from '../core/token.js'
 import { VERSION } from '../core/version.js'
 import { createClaudeAdapter } from '../adapters/claude/adapter.js'
@@ -125,6 +129,8 @@ export interface DaemonOptions {
   paths: PultPaths
   config: PultConfig
   logger: Logger
+  /** In-process test seam; never accepted from RPC or ordinary saved-session settings. */
+  temporary?: Pick<TemporaryServiceOptions, 'factory' | 'capabilities'>
   /**
    * Файл правил Codex (план 16, № 11). Нет — `$CODEX_HOME/rules/default.rules`, а в testMode —
    * `PULT_CODEX_RULES` или `PULT_HOME/codex-rules/default.rules`: тест никогда не читает и не правит настоящий.
@@ -192,6 +198,7 @@ export interface DaemonHandle {
   readonly askKeys: AskKeys
   readonly runtimes: ReturnType<typeof createRuntimeService>
   readonly manager: SessionManager
+  readonly temporary: TemporaryChatService
   readonly startedAt: string
   status(): DaemonStatus
   emit(draft: EventDraft): PultEvent
@@ -693,10 +700,53 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
       },
     } : {}),
   })
+  const temporaryWorkspaceRoot = join(paths.home, 'temporary-workspaces')
+  const temporaryRoutes = new Map<string, { signature: string; env: Record<string, string> }>()
+  let temporary: TemporaryChatService
+  const temporaryBin = opts.testMode && process.env['PULT_TEST_TEMPORARY_CLAUDE_BIN']
+    ? process.env['PULT_TEST_TEMPORARY_CLAUDE_BIN'] : claudeBin
+  const temporaryProvider = createTemporaryProviderFactory({
+    claudeBin: temporaryBin, workspaceRoot: temporaryWorkspaceRoot,
+    workspaceFor: (id) => temporary.workspaceFor(id),
+    networkEnvFor: (id) => temporaryRoutes.get(id)?.env ?? {},
+  })
+  let temporaryCapabilities: { at: number; value: TemporaryCapability[] } | null = null
+  let temporaryCapabilityFlight: Promise<TemporaryCapability[]> | null = null
+  const privateCapabilities = async (): Promise<TemporaryCapability[]> => {
+    if (temporaryCapabilities && Date.now() - temporaryCapabilities.at < 30_000) return temporaryCapabilities.value
+    if (!temporaryCapabilityFlight) {
+      temporaryCapabilityFlight = readTemporaryProviderCapabilities({ claudeBin: temporaryBin }).then((value) => {
+        temporaryCapabilities = { at: Date.now(), value }; return value
+      }).finally(() => { temporaryCapabilityFlight = null })
+    }
+    return temporaryCapabilityFlight
+  }
+  temporary = createTemporaryChatService({
+    workspaceRoot: temporaryWorkspaceRoot,
+    factory: opts.temporary?.factory ?? temporaryProvider,
+    capabilities: opts.temporary?.capabilities ?? privateCapabilities,
+    beforeTurn: async (provider, id) => {
+      if (updaterRef?.applying()) throw new TemporaryChatError('shutting_down')
+      const generation = netGeneration()
+      const profile = JSON.stringify([config.network[provider], config.guard])
+      let check: NetCheck
+      try {
+        check = await (netCheck ? netCheck(provider) : checkNetwork(provider, config.network[provider], config.guard, { fresh: true }))
+      } catch { throw new TemporaryChatError('blocked_network') }
+      if (updaterRef?.applying()) throw new TemporaryChatError('shutting_down')
+      if (!check.ok || netGeneration() !== generation || profile !== JSON.stringify([config.network[provider], config.guard])) throw new TemporaryChatError('blocked_network')
+      // Check the route actually pinned to the live CLI, not a newly selected route.
+      const signature = JSON.stringify([check.path, check.proxy, check.loc, generation])
+      const previous = temporaryRoutes.get(id)
+      if (previous && previous.signature !== signature) throw new TemporaryChatError('blocked_network')
+      temporary.read({ epoch: temporary.epoch, id }) // Reject a late check after End/delete.
+      temporaryRoutes.set(id, { signature, env: provider === 'claude' ? claudeNetworkEnv(check) : {} })
+    },
+  })
   // Ход идёт по статусу ИЛИ заводится прямо сейчас (resume/send — статуса `working` ещё нет). Один счёт на «Обновить»
   // в окне (checker ждёт, пока он не 0) и на `pult update` из CLI (`daemon.status.turns`).
   const runningTurns = (): number =>
-    new Set([...manager.list().filter((r) => RUNNING_TURN.has(r.lastStatus)).map((r) => r.name), ...manager.startingTurns()]).size
+    new Set([...manager.list().filter((r) => RUNNING_TURN.has(r.lastStatus)).map((r) => r.name), ...manager.startingTurns()]).size + temporary.runningCount()
   // M8c: канал обновлений. В тестовом демоне расписание — только по шву (`opts.updates`) или в сквозном
   // прогоне с PULT_TEST_UPDATE_DIR (первая проверка — через PULT_TEST_UPDATE_FIRST_MS): иначе каждый тест
   // заводил бы таймер, который через минуту честно сообщал бы «сеть в тестах не трогается».
@@ -1920,6 +1970,37 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
       appUpdater.onShellReady(conn.app)
     }
 
+    if (req.method.startsWith('temporary.')) {
+      // This namespace never reaches saved sessions, the event bus, notifications or raw logging.
+      try {
+        const p = ownParams(req.params)
+        if (req.params !== undefined && (req.params === null || typeof req.params !== 'object' || Array.isArray(req.params))) throw new TemporaryChatError('invalid_params')
+        if ((req.method === 'temporary.start' || req.method === 'temporary.prompt') && updaterRef?.applying()) throw new TemporaryChatError('shutting_down')
+        let result: unknown
+        switch (req.method) {
+          case 'temporary.list':
+            if (Object.keys(p).length) throw new TemporaryChatError('invalid_params')
+            result = await temporary.list(); break
+          case 'temporary.start': result = await temporary.start(p as unknown as TemporaryStartRequest); break
+          case 'temporary.read': result = temporary.read(p as unknown as TemporaryReadRequest); break
+          case 'temporary.draft': result = temporary.draft(p as unknown as TemporaryDraftRequest); break
+          case 'temporary.configure': result = await temporary.configure(p as unknown as TemporaryConfigureRequest); break
+          case 'temporary.prompt': result = temporary.prompt(p as unknown as TemporaryPromptRequest); break
+          case 'temporary.stop': result = await temporary.stop(p as unknown as TemporaryIdentity); break
+          case 'temporary.remove':
+            result = await temporary.remove(p as unknown as TemporaryIdentity)
+            if (typeof p['id'] === 'string') temporaryRoutes.delete(p['id'])
+            break
+          default: throw new TemporaryChatError('invalid_params')
+        }
+        send({ id: req.id, result })
+      } catch (error) {
+        const code = error instanceof TemporaryChatError ? error.code : 'internal'
+        fail(code, 'Временный чат недоступен')
+      }
+      return
+    }
+
     switch (req.method) {
       case 'daemon.status': {
         const st = status()
@@ -2347,6 +2428,10 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
           continue
         }
         void withLanguage(req.locale === 'ru' || req.locale === 'en' ? req.locale : () => resolveLanguage(config.language, process.env['LC_ALL'] || process.env['LC_MESSAGES'] || process.env['LANG'] || Intl.DateTimeFormat().resolvedOptions().locale), () => dispatch(conn, req)).catch((e: unknown) => {
+          if (req.method.startsWith('temporary.')) {
+            try { writeFrame(conn, { id: req.id, error: { code: ERROR_CODES.internal, message: 'Временный чат недоступен' } }) } catch { /* disconnected */ }
+            return
+          }
           logger.error('метод упал', { method: req.method, error: (e as Error).message })
           try {
             writeFrame(conn, { id: req.id, error: { code: ERROR_CODES.internal, message: String((e as Error).message) } })
@@ -2428,6 +2513,10 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
       await cleanup('updater', () => updater.stop())
       await cleanup('permissions', () => broker.shutdown('демон останавливается'))
       await cleanup('agents', () => manager.shutdown())
+      await cleanup('temporary', async () => {
+        try { await temporary.shutdown() } catch { throw new Error('temporary_shutdown_failed') }
+        finally { temporaryRoutes.clear() }
+      })
       await cleanup('appUpdater', () => appUpdater.stop())
       await cleanup('notifications', () => notifyRunner?.close())
       await cleanup('rules', () => rules.close())
@@ -2465,6 +2554,7 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
       askKeys,
       runtimes,
       manager,
+      temporary,
       startedAt,
       status,
       emit,
