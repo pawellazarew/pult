@@ -199,11 +199,20 @@ describe('argv и --mcp-config: браузер и свои серверы', () =
     assert.deepEqual(Object.keys((JSON.parse(mcpConfigBody({ nodeBin: 'n', cliEntry: 'c', home: 'h', sessionName: 's', askKey: 'k' })) as { mcpServers: object }).mcpServers), ['pult'])
   })
 
+  it('Playwright MCP: system Chrome is always sandboxed on macOS and Linux', () => {
+    for (const platform of ['darwin', 'linux']) for (const headed of [true, false]) {
+      const args = browserArgs({ nodeBin: 'node', cli: '/mcp/cli.js', dirs: { root: '/tmp/b', profile: '/tmp/b/p', downloads: '/tmp/b/d' }, chrome: null, platform, headed })
+      assert.ok(args.includes('--sandbox'))
+      assert.ok(!args.includes('--no-sandbox'))
+      assert.equal(args[args.indexOf('--browser') + 1], 'chrome')
+    }
+  })
+
   it('Playwright MCP: свой профиль, скачивания, абсолютные пути, без окна по умолчанию, cwd — папка скачиваний', () => {
     const dirs = { root: '/h/browser/w', profile: '/h/browser/w/profile', downloads: '/h/browser/w/downloads' }
     const std = STANDARD_CHROME['darwin'] as string
     const a = browserArgs({ nodeBin: 'n', cli: '/c/cli.js', dirs, headed: false, chrome: std, platform: 'darwin' })
-    assert.deepEqual(a, ['/c/cli.js', '--browser', 'chrome', '--user-data-dir', dirs.profile, '--output-dir', dirs.downloads, '--file-paths', 'absolute', '--headless'])
+    assert.deepEqual(a, ['/c/cli.js', '--browser', 'chrome', '--sandbox', '--user-data-dir', dirs.profile, '--output-dir', dirs.downloads, '--file-paths', 'absolute', '--headless'])
     assert.ok(!a.includes('--allow-unrestricted-file-access'))
     const h = browserArgs({ nodeBin: 'n', cli: '/c/cli.js', dirs, headed: true, chrome: '/Users/you/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', platform: 'darwin' })
     assert.ok(!h.includes('--headless'))
@@ -248,7 +257,7 @@ describe('argv и --mcp-config: браузер и свои серверы', () =
 })
 
 describe('установка Playwright MCP без сети', () => {
-  it('в пакете есть lock-файл с суммами: @playwright/mcp 0.0.83 и обе зависимости', () => {
+  it('в пакете есть lock-файл с суммами: @playwright/mcp 0.0.84 и обе зависимости', () => {
     const lock = JSON.parse(readFileSync(join(PACKAGED_LOCK_DIR, 'package-lock.json'), 'utf8')) as { packages: Record<string, { version?: string; integrity?: string; resolved?: string }> }
     const pkgs = Object.entries(lock.packages).filter(([k]) => k)
     assert.deepEqual(pkgs.map(([k]) => k).sort(), ['node_modules/@playwright/mcp', 'node_modules/playwright', 'node_modules/playwright-core'])

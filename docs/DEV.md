@@ -410,7 +410,7 @@ pult agent rm w2 --worktree      # ещё и `git worktree remove` — толь�
   шрифты Geologica/Onest/JetBrains Mono копируются из devDependencies `@fontsource-variable/*` (источник и
   OFL — `ui/fonts/LICENSES.md`). `npm run ui:watch` — пересборка на лету. Юнит-тесты интерфейса (`ui/test/`,
   без DOM) идут в `npm test`; типы — `npm run typecheck` (`ui/tsconfig.json`).
-- `shell/` — отдельный пакет Electron со своим lock-файлом (electron 44.4.5, electron-builder, @electron/fuses,
+- `shell/` — отдельный пакет Electron со своим lock-файлом (electron 45.2.3, electron-builder, @electron/fuses,
   playwright-core). `cd shell && npm ci && npm start` — окно на рабочей копии (`PULT_UI_ROOT` = корень,
   демон запускается текущим node через `PULT_NODE`). Сначала `npm run build` в корне: оболочка грузит
   `dist/cli/*.js` и `dist/ui` из найденного пакета. Бинарь Electron докачивается при первом запуске.
@@ -575,7 +575,7 @@ PATH → Homebrew): `execPath` оболочки — Electron, а fuse `RunAsNode
 
 Решение — docs/14 «О3 — браузер для агента и свои MCP-серверы», поправки ревью 15.10.2026. Код — `src/mcp/`.
 
-- **Установка** (`src/mcp/browser.ts`). `@playwright/mcp` прибит на `0.0.83` вместе с зависимостями: `mcp/playwright-mcp/`
+- **Установка** (`src/mcp/browser.ts`). `@playwright/mcp` прибит на `0.0.84` вместе с зависимостями: `mcp/playwright-mcp/`
   в пакете (`package.json` + `package-lock.json` с `integrity` sha512 трёх тарболов: `@playwright/mcp`, `playwright`,
   `playwright-core`; каталог в `files` пакета). Ставится `npm ci --ignore-scripts --omit=dev --registry=https://registry.npmjs.org/`
   в `PULT_HOME/mcp/playwright-mcp-<версия>.partial-<pid>` npm-ом своего node (`runtime/active`; нет — сосед node демона,

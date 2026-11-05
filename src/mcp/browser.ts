@@ -6,8 +6,8 @@ import { t } from '../cli/i18n.js'
 // зависимостями: `mcp/playwright-mcp/{package.json,package-lock.json}` в пакете Пульта (суммы sha512 всех
 // трёх тарболов) и `npm ci` по нему — `@latest` или свежий `npm install` значили бы, что любой следующий
 // выпуск чужого пакета (или его зависимости) исполняется у владельца без его ведома.
-//   * `--ignore-scripts`: install-скриптов у @playwright/mcp 0.0.83 и его зависимостей нет (проверено
-//     `npm view` 14.10.2026), а браузеры Playwright Пульт не качает вовсе — работает системный Chrome
+//   * `--ignore-scripts`: install-скриптов у @playwright/mcp 0.0.84 и его зависимостей нет (проверено
+//     `npm view` 05.11.2026), а браузеры Playwright Пульт не качает вовсе — работает системный Chrome
 //     (`--browser chrome`). PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 — пояс к подтяжкам;
 //   * `--registry=https://registry.npmjs.org/`, `npm_config_globalconfig` = /dev/null, `npm_config_userconfig` — пустой файл,
 //     `HOME=PULT_HOME`, кэш npm в `PULT_HOME/npm-cache`: чужой .npmrc (зеркало, токен) не читается, ~/.npm
@@ -52,10 +52,10 @@ import type { McpServerSpec } from './servers.js'
 
 export const PLAYWRIGHT_MCP_PACKAGE = '@playwright/mcp'
 /** Прибитая версия. Новую — только руками: lock-файл, install-скрипты, флаги (`cli.js --help`), `tools/list`. */
-export const PLAYWRIGHT_MCP_VERSION = '0.0.83'
+export const PLAYWRIGHT_MCP_VERSION = '0.0.84'
 export const BROWSER_SERVER_NAME = 'pult_browser'
 /**
- * Инструменты 0.0.83, исполняющие произвольный код (`tools/list`, 14.10.2026): `browser_run_code_unsafe` —
+ * Инструменты 0.0.84, исполняющие произвольный код (`tools/list`, 05.11.2026): `browser_run_code_unsafe` —
  * код Playwright в процессе node (то есть на машине), `browser_evaluate` — JavaScript в странице.
  * `browser_run_code` — прежнее имя первого: на случай, если пакет обновят, а список забудут.
  */
@@ -203,12 +203,13 @@ export interface BrowserSpecOptions {
   platform?: string
 }
 
-/** Аргументы Playwright MCP. Флаги сверены с `cli.js --help` версии 0.0.83. */
+/** Аргументы Playwright MCP. Флаги сверены с `cli.js --help` версии 0.0.84. */
 export function browserArgs(o: BrowserSpecOptions): string[] {
   const standard = STANDARD_CHROME[o.platform ?? process.platform]
   return [
     o.cli,
     '--browser', 'chrome',
+    '--sandbox',
     ...(o.chrome && o.chrome !== standard ? ['--executable-path', o.chrome] : []),
     '--user-data-dir', o.dirs.profile,
     '--output-dir', o.dirs.downloads,
