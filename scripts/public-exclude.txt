@@ -37,3 +37,6 @@ docs/research/**
 docs/page-v0.5.html
 docs/page-v0.6.html
 docs/render.py
+
+# Design drafts, audits and second-model critiques under design/ (design history, owner decision 20.10.2026).
+design/**
