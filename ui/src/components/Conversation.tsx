@@ -1231,7 +1231,7 @@ export function QueueList({ queue, paused, onRemove, onMove, onResume, onSend, e
             <li key={it.id} className="queue-item" data-testid="queue-item" data-id={it.id}
               data-dragging={dragView?.id === it.id ? '1' : undefined}
               data-drop={dragView?.target === it.id && dragView.id !== it.id ? dragView.after ? 'after' : 'before' : undefined}>
-              <button type="button" className="btn btn-ghost btn-sm queue-drag-handle" disabled={blocked || queue.length < 2}
+              <button type="button" className="btn btn-ghost btn-sm queue-act queue-drag-handle" disabled={blocked || queue.length < 2}
                 aria-label={t("Переместить реплику")} aria-keyshortcuts="ArrowUp ArrowDown" title={t("Переместить реплику")} data-testid="queue-drag"
                 onPointerDown={(e) => {
                   if (drag.current || !e.isPrimary || e.button !== 0 || blocked || queue.length < 2) return
@@ -1251,15 +1251,16 @@ export function QueueList({ queue, paused, onRemove, onMove, onResume, onSend, e
               </button>
               <span className="n mono">{i + 1}</span>
               <span className="queue-message"><span className="txt" title={it.text}>{it.text}</span><UserAttachments items={it.attachments ?? []} /></span>
+              {/* Действия — иконки фиксированного размера с подсказкой: подписи не влезали и вылезали за рамку поля. */}
               {edit && (
-                <button type="button" className="btn btn-ghost btn-sm" aria-label={t("Изменить реплику")} title={t("Изменить: очередь подождёт, пока правишь")}
+                <button type="button" className="btn btn-ghost btn-sm queue-act" aria-label={t("Изменить реплику")} title={t("Изменить: очередь подождёт, пока правишь")}
                   disabled={blocked} aria-busy={edit.opening === it.id ? true : undefined}
-                  onClick={() => edit.onStart(it.id)} data-testid="queue-edit">{t("Изменить")}</button>
+                  onClick={() => edit.onStart(it.id)} data-testid="queue-edit"><Icon name="edit" /></button>
               )}
-              {onSend && <button type="button" className="btn btn-ghost btn-sm queue-send-now" disabled={blocked}
-                title={t("Отправить в текущую задачу без остановки")} aria-busy={sending === it.id ? true : undefined}
-                onClick={() => void send(it.id)} data-testid="queue-send">{sending === it.id ? <span className="spin" /> : <Icon name="send" />}{t("Отправить сейчас")}</button>}
-              <button type="button" className="btn btn-ghost btn-sm" aria-label={t("Убрать из очереди")} title={t("Убрать из очереди")} disabled={sending !== null}
+              {onSend && <button type="button" className="btn btn-ghost btn-sm queue-act queue-send-now" disabled={blocked}
+                aria-label={t("Отправить сейчас")} title={t("Отправить в текущую задачу без остановки")} aria-busy={sending === it.id ? true : undefined}
+                onClick={() => void send(it.id)} data-testid="queue-send">{sending === it.id ? <span className="spin" /> : <Icon name="send" />}</button>}
+              <button type="button" className="btn btn-ghost btn-sm queue-act" aria-label={t("Убрать из очереди")} title={t("Убрать из очереди")} disabled={sending !== null}
                 onClick={() => onRemove(it.id)} data-testid="queue-remove"><Icon name="x" /></button>
             </li>
           )))}
