@@ -5,10 +5,5 @@
 .queue-item[data-dragging="1"] { opacity: .5; border-style: solid; }
 .queue-item[data-drop="before"] { box-shadow: 0 -3px 0 var(--accent); }
 .queue-item[data-drop="after"] { box-shadow: 0 3px 0 var(--accent); }
-.queue-item .queue-send-now { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .queue .queue-notice.err { color: var(--fail); }
-.queue-send-now .ic { width: 13px; height: 13px; }
 .queue-announcement { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-@media (max-width: 700px) {
-  .queue-item .queue-send-now { font-size: 11px; padding-inline: 4px; }
-}
