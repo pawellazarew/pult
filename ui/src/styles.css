@@ -774,8 +774,15 @@ button { font: inherit; color: inherit; }
 .queue-item { display: flex; align-items: center; gap: 6px; padding: 4px 6px 4px 10px; border: 1px dashed var(--line); border-radius: 8px;
   font-size: 12px; color: var(--mut); }
 .queue-item .n { color: var(--faint); font-size: 11px; }
-.queue-item .txt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.queue-item .btn { height: 24px; min-width: 24px; padding: 0 6px; }
+/* Текст берёт остаток строки и обрезается «…»; кнопки — квадраты 26×26 без подписи и не сжимаются,
+   поэтому строка никогда не шире поля ввода. */
+.queue-item { min-width: 0; }
+.queue-item .n { flex: none; }
+.queue-message { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 6px; overflow: hidden; }
+.queue-item .txt { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-message .user-attachments { flex: 0 1 auto; min-width: 0; flex-wrap: nowrap; margin: 0; overflow: hidden; }
+.queue-item .btn.queue-act { flex: none; width: 26px; height: 26px; min-width: 26px; padding: 0; gap: 0; justify-content: center; }
+.queue-item .queue-act .ic, .queue-item .queue-act svg { width: 14px; height: 14px; flex: none; }
 .queue-notice { padding: 5px 10px; margin-bottom: 6px; border: 1px solid var(--line); border-radius: 8px; font-size: 12px; color: var(--mut); }
 /* 0.3.2: правка реплики на месте строки очереди. */
 .queue-item-edit { align-items: flex-start; border-style: solid; border-color: var(--accent); color: var(--ink); }
@@ -1005,8 +1012,11 @@ button { font: inherit; color: inherit; }
 .it-notice .body { border-radius: 8px; padding: 10px 12px; font-size: 13px; }
 .it-agent > .body { border-radius: 9px; overflow: hidden; border-left: 2px solid var(--hair); }
 .sub-body { padding: 12px; }
+/* Поле ввода, очередь и кнопка субагентов стоят в одной колонке: общий отступ и ширина держат их края на одной линии.
+   Сам отступ поля задаёт workspace.css (там же узкое окно). */
+:root { --composer-gutter: 24px; --composer-w: 764px; }
 .composer { padding: 12px 24px 18px; border: 0; background: var(--ground); }
-.composer .box { display: flex; flex-direction: column; align-items: stretch; gap: 10px; max-width: 764px; margin: 0 auto; border: 1px solid var(--line); border-radius: 13px; background: var(--panel); padding: 12px; box-shadow: 0 2px 8px rgba(20,25,20,.025); }
+.composer .box { display: flex; flex-direction: column; align-items: stretch; gap: 10px; max-width: var(--composer-w); margin: 0 auto; border: 1px solid var(--line); border-radius: 13px; background: var(--panel); padding: 12px; box-shadow: 0 2px 8px rgba(20,25,20,.025); }
 .composer .box:focus-within { border-color: var(--accent-edge); box-shadow: 0 0 0 2px var(--accent-soft); }
 .composer textarea { flex: none; width: 100%; min-width: 0; min-height: 78px; max-height: 240px; padding: 3px 5px; font: 15px/1.6 var(--body); border: 0; border-radius: 0; background: transparent; }
 .composer textarea:focus { background: transparent; border: 0; }
@@ -1039,8 +1049,8 @@ button { font: inherit; color: inherit; }
 .chat-info .ctx-meter .bar { width: 100%; }
 .chat-info .chat-limits { flex-direction: column; align-items: flex-start; white-space: normal; gap: 7px; margin-top: 10px; font-size: 11.5px; }
 .chat-status .help-btn { width: 22px; height: 22px; border-color: transparent; font-family: var(--body); font-size: 12px; }
-.queue { padding: 0 24px 2px; background: var(--ground); }
-.queue > * { max-width: 764px; }
+.queue { padding: 0 var(--composer-gutter) 2px; background: var(--ground); }
+.queue > * { max-width: var(--composer-w); }
 .queue-list { font-size: 12px; }
 .jump-latest { position: absolute; bottom: 12px; right: max(24px, calc((100% - 764px) / 2)); max-width: calc(100% - 48px); z-index: 5; height: 34px; padding: 0 13px; display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 18px; background: var(--panel); color: var(--ink); box-shadow: 0 3px 14px rgba(20,25,20,.1); cursor: pointer; font: 12px var(--body); white-space: nowrap; }
 .jump-latest .ic { width: 14px; height: 14px; }

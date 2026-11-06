@@ -138,8 +138,35 @@ describe('очередь реплик под полем ввода', () => {
     assert.doesNotMatch(html(QueueList, props), /data-testid="queue-send"/)
     const h = html(QueueList, { ...props, onSend: async () => {} })
     assert.match(h, /data-testid="queue-send"/)
-    assert.match(text(h), /Отправить сейчас/)
+    assert.match(h, /aria-label="Отправить сейчас"[^>]*data-testid="queue-send"/)
     assert.match(h, /disabled=""[^>]*data-testid="queue-drag"/, 'единственную реплику некуда перемещать')
+  })
+
+  it('строка очереди не шире поля ввода: действия — иконки без подписей, текст обрезается «…»', () => {
+    const long = 'еще сборку для тестирования сделай и напиши новые qa notes и сабтаски которые выполнил тоже переведи на тест'
+    const edit = { state: null, opening: null, onStart: noop, onChange: noop, onSave: noop, onCancel: noop }
+    const h = html(QueueList, { queue: [{ id: 'a', text: long, at: '' }, { id: 'b', text: 'вторая', at: '' }], paused: false,
+      onRemove: noop, onMove: noop, onResume: noop, onSend: async () => {}, edit })
+    const row = h.match(/<li[^>]*data-testid="queue-item"[^>]*>.*?<\/li>/)?.[0] ?? ''
+    // Порядок: ручка, номер, текст, затем три иконки-действия.
+    assert.match(row, /queue-drag-handle.*class="n mono">1<.*class="queue-message"><span class="txt" title="[^"]+">.*queue-edit.*queue-send.*queue-remove/)
+    for (const id of ['queue-drag', 'queue-edit', 'queue-send', 'queue-remove']) {
+      const btn = row.match(new RegExp(`<button[^>]*data-testid="${id}"[^>]*>(.*?)</button>`))
+      assert.ok(btn, `нет кнопки ${id}`)
+      assert.match(btn[0], /class="[^"]*\bqueue-act\b/, `${id}: нет фиксированного размера`)
+      assert.match(btn[0], /aria-label="[^"]+"/, `${id}: иконке нужна подпись для читалки`)
+      assert.match(btn[0], /title="[^"]+"/, `${id}: иконке нужна подсказка`)
+      assert.equal(text(btn[1] ?? ''), '', `${id}: подпись текстом снова вылезет за рамку`)
+    }
+    const css = readFileSync(new URL('../ui/src/styles.css', import.meta.url), 'utf8')
+    assert.match(css, /^\.queue-message \{ flex: 1 1 auto; min-width: 0;/m, 'текст очереди не сжимается и выталкивает кнопки')
+    assert.match(css, /^\.queue-item \.txt \{[^}]*min-width: 0;[^}]*text-overflow: ellipsis;/m)
+    assert.match(css, /^\.queue-item \.btn\.queue-act \{ flex: none; width: 26px; height: 26px;/m, 'кнопки очереди без фиксированного размера')
+    assert.match(css, /^\.queue \{ padding: 0 var\(--composer-gutter\)/m, 'отступ очереди разошёлся с полем ввода')
+    const ws = readFileSync(new URL('../ui/src/workspace.css', import.meta.url), 'utf8')
+    assert.match(ws, /^\.composer \{[^}]*padding: 12px var\(--composer-gutter\) 20px;/m, 'отступ поля ввода не из общей переменной')
+    assert.match(ws, /^\.subagent-track \{[^}]*padding: 8px max\(var\(--composer-gutter, 24px\), calc\(\(100% - var\(--composer-w, 764px\)\) \/ 2\)\) 0;/m,
+      'кнопка субагентов не на линии рамки поля ввода')
   })
 
   it('старый демон (без очереди): поле заперто ходом, как раньше', () => {
