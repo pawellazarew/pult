@@ -1,0 +1,81 @@
+/* Предпросмотр PR 1 (колонка + строка очереди + панель поля ввода) поверх текущего CSS. Только для repro-proposed.html.
+   В продукте эти правила лягут в ui/src/components/composer.css и queue.css, а значения — локальными переменными:
+   tokens.css в PR 1 ещё не подключается. Фокус и радиусы здесь намеренно НЕ трогаются (это PR 3 и PR 6). */
+
+/* --- Колонка: общие внешние края у ленты, пилюли, очереди и поля ввода. ------------------------------------ */
+.conv { container: conv / inline-size; }
+.conv > .subagent-track,
+.conv > .queue,
+.conv > .composer,
+.conv .feed-inner {
+  width: min(100% - 2 * var(--column-gutter), var(--column-max));
+  max-width: none;
+  margin-inline: auto;
+  padding-inline: 0;
+  align-self: auto;
+}
+@container conv (max-width: 600px) {
+  .conv > .subagent-track, .conv > .queue, .conv > .composer, .conv .feed-inner { --column-gutter: var(--column-gutter-narrow); }
+}
+/* Классические полосы прокрутки отнимают ширину только у ленты: резервируем их симметрично, центр колонки не едет. */
+.conv .feed { scrollbar-gutter: stable both-edges; }
+.composer .box, .queue > *, .access-strip { max-width: none; margin-inline: 0; }
+.subagent-track { padding-top: var(--space-8); }
+.queue-list { gap: var(--space-4); }
+
+/* --- QueueItem: [ручка][номер][текст — сжимается][действия — никогда]. ----------------------------------------- */
+.queue-item { container: queue-item / inline-size; padding: var(--space-4); gap: var(--space-4); }
+.queue-item > .btn, .queue-item > .n { flex: none; }
+/* Зоны содержимого — и в обычной строке, и в режиме правки. */
+.queue-item > .queue-message, .queue-item > .queue-edit-body { flex: 1 1 0; min-width: 0; }
+.queue-item > .queue-message { display: flex; flex-direction: column; }
+.queue-item .txt { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-item .btn { height: var(--control-sm); min-width: var(--control-sm); padding: 0 var(--control-pad-sm); }
+.queue-item .btn.icon-only { width: var(--control-sm); padding: 0; justify-content: center; }
+/* Узкая строка: подписи вторичных действий уходят первыми, остаются иконки с aria-label и title. */
+@container queue-item (max-width: 520px) {
+  .queue-item .btn .label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .queue-item .btn:has(.label) { width: var(--control-sm); padding: 0; justify-content: center; }
+}
+
+/* --- Composer: одна высота на панель, группы не разрываются. ---------------------------------------------------- */
+.composer .box { container: composer-box / inline-size; }
+.composer .composer-toolbar { align-items: center; }
+/* Группа настроек (чипы + «◔» сведений) — неделимая: «◔» больше не уезжает один во вторую строку. */
+.composer .chat-status { flex: 1 1 0; min-width: 0; flex-wrap: nowrap; }
+.composer .composer-preferences { flex: 0 1 auto; min-width: 0; flex-wrap: nowrap; }
+.composer .chat-info { flex: none; }
+.composer .composer-actions { flex: none; flex-wrap: nowrap; }
+.composer .settings,
+.composer .chat-info > summary,
+.composer .composer-actions .btn,
+.composer .composer-actions > .attach-picker,
+.composer .dictation-mic,
+.composer .dictation-options {
+  height: var(--control-lg); min-height: 0; padding-block: 0; line-height: var(--leading-none);
+}
+.composer .settings { padding-inline: var(--space-8); }
+.composer .model-picker { min-width: 0; flex: 0 1 auto; }
+.composer .model-picker > [data-testid="conv-model"] { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer .settings > .ic, .composer .settings > .provider-icon { flex: none; }
+.composer .chat-info > summary { width: var(--control-lg); justify-content: center; padding: 0; }
+.composer .composer-actions > .attach-picker,
+.composer .dictation-mic { width: var(--control-lg); padding: 0; justify-content: center; }
+.composer .dictation-options { width: var(--hit-min); padding: 0; justify-content: center; }
+.composer .composer-actions > .btn-primary,
+.composer .composer-actions > .composer-stop { width: var(--control-lg); height: var(--control-lg); }
+/* Лишний «·» между иконкой провайдера и именем модели. */
+.composer .model-picker > span + span::before { content: none; }
+/* Узкое поле: усилие и скорость — только иконкой; доступ сохраняет текст (обрезается), особенно full. */
+@container composer-box (max-width: 600px) {
+  .composer .effort-picker > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .composer .effort-picker { width: var(--control-lg); padding: 0; justify-content: center; }
+  .composer .effort-picker > .ic:last-child { display: none; }
+  .composer .approval-picker .approval { max-width: 12ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .composer .model-picker { max-width: 150px; }
+}
+@container composer-box (max-width: 420px) {
+  /* Группа действий переносится целиком под настройки — не по одной кнопке. */
+  .composer .composer-toolbar { flex-wrap: wrap; }
+  .composer .chat-status { flex-basis: 100%; }
+}
