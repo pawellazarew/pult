@@ -88,6 +88,7 @@ import type { PendingSend } from './model/pending.js'
 import type { AgentRecord, DaemonStatus, DoctorReport, PendingPermission } from './model/types.js'
 import type { ProviderCatalog } from './model/types.js'
 import type { FilePathSource } from './model/paths.js'
+import type { SlashListing } from './model/slash.js'
 import { isQuestionTool } from './model/questions.js'
 import { applyPhaseFrame, EMPTY_PHASES, LIVE_CURSOR_BASE } from './model/phase.js'
 import type { PhaseMap } from './model/phase.js'
@@ -370,6 +371,10 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
       ...(clipboardImage && typeof clipboardImage.save === 'function' ? { image: (session: string) => clipboardImage.save(session) } : {}),
     }
   }, [bridge])
+  // «/» в поле ввода (docs/19): скиллы и команды папки чата у демона. Старая оболочка отвечает `method_not_allowed` —
+  // меню говорит «после обновления».
+  const slashCommands = useCallback((name: string, force?: boolean): Promise<SlashListing> =>
+    bridge.call('agent.commands', { name, ...(force ? { force: true } : {}) }) as Promise<SlashListing>, [bridge])
   const refreshSettings = useCallback(async (): Promise<void> => {
     try { setSettings(await bridge.call('settings.get') as SettingsReply) } catch { /* старый демон или оболочка — черновик на встроенных умолчаниях */ }
     finally { setSettingsTried(true) }
@@ -1697,6 +1702,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
             sending={send.sending} sendError={send.error}
             pending={pendingBubble(outgoing, current.name, withEarlier(ui, current.name))}
             onSend={sendPrompt} onAsyncAnswer={async (questionId, answers) => { await bridge.call('agent.question.answer', { name: current.name, questionId, answers }); await refreshAgents() }} filePaths={filePaths}
+            commands={slashCommands}
             onQueueRemove={(id) => queueCall('agent.queue.remove', { name: current.name, id })}
             onQueueMove={(id, to) => queueCall('agent.queue.move', { name: current.name, id, to })}
             onQueueResume={() => queueCall('agent.queue.resume', { name: current.name })}

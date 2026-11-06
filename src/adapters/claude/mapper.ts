@@ -57,7 +57,11 @@ export type TurnSignal =
    * Начался (в том числе САМ, после фонового субагента) новый ход: пришёл `system/init`. `permissionMode` — режим,
    * с которым CLI на самом деле работает (шаг A: по нему строится метка доступа); только у init корня разговора.
    */
-  | { kind: 'turn_started'; permissionMode?: string }
+  | {
+    kind: 'turn_started'; permissionMode?: string
+    /** «/» в поле ввода (docs/19): имена команд, скиллов и терминальных команд из `init` корня разговора. */
+    commands?: { slashCommands: string[]; skills: string[]; terminalOnly: string[] }
+  }
   | {
     kind: 'result'
     ok: boolean
@@ -236,7 +240,11 @@ export function createClaudeMapper(opts: MapperOptions): ClaudeMapper {
           const id = str(ev['session_id'])
           if (id) out.signals.push({ kind: 'session_id', id })
           const permissionMode = !parentId ? str(ev['permissionMode']) : null
-          out.signals.push({ kind: 'turn_started', ...(permissionMode ? { permissionMode } : {}) })
+          const names = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [])
+          const commands = !parentId && Array.isArray(ev['slash_commands'])
+            ? { slashCommands: names(ev['slash_commands']), skills: names(ev['skills']), terminalOnly: names(ev['terminal_slash_commands']) }
+            : null
+          out.signals.push({ kind: 'turn_started', ...(permissionMode ? { permissionMode } : {}), ...(commands ? { commands } : {}) })
           if (!parentId) out.live = [{ kind: 'active' }]
           if (sessionStartedEmitted) return out
           sessionStartedEmitted = true

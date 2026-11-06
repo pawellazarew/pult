@@ -9,7 +9,7 @@ import type { SubagentView } from '../model/subagents.js'
 // Центр окна: разговор с выбранным агентом (docs/12 §3 п.2). Вся логика ленты — в model/conversation.ts;
 // здесь только отрисовка, прокрутка «прилипает» к низу, пока человек сам не отлистал вверх.
 
-import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent, ReactElement, ReactNode } from 'react'
 import type { ConnState, PultEvent } from '../../../shell/src/contract.js'
 import type { AgentView } from '../model/agents.js'
@@ -18,10 +18,13 @@ import { contextView } from '../model/context.js'
 import type { SessionContext } from '../model/context.js'
 import type { AgentItem, ConvItem, ItemState, NoticeItem, ToolItem } from '../model/conversation.js'
 import { composerCmdEnter, searchKeys } from '../model/hotkeys.js'
+import { useSlashMenu } from './SlashMenu.js'
+import type { SlashLoader } from './SlashMenu.js'
 import { adjacentUser, itemForEvent, userMarks } from '../model/search.js'
 import { formatSeconds, messageSource, resultText, toolInputText, toolSummary } from '../model/conversation.js'
 import { obj } from '../model/types.js'
 import type { QueueItem } from '../model/types.js'
+import type { SlashListing } from '../model/slash.js'
 import type { ProviderUsage } from '../model/usage.js'
 import { formatClock, formatResetIn, limitHolds, limitWindowsView } from '../model/usage.js'
 import { Dictation } from './Dictation.js'
@@ -120,6 +123,8 @@ export interface ConversationProps {
   userJump?: { dir: -1 | 1; nonce: number } | null
   /** Пути файлов для вставки и перетаскивания в поле реплики; нет — старая оболочка, поле как раньше. */
   filePaths?: FilePathSource | null
+  /** «/» в поле (docs/19): список скиллов и команд по имени чата; нет — меню не открывается. */
+  commands?: ((name: string, force?: boolean) => Promise<SlashListing>) | null
   /** Сменить название (пустое — снять). `false` — не вышло: правка остаётся открытой. */
   onRename(title: string): Promise<boolean>
   onStop(): void
@@ -162,6 +167,8 @@ export function Conversation(p: ConversationProps): ReactElement {
   const sv = statusView(agent.status)
   const feed = useRef<HTMLDivElement>(null)
   const qe = useQueueEdit(p.onQueueEdit, agent.name)
+  const commandsOf = p.commands ?? null
+  const slashLoad = useMemo(() => (commandsOf ? (force?: boolean) => commandsOf(agent.name, force) : null), [commandsOf, agent.name])
   const stick = useRef(true)
   const feedSize = useRef({ height: 0, viewport: 0 })
   const [away, setAway] = useState(false)
@@ -378,6 +385,7 @@ export function Conversation(p: ConversationProps): ReactElement {
           {...(p.onQueueEdit ? { edit: qe.view } : {})} notice={qe.notice} />
       ) : null}
       <Composer hidden={activeChild !== null} busy={sv.busy} needsYou={sv.needsYou} permFocused={p.focusedPerm !== null} link={p.link ?? 'up'} disabled={holds} sending={p.sending} error={p.sendError} onSend={p.onSend} agentName={agent.name} label={agentLabel(agent)} filePaths={p.filePaths ?? null}
+        commands={slashLoad} commandScope={`${agent.name}\0${agent.provider}\0${agent.cwd}`}
         accessRed={chip.red} accessNote={pendingStrip(agent)}
         onStop={p.onStop} steerable={agent.provider === 'codex'} queueable={!!p.onQueueRemove} inject={qe.inject} footer={<ChatFooter agent={agent} usage={p.usage} now={p.now} onReveal={p.onReveal} {...(p.onHelp ? { onHelp: p.onHelp } : {})}
         {...(p.onConfigure ? { onConfigure: p.onConfigure } : {})} catalog={p.catalog ?? null} windows={p.windows ?? EMPTY_WINDOWS} consent={p.consent ?? null} />} />
@@ -956,8 +964,12 @@ const draftStore: DraftStore = {
   set(k, v) { try { window.localStorage.setItem(k, v) } catch { /* хранилище недоступно */ } },
 }
 
-function Composer({ hidden = false, busy, needsYou, permFocused, link, disabled, sending, error, onSend, onStop, agentName, label, filePaths, queueable, steerable = false, inject, footer, accessRed = false, accessNote = null }: {
+function Composer({ hidden = false, busy, needsYou, permFocused, link, disabled, sending, error, onSend, onStop, agentName, label, filePaths, queueable, steerable = false, inject, footer, accessRed = false, accessNote = null, commands = null, commandScope = agentName }: {
   hidden?: boolean
+  /** «/» в поле (docs/19): список скиллов и команд чата; `null` — старая оболочка, меню нет. */
+  commands?: SlashLoader | null
+  /** Чат, папка и провайдер одной строкой: сменились — список заново. */
+  commandScope?: string
   /** Шаг A: красная рамка поля — чат с полным доступом (выбран или ещё жив процесс с полными правами). */
   accessRed?: boolean
   /** Шаг A: строка под полем при понижении во время хода с полными правами (кадр 11). */
@@ -1068,7 +1080,10 @@ function Composer({ hidden = false, busy, needsYou, permFocused, link, disabled,
   }
   // ⌘V на файлах из Finder и перетаскивание кладут в поле пути (model/filePathsInput.ts).
   const { onPaste, onDragOver, onDrop, notice: pasteNotice } = attached
+  const slash = useSlashMenu({ ta, text, setText, load: commands, scope: commandScope })
   const onKey = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
+    // «/»-меню открыто: ↑↓, Enter/Tab и Esc — его (Enter вставляет команду, а не отправляет реплику).
+    if (slash.onKeyDown(e)) return
     if (e.nativeEvent.isComposing || e.key !== 'Enter' || e.shiftKey) return
     if (e.altKey) {
       if (!e.metaKey && !e.ctrlKey && steerable && busy && !needsYou) {
@@ -1096,8 +1111,10 @@ function Composer({ hidden = false, busy, needsYou, permFocused, link, disabled,
   return (
     <ResizableComposer hidden={hidden}>
       <div className={`box${attached.over ? ' attachment-over' : ''}${accessRed ? ' access-full' : ''}`} data-access-full={accessRed ? '1' : undefined}>
+        {slash.menu && <div className="slash-anchor">{slash.menu}</div>}
         <AttachmentStrip items={attached.items} previews={attached.previews} pending={attached.pending} onRemove={attached.remove} />
         <textarea ref={ta} rows={3} value={text} onChange={(e) => setText(e.target.value)} onKeyDown={onKey}
+          onSelect={slash.onCaret} {...slash.aria}
           onPaste={onPaste} onDragOver={onDragOver} onDragEnter={attached.onDragEnter} onDragLeave={attached.onDragLeave} onDrop={onDrop}
           placeholder={placeholderFor({ link, needsYou, busy, disabled, label, queueable })}
           data-testid="composer" aria-label={t("Реплика в сессию")} />

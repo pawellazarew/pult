@@ -1,0 +1,27 @@
+/* «/» в поле ввода (docs/19): список над полем строго в границах его рамки. Якорь нулевой высоты стоит первым
+   в .box: его край — край содержимого, поэтому список выносится наружу на внутренний отступ и рамку поля. */
+.slash-anchor { --slash-pad-x: 13px; --slash-pad-top: 11px; position: relative; height: 0; }
+@media (max-width: 760px) { .slash-anchor { --slash-pad-x: 9px; --slash-pad-top: 9px; } }
+.slash-menu {
+  position: absolute; z-index: 45; left: calc(-1 * var(--slash-pad-x)); right: calc(-1 * var(--slash-pad-x));
+  bottom: calc(var(--slash-pad-top) + 6px); max-height: min(318px, 46vh); display: flex; flex-direction: column;
+  border: 1px solid var(--line); border-radius: 14px; background: var(--panel); box-shadow: var(--shadow); overflow: hidden;
+}
+.slash-list { list-style: none; margin: 0; padding: 5px; overflow-y: auto; overscroll-behavior: contain; }
+.slash-row {
+  display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; align-items: center; column-gap: 10px;
+  height: 34px; padding: 0 10px; border-radius: 9px; cursor: pointer; font-size: 13px; color: var(--ink); white-space: nowrap;
+}
+.slash-row.is-active { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent-edge); }
+.slash-name { font-family: var(--mono); font-size: 12.5px; font-weight: 600; max-width: 34ch; overflow: hidden; text-overflow: ellipsis; }
+.slash-hint { font-family: var(--mono); font-size: 11.5px; color: var(--faint); max-width: 22ch; overflow: hidden; text-overflow: ellipsis; }
+.slash-desc { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--mut); font-size: 12.5px; }
+.slash-row:not(:has(.slash-hint)) { grid-template-columns: auto minmax(0, 1fr) auto; }
+.slash-badge {
+  justify-self: end; font-size: 10.5px; line-height: 18px; padding: 0 7px; border-radius: 999px;
+  color: var(--mut); background: var(--sunk); border: 1px solid var(--hair);
+}
+.slash-badge.is-skill { color: var(--accent); background: var(--accent-soft); border-color: var(--accent-edge); }
+.slash-status { padding: 10px 14px; font-size: 12.5px; color: var(--mut); }
+.slash-status.is-warn { border-top: 1px solid var(--hair); padding: 7px 14px; font-size: 11.5px; }
+@media (max-width: 760px) { .slash-hint { display: none; } .slash-row, .slash-row:not(:has(.slash-hint)) { grid-template-columns: auto minmax(0, 1fr) auto; } }

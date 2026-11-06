@@ -413,6 +413,13 @@ process.stdin.on('data', (chunk) => {
     let msg
     try { msg = JSON.parse(line) } catch { continue }
     if (cfg.stdinOut) appendFileSync(cfg.stdinOut, JSON.stringify(msg) + '\n')
+    // «/» в поле ввода (docs/19): управляющий `initialize` — записанный ответ настоящего CLI 2.1.318 со своим request_id.
+    if (msg?.type === 'control_request' && msg.request?.subtype === 'initialize') {
+      const rec = JSON.parse(readFileSync(join(FIXTURES, 'initialize-commands.jsonl'), 'utf8'))
+      rec.response.request_id = msg.request_id
+      out(JSON.stringify(rec))
+      continue
+    }
     const text = msg?.message?.content?.[0]?.text ?? ''
     const marked = scenarioFromText(text)
     if (marked && marked !== scenario) { scenario = marked; turns = null; turnIndex = 0; played.clear() }
