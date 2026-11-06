@@ -55,7 +55,7 @@ import type {
 } from '../types.js'
 import { APPROVAL_WORDS } from '../../sessions/settings.js'
 import { claudePromptAttachmentBlocks } from '../../core/promptAttachments.js'
-import { buildClaudeArgv, mcpConfigBody, userTurnLine } from './argv.js'
+import { buildClaudeArgv, isSlashCommandTurn, mcpConfigBody, userTurnLine } from './argv.js'
 import { approvalContext } from '../approvalContext.js'
 import { createAskKeys } from '../../perm/askKeys.js'
 import type { AskKeys } from '../../perm/askKeys.js'
@@ -83,6 +83,8 @@ export interface ClaudeAdapterOptions extends AdapterDeps {
   nodeExec?: string
   /** Инъекция стража сети: тест не ходит в сеть вообще. */
   netCheck?: (provider: 'claude') => Promise<NetCheck>
+  /** `system/init` хода принёс имена «/»-команд (docs/19): каталог папки сверяется по ним. */
+  commandsSeen?: (cwd: string, settingSources: string | undefined, commands: { slashCommands: string[]; skills: string[]; terminalOnly: string[] }) => void
   now?: () => number
   /**
    * 0.3.7: ключи вопросов демона — по ключу на процесс `claude` с брокером, снимается на его выходе. Нет — свои
@@ -1008,6 +1010,10 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
             // Шаг A: действующий режим — из `init` КАЖДОГО хода, а не из того, что Пульт отправил.
             if (sig.permissionMode) l.childReported = sig.permissionMode
             if (sig.permissionMode && !gone()) opts.applied?.(name, { approval: l.childFlags?.approval, reported: sig.permissionMode })
+            // «/» в поле ввода (docs/19): каталог команд папки сверяется с тем, что CLI видит на этом ходу.
+            if (sig.commands) {
+              try { opts.commandsSeen?.(l.spec.cwd, l.spec.settingSources, sig.commands) } catch { /* подсказка не ломает ход */ }
+            }
             // Пришёл новый `init` внутри отсрочки — значит фоновая работа ожила.
             clearGrace()
             return
@@ -1172,7 +1178,10 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
       // Промпт идёт в stdin, НИКОГДА в argv. И stdin НЕ закрывается здесь даже в режиме
       // «процесс на ход»: закрой мы его сейчас — второй ход после фонового субагента не
       // пришёл бы. Закрытие делает finish().
-      try { stdin.write(userTurnLine(text, userUuid, approvalContext('claude', flags.approval, l.spec.broker), attachmentBlocks)) } catch { /* обработает close */ }
+      // «/команда» (docs/19): CLI разворачивает её, только когда реплика — ОДИН текстовый блок; с блоком контекста
+      // режима `/compact` и `/context` уходили модели простым текстом. Такой ход идёт без этого блока.
+      const context = isSlashCommandTurn(text, attachmentBlocks.length) ? undefined : approvalContext('claude', flags.approval, l.spec.broker)
+      try { stdin.write(userTurnLine(text, userUuid, context, attachmentBlocks)) } catch { /* обработает close */ }
     })
     return { turnId, done }
   }

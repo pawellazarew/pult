@@ -55,6 +55,8 @@ export const ALLOWED_METHODS = [
   'agent.queue.move',
   // О3: браузер для агента вкл/выкл (со следующего хода) и свои MCP-серверы владельца — список и выбор.
   'agent.browser',
+  // «/» в поле ввода (docs/19): скиллы и команды папки чата. Только чтение; Claude снимается коротким процессом.
+  'agent.commands',
   'mcp.list',
   'mcp.select',
   'agent.stop',

@@ -326,6 +326,16 @@ async function onRequest(id, method, params) {
       replyOk(id, { status })
       return
     }
+    case 'skills/list': {
+      // «/» в поле ввода (docs/19): форма ответа codex-cli 0.166 — запись на папку, скиллы с областью и путём.
+      const cwd = params?.cwds?.[0] ?? '/'
+      replyOk(id, { data: [{ cwd, errors: [], skills: [
+        { name: 'codex-hello', description: 'Test skill for the Pult slash picker (Codex). Echo check.', path: `${cwd}/.agents/skills/codex-hello/SKILL.md`, scope: 'repo', enabled: true, pluginId: null },
+        { name: 'imagegen', description: 'Generate or edit images', interface: { shortDescription: 'Generate images', iconSmallUrl: null, iconLargeUrl: null }, path: '/x/.codex/skills/.system/imagegen/SKILL.md', scope: 'system', enabled: true, pluginId: null },
+        { name: 'off-skill', description: 'disabled', path: '/x/off/SKILL.md', scope: 'user', enabled: false, pluginId: null },
+      ] }] })
+      return
+    }
     case 'account/rateLimits/read': {
       if (cfg.limited) {
         replyOk(id, JSON.parse(readFileSync(join(FIXTURES, '07-rate-limits-read-limited.json'), 'utf8')))
