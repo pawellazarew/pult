@@ -192,6 +192,8 @@ export function createClaudeMapper(opts: MapperOptions): ClaudeMapper {
   const sessionId = opts.sessionId
   const ceiling = opts.retryCeiling ?? 3
   const agentIds = new Set<string>()
+  const backgroundAgents = new Set<string>()
+  const finishedAgents = new Set<string>()
   const unknownSeen = new Set<string>()
   let retries = 0
   // ИЗМЕРЕНО: `system/init` приходит на КАЖДЫЙ ход, в том числе на второй ход тёплого
@@ -268,7 +270,16 @@ export function createClaudeMapper(opts: MapperOptions): ClaudeMapper {
           return out
         }
         if (subtype === 'task_notification') {
-          out.signals.push({ kind: 'task_notification', status: str(ev['status']) })
+          const id = str(ev['tool_use_id'])
+          const status = str(ev['status'])
+          if (id && agentIds.has(id) && !finishedAgents.has(id) &&
+              (status === 'completed' || status === 'failed' || status === 'stopped')) {
+            finishedAgents.add(id)
+            out.drafts.push({ ...base, kind: 'agent.finished', data: {
+              toolUseId: id, isError: status !== 'completed', content: redact(stripBlobs(ev['summary'] ?? '')),
+            } })
+          }
+          out.signals.push({ kind: 'task_notification', status })
           return out
         }
         if (subtype === 'background_tasks_changed') {
@@ -349,6 +360,7 @@ export function createClaudeMapper(opts: MapperOptions): ClaudeMapper {
           if (id === null) continue
           if (SUBAGENT_TOOL_NAMES.has(name)) {
             agentIds.add(id)
+            if (input['run_in_background'] === true) backgroundAgents.add(id)
             out.drafts.push({
               ...base,
               kind: 'agent.spawned',
@@ -390,6 +402,12 @@ export function createClaudeMapper(opts: MapperOptions): ClaudeMapper {
           const id = str(b['tool_use_id'])
           if (id === null) continue
           const isError = b['is_error'] === true
+          if (agentIds.has(id)) {
+            if (finishedAgents.has(id)) continue
+            const content = JSON.stringify(b['content'] ?? '')
+            if (!isError && (backgroundAgents.has(id) || content.includes('Async agent launched'))) continue
+            finishedAgents.add(id)
+          }
           const images = opts.images?.capture(b['content']) ?? []
           out.drafts.push({
             ...base,

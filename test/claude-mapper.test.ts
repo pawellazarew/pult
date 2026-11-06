@@ -108,6 +108,42 @@ describe('переводчик claude: эталоны по фикстурам', 
     assert.equal((bash.data as { input: { command: string } }).input.command, 'touch probe.txt')
   })
 
+  it('background agent stays working until notification and finishes once', () => {
+    const mapper = createClaudeMapper({ sessionId: 'w' })
+    mapper.push({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'bg', name: 'Agent', input: { run_in_background: true } }] } })
+    const launch = mapper.push({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'bg', content: 'Async agent launched successfully.' }] } })
+    assert.equal(launch.drafts.filter(d => d.kind === 'agent.finished').length, 0)
+    const notification = { type: 'system', subtype: 'task_notification', tool_use_id: 'bg', status: 'completed', summary: 'Done' }
+    const done = mapper.push(notification)
+    assert.equal(done.drafts.filter(d => d.kind === 'agent.finished').length, 1)
+    assert.equal(mapper.push(notification).drafts.filter(d => d.kind === 'agent.finished').length, 0)
+  })
+
+  it('real background fixture finishes the agent only after task notification', () => {
+    const mapper = createClaudeMapper({ sessionId: 'w' })
+    let notified = false
+    let completions = 0
+    for (const line of readFileSync(`${FIXTURES}/12-background-live.jsonl`, 'utf8').trim().split('\n')) {
+      const event = JSON.parse(line)
+      if (event.subtype === 'task_notification') notified = true
+      for (const draft of mapper.push(event).drafts) {
+        if (draft.kind === 'agent.finished') {
+          assert.ok(notified)
+          completions++
+        }
+      }
+    }
+    assert.equal(completions, 1)
+  })
+
+  it('background launch failure finishes immediately as error', () => {
+    const mapper = createClaudeMapper({ sessionId: 'w' })
+    mapper.push({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'bg', name: 'Agent', input: { run_in_background: true } }] } })
+    const failed = mapper.push({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'bg', is_error: true, content: 'Launch failed' }] } })
+    assert.equal(failed.drafts[0]?.kind, 'agent.finished')
+    assert.equal((failed.drafts[0]?.data as { isError: boolean }).isError, true)
+  })
+
   it('06 субагент: agent.spawned с parentId у детей и ВТОРОЙ result после фонового старта', () => {
     const { drafts, signals } = run('06-subagent')
     const spawned = drafts.filter((d) => d.kind === 'agent.spawned')

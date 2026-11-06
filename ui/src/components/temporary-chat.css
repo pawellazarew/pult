@@ -12,7 +12,6 @@
 .temporary-sidebar-row[aria-selected="true"] { background: var(--selected); color: var(--ink); }
 .temporary-sidebar-row .provider-icon { width: 16px; height: 16px; }
 .temporary-row-number { color: var(--faint); margin-left: auto; font-size: 10px; }
-.temporary-busy-dot { display: inline-block; width: 5px; height: 5px; flex: none; border-radius: 50%; background: var(--run); animation: pulse 1.4s ease-in-out infinite; }
 .temporary-rail .temporary-busy-dot { position: absolute; top: 2px; right: 2px; }
 .temporary-head { justify-content: space-between; }
 .temporary-title { display: flex; align-items: center; gap: 10px; min-width: 0; }
@@ -77,4 +76,3 @@
   .temporary-empty { padding: 24px 16px; margin-top: 42px; }
   .temporary-empty h1 { font-size: 20px; }
 }
-@media(prefers-reduced-motion:reduce) { .temporary-busy-dot { animation: none; } }

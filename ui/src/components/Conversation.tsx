@@ -2,6 +2,8 @@ import './queue.css'
 import { AsyncQuestion } from './AsyncQuestion.js'
 import { t } from '../lib/i18n.js'
 import { ProviderIcon } from './ProviderIcon.js'
+import { StatusDot } from './StatusDot.js'
+import type { DotState } from './StatusDot.js'
 import { archiveFinished, parseSubagentKeys, subagentViews, visibleSubagents } from '../model/subagents.js'
 import type { SubagentView } from '../model/subagents.js'
 // Центр окна: разговор с выбранным агентом (docs/12 §3 п.2). Вся логика ленты — в model/conversation.ts;
@@ -316,7 +318,7 @@ export function Conversation(p: ConversationProps): ReactElement {
       {childTabs.length > 0 && <div className="subagent-tabs" role="tablist" aria-label={t('Родитель и субагенты')} data-testid="subagent-tabs">
         <button type="button" role="tab" aria-selected={activeChild === null} onClick={() => { setActiveChild(null); requestAnimationFrame(() => { if (feed.current) feed.current.scrollTop = parentScroll.current }) }} data-testid="subagent-parent-tab">{agentLabel(agent)}</button>
         {childTabs.map((key) => { const view = views.find((v) => v.key === key); return <div key={key} className={`subagent-tab${activeChild === key ? ' active' : ''}`}>
-          <button type="button" role="tab" aria-selected={activeChild === key} onClick={() => openChild(key)} data-testid="subagent-tab" data-child={key}><ProviderIcon provider={agent.provider} /><span className={`subagent-state t-${view ? stateTone(view.item.state) : 'mut'}`} data-working={view?.item.state === 'running' ? 'true' : 'false'}>●</span>{view?.item.subagentType ?? view?.item.description ?? t('Субагент')}</button>
+          <button type="button" role="tab" aria-selected={activeChild === key} onClick={() => openChild(key)} data-testid="subagent-tab" data-child={key}><ProviderIcon provider={agent.provider} /><StatusDot state={view ? itemDotState(view.item.state) : 'idle'} label={view ? itemStateLabel(view.item.state) : t('Остановлен')} testId="subagent-tab-state" />{view?.item.subagentType ?? view?.item.description ?? t('Субагент')}</button>
           <button type="button" className="subagent-tab-close" aria-label={t('Закрыть вкладку субагента')} onClick={() => { setChildTabs((before) => before.filter((k) => k !== key)); if (activeChild === key) returnToParent() }}><Icon name="x" /></button>
         </div> })}
       </div>}
@@ -407,7 +409,7 @@ function SubagentHistory({ child, positions, props, parentLabel, onParent }: { c
   }, [child?.key, child?.item.items, positions])
   return <div className="subagent-view" data-testid="subagent-view">
     <div className="subagent-feed feed" ref={box} onScroll={() => { if (child && box.current) { positions.set(child.key, box.current.scrollTop); follows.current = box.current.scrollHeight - box.current.scrollTop - box.current.clientHeight < 80 } }}>
-      <div className="feed-inner"><div className="subagent-heading"><span>{child?.item.subagentType ?? t('Субагент')}</span>{child && <span className={`t-${stateTone(child.item.state)}`}>{child.item.state === 'running' ? t('Работает') : child.item.state === 'ok' ? t('Завершён') : child.item.state === 'error' ? t('Ошибка') : t('Остановлен')}</span>}</div>
+      <div className="feed-inner"><div className="subagent-heading"><span>{child?.item.subagentType ?? t('Субагент')}</span>{child && <span className={`t-${stateTone(child.item.state)}`}>{itemStateLabel(child.item.state)}</span>}</div>
         {props.earlier?.more && <button type="button" className="btn earlier" disabled={props.earlier.loading} onClick={props.onLoadEarlier}>{props.earlier.loading ? t('Загружаю…') : t('Показать раньше')}</button>}
         {child?.item.description && <p className="subagent-task">{child.item.description}</p>}
         {child && child.item.items.length ? <ActivityItems items={child.item.items} props={props} /> : <p className="mut">{props.historyLoading ? t('Загружаю историю…') : t('История субагента пока недоступна')}</p>}
@@ -730,6 +732,11 @@ function Item({ it, ...p }: { it: ConvItem } & ConversationProps): ReactElement 
 }
 
 const stateTone = (s: ItemState): string => (s === 'running' ? 'run' : s === 'ok' ? 'ok' : s === 'stopped' ? 'mut' : 'fail')
+/** Состояние строки ленты (субагент, инструмент) → точка: «прерван» — пустое кольцо, а не серая «очередь». */
+const itemDotState = (s: ItemState): DotState => (s === 'running' ? 'working' : s === 'ok' ? 'done' : s === 'stopped' ? 'idle' : 'failed')
+const itemStateLabel = (s: ItemState): string => (s === 'running' ? t('Работает') : s === 'ok' ? t('Завершён') : s === 'error' ? t('Ошибка') : t('Остановлен'))
+/** Фаза хода → точка: запуск и фон — нейтральные, ожидание — янтарная, остальное — «работает». */
+const phaseDotState = (p: TurnPhase['phase']): DotState => (p === 'waiting' ? 'waiting' : p === 'starting' || p === 'background' ? 'queued' : 'working')
 
 /** Значок состояния строки инструмента и субагента. `stopped` — ход прервали, конца не будет: не спиннер. */
 function StateMark({ state }: { state: ItemState }): ReactElement {
@@ -1351,7 +1358,8 @@ export function PhaseLine({ phase, onOpenInbox, now: fixedNow }: { phase: TurnPh
   return (
     <div className={`phase-line ph-${phase.phase}`} data-testid="turn-phase" data-phase={phase.phase}>
       <div className="phase-row">
-        <span className="phase-dot" aria-hidden="true" />
+        {/* Декоративная: смену фазы диктору сообщает строка role="status" ниже. */}
+        <StatusDot state={phaseDotState(phase.phase)} size="md" label={null} testId="turn-phase-dot" />
         <span className="phase-text" data-testid="turn-phase-text">{phaseText(phase)}</span>
         <span className="phase-time mono" data-testid="turn-phase-time" aria-hidden="true">{phaseElapsed(phase, now)}</span>
         {waiting && onOpenInbox && (
