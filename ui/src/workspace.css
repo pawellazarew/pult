@@ -156,6 +156,9 @@
   .conversation-summary { display: none; }
 }
 .provider-icon { display: inline-flex; align-items: center; justify-content: center; width: 17px; height: 17px; flex: none; color: var(--mut); }
+.provider-icon[data-provider="claude"] { color: var(--claude); }
+.provider-icon[data-provider="codex"] { color: var(--teal); }
+.provider-icon[data-provider="zcode"] { color: var(--glm); }
 .provider-icon svg { display: block; width: 100%; height: 100%; }
 .row-provider { display: inline-flex; align-items: center; position: relative; grid-column: 1; grid-row: 1 / span 2; padding-left: 1px; margin-right: 3px; }
 .row-live-dot { position: absolute; right: -3px; bottom: 0; width: 5px; height: 5px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 2px var(--sidebar); }

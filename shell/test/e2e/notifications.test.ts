@@ -72,9 +72,15 @@ describe('переход из системного уведомления', () =
     await h.win.locator('[data-testid="agent-row"][data-agent="alpha"]').click()
     await h.win.locator('[data-testid="conversation"][data-agent="alpha"]').waitFor()
     const id = await notify({ sessionId: 'beta' })
+    // Как в Harness.reopen: вызов inspector при нуле окон может уронить Electron/macOS
+    // с SIGSEGV. Готовим настоящий обработчик click до закрытия, вызываем его сигналом.
+    await h.app.evaluate((_e, key) => {
+      process.once('SIGUSR2', () => { (globalThis as Globals).__pultTestNotificationClick?.(key) })
+    }, id)
     await h.win.close()
     const next = h.app.waitForEvent('window', { timeout: 15_000 })
-    await click(id)
+    next.catch(() => {})
+    assert.equal(h.app.process().kill('SIGUSR2'), true, 'не удалось вызвать уведомление в дочернем Electron')
     const win = await next
     await win.locator('[data-testid="conversation"][data-agent="beta"]').waitFor({ timeout: 15_000 })
   })
