@@ -949,6 +949,8 @@ export const componentsEn: Readonly<Record<string, string>> = {
   "Завершён": "Completed",
   "Ошибка": "Error",
   "Остановлен": "Stopped",
+  "Простаивает": "Idle",
+  "В очереди": "Queued",
   "Скрыть архив": "Hide archive",
   "Показать архив": "Show archive",
   "История субагента пока недоступна": "Subagent history is not available yet",

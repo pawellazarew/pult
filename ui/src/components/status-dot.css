@@ -1,0 +1,18 @@
+/* Точка состояния (StatusDot.tsx) — единственный источник её вида. Цвет = состояние, никогда не провайдер.
+   Место (position, отступы) задаёт класс вызывающего; здесь только размер, цвет, мигание и кольцо. */
+.status-dot { display: inline-block; flex: none; width: 5px; height: 5px; border-radius: 50%; background: var(--queued); }
+.status-dot[data-size="md"] { width: 7px; height: 7px; }
+.status-dot[data-state="working"] { background: var(--run); animation: pulse 1.4s ease-in-out infinite; }
+.status-dot[data-state="waiting"] { background: var(--wait); }
+.status-dot[data-state="failed"] { background: var(--fail); }
+.status-dot[data-state="done"] { background: var(--ok); }
+.status-dot[data-state="queued"] { background: var(--queued); }
+/* «Простаивает» — пустое кольцо: не путается ни с «готово», ни с «в очереди». */
+.status-dot[data-state="idle"] { background: transparent; box-shadow: inset 0 0 0 1.5px var(--queued); }
+/* Точка поверх значка: кольцо цвета фона отделяет её от значка (эталон — строка чата в боковой панели). */
+.status-dot[data-cutout="1"] { box-shadow: 0 0 0 2px var(--dot-cutout, var(--panel)); }
+.status-dot[data-cutout="1"][data-state="idle"] { box-shadow: inset 0 0 0 1.5px var(--queued), 0 0 0 2px var(--dot-cutout, var(--panel)); }
+/* Без движения «работает» не должен слиться с «ждёт» или «готово»: вместо мигания — внешнее кольцо того же синего. */
+@media (prefers-reduced-motion: reduce) {
+  .status-dot[data-state="working"] { animation: none; outline: 1px solid var(--run); outline-offset: 1px; }
+}

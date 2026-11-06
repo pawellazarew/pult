@@ -13,6 +13,9 @@ import './draft.css'
 import './appearance.css'
 import './workspace.css'
 import './components/user-attachments.css'
+// Точка состояния — общая для шапки, строк, вкладок: стиль глобальный, а не импорт из StatusDot.tsx, иначе
+// e2e-стенды, собирающие отдельные компоненты через esbuild stdin без outdir, падают на CSS-импорте.
+import './components/status-dot.css'
 
 async function start(): Promise<void> {
   await initializeLanguage()

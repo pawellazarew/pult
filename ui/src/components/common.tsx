@@ -2,6 +2,7 @@
 
 import type { ReactElement } from 'react'
 import type { Tone } from '../model/types.js'
+import { StatusDot, toneState } from './StatusDot.js'
 
 const PATHS: Record<string, ReactElement> = {
   'folder-open': <><path d="M2 12.5V4a1 1 0 0 1 1-1h3l1.5 1.5H13v2M2 12.5l2-6h10l-2 6z" /></>,
@@ -62,7 +63,7 @@ export function Icon({ name, className = 'ic' }: { name: keyof typeof PATHS | st
 export function Chip({ tone, label, testId }: { tone: Tone; label: string; testId?: string }): ReactElement {
   return (
     <span className={`chip tone-${tone}`} data-testid={testId}>
-      <span className="dot" aria-hidden="true" />
+      <StatusDot state={toneState(tone)} size="md" label={null} />
       {label}
     </span>
   )
