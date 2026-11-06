@@ -197,6 +197,18 @@ describe('служебное меню в подвале', () => {
     assert.doesNotMatch(up, /hdr-stale/)
   })
 
+  it('ошибки и действия находятся внутри закрытой панели состояния', () => {
+    const out = html(Header, { ...base,
+      conn: { state: 'up', daemon: { version: '0.1.0', pid: 1, startedAt: 'x' } },
+      noticeTone: 'fail', children: createElement('button', { 'data-testid': 'service-action' }, 'Retry'),
+    })
+    assert.match(out, /<summary class="footer-icon health-summary t-fail"/)
+    const panel = out.slice(out.indexOf('<details'), out.indexOf('</details>'))
+    assert.match(panel, /data-testid="service-action"/)
+    assert.doesNotMatch(panel, /<details[^>]* open/)
+    assert.doesNotMatch(out, /header-guard-alert/)
+  })
+
   it('технические статусы доступны в закрытом по умолчанию меню подвала', () => {
     const up = html(Header, { ...base, conn: { state: 'up', daemon: { version: '0.1.0', pid: 1, startedAt: 'x' } },
       providers: { checkedAt: 'x', claude: { provider: 'claude', state: 'ready', detail: 'Вход выполнен · готов', models: [] },

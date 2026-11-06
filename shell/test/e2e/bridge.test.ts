@@ -119,10 +119,13 @@ describe('окно: мост, подписка, переподключение',
   })
 
   it('демон убит — плашка «демон недоступен»; поднят — окно доигрывает с курсора без потерь и повторов', async () => {
+    const workspaceBefore = await h.win.locator('.resizable-workspace').boundingBox()
     const pid = h.daemonPid()
     assert.ok(pid, 'нет pid демона')
     process.kill(pid, 'SIGKILL')
     assert.ok(await waitFor(async () => (await connState()) === 'down', 10_000), 'окно не заметило смерть демона')
+    await h.win.locator('[data-testid="health-menu"] summary').click()
+    assert.deepEqual(await h.win.locator('.resizable-workspace').boundingBox(), workspaceBefore, 'daemon failure must not shift the workspace')
     const banner = h.win.getByTestId('conn-banner')
     await banner.waitFor({ timeout: 5000 })
     assert.match((await banner.textContent()) ?? '', /[Дд]емон недоступен/)
