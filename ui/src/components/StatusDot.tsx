@@ -1,7 +1,7 @@
 import type { ReactElement } from 'react'
 import { t } from '../lib/i18n.js'
 import type { Tone } from '../model/types.js'
-import './status-dot.css'
+// Стиль — ui/src/components/status-dot.css, подключён в main.tsx (глобально, см. комментарий там).
 
 /**
  * Одна точка состояния на весь интерфейс: строка чата в боковой панели, вкладка сессии, вкладка
