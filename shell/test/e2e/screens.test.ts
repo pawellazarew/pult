@@ -207,6 +207,7 @@ describe('скриншоты экранов (демо)', () => {
       'субагент прерванного хода всё ещё «идёт»')
     await c.request('daemon.stop', {})
     assert.ok(await waitFor(async () => (await h.win.getAttribute('.app', 'data-conn')) === 'down', 15_000), 'окно не заметило остановку демона')
+    await h.win.locator('[data-testid="health-menu"] summary').click()
     await h.win.getByTestId('conn-banner').waitFor({ timeout: 5000 })
     await h.win.locator('[data-testid="agent-row"][data-agent="ui-refactor"]').click({ force: true }).catch(() => { /* строки неактивны */ })
     // Сводка Mac не выдаёт последнее известное за живое; ввод не зовёт печатать.

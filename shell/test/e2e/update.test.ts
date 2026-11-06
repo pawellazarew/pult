@@ -70,6 +70,7 @@ describe('окно: плашка обновления', () => {
     const st = (await h.win.evaluate(() => window.pult!.call('update.status'))) as { latest: { version: string } | null; available: boolean }
     assert.equal(st.latest?.version, '9.9.9')
     assert.equal(st.available, true)
+    await h.win.locator('[data-testid="health-menu"] summary').click()
     const banner = h.win.getByTestId('update-available')
     await banner.waitFor({ timeout: 20_000 })
     assert.match(await banner.innerText(), /Доступен Пульт 9\.9\.9/)
@@ -128,6 +129,7 @@ describe('окно: пока ставится обновление, реплик
     await c.request('agent.start', { name: 'w', kind: 'claude', cwd: h.workDir('w') })
     await h.win.locator('[data-testid="agent-row"][data-agent="w"]').click()
     await h.win.locator('[data-testid="conversation"][data-agent="w"]').waitFor({ timeout: 10_000 })
+    await h.win.locator('[data-testid="health-menu"] summary').click()
     await h.win.getByTestId('update-apply').click({ timeout: 20_000 })
     const banner = h.win.getByTestId('update-applying')
     await banner.waitFor({ timeout: 10_000 })
@@ -206,7 +208,7 @@ describe('окно: «Настройки» → «Обновления» — пр
     assert.match(await st.innerText(), /Установлена последняя версия \(\d+\.\d+\.\d+\)/)
     assert.match(await h.win.getByTestId('settings-update-checked').innerText(), /последняя проверка: только что/)
     assert.equal(await h.win.getByTestId('settings-update-apply').count(), 0)
-    await h.win.getByTestId('update-latest').waitFor({ timeout: 2000 })
+    await h.win.getByTestId('update-latest').waitFor({ state: 'attached', timeout: 2000 })
     await h.shot('settings-uptodate')
   })
 

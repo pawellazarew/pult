@@ -189,3 +189,10 @@
 @media(max-width:760px) {
   .composer .composer-actions > .btn-primary, .composer .composer-actions > .composer-stop, .composer .dictation-mic { width: 34px; height: 34px; }
 }
+
+/* Service notices live in the overlay so status changes never resize the workspace. */
+.health-popover { max-height: min(640px, calc(100vh - 80px)); overflow-y: auto; }
+.health-notices:empty { display: none; }
+.health-notices .banner { flex-wrap: wrap; gap: 8px; border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin-top: 8px; }
+.health-notices .banner .grow { flex-basis: calc(100% - 32px); overflow-wrap: anywhere; }
+.health-notices .banner .btn { white-space: normal; height: auto; min-height: 28px; }
