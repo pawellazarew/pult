@@ -213,7 +213,7 @@ describe('скриншоты экранов (демо)', () => {
     // Сводка Mac не выдаёт последнее известное за живое; ввод не зовёт печатать.
     const health = h.win.getByTestId('health-menu')
     assert.match((await health.locator('summary').getAttribute('class')) ?? '', /t-fail/)
-    await health.locator('summary').click()
+    if (await health.getAttribute('open') === null) await health.locator('summary').click()
     assert.match((await health.locator('.health-popover').getAttribute('class')) ?? '', /hdr-stale/)
     assert.equal(await health.getByTestId('conn-state').isVisible(), true)
     assert.match((await h.win.getByTestId('composer').getAttribute('placeholder')) ?? '', /демон недоступен/)

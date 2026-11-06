@@ -196,3 +196,15 @@
 .health-notices .banner { flex-wrap: wrap; gap: 8px; border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin-top: 8px; }
 .health-notices .banner .grow { flex-basis: calc(100% - 32px); overflow-wrap: anywhere; }
 .health-notices .banner .btn { white-space: normal; height: auto; min-height: 28px; }
+@media (max-width: 760px) {
+  .sidebar-footer .health-popover { width: min(304px, calc(88vw - 16px)); }
+}
+/* Keep recovery actions usable inside the sidebar while the daemon is down. */
+.app[data-conn="down"] .grid { filter: none; opacity: 1; }
+.app[data-conn="down"] .conv-col { filter: saturate(.4); opacity: .62; }
+.app[data-conn="down"] .grid .sidebar-footer button { pointer-events: auto; }
+
+@media (max-width: 760px) {
+  .navigation-scrim { left: min(320px, 88vw); }
+  .app[data-interface-mode="focus"] .navigation-scrim { left: 64px; }
+}
