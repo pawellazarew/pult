@@ -36,7 +36,7 @@ const STOP = /[\s/"'`$]/u
 
 /**
  * `/` в начале поля или после пробела, от него до каретки — без пробела и кавычек. Иначе `null`: `a/b`, путь
- * `/Users/x`, уже набранный `/name ` с пробелом за ним. Выделение (а не каретка) — тоже `null`.
+ * `/opt/x`, уже набранный `/name ` с пробелом за ним. Выделение (а не каретка) — тоже `null`.
  */
 export function findSlashToken(text: string, caret: number, selectionEnd: number = caret): SlashToken | null {
   if (caret !== selectionEnd) return null

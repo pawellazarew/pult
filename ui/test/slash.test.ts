@@ -33,7 +33,7 @@ describe('«/»: где набирается команда', () => {
     assert.deepEqual(findSlashToken('line\n/x', 7), { start: 5, end: 7, query: 'x', position: 'inline' })
   })
   it('не команда: путь, a/b, пробел после имени, выделение, кавычки', () => {
-    assert.equal(findSlashToken('/Users/me', 9), null)
+    assert.equal(findSlashToken('/opt/demo', 9), null)
     assert.equal(findSlashToken('a/b', 3), null)
     assert.equal(findSlashToken('/compact ', 9), null)
     assert.equal(findSlashToken('/compact', 1, 4), null)

@@ -177,7 +177,7 @@ describe('ход Claude с «/командой»', () => {
     assert.equal(isSlashCommandTurn('/compact'), true)
     assert.equal(isSlashCommandTurn('/hello-pult abc'), true)
     assert.equal(isSlashCommandTurn('/engineering:debug x\ny'), true)
-    assert.equal(isSlashCommandTurn('/Users/me/file.txt посмотри'), false)
+    assert.equal(isSlashCommandTurn('/opt/demo/file.txt посмотри'), false)
     assert.equal(isSlashCommandTurn('please /compact'), false)
     assert.equal(isSlashCommandTurn('/compact', 1), false, 'с вложениями — как раньше')
     const line = JSON.parse(userTurnLine('/context', 'u', undefined)) as { message: { content: unknown[] } }
