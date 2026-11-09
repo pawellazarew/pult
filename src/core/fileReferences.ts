@@ -18,6 +18,21 @@ export function fileCitation(text: string): { path: string; length: number } | n
 }
 
 
+/** Codex's visualize output points to a local artifact. */
+export function visualizeReference(text: string): { path: string; length: number } | null {
+  const prefix = '\ue200visualize\ue202'
+  if (!text.startsWith(prefix)) return null
+  const end = text.indexOf('\ue201', prefix.length)
+  if (end < 0 || end > 8400) return null
+  try {
+    const payload: unknown = JSON.parse(text.slice(prefix.length, end))
+    if (!payload || typeof payload !== 'object' || !('path' in payload)) return null
+    const path = payload.path
+    return typeof path === 'string' && localFilePath(path) ? { path, length: end + 1 } : null
+  } catch { return null }
+}
+
+
 /** Outside-workspace previews must be explicitly referenced in a real conversation message. */
 export function referencesFile(events: readonly {kind?: string; data?: Record<string, unknown>}[], source: string): boolean {
   if (!localFilePath(source)) return false
@@ -30,6 +45,11 @@ export function referencesFile(events: readonly {kind?: string; data?: Record<st
       const ref = fileCitation(text.slice(at, at + 8400))
       if (ref?.path === source) return true
       at = text.indexOf(':codex-file-citation{', at + 21)
+    }
+    let visualAt = text.indexOf('\ue200visualize\ue202')
+    while (visualAt >= 0) {
+      if (visualizeReference(text.slice(visualAt, visualAt + 8401))?.path === source) return true
+      visualAt = text.indexOf('\ue200visualize\ue202', visualAt + 1)
     }
     // Absolute Markdown links (including angle-wrapped paths with spaces).
     return text.includes('](<' + source + '>)') || (!/\s/.test(source) && text.includes('](' + source + ')'))

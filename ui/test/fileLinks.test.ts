@@ -4,8 +4,9 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { followFile, Markdown } from '../src/components/Markdown.js'
 import { parseInline } from '../src/model/markdown.js'
-import { fileCitation } from '../src/model/fileReferences.js'
+import { fileCitation, visualizeReference } from '../src/model/fileReferences.js'
 import { relativeDocument } from '../src/model/filePreviewContext.js'
+import { referencesFile } from '../../src/core/fileReferences.js'
 import { hotkeyAction } from '../src/model/hotkeys.js'
 
 it('выходной codex-file-citation становится ссылкой на PDF с кириллицей и пробелами', () => {
@@ -54,4 +55,27 @@ it('локальные относительные ссылки получают 
   assert.equal(relativeDocument('/tmp/project', 'src/main.ts'), '/tmp/project/src/main.ts')
   for (const source of ['https://example.com', 'javascript:alert(1)', '//example.com/x', '#section', 'обычный текст']) assert.equal(relativeDocument('/tmp/project', source), null)
   assert.deepEqual(hotkeyAction({ key: 'з', code: 'KeyP', metaKey: true, ctrlKey: false, altKey: false, shiftKey: false }, true), { type: 'openFiles' })
+})
+
+it('Codex visualize renders the referenced HTML as an openable file', () => {
+  const text = '\ue200visualize\ue202{"path":"/tmp/ios-roadmap.html"}\ue201';
+  const out = renderToStaticMarkup(createElement(Markdown, { text }));
+  assert.match(out, /data-testid="file-link"/);
+  assert.doesNotMatch(out, /visualize|[\ue200-\ue202]/);
+});
+
+
+it('visualize validates paths and preserves incomplete markers and code', () => {
+  for (const payload of [{ path: 'https://example.com/x' }, { path: '//server/x' },
+    { path: '/tmp/a\u0000.html' }, { path: 42 }, null]) {
+    const text = '\ue200visualize\ue202' + JSON.stringify(payload) + '\ue201'
+    assert.equal(visualizeReference(text), null)
+    assert.equal(parseInline(text).some((p) => p.t === 'file'), false)
+  }
+  const text = '\ue200visualize\ue202{"path":"/tmp/План команды.html"}\ue201'
+  assert.equal(parseInline('`' + text + '`')[0]?.t, 'code')
+  assert.equal(parseInline(text.slice(0, -1)).some((p) => p.t === 'file'), false)
+  assert.equal(referencesFile([{ kind: 'message.done', data: { text } }], '/tmp/План команды.html'), true)
+  assert.equal(referencesFile([{ kind: 'tool.finished', data: { text } }], '/tmp/План команды.html'), false)
+  assert.equal(parseInline(text + ' и ' + text).filter((p) => p.t === 'file').length, 2)
 })
