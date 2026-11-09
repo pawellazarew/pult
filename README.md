@@ -89,6 +89,8 @@ Xcode and an iOS runtime are required for iOS; Android needs its SDK, Emulator a
 
 The built-in browser requires an open Pult window. Only virtual devices are supported. Model-requested screenshots are sent to the selected provider. Text-only models can use UI trees but cannot visually evaluate screenshots. iOS text input uses the simulator clipboard and supports Unicode; Android input currently supports ASCII only.
 
+HTML and HTM files open as websites beside the chat, with a source toggle. Inline CSS and JavaScript and HTTPS resources are supported. Relative local assets require a web server. Truncated files remain in source view.
+
 ## Dictation and settings
 
 Settings (`⌘,`) opens a separate workspace with sections for new chats, providers, dictation,

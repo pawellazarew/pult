@@ -1,5 +1,6 @@
 /** English translations of application-owned component text. Placeholder values remain untouched. */
 export const componentsEn: Readonly<Record<string, string>> = {
+  "Сайт": "Website",
   "Язык": "Language",
   "AirPods, название гарнитуры": "AirPods, headset name",
   "{0} с · Готово": "{0} s · Finish",

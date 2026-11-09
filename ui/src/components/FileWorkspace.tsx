@@ -197,7 +197,7 @@ export function FileWorkspace({ bridge, sessionId, cwd, open, expanded, request,
         {file && <div className="file-toolbar">
           <span className="file-location" title={file.path}>{file.path.startsWith(`${root}/`) ? file.path.slice(root.length + 1) : file.path}</span>
           <span className="file-size">{sizeOf(file.size)}</span>
-          {file.kind === 'markdown' && <button type="button" className="btn btn-ghost btn-sm" onClick={() => setSourceView((v) => !v)} data-testid="file-source-toggle">{sourceView ? t('Просмотр') : t('Исходник')}</button>}
+          {(file.kind === 'markdown' || file.htmlUrl) && <button type="button" className="btn btn-ghost btn-sm" onClick={() => setSourceView((v) => !v)} data-testid="file-source-toggle">{sourceView ? (file.htmlUrl ? t('Сайт') : t('Просмотр')) : t('Исходник')}</button>}
           <button type="button" className="btn btn-ghost btn-sm" onClick={() => void bridge.copyText(file.path).then(() => setActionNote(t('Путь скопирован')), () => setActionNote(t('Не удалось скопировать путь')))} title={t("Скопировать путь")} aria-label={t("Скопировать путь")}><Icon name="copy" /></button>
           <button type="button" className="btn btn-ghost btn-sm" onClick={() => void bridge.revealPath(file.path)} title={t("Показать в Finder")} aria-label={t("Показать файл в Finder")}><Icon name="folder" /></button>
           {bridge.openFile && <button type="button" className="btn btn-sm" onClick={() => void external()} data-testid="file-open-external">{t("Открыть вне Пульта")}</button>}
@@ -207,6 +207,7 @@ export function FileWorkspace({ bridge, sessionId, cwd, open, expanded, request,
           {loading ? <div className="file-placeholder" role="status">{t("Открываю файл…")}</div>
             : error ? <div className="file-placeholder" role="alert">{error}</div>
             : !file ? <div className="file-placeholder"><Icon name="file" /><h3>{t("Файлы рядом с разговором")}</h3><p>{t("Выбери файл в дереве проекта или нажми на файловую ссылку в ответе агента.")}</p></div>
+            : open && file.htmlUrl && !sourceView ? <iframe className="file-html" title={file.name} src={file.htmlUrl} sandbox="allow-scripts" referrerPolicy="no-referrer" data-testid="file-html" />
             : file.kind === 'pdf' && file.base64 ? <PdfPreview key={file.path} base64={file.base64} name={file.name} />
             : file.kind === 'image' && file.dataUrl ? <div className="file-image"><img src={file.dataUrl} alt={file.name} data-testid="file-image" /></div>
             : file.kind === 'unsupported' ? <div className="file-placeholder"><Icon name="file" /><h3>{file.name}</h3><p>{file.reason ?? t('Для этого формата пока нет встроенного просмотра.')}</p><p>{t("Можно открыть файл вне Пульта.")}</p></div>

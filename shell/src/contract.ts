@@ -148,7 +148,7 @@ export function sanitizeParams(method: AllowedMethod, params: Record<string, unk
 
 /** CSP окна — дословно docs/12 §2. Тот же текст стоит мета-тегом в ui/index.html (тест сверяет). */
 export const CSP =
-  "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; worker-src 'self'; connect-src 'self'"
+  "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; worker-src 'self'; connect-src 'self'; frame-src pult-preview:"
 
 /** Ошибка вызова. Через contextBridge Error теряет всё, кроме message, поэтому отказ — простой объект. */
 export interface BridgeError {
