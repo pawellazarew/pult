@@ -20,6 +20,7 @@ import {
 import type { IpcMainEvent, IpcMainInvokeEvent, MenuItemConstructorOptions, NativeImage, WebContents } from 'electron'
 import { readScopedImage } from '../../src/core/images.js'
 import { LocalSpeech } from './speech.js'
+import { HtmlPreviews, HTML_PREVIEW_SCHEME } from './htmlPreview.js'
 import { localFile } from './localFile.js'
 import { listWorkspaceFiles, readWorkspaceFile } from '../../src/core/fileBrowser.js'
 import { referencesFile } from '../../src/core/fileReferences.js'
@@ -54,7 +55,10 @@ const TEST_MODE = process.env['PULT_TEST'] === '1'
 
 // Схема регистрируется ДО ready: standard + secure дают окну настоящий origin `app://pult`,
 // на котором работают CSP 'self' и модульные скрипты.
+const htmlPreviews = new HtmlPreviews()
+
 protocol.registerSchemesAsPrivileged([
+  { scheme: HTML_PREVIEW_SCHEME, privileges: { standard: true, secure: true } },
   { scheme: APP_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, codeCache: true } },
 ])
 
@@ -134,6 +138,7 @@ function toReply(e: unknown): CallReply {
 }
 
 function registerAppProtocol(): void {
+  protocol.handle(HTML_PREVIEW_SCHEME, (req) => htmlPreviews.response(req.url))
   const notFound = (): Response => new Response('not found', { status: 404, headers: { 'content-type': 'text/plain' } })
   protocol.handle(APP_SCHEME, (req) => {
     const file = resolveAppPath(uiRoot, req.url)
@@ -499,11 +504,11 @@ function registerIpc(): void {
     try {
       if (typeof source !== 'string' || typeof sessionId !== 'string' || !link) throw new Error(tr('Неверный файл'))
       const scope = await workspace(sessionId)
-      try { return { ok: true, result: await readWorkspaceFile(scope, source) } } catch {
+      try { return { ok: true, result: htmlPreviews.attach(sessionId, await readWorkspaceFile(scope, source)) } } catch {
         // Files outside the workspace are only previewed when the conversation actually linked them.
         const history = await link.call('agent.read', { name: sessionId, format: 'json' }) as { events?: Array<{ kind?: string; data?: Record<string, unknown> }> }
         if (!referencesFile(history.events ?? [], source)) throw new Error(tr('Файл вне проекта'))
-        return { ok: true, result: await readWorkspaceFile({ ...scope, allowedFiles: [source] }, source) }
+        return { ok: true, result: htmlPreviews.attach(sessionId, await readWorkspaceFile({ ...scope, allowedFiles: [source] }, source)) }
       }
     } catch { return fail('file_unavailable', tr('Файл недоступен: он перемещён, вне проекта или доступ к нему закрыт')) }
   })
