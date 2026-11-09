@@ -17,7 +17,7 @@
 // обрезаются: человек вставляет код, diff и логи — `# комментарий`, `- строка`/`+ строка` и отступы должны
 // остаться как набраны.
 
-import { fileCitation } from './fileReferences.js'
+import { fileCitation, visualizeReference } from './fileReferences.js'
 
 export type Inline =
   | { t: 'text'; v: string }
@@ -218,6 +218,10 @@ function inline(s: string, o: Opts): Inline[] {
   while (i < s.length) {
     const c = s[i] as string
     if (c === '\\' && i + 1 < s.length && PUNCT.has(s[i + 1] as string)) { buf += s[i + 1]; i += 2; continue }
+    if (!o.noLinks && c === '\ue200') {
+      const reference = visualizeReference(s.slice(i, i + 8401))
+      if (reference) { push({ t: 'file', path: reference.path }); i += reference.length; continue }
+    }
     if (!o.noLinks && c === ':' && s.startsWith(':codex-file-citation{', i)) {
       const citation = fileCitation(s.slice(i, i + 8400))
       if (citation) { push({ t: 'file', path: citation.path }); i += citation.length; continue }

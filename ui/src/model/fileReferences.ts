@@ -1,1 +1,1 @@
-export { fileCitation, localFilePath } from '../../../src/core/fileReferences.js'
+export { fileCitation, visualizeReference, localFilePath } from '../../../src/core/fileReferences.js'
