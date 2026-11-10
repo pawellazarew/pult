@@ -1,19 +1,24 @@
 #![forbid(unsafe_code)]
 
+pub mod journal;
+
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
 use fs2::FileExt;
 use nix::sys::signal::kill;
 use nix::unistd::Pid;
+use serde::Serialize;
+use serde_json::value::{RawValue, to_raw_value};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
@@ -25,7 +30,65 @@ use tokio::task::JoinSet;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const PROTOCOL: u64 = 1;
 pub const MAX_LINE: usize = 1024 * 1024;
-pub const SUPPORTED: [&str; 3] = ["daemon.status", "daemon.stop", "protocol.catalog"];
+pub const SUPPORTED: [&str; 5] = [
+    "daemon.status",
+    "daemon.stop",
+    "events.emit",
+    "events.tail",
+    "protocol.catalog",
+];
+const SCRATCH_MARKER: &str = "pult-rust-scratch-v1\n";
+
+fn marked_scratch(home: &Path) -> Result<bool> {
+    let path = home.join(".rust-core-scratch");
+    let mut file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).context("cannot read scratch marker"),
+    };
+    let metadata = file.metadata()?;
+    ensure!(
+        metadata.is_file() && metadata.permissions().mode() & 0o077 == 0,
+        "scratch marker must be a private regular file"
+    );
+    ensure!(
+        metadata.len() == SCRATCH_MARKER.len() as u64,
+        "invalid scratch marker"
+    );
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+    ensure!(contents == SCRATCH_MARKER, "invalid scratch marker");
+    Ok(true)
+}
+
+fn initialize_scratch(home: &Path) -> Result<()> {
+    if !marked_scratch(home)? {
+        let mut random = [0; 8];
+        getrandom::fill(&mut random)
+            .map_err(|error| anyhow::anyhow!("marker randomness: {error}"))?;
+        let suffix: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+        let temporary = home.join(format!(".rust-core-scratch.{suffix}.tmp"));
+        let mut marker = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        let result = (|| -> Result<()> {
+            marker.write_all(SCRATCH_MARKER.as_bytes())?;
+            marker.sync_all()?;
+            fs::hard_link(&temporary, home.join(".rust-core-scratch"))?;
+            fs::File::open(home)?.sync_all()?;
+            Ok(())
+        })();
+        let _ = fs::remove_file(temporary);
+        result?;
+    }
+    Ok(())
+}
 
 pub fn catalog() -> Value {
     serde_json::from_str(include_str!("../../protocol/methods.json"))
@@ -61,10 +124,17 @@ pub fn checked_home(home: &Path) -> Result<PathBuf> {
             "choose a scratch home separate from production Pult"
         );
     }
-    for name in ["config.json", "sessions.json", "events"] {
+    for name in ["config.json", "sessions.json"] {
         ensure!(
-            !canonical.join(name).exists(),
+            fs::symlink_metadata(canonical.join(name))
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
             "existing Pult state is not supported by this foundation"
+        );
+    }
+    if fs::symlink_metadata(canonical.join("events")).is_ok() {
+        ensure!(
+            marked_scratch(&canonical)?,
+            "existing events require a Rust scratch home"
         );
     }
     if canonical.exists() {
@@ -328,9 +398,9 @@ pub async fn read_line<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Option
     }
 }
 
-async fn write_value<W: tokio::io::AsyncWrite + Unpin>(
+async fn write_value<W: tokio::io::AsyncWrite + Unpin, T: Serialize>(
     writer: &mut W,
-    value: &Value,
+    value: &T,
 ) -> Result<()> {
     let mut bytes = serde_json::to_vec(value)?;
     bytes.push(b'\n');
@@ -348,6 +418,96 @@ struct State {
     token: String,
     clients: AtomicUsize,
     stop: watch::Sender<bool>,
+    store: Mutex<journal::EventStore>,
+    last_event_id: AtomicU64,
+    test_mode: bool,
+    projection_degraded: AtomicBool,
+}
+
+#[derive(Serialize)]
+struct TailResult {
+    events: Vec<Box<RawValue>>,
+    cursor: u64,
+}
+
+#[derive(Serialize)]
+struct RpcResult<'a> {
+    id: &'a Value,
+    result: Box<RawValue>,
+}
+
+async fn journal_request(
+    state: Arc<State>,
+    method: String,
+    params: Value,
+) -> Result<Box<RawValue>> {
+    tokio::task::spawn_blocking(move || {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|_| anyhow::anyhow!("journal lock poisoned"))?;
+        if method == "events.tail" {
+            let since = params["since"].as_f64().unwrap_or(0.0).floor().max(0.0) as u64;
+            let limit = params["limit"]
+                .as_f64()
+                .map_or(usize::MAX, |n| n.ceil().max(0.0) as usize);
+            let session = params["sessionId"].as_str();
+            let events = store.read_from(since, session, limit, MAX_LINE)?;
+            let last = events.last().map(|event| event.id);
+            if let Some(last) = last {
+                ensure!(
+                    events.len() >= limit
+                        || store.read_from(last, session, 1, MAX_LINE)?.is_empty(),
+                    "events.tail exceeds frame budget; reduce limit or advance since"
+                );
+            }
+            let result = to_raw_value(&TailResult {
+                events: events.into_iter().map(|event| event.json).collect(),
+                cursor: store.last_id(),
+            })?;
+            ensure!(
+                result.get().len() < MAX_LINE - 256,
+                "events.tail exceeds frame budget; reduce limit or advance since"
+            );
+            return Ok(result);
+        }
+        let count = params["count"]
+            .as_f64()
+            .unwrap_or(1.0)
+            .clamp(1.0, 1000.0)
+            .ceil() as usize;
+        let session = params["sessionId"].as_str().unwrap_or("daemon");
+        let provider = match params["provider"].as_str() {
+            Some("claude") => "claude",
+            Some("codex") => "codex",
+            _ => "pult",
+        };
+        let mut ids = Vec::with_capacity(count);
+        for n in 0..count {
+            let mut data = params["data"].as_object().cloned().unwrap_or_default();
+            data.insert("n".into(), json!(n));
+            let mut draft =
+                json!({"sessionId":session,"provider":provider,"kind":params["kind"],"data":data});
+            if let Some(parent) = params["parentId"].as_str() {
+                draft["parentId"] = json!(parent);
+            }
+            let event = store.append(draft)?;
+            state
+                .last_event_id
+                .store(store.last_id(), Ordering::Release);
+            if store.projection_error().is_some()
+                && !state.projection_degraded.swap(true, Ordering::Relaxed)
+            {
+                eprintln!("journal is committed but a session projection needs repair");
+            }
+            ids.push(event["id"].clone());
+        }
+        Ok(to_raw_value(
+            &json!({"ids":ids,"lastEventId":store.last_id()}),
+        )?)
+    })
+    .await
+    .context("journal task failed")?
 }
 
 struct ConnectionCount(Arc<State>);
@@ -451,10 +611,63 @@ async fn connection(
         let method = request["method"].as_str().unwrap();
         let result = match method {
             "daemon.status" => {
-                json!({"version":VERSION,"protocol":PROTOCOL,"pid":std::process::id(),"startedAt":state.started_at,"uptimeMs":state.started.elapsed().as_millis(),"home":state.home,"sock":state.home.join("run/pultd.sock"),"clients":state.clients.load(Ordering::Relaxed),"subscriptions":0,"lastEventId":0,"mode":"on-demand","capabilities":{"experimental":true,"supportedMethods":SUPPORTED}})
+                json!({"version":VERSION,"protocol":PROTOCOL,"pid":std::process::id(),"startedAt":state.started_at,"uptimeMs":state.started.elapsed().as_millis(),"home":state.home,"sock":state.home.join("run/pultd.sock"),"clients":state.clients.load(Ordering::Relaxed),"subscriptions":0,"lastEventId":state.last_event_id.load(Ordering::Acquire),"mode":"on-demand","journal":{"projectionDegraded":state.projection_degraded.load(Ordering::Relaxed)},"capabilities":{"experimental":true,"supportedMethods":SUPPORTED}})
             }
             "daemon.stop" => json!({"stopping":true}),
             "protocol.catalog" => catalog(),
+            "events.tail" | "events.emit" => {
+                let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
+                if method == "events.emit" {
+                    let valid_kind = catalog()["methods"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|method| method["name"] == "events.emit")
+                        .unwrap()["paramsSchema"]["properties"]["kind"]["enum"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&params["kind"]);
+                    let error = if !state.test_mode {
+                        Some(("not_found", "events.emit requires PULT_TEST=1"))
+                    } else if !valid_kind {
+                        Some(("invalid_params", "kind is not a known event kind"))
+                    } else if params
+                        .get("data")
+                        .is_some_and(|data| !data.is_null() && !data.is_object())
+                    {
+                        Some(("invalid_params", "data must be an object"))
+                    } else {
+                        None
+                    };
+                    if let Some((code, message)) = error {
+                        write_value(
+                            &mut output,
+                            &json!({"id":id,"error":{"code":code,"message":message}}),
+                        )
+                        .await?;
+                        continue;
+                    }
+                }
+                match journal_request(state.clone(), method.to_owned(), params).await {
+                    Ok(result) => {
+                        write_value(&mut output, &RpcResult { id, result }).await?;
+                        continue;
+                    }
+                    Err(error) => {
+                        let code = if method == "events.emit" {
+                            "journal_write_failed"
+                        } else {
+                            "internal"
+                        };
+                        write_value(
+                            &mut output,
+                            &json!({"id":id,"error":{"code":code,"message":error.to_string()}}),
+                        )
+                        .await?;
+                        continue;
+                    }
+                }
+            }
             _ => {
                 let known = catalog()["methods"]
                     .as_array()
@@ -499,6 +712,10 @@ pub async fn serve(home: PathBuf) -> Result<()> {
         }
         fs::remove_file(&socket)?;
     }
+    initialize_scratch(&home)?;
+    let events = home.join("events");
+    let store = tokio::task::spawn_blocking(move || journal::EventStore::open(&events)).await??;
+    let last_event_id = AtomicU64::new(store.last_id());
     let listener = UnixListener::bind(&socket)?;
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
     let metadata = fs::symlink_metadata(&socket)?;
@@ -516,6 +733,10 @@ pub async fn serve(home: PathBuf) -> Result<()> {
         started: Instant::now(),
         clients: AtomicUsize::new(0),
         stop,
+        store: Mutex::new(store),
+        last_event_id,
+        test_mode: std::env::var("PULT_TEST").as_deref() == Ok("1"),
+        projection_degraded: AtomicBool::new(false),
     });
     let permits = Arc::new(Semaphore::new(64));
     let mut tasks = JoinSet::new();
@@ -551,7 +772,15 @@ pub async fn serve(home: PathBuf) -> Result<()> {
     Ok(())
 }
 
-pub async fn request(home: &Path, method: &str) -> Result<Value> {
+pub async fn request(home: &Path, method: &str) -> Result<Box<RawValue>> {
+    request_with_params(home, method, json!({})).await
+}
+
+pub async fn request_with_params(
+    home: &Path,
+    method: &str,
+    params: Value,
+) -> Result<Box<RawValue>> {
     let home = checked_home(home)?;
     let token = fs::read_to_string(home.join("run/token"))?;
     let socket = tokio::time::timeout(
@@ -575,20 +804,29 @@ pub async fn request(home: &Path, method: &str) -> Result<Value> {
         hello["type"] == "hello_ok" && hello["protocol"].as_u64() == Some(PROTOCOL),
         "handshake failed: {hello}"
     );
-    write_value(&mut output, &json!({"id":1,"method":method,"params":{}})).await?;
+    write_value(
+        &mut output,
+        &json!({"id":1,"method":method,"params":params}),
+    )
+    .await?;
     let response = tokio::time::timeout(Duration::from_secs(3), read_line(&mut input))
         .await??
         .context("daemon closed before response")?;
-    let response: Value = serde_json::from_slice(&response)?;
+    let mut response: HashMap<String, Box<RawValue>> = serde_json::from_slice(&response)?;
+    let id: Value =
+        serde_json::from_str(response.get("id").context("response is missing id")?.get())?;
     ensure!(
-        response["id"].as_u64() == Some(1) && response.get("result").is_some(),
+        id.as_u64() == Some(1),
         "response does not match pending request"
     );
     ensure!(
-        response.get("error").is_none(),
-        "request failed: {response}"
+        !response.contains_key("error"),
+        "request failed: {}",
+        response.get("error").map_or("", |error| error.get())
     );
-    Ok(response["result"].clone())
+    response
+        .remove("result")
+        .context("response is missing result")
 }
 
 #[cfg(test)]
