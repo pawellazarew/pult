@@ -1,0 +1,259 @@
+{
+  "schemaVersion": 1,
+  "measuredAt": "2026-11-10T20:10:56.324Z",
+  "commit": "1df3ed5cd1a0427b9655663d974d3022d01bcf51",
+  "host": {
+    "platform": "darwin",
+    "release": "25.6.0",
+    "arch": "arm64",
+    "cpu": "Apple M1 Pro",
+    "node": "v24.21.0"
+  },
+  "rustBinarySha256": "32aa8aebbf59858daa58657e93c9e0bedeaf0b4705de5dfe4a71e35b2385e105",
+  "runnerSha256": "8785272a95033a53a9fbb762c7425a4140792fa9024daa91024de33c6ef50e7f",
+  "nodePeerSha256": "4b1f7ae433e0473c7c8afd0503564f7e86d61e1d6970724606dc447ab33ea06d",
+  "options": {
+    "trials": 10,
+    "records": 10000,
+    "payloadBytes": 256
+  },
+  "fixtureBytes": 3188894,
+  "fixtureSha256": "08dbf7c0d74c82d81877e0b838baa27f7e346e5c049f98c0de191b0218843c84",
+  "scope": "Complete valid ASCII single-writer replay only; wall includes startup/validation/serialization/pipes and RSS sampling overhead. Not provider/ACK/storage-durability or full-Pult parity.",
+  "summary": {
+    "node": {
+      "p50Ms": 98.59349999999995,
+      "p95Ms": 343.52658299999985,
+      "sampledRssBytes": [
+        77578240,
+        75120640,
+        75055104,
+        75612160,
+        75792384,
+        75120640,
+        75431936,
+        75710464,
+        75759616,
+        75808768
+      ]
+    },
+    "rust": {
+      "p50Ms": 177.8611669999999,
+      "p95Ms": 392.891208,
+      "sampledRssBytes": [
+        16826368,
+        17465344,
+        17465344,
+        17530880,
+        17481728,
+        17465344,
+        16809984,
+        17465344,
+        17547264,
+        16809984
+      ]
+    }
+  },
+  "rows": [
+    {
+      "trial": 0,
+      "runtime": "node",
+      "elapsedMs": 183.75091699999996,
+      "maxSampledRssBytes": 77578240,
+      "rssSamples": 8,
+      "outputBytes": 3188894,
+      "records": 10000,
+      "sha256": "08dbf7c0d74c82d81877e0b838baa27f7e346e5c049f98c0de191b0218843c84"
+    },
+    {
+      "trial": 0,
+      "runtime": "rust",
+      "elapsedMs": 194.18954099999996,
+      "maxSampledRssBytes": 16826368,
+      "rssSamples": 9,
+      "outputBytes": 3188894,
+      "records": 10000,
+      "sha256": "08dbf7c0d74c82d81877e0b838baa27f7e346e5c049f98c0de191b0218843c84"
+    },
+    {
+      "trial": 1,
+      "runtime": "rust",
+      "elapsedMs": 177.8611669999999,
+      "maxSampledRssBytes": 17465344,
+      "rssSamples": 7,
+      "outputBytes": 3188894,
+      "records": 10000,
+      "sha256": "08dbf7c0d74c82d81877e0b838baa27f7e346e5c049f98c0de191b0218843c84"
+    },
+    {
+      "trial": 1,
+      "runtime": "node",
+      "elapsedMs": 85.55424999999991,
+      "maxSampledRssBytes": 75120640,
+      "rssSamples": 3,
+      "outputBytes": 3188894,
+      "records": 10000,
+      "sha256": "08dbf7c0d74c82d81877e0b838baa27f7e346e5c049f98c0de191b0218843c84"
+    },
+    {
+      "trial": 2,
+      "runtime": "node",
+      "elapsedMs": 88.98608300000001,
+      "maxSampledRssBytes": 75055104,
+      "rssSamples": 3,
+      "outputBytes": 3188894,
+      "records": 10000,
+      "sha256": "08dbf7c0d74c82d81877e0b838baa27f7e346e5c049f98c0de191b0218843c84"
+    },
+    {
+      "trial": 2,
+      "runtime": "rust",
+      "elapsedMs": 151.81279100000006,
+      "maxSampledRssBytes": 17465344,
+      "rssSamples": 7,
+      "outputBytes": 3188894,
+      "records": 10000,
+      "sha256": "08dbf7c0d74c82d81877e0b838baa27f7e346e5c049f98c0de191b0218843c84"
+    },
+    {
+      "trial": 3,
+      "runtime": "rust",
+      "elapsedMs": 372.620958,
+      "maxSampledRssBytes": 17530880,
+      "rssSamples": 15,
+      "outputBytes": 3188894,
+      "records": 10000,
+      "sha256": "08dbf7c0d74c82d81877e0b838baa27f7e346e5c049f98c0de191b0218843c84"
+    },
+    {
+      "trial": 3,
+      "runtime": "node",
+      "elapsedMs": 343.52658299999985,
+      "maxSampledRssBytes": 75612160,
+      "rssSamples": 14,
+      "outputBytes": 3188894,
+      "records": 10000,
+      "sha256": "08dbf7c0d74c82d81877e0b838baa27f7e346e5c049f98c0de191b0218843c84"
+    },
+    {
+      "trial": 4,
+      "runtime": "node",
+      "elapsedMs": 98.59349999999995,
+      "maxSampledRssBytes": 75792384,
+      "rssSamples": 3,
+      "outputBytes": 3188894,
+      "records": 10000,
+      "sha256": "08dbf7c0d74c82d81877e0b838baa27f7e346e5c049f98c0de191b0218843c84"
+    },
+    {
+      "trial": 4,
+      "runtime": "rust",
+      "elapsedMs": 170.9510419999997,
+      "maxSampledRssBytes": 17481728,
+      "rssSamples": 7,
+      "outputBytes": 3188894,
+      "records": 10000,
+      "sha256": "08dbf7c0d74c82d81877e0b838baa27f7e346e5c049f98c0de191b0218843c84"
+    },
+    {
+      "trial": 5,
+      "runtime": "rust",
+      "elapsedMs": 211.31054099999983,
+      "maxSampledRssBytes": 17465344,
+      "rssSamples": 9,
+      "outputBytes": 3188894,
+      "records": 10000,
+      "sha256": "08dbf7c0d74c82d81877e0b838baa27f7e346e5c049f98c0de191b0218843c84"
+    },
+    {
+      "trial": 5,
+      "runtime": "node",
+      "elapsedMs": 203.81245799999942,
+      "maxSampledRssBytes": 75120640,
+      "rssSamples": 6,
+      "outputBytes": 3188894,
+      "records": 10000,
+      "sha256": "08dbf7c0d74c82d81877e0b838baa27f7e346e5c049f98c0de191b0218843c84"
+    },
+    {
+      "trial": 6,
+      "runtime": "node",
+      "elapsedMs": 86.40554199999951,
+      "maxSampledRssBytes": 75431936,
+      "rssSamples": 3,
+      "outputBytes": 3188894,
+      "records": 10000,
+      "sha256": "08dbf7c0d74c82d81877e0b838baa27f7e346e5c049f98c0de191b0218843c84"
+    },
+    {
+      "trial": 6,
+      "runtime": "rust",
+      "elapsedMs": 143.6094579999999,
+      "maxSampledRssBytes": 16809984,
+      "rssSamples": 6,
+      "outputBytes": 3188894,
+      "records": 10000,
+      "sha256": "08dbf7c0d74c82d81877e0b838baa27f7e346e5c049f98c0de191b0218843c84"
+    },
+    {
+      "trial": 7,
+      "runtime": "rust",
+      "elapsedMs": 157.11204100000032,
+      "maxSampledRssBytes": 17465344,
+      "rssSamples": 7,
+      "outputBytes": 3188894,
+      "records": 10000,
+      "sha256": "08dbf7c0d74c82d81877e0b838baa27f7e346e5c049f98c0de191b0218843c84"
+    },
+    {
+      "trial": 7,
+      "runtime": "node",
+      "elapsedMs": 99.17674999999963,
+      "maxSampledRssBytes": 75710464,
+      "rssSamples": 4,
+      "outputBytes": 3188894,
+      "records": 10000,
+      "sha256": "08dbf7c0d74c82d81877e0b838baa27f7e346e5c049f98c0de191b0218843c84"
+    },
+    {
+      "trial": 8,
+      "runtime": "node",
+      "elapsedMs": 94.3237909999998,
+      "maxSampledRssBytes": 75759616,
+      "rssSamples": 4,
+      "outputBytes": 3188894,
+      "records": 10000,
+      "sha256": "08dbf7c0d74c82d81877e0b838baa27f7e346e5c049f98c0de191b0218843c84"
+    },
+    {
+      "trial": 8,
+      "runtime": "rust",
+      "elapsedMs": 392.891208,
+      "maxSampledRssBytes": 17547264,
+      "rssSamples": 12,
+      "outputBytes": 3188894,
+      "records": 10000,
+      "sha256": "08dbf7c0d74c82d81877e0b838baa27f7e346e5c049f98c0de191b0218843c84"
+    },
+    {
+      "trial": 9,
+      "runtime": "rust",
+      "elapsedMs": 296.4571249999999,
+      "maxSampledRssBytes": 16809984,
+      "rssSamples": 13,
+      "outputBytes": 3188894,
+      "records": 10000,
+      "sha256": "08dbf7c0d74c82d81877e0b838baa27f7e346e5c049f98c0de191b0218843c84"
+    },
+    {
+      "trial": 9,
+      "runtime": "node",
+      "elapsedMs": 339.26824999999917,
+      "maxSampledRssBytes": 75808768,
+      "rssSamples": 13,
+      "outputBytes": 3188894,
+      "records": 10000,
+      "sha256": "08dbf7c0d74c82d81877e0b838baa27f7e346e5c049f98c0de191b0218843c84"
+    }
+  ]
+}

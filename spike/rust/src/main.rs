@@ -1,7 +1,10 @@
 #![forbid(unsafe_code)]
 
+mod output;
+
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
+use output::ControlOutput;
 use pult_r1::{Journal, Process, bounded_sync_line};
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -38,24 +41,38 @@ enum Action {
 async fn main() -> Result<()> {
     let args = Args::parse();
     let mut journal = Journal::open(&args.home)?;
+    let output = ControlOutput::new();
     match args.command {
         Action::Replay => {
+            let mut batch = Vec::with_capacity(64 * 1024);
             for record in journal.records()? {
-                reply(&serde_json::to_value(record)?)?;
+                let mut line = serde_json::to_vec(&serde_json::to_value(record)?)?;
+                line.push(b'\n');
+                ensure!(
+                    line.len() <= pult_r1::MAX_LINE,
+                    "replay record exceeds output limit"
+                );
+                if !batch.is_empty() && batch.len() + line.len() > 64 * 1024 {
+                    output.write_batch(std::mem::take(&mut batch)).await?;
+                }
+                batch.extend(line);
+            }
+            if !batch.is_empty() {
+                output.write_batch(batch).await?;
             }
         }
-        Action::Serve => serve(&mut journal).await?,
+        Action::Serve => serve(&mut journal, &output).await?,
         Action::Codex { bin, cwd, prompt } => {
             ensure!(cwd.is_absolute(), "--cwd must be absolute");
             let mut terminate =
                 tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-            let mut process = Process::spawn(&bin, &["app-server".into()], &cwd)?;
+            let mut process = Process::spawn(&bin, &["app-server".into()], &cwd).await?;
             let work = tokio::time::timeout(Duration::from_secs(120), async {
                 journal.append(
                     "session.started",
                     json!({"provider":"codex","pid":process.pid()}),
                 )?;
-                codex(&mut process, &mut journal, &cwd, prompt).await
+                codex(&mut process, &mut journal, &cwd, prompt, &output).await
             });
             let result = tokio::select! {
                 result = work => result.context("Codex smoke deadline exceeded").and_then(|value| value),
@@ -75,6 +92,7 @@ async fn codex(
     journal: &mut Journal,
     cwd: &std::path::Path,
     prompt: Option<String>,
+    output: &ControlOutput,
 ) -> Result<()> {
     let init = process
         .request(
@@ -84,7 +102,7 @@ async fn codex(
             journal,
         )
         .await?;
-    reply(&json!({"initialized": init}))?;
+    output.reply(&json!({"initialized": init})).await?;
     process
         .send(&json!({"method":"initialized","params":{}}))
         .await?;
@@ -101,7 +119,9 @@ async fn codex(
         .context("thread/start returned no thread id")?
         .to_string();
     journal.append("session.ready", json!({"threadId":id}))?;
-    reply(&json!({"threadId":id,"sandbox":"read-only"}))?;
+    output
+        .reply(&json!({"threadId":id,"sandbox":"read-only"}))
+        .await?;
     if let Some(prompt) = prompt {
         process
             .request(
@@ -121,7 +141,7 @@ async fn codex(
             process.deny_server_request(&value).await?;
             if value["method"] == "turn/completed" && value["params"]["threadId"] == id {
                 let status = &value["params"]["turn"]["status"];
-                reply(&json!({"turnStatus":status}))?;
+                output.reply(&json!({"turnStatus":status})).await?;
                 ensure!(status == "completed", "turn did not complete: {value}");
                 break;
             }
@@ -130,7 +150,7 @@ async fn codex(
     Ok(())
 }
 
-async fn serve(journal: &mut Journal) -> Result<()> {
+async fn serve(journal: &mut Journal, output: &ControlOutput) -> Result<()> {
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let records = journal.records()?;
     if records
@@ -160,7 +180,7 @@ async fn serve(journal: &mut Journal) -> Result<()> {
     });
     let mut process: Option<Process> = None;
     loop {
-        let output = async {
+        let provider_output = async {
             match process.as_mut() {
                 Some(child) => child.output.recv().await,
                 None => std::future::pending().await,
@@ -173,7 +193,7 @@ async fn serve(journal: &mut Journal) -> Result<()> {
         }
         let next = tokio::select! {
             line = input.recv() => Next::Input(line.unwrap_or(Ok(None))),
-            value = output => Next::Output(value),
+            value = provider_output => Next::Output(value),
             _ = tokio::signal::ctrl_c() => Next::Stop,
             _ = terminate.recv() => Next::Stop,
         };
@@ -184,25 +204,25 @@ async fn serve(journal: &mut Journal) -> Result<()> {
                 Next::Input(Ok(Some(bytes))) => {
                     let request: Value = serde_json::from_slice(&bytes)?;
                     match request["method"].as_str() {
-                        Some("hello") => reply(&json!({"protocol":1,"experimental":true,"methods":["hello","start","stop","quit"]}))?,
+                        Some("hello") => output.reply(&json!({"protocol":1,"experimental":true,"methods":["hello","start","stop","quit"]})).await?,
                         Some("start") => {
                             ensure!(process.is_none(), "a session is already running");
                             let program = request["program"].as_str().context("program is required")?;
                             let cwd = PathBuf::from(request["cwd"].as_str().context("cwd is required")?);
                             ensure!(cwd.is_absolute(), "cwd must be absolute");
                             let args: Vec<String> = serde_json::from_value(request.get("args").cloned().unwrap_or(json!([])))?;
-                            let child = Process::spawn(program, &args, &cwd)?;
+                            let child = Process::spawn(program, &args, &cwd).await?;
                             let pid = child.pid();
                             process = Some(child);
                             let sequence = journal.append("session.started", json!({"pid":pid}))?;
-                            reply(&json!({"started":pid,"acknowledged":sequence}))?;
+                            output.reply(&json!({"started":pid,"acknowledged":sequence})).await?;
                         }
                         Some("stop") => {
                             if let Some(mut child) = process.take() {
                                 let result = child.stop().await?;
                                 let sequence = journal.append("session.stopped", result)?;
-                                reply(&json!({"stopped":true,"acknowledged":sequence}))?;
-                            } else { reply(&json!({"stopped":true}))?; }
+                                output.reply(&json!({"stopped":true,"acknowledged":sequence})).await?;
+                            } else { output.reply(&json!({"stopped":true})).await?; }
                         }
                         Some("quit") => return Ok(false),
                         _ => anyhow::bail!("unknown method"),
@@ -210,7 +230,7 @@ async fn serve(journal: &mut Journal) -> Result<()> {
                 }
                 Next::Output(Some(value)) => {
                     let sequence = journal.append("provider.message", value?)?;
-                    reply(&json!({"acknowledged":sequence}))?;
+                    output.reply(&json!({"acknowledged":sequence})).await?;
                 }
                 Next::Output(None) => {
                     if let Some(mut child) = process.take() {
@@ -232,13 +252,4 @@ async fn serve(journal: &mut Journal) -> Result<()> {
             }
         }
     }
-}
-
-fn reply(value: &Value) -> Result<()> {
-    use std::io::Write;
-    let mut output = std::io::stdout().lock();
-    serde_json::to_writer(&mut output, value)?;
-    output.write_all(b"\n")?;
-    output.flush()?;
-    Ok(())
 }
