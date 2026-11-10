@@ -1586,6 +1586,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
 
 
 
+      {mobile && mobileNavOpen && <button type="button" className="navigation-scrim" aria-label={tr("Закрыть навигацию")} onClick={() => setMobileNavOpen(false)} />}
       <WorkspaceLayout mode={appearance.mode} sidebarHidden={effectiveSidebarHidden} inboxOpen={inboxOpen || summaryShown} filesOpen={filesOpen || (!!current && runtimeOpen)} filesExpanded={filesOpen && filesExpanded}>
         <div className="agents-col">
           <ProjectTree mode={appearance.mode} groups={groups} selected={current?.name ?? null} revealSend={revealSend} now={now} collapsed={collapsed}
@@ -1664,7 +1665,6 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         </div>
       )}
 
-      {mobile && mobileNavOpen && <button type="button" className="navigation-scrim" aria-label={tr("Закрыть навигацию")} onClick={() => setMobileNavOpen(false)} />}
       {conn.state === 'up' && settings?.disk?.status.state === 'low' && <div className="banner" role="status" data-testid="disk-warning" style={{ flexWrap: 'wrap' }}>
         <Icon name="alert" /><span className="grow" style={{ flex: '1 1 240px', minWidth: 0 }} title={settings.disk.status.path}>{tr('Мало места на диске с данными Pult.')} {freeDiskText(settings.disk.status)}</span>
         <button type="button" className="btn" onClick={openCleanupDraft} data-testid="disk-cleanup">{tr('Начать уборку')}</button>

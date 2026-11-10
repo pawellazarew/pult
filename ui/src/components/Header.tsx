@@ -28,7 +28,7 @@ export function Header(p: {
   useEffect(() => { const close = (event: PointerEvent): void => { if (health.current && !health.current.contains(event.target as Node)) health.current.open = false }; document.addEventListener('pointerdown', close); return () => document.removeEventListener('pointerdown', close) }, [])
   const up = p.conn.state === 'up'
   const daemonTone: Tone = up ? 'ok' : p.conn.state === 'connecting' ? 'run' : 'fail'
-  const tone = !up ? daemonTone : p.noticeTone ?? (p.doctorTone === 'fail' || p.guard.tone === 'fail' ? 'fail' : p.doctorTone === 'wait' ? 'wait' : 'ok')
+  const tone = !up ? daemonTone : p.noticeTone === 'fail' || p.doctorTone === 'fail' || p.guard.tone === 'fail' ? 'fail' : p.noticeTone === 'wait' || p.doctorTone === 'wait' ? 'wait' : 'ok'
   const uptime = p.status ? p.status.uptimeMs + Math.max(0, p.now - p.statusAt) : null
   return <footer className="sidebar-footer" aria-label={t('Помощь и настройки')} data-testid="sidebar-footer">
     {p.onAddProject && <button type="button" className="footer-icon" title={t('Добавить проект')} aria-label={t('Добавить проект')} onClick={p.onAddProject}><Icon name="folder-plus" /></button>}

@@ -209,6 +209,14 @@ describe('служебное меню в подвале', () => {
     assert.doesNotMatch(out, /header-guard-alert/)
   })
 
+  it('ожидающее уведомление не скрывает ошибку диагностики', () => {
+    const out = html(Header, { ...base,
+      conn: { state: 'up', daemon: { version: '0.1.0', pid: 1, startedAt: 'x' } },
+      doctorTone: 'fail', noticeTone: 'wait',
+    })
+    assert.match(out, /<summary class="footer-icon health-summary t-fail"/)
+  })
+
   it('технические статусы доступны в закрытом по умолчанию меню подвала', () => {
     const up = html(Header, { ...base, conn: { state: 'up', daemon: { version: '0.1.0', pid: 1, startedAt: 'x' } },
       providers: { checkedAt: 'x', claude: { provider: 'claude', state: 'ready', detail: 'Вход выполнен · готов', models: [] },
