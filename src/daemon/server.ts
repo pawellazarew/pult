@@ -13,7 +13,7 @@ import { existsSync, chmodSync, lstatSync, mkdirSync, readdirSync, readFileSync,
 import net from 'node:net'
 import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
 import type { AttachmentRetentionDays, ProviderName, PultConfig } from '../core/config.js'
 import type { EventDraft, PultEvent } from '../core/events.js'
 import { DAEMON_SESSION, isEventKind } from '../core/events.js'
@@ -59,6 +59,8 @@ import { buildChildEnv } from '../env/allowlist.js'
 import { daemonNodeInfo, fileId } from '../env/nodeBin.js'
 import { execAsync } from '../env/exec.js'
 import { createAutoTitler } from '../sessions/autotitle.js'
+import { codexCommandsFromSkills, createCommandCatalog } from '../commands/catalog.js'
+import { probeClaudeCommands } from '../commands/claudeProbe.js'
 import { createProviderCatalog, codexMetadataRequest, fetchCodexModels } from '../env/providers.js'
 import type { ProviderModel } from '../env/providers.js'
 import { nextLastUsed, parseLastUsed, parseNewSession, ConfigureError } from '../sessions/settings.js'
@@ -574,6 +576,24 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
   const withBrowser = <T extends SessionRecord>(rec: T): T & { browserDownloads?: string } =>
     rec.browser ? { ...rec, browserDownloads: browserDirs(paths, rec.name).downloads } : rec
 
+  // «/» в поле ввода (docs/19): скиллы и команды папки сессии. Claude — отдельный короткий процесс с `initialize`
+  // (через страж сети, как автоназвание); Codex — `skills/list` общего app-server; ZCode списка не даёт.
+  const slashCatalog = createCommandCatalog({
+    probe: async (key, force) => {
+      if (key.provider === 'codex') {
+        if (!codex.listSkills) return []
+        return codexCommandsFromSkills(await codex.listSkills(key.cwd, force), key.cwd)
+      }
+      if (key.provider !== 'claude') return []
+      const check = await (netCheck ?? ((p: 'claude') => checkNetwork(p, config.network[p], config.guard, {})))('claude')
+      if (!check.ok) throw new Error('страж сети не пустил claude — список команд не снят')
+      return await probeClaudeCommands({
+        bin: claudeBin, cwd: key.cwd,
+        env: buildChildEnv(process.env, { network: claudeNetworkEnv(check), extra: {} }),
+        ...(key.settingSources ? { settingSources: key.settingSources } : {}),
+      })
+    },
+  })
   const claude: ProviderAdapter = createClaudeAdapter({
     paths, config, logger, bin: claudeBin,
     ...(opts.cliEntry !== undefined ? { cliEntry: opts.cliEntry } : {}),
@@ -585,6 +605,9 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
     askKeys,
     ...(netCheck ? { netCheck } : {}),
     mcpExtras: (name, nodeBin, at) => mcpExtras(name, nodeBin, at),
+    commandsSeen: (cwd, settingSources, cmds) => {
+      slashCatalog.seenClaudeInit({ provider: 'claude', cwd, ...(settingSources ? { settingSources } : {}) }, cmds)
+    },
   })
   const codexBin = opts.codexBin
     ?? process.env['PULT_CODEX_BIN']
@@ -631,6 +654,7 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
   }
   const codex: ProviderAdapter = createCodexAdapter({
     paths, config, logger, bin: codexBin,
+    skillsChanged: () => { slashCatalog.invalidate('codex') },
     ruleGranted: (g) => { rules.granted(g) },
     emit: (draft) => { manager.emit(draft) },
     live: (name, sig) => { manager.live(name, sig) },
@@ -1706,6 +1730,26 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
         if (p['on']) browserOn(name)
         return withBrowser(publicRecord(rec))
       }
+      case 'agent.commands': {
+        // «/» в поле ввода (docs/19): `{name}` — чат; `{provider, cwd}` — черновик нового чата. `force` — снять заново.
+        const name = typeof p['name'] === 'string' ? p['name'] : ''
+        const rec = name ? manager.list().find((r) => r.name === name) : undefined
+        if (name && !rec) throw new ManagerError(ERROR_CODES.notFound, `agent.commands: сессии ${name.slice(0, 80)} нет`)
+        const provider = rec?.provider ?? p['provider']
+        const cwd = rec?.cwd ?? p['cwd']
+        if (provider !== 'claude' && provider !== 'codex' && provider !== 'zcode') {
+          throw new ManagerError(ERROR_CODES.invalidParams, 'agent.commands: нужен name сессии или provider claude|codex|zcode')
+        }
+        if (typeof cwd !== 'string' || !isAbsolute(cwd) || cwd.includes('\0')) {
+          throw new ManagerError(ERROR_CODES.invalidParams, 'agent.commands: cwd — абсолютный путь')
+        }
+        if (!rec) {
+          try { if (!statSync(cwd).isDirectory()) throw new Error('не папка') } catch {
+            throw new ManagerError(ERROR_CODES.invalidParams, 'agent.commands: папки нет')
+          }
+        }
+        return await slashCatalog.list({ provider, cwd, ...(rec?.settingSources ? { settingSources: rec.settingSources } : {}) }, { force: p['force'] === true })
+      }
       case 'mcp.list':
         // Только ~/.claude.json: серверы проекта (.mcp.json) — позже (src/mcp/servers.ts).
         return await listServers(claudeUserFile, config.mcp.servers)
@@ -2276,6 +2320,7 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
       case 'agent.browser':
       case 'mcp.list':
       case 'mcp.select':
+      case 'agent.commands':
       case 'agent.rename':
       case 'agent.archive':
       case 'agent.question.answer':

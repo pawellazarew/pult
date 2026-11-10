@@ -5,6 +5,7 @@ import type { RuntimeBounds, RuntimeDiscovery, RuntimeKind, RuntimeResult, Runti
 import { errorText } from '../bridge.js'
 import { t as tr } from '../lib/i18n.js'
 import { Icon } from './common.js'
+import { StatusDot } from './StatusDot.js'
 import '../runtime.css'
 
 type Discovery = RuntimeDiscovery & { attached?: string[]; controller?: 'agent' | 'human'; controllers?: Record<string, 'agent' | 'human'> }
@@ -219,7 +220,7 @@ export function RuntimePanel({ bridge, sessionId, obstructed, onClose }: { bridg
     {target?.detail && <p className="runtime-note">{target.detail}</p>}
     {kind === 'android' && bootNote && <p className="runtime-note" role="status">{bootNote}</p>}
     {attached && <>
-      <div className="runtime-control"><span className={human ? 't-ok' : 't-run'}><span className="dot" />{human ? tr('Ты управляешь') : tr('Управляет агент')}</span><button type="button" className="btn btn-sm" disabled={busy} onClick={() => void control()} data-testid="runtime-control">{human ? tr('Вернуть агенту') : tr('Взять управление')}</button></div>
+      <div className="runtime-control"><span className={human ? 't-ok' : 't-run'}><StatusDot state={human ? 'done' : 'working'} size="md" label={null} />{human ? tr('Ты управляешь') : tr('Управляет агент')}</span><button type="button" className="btn btn-sm" disabled={busy} onClick={() => void control()} data-testid="runtime-control">{human ? tr('Вернуть агенту') : tr('Взять управление')}</button></div>
       {web && <form className="runtime-address" onSubmit={navigate}><input ref={urlInput} aria-label={tr("Адрес страницы")} value={url} placeholder="http://localhost:3000" onChange={(e) => setUrl(e.target.value)} spellCheck={false} disabled={!human} /><button type="submit" className="btn btn-sm" disabled={busy || !human}>{tr("Открыть")}</button><button type="button" className="btn btn-ghost btn-sm" aria-label={tr("Перезагрузить страницу")} disabled={busy || !human} onClick={() => void perform('reload')}>↻</button></form>}
       <div ref={slot} className={`runtime-screen${web ? ' runtime-screen-web' : ''}${human ? ' runtime-screen-human' : ''}`} data-testid="runtime-screen" aria-label={nativeWeb ? tr('Интерактивная веб-страница') : tr('Экран выбранной среды')}>
         {!nativeWeb && (picture ? <img src={picture} alt={tr`Экран: ${target?.name ?? tr('устройство')}`} draggable={false} onClick={tap} /> : <div className="runtime-placeholder">{targetId.startsWith('android-avd:') ? tr('Эмулятор загружается. Затем выбери запущенное устройство и нажми «Подключить».') : target?.capabilities.includes('screenshot') ? tr('Ожидаю первый кадр…') : tr('Для показа экрана нужен дополнительный компонент.')}</div>)}

@@ -72,20 +72,13 @@ policy still applies; this does not promise removal of operating-system copies, 
 you explicitly copy elsewhere. Memory limits are 8 open chats, 512 KiB per chat snapshot and 4 MiB total;
 exceeding a limit returns an error without falling back to disk. See [the developer contract](docs/DEV.md#временные-чаты-отдельный-контур-в-памяти).
 
-## New in 0.3.20
+## New in 0.3.21
 
-- **A quieter workspace.** Normal, Expanded and Focus layouts keep Pult’s palette. Choose fonts, text size
-  and density in Appearance; diagnostics and Help live in the sidebar footer, usage and file retention in Settings.
-- **Conversations without a project.** New chat starts a saved general conversation. The adjacent menu also
-  offers temporary text-only chats, without project context or local history, on verified Claude Code 2.1.317.
-- **Subagent conversations.** Open their history in read-only tabs, return to the parent and hide completed work.
-- **Cleaner attachments and Codex controls.** Named attachment cards, native image inputs, Normal/Fast speed,
-  question forms, mid-turn clarifications and immediate delivery of selected queued messages.
-- **Local dictation and disk warnings.** Dictate with Whisper; a configurable low-space warning can open
-  a cleanup request as an unsent draft.
+- **Skills from the composer.** Type `/` in an existing chat to choose provider skills and commands. Claude uses `/name`, Codex uses `$name`.
+- **Queue layout.** Rows stay inside the input width, long text truncates, and action buttons keep their size.
+- **Shared status indicator.** Working is blue throughout the interface; background Claude agents stay working until completion.
 
-See the [release notes](docs/releases/0.3.20.md) for details and temporary-chat limits. Update with `pult update`
-or the update button in the window.
+See the [release notes](docs/releases/0.3.21.md) for details and current limitations. Update with `pult update` or the update button in the window.
 
 ## What it does
 

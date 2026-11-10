@@ -309,6 +309,8 @@ const APPROVAL_TOOL_NAME: Record<string, string> = {
 const MODEL_CAPACITY_RE = /(?:selected model is at capacity|model[^\n]{0,60}(?:at capacity|overloaded))/i
 
 export interface CodexAdapterOptions extends AdapterDeps {
+  /** `skills/changed` от app-server: скиллы на диске сменились (каталог «/»-команд, docs/19). */
+  skillsChanged?: () => void
   /** Паузы двух повторов при перегрузке модели; тест сокращает ожидание. Всего три попытки. */
   capacityRetryDelaysMs?: readonly [number, number]
   paths: PultPaths
@@ -1683,6 +1685,8 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
       if (snapshot) applyLimits(snapshot, null)
       return
     }
+    // «/» в поле ввода (docs/19): скиллы на диске сменились — каталог Codex перечитается на следующий запрос.
+    if (method === 'skills/changed') { opts.skillsChanged?.(); return }
     if (method === 'deprecationNotice') {
       logger.warn('протокол codex изменился (deprecationNotice)', { summary: redactString(str(params['summary']) ?? '') })
       return
@@ -2407,6 +2411,18 @@ export function createCodexAdapter(opts: CodexAdapterOptions): ProviderAdapter {
       }
       if (r.codex === 'not_running') noticeAll(`${why}: Codex в Пульте не запущен — правило больше не действует; ${RELOAD_OUTSIDE}.`)
       return r
+    },
+
+    async listSkills(cwd, force) {
+      // Живой общий процесс уже прошёл стража — спрашиваем его. Нет процесса — сначала страж, как перед ходом:
+      // `skills/list` поднимает app-server, а он ходит в сеть (каталог плагинов).
+      let c = client && client.alive() ? client : null
+      if (!c) {
+        const check = await netProbe('codex')
+        if (!check.ok) throw Object.assign(new Error(netRefusal(check)), { code: 'blocked_network' })
+        c = await ensureClient(networkEnv(check), '')
+      }
+      return await c.request('skills/list', { cwds: [cwd], ...(force ? { forceReload: true } : {}) }, 20_000)
     },
 
     reset() {
