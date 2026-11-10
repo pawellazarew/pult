@@ -37,6 +37,10 @@ impl ControlOutput {
     pub async fn reply(&self, value: &Value) -> Result<()> {
         let mut bytes = serde_json::to_vec(value)?;
         bytes.push(b'\n');
+        self.write_batch(bytes).await
+    }
+
+    pub async fn write_batch(&self, bytes: Vec<u8>) -> Result<()> {
         ensure!(
             bytes.len() <= pult_r1::MAX_LINE,
             "control reply exceeds 1 MiB"

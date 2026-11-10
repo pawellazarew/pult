@@ -44,8 +44,21 @@ async fn main() -> Result<()> {
     let output = ControlOutput::new();
     match args.command {
         Action::Replay => {
+            let mut batch = Vec::with_capacity(64 * 1024);
             for record in journal.records()? {
-                output.reply(&serde_json::to_value(record)?).await?;
+                let mut line = serde_json::to_vec(&serde_json::to_value(record)?)?;
+                line.push(b'\n');
+                ensure!(
+                    line.len() <= pult_r1::MAX_LINE,
+                    "replay record exceeds output limit"
+                );
+                if !batch.is_empty() && batch.len() + line.len() > 64 * 1024 {
+                    output.write_batch(std::mem::take(&mut batch)).await?;
+                }
+                batch.extend(line);
+            }
+            if !batch.is_empty() {
+                output.write_batch(batch).await?;
             }
         }
         Action::Serve => serve(&mut journal, &output).await?,
