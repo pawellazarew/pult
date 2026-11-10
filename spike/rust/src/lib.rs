@@ -205,24 +205,62 @@ pub struct Process {
 }
 
 impl Process {
-    pub fn spawn(program: &str, args: &[String], cwd: &Path) -> Result<Self> {
-        let mut command = Command::new(program);
+    pub async fn spawn(program: &str, args: &[String], cwd: &Path) -> Result<Self> {
+        let executable = std::env::current_exe()?;
+        let directory = executable
+            .parent()
+            .context("executable directory unavailable")?;
+        let directory = if directory.file_name().is_some_and(|n| n == "deps") {
+            directory.parent().context("target directory unavailable")?
+        } else {
+            directory
+        };
+        let holder = directory.join("pult-r1-holder");
+        ensure!(
+            holder.is_file(),
+            "missing companion pult-r1-holder; build both binaries"
+        );
+        let mut command = Command::new(holder);
+        command.arg(std::process::id().to_string()).arg(program);
         command
             .args(args)
             .current_dir(cwd)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
+            .kill_on_drop(false);
         #[cfg(unix)]
         command.process_group(0);
         let mut child = command.spawn().context("spawn subprocess")?;
         let stdin = child.stdin.take();
         let stdout = child.stdout.take().context("stdout unavailable")?;
         let mut stderr = child.stderr.take().context("stderr unavailable")?;
+        let mut reader = tokio::io::BufReader::new(stdout);
+        let ready: Result<()> = async {
+            let bytes =
+                tokio::time::timeout(std::time::Duration::from_secs(3), bounded_line(&mut reader))
+                    .await??
+                    .context("holder exited before provider startup")?;
+            let value: Value = serde_json::from_slice(&bytes)?;
+            ensure!(
+                value["holder_ready"] == true && value["providerPid"].as_u64().is_some(),
+                "invalid holder startup acknowledgement"
+            );
+            Ok(())
+        }
+        .await;
+        if let Err(error) = ready {
+            if let Some(pid) = child.id() {
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(pid as i32),
+                    nix::sys::signal::Signal::SIGTERM,
+                );
+            }
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await;
+            return Err(error.context("provider startup failed"));
+        }
         let (tx, output) = mpsc::channel(16);
         let out = tokio::spawn(async move {
-            let mut reader = tokio::io::BufReader::new(stdout);
             loop {
                 let value = match bounded_line(&mut reader).await {
                     Ok(Some(bytes)) => {
@@ -306,19 +344,26 @@ impl Process {
 
     pub async fn stop(&mut self) -> Result<Value> {
         self.stdin.take();
-        #[cfg(unix)]
         if let Some(pid) = self.child.id() {
-            // kill(1) addresses the process group created above. No raw unsafe FFI is needed.
-            let _ = Command::new("/bin/kill")
-                .args(["-KILL", "--", &format!("-{pid}")])
-                .status()
-                .await;
-        }
-        if self.child.try_wait()?.is_none() {
-            self.child.start_kill()?;
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGTERM,
+            );
         }
         let status =
             tokio::time::timeout(std::time::Duration::from_secs(5), self.child.wait()).await??;
+        // TERM before the holder installs its handler cannot leave a provider:
+        // it registers the handler before spawning one. Other fatal signals do
+        // not acknowledge cleanup. Nonzero codes preserve natural provider exits.
+        use std::os::unix::process::ExitStatusExt;
+        ensure!(
+            status.code() != Some(125),
+            "holder could not confirm cleanup"
+        );
+        ensure!(
+            status.signal().is_none() || status.signal() == Some(15),
+            "holder cleanup interrupted: {status}"
+        );
         for task in &self.readers {
             task.abort();
         }
@@ -333,7 +378,13 @@ impl Drop for Process {
         for task in &self.readers {
             task.abort();
         }
-        // Callers must await stop(): kill_on_drop is only a direct-child emergency fallback.
+        if let Some(pid) = self.child.id() {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGTERM,
+            );
+        }
+        // Await stop for acknowledgement; on owner death the holder observes reparenting.
     }
 }
 

@@ -142,6 +142,7 @@ async fn one_hundred_process_start_record_stop_replay_cycles() {
             &["-c".into(), "printf '{\"ok\":true}\\n'; sleep 30".into()],
             dir.path(),
         )
+        .await
         .unwrap();
         let pid = process.pid().unwrap();
         journal
@@ -167,7 +168,9 @@ async fn stderr_flood_is_drained_and_oversized_stdout_is_rejected() {
     let dir = private_home();
     let script =
         "import os,time; os.write(2,b'x'*2000000); os.write(1,b'x'*1100000); time.sleep(30)";
-    let mut process = Process::spawn("python3", &["-c".into(), script.into()], dir.path()).unwrap();
+    let mut process = Process::spawn("python3", &["-c".into(), script.into()], dir.path())
+        .await
+        .unwrap();
     let result = tokio::time::timeout(Duration::from_secs(10), process.output.recv())
         .await
         .unwrap()
@@ -181,7 +184,9 @@ async fn stderr_flood_is_drained_and_oversized_stdout_is_rejected() {
 async fn stopped_session_is_reaped_when_stdout_consumer_is_backed_up() {
     let dir = private_home();
     let script = "import os; line=b'{\"ok\":true}\\n'; [(os.write(1,line)) for _ in range(100000)]";
-    let mut process = Process::spawn("python3", &["-c".into(), script.into()], dir.path()).unwrap();
+    let mut process = Process::spawn("python3", &["-c".into(), script.into()], dir.path())
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
     process.stop().await.unwrap();
     assert!(process.pid().is_none());
@@ -242,12 +247,23 @@ async fn acknowledged_start_survives_sigkill_and_restart_marks_interruption() {
     assert_eq!(acknowledgement["acknowledged"], 1);
     let provider_pid = acknowledgement["started"].as_u64().unwrap();
     daemon.kill().await.unwrap();
-    // SIGKILL orphan cleanup is an explicit prototype limitation, not an asserted guarantee.
-    Command::new("/bin/kill")
-        .args(["-KILL", "--", &format!("-{provider_pid}")])
-        .status()
-        .await
-        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let status = Command::new("ps")
+            .args(["-o", "stat=", "-p", &provider_pid.to_string()])
+            .output()
+            .await
+            .unwrap();
+        let state = String::from_utf8_lossy(&status.stdout);
+        if state.trim().is_empty() || state.trim().starts_with('Z') {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "holder survived owner SIGKILL"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let mut restarted = Command::new(bin)
         .arg("--home")
         .arg(dir.path())
