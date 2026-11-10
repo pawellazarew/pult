@@ -1,0 +1,616 @@
+#![forbid(unsafe_code)]
+
+use anyhow::{Context, Result, bail, ensure};
+use chrono::Utc;
+use fs2::FileExt;
+use nix::sys::signal::kill;
+use nix::unistd::Pid;
+use serde_json::{Value, json};
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Write};
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+use std::time::{Duration, Instant};
+use subtle::ConstantTimeEq;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::{Semaphore, watch};
+use tokio::task::JoinSet;
+
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const PROTOCOL: u64 = 1;
+pub const MAX_LINE: usize = 1024 * 1024;
+pub const SUPPORTED: [&str; 3] = ["daemon.status", "daemon.stop", "protocol.catalog"];
+
+pub fn catalog() -> Value {
+    serde_json::from_str(include_str!("../../protocol/methods.json"))
+        .expect("checked protocol catalog")
+}
+
+fn canonical_candidate(path: &Path) -> Result<PathBuf> {
+    if path.exists() {
+        return Ok(path.canonicalize()?);
+    }
+    let parent = path.parent().context("path has no existing ancestor")?;
+    Ok(canonical_candidate(parent)?.join(path.file_name().context("missing path name")?))
+}
+
+pub fn checked_home(home: &Path) -> Result<PathBuf> {
+    ensure!(home.is_absolute(), "--home must be absolute");
+    ensure!(
+        !fs::symlink_metadata(home).is_ok_and(|m| m.file_type().is_symlink()),
+        "home may not be a symlink"
+    );
+    let canonical = canonical_candidate(home)?;
+    let mut protected = Vec::new();
+    if let Some(user) = std::env::var_os("HOME") {
+        protected.push(PathBuf::from(user).join(".pult"));
+    }
+    if let Some(configured) = std::env::var_os("PULT_HOME") {
+        protected.push(PathBuf::from(configured));
+    }
+    for path in protected {
+        let path = canonical_candidate(&path)?;
+        ensure!(
+            !canonical.starts_with(&path) && !path.starts_with(&canonical),
+            "choose a scratch home separate from production Pult"
+        );
+    }
+    for name in ["config.json", "sessions.json", "events"] {
+        ensure!(
+            !canonical.join(name).exists(),
+            "existing Pult state is not supported by this foundation"
+        );
+    }
+    if canonical.exists() {
+        private_directory(&canonical)?;
+    }
+    ensure!(
+        canonical.join("run/pultd.sock").as_os_str().len() < 104,
+        "socket path is too long"
+    );
+    Ok(canonical)
+}
+
+fn private_directory(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    ensure!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "directory must be regular"
+    );
+    ensure!(
+        metadata.permissions().mode() & 0o077 == 0,
+        "directory must be private (0700)"
+    );
+    Ok(())
+}
+
+fn make_private(path: &Path) -> Result<()> {
+    if !path.exists() {
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .recursive(true)
+            .create(path)?;
+    }
+    private_directory(path)
+}
+
+fn ps_field(pid: u32, field: &str) -> Option<String> {
+    let mut child = Command::new("/bin/ps")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("LC_ALL", "C")
+        .args(["-p", &pid.to_string(), "-o", field])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return None;
+                }
+                let mut text = String::new();
+                child.stdout.take()?.read_to_string(&mut text).ok()?;
+                return (!text.trim().is_empty()).then(|| text.trim().to_string());
+            }
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+fn ps_start(pid: u32) -> Option<String> {
+    ps_field(pid, "lstart=")
+}
+
+fn holder_live(bytes: &[u8]) -> bool {
+    let Ok(record) = serde_json::from_slice::<Value>(bytes) else {
+        return false;
+    };
+    let Some(pid) = record
+        .get("pid")
+        .or_else(|| record.is_number().then_some(&record))
+        .and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .filter(|n| *n > 0 && *n <= i32::MAX as u32)
+    else {
+        return false;
+    };
+    if kill(Pid::from_raw(pid as i32), None).is_err_and(|e| e == nix::errno::Errno::ESRCH) {
+        return false;
+    }
+    match record
+        .get("started")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        Some(recorded) => ps_start(pid).is_none_or(|current| current == recorded),
+        None => ps_field(pid, "command=").is_none_or(|command| {
+            command.contains("pultd")
+                || command.contains("pult/dist")
+                || command.contains("daemon/main.js")
+        }),
+    }
+}
+
+struct Ownership {
+    run: PathBuf,
+    record: Vec<u8>,
+    token: String,
+    socket: Option<(u64, u64)>,
+    _guard: std::fs::File,
+    token_published: bool,
+}
+
+impl Ownership {
+    fn acquire(home: &Path, started_at: &str) -> Result<Self> {
+        make_private(home)?;
+        let run = home.join("run");
+        make_private(&run)?;
+        for name in ["pultd.lock", "token", "rust-owner.guard"] {
+            if let Ok(metadata) = fs::symlink_metadata(run.join(name)) {
+                ensure!(
+                    metadata.is_file() && !metadata.file_type().is_symlink(),
+                    "runtime files must be regular files"
+                );
+            }
+        }
+        for name in ["pultd.lock", "token", "pultd.sock"] {
+            ensure!(
+                !fs::symlink_metadata(run.join(name)).is_ok_and(|m| m.file_type().is_symlink()),
+                "runtime files may not be symlinks"
+            );
+        }
+        let guard_path = run.join("rust-owner.guard");
+        ensure!(
+            !fs::symlink_metadata(&guard_path).is_ok_and(|m| m.file_type().is_symlink()),
+            "guard may not be a symlink"
+        );
+        let guard = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(guard_path)?;
+        guard
+            .try_lock_exclusive()
+            .context("another Rust daemon owns this home")?;
+        let pid = std::process::id();
+        let record = serde_json::to_vec(
+            &json!({"pid":pid,"startedAt":started_at,"started":ps_start(pid).context("cannot identify this process")?,"cmd":"pultd-rust"}),
+        )?;
+        let path = run.join("pultd.lock");
+        for _ in 0..4 {
+            let temporary = run.join(format!("pultd.lock.{pid}.tmp"));
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temporary)?;
+            file.write_all(&record)?;
+            file.sync_all()?;
+            let published = fs::hard_link(&temporary, &path);
+            fs::remove_file(&temporary)?;
+            match published {
+                Ok(()) => {
+                    ensure!(
+                        fs::read(&path)? == record,
+                        "daemon lock ownership changed after publication"
+                    );
+                    let mut random = [0; 32];
+                    getrandom::fill(&mut random)
+                        .map_err(|e| anyhow::anyhow!("token generation: {e}"))?;
+                    let token = random
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<String>();
+                    let owner = Self {
+                        run,
+                        record,
+                        token,
+                        socket: None,
+                        _guard: guard,
+                        token_published: false,
+                    };
+                    ensure!(
+                        fs::read(&path)? == owner.record,
+                        "daemon lock ownership changed during startup"
+                    );
+                    return Ok(owner);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let raw = fs::read(&path)?;
+                    ensure!(!holder_live(&raw), "another daemon owns this home");
+                    ensure!(
+                        fs::read(&path)? == raw,
+                        "lock changed while probing its owner"
+                    );
+                    fs::remove_file(&path)?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        bail!("cannot acquire daemon lock after concurrent changes")
+    }
+
+    fn write_token(&mut self) -> Result<()> {
+        let temporary = self.run.join(format!("token.{}.tmp", std::process::id()));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        file.write_all(self.token.as_bytes())?;
+        file.sync_all()?;
+        fs::rename(temporary, self.run.join("token"))?;
+        self.token_published = true;
+        Ok(())
+    }
+}
+
+impl Drop for Ownership {
+    fn drop(&mut self) {
+        use std::os::unix::fs::MetadataExt;
+        if fs::read(self.run.join("pultd.lock")).ok().as_deref() != Some(&self.record) {
+            return;
+        }
+        let socket = self.run.join("pultd.sock");
+        if fs::symlink_metadata(&socket).is_ok_and(|m| self.socket == Some((m.dev(), m.ino()))) {
+            let _ = fs::remove_file(socket);
+        }
+        if self.token_published
+            && fs::read_to_string(self.run.join("token")).ok().as_deref() == Some(&self.token)
+        {
+            let _ = fs::remove_file(self.run.join("token"));
+        }
+        let _ = fs::remove_file(self.run.join("pultd.lock"));
+    }
+}
+
+pub async fn read_line<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Option<Vec<u8>>> {
+    let mut line = Vec::new();
+    loop {
+        let buffer = reader.fill_buf().await?;
+        if buffer.is_empty() {
+            return Ok(None);
+        }
+        let count = buffer
+            .iter()
+            .position(|b| *b == b'\n')
+            .map_or(buffer.len(), |i| i + 1);
+        let newline = buffer.get(count.saturating_sub(1)) == Some(&b'\n');
+        ensure!(
+            line.len() + count - usize::from(newline) <= MAX_LINE,
+            "line_too_long"
+        );
+        line.extend_from_slice(&buffer[..count]);
+        reader.consume(count);
+        if newline {
+            if line.iter().all(u8::is_ascii_whitespace) {
+                line.clear();
+                continue;
+            }
+            return Ok(Some(line));
+        }
+    }
+}
+
+async fn write_value<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    value: &Value,
+) -> Result<()> {
+    let mut bytes = serde_json::to_vec(value)?;
+    bytes.push(b'\n');
+    ensure!(bytes.len() <= MAX_LINE, "response exceeds frame budget");
+    tokio::time::timeout(Duration::from_secs(1), writer.write_all(&bytes))
+        .await
+        .context("slow client write deadline")??;
+    Ok(())
+}
+
+struct State {
+    home: PathBuf,
+    started_at: String,
+    started: Instant,
+    token: String,
+    clients: AtomicUsize,
+    stop: watch::Sender<bool>,
+}
+
+struct ConnectionCount(Arc<State>);
+impl Drop for ConnectionCount {
+    fn drop(&mut self) {
+        self.0.clients.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+async fn connection(
+    socket: UnixStream,
+    state: Arc<State>,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<()> {
+    state.clients.fetch_add(1, Ordering::Relaxed);
+    let _count = ConnectionCount(state.clone());
+    let (input, mut output) = socket.into_split();
+    let mut reader = BufReader::new(input);
+    let first = tokio::time::timeout(Duration::from_secs(2), read_line(&mut reader)).await;
+    let hello = match first {
+        Err(_) => {
+            write_value(
+                &mut output,
+                &json!({"type":"error","code":"handshake_timeout"}),
+            )
+            .await?;
+            return Ok(());
+        }
+        Ok(Err(_)) => {
+            write_value(&mut output, &json!({"type":"error","code":"line_too_long"})).await?;
+            return Ok(());
+        }
+        Ok(Ok(None)) => return Ok(()),
+        Ok(Ok(Some(bytes))) => match serde_json::from_slice::<Value>(&bytes) {
+            Ok(value) => value,
+            Err(_) => {
+                write_value(&mut output, &json!({"type":"error","code":"bad_json"})).await?;
+                return Ok(());
+            }
+        },
+    };
+    if !hello.is_object() {
+        write_value(&mut output, &json!({"type":"error","code":"bad_json"})).await?;
+        return Ok(());
+    }
+    let error = if hello["type"] != "hello" {
+        Some("handshake_required")
+    } else {
+        let given = hello["token"].as_str().unwrap_or("");
+        let scoped = hello.get("ask").is_some() || hello.get("runtime").is_some();
+        let valid = given.len() == state.token.len()
+            && bool::from(given.as_bytes().ct_eq(state.token.as_bytes()));
+        if !valid || scoped {
+            Some("bad_token")
+        } else if hello
+            .get("protocol")
+            .is_some_and(|p| p.as_f64() != Some(PROTOCOL as f64))
+        {
+            Some("bad_protocol")
+        } else {
+            None
+        }
+    };
+    if let Some(code) = error {
+        write_value(&mut output, &json!({"type":"error","code":code})).await?;
+        return Ok(());
+    }
+    write_value(&mut output, &json!({"type":"hello_ok","protocol":PROTOCOL,"daemon":{"version":VERSION,"pid":std::process::id(),"startedAt":state.started_at},"capabilities":{"experimental":true,"supportedMethods":SUPPORTED}})).await?;
+    loop {
+        let line = tokio::select! {
+            _ = shutdown.changed() => break,
+            line = read_line(&mut reader) => line,
+        };
+        let bytes = match line {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => break,
+            Err(_) => {
+                write_value(&mut output, &json!({"type":"error","code":"line_too_long"})).await?;
+                break;
+            }
+        };
+        let request: Value = match serde_json::from_slice(&bytes) {
+            Ok(request) => request,
+            Err(_) => {
+                write_value(&mut output, &json!({"type":"error","code":"bad_json"})).await?;
+                break;
+            }
+        };
+        if !request.is_object() {
+            write_value(&mut output, &json!({"type":"error","code":"bad_json"})).await?;
+            break;
+        }
+        let id = &request["id"];
+        if !(id.is_string() || id.is_number())
+            || !request["method"].is_string()
+            || request.get("params").is_some_and(|v| !v.is_object())
+        {
+            write_value(&mut output, &json!({"id":id,"error":{"code":"invalid_params","message":"request needs id, method and object params"}})).await?;
+            continue;
+        }
+        let method = request["method"].as_str().unwrap();
+        let result = match method {
+            "daemon.status" => {
+                json!({"version":VERSION,"protocol":PROTOCOL,"pid":std::process::id(),"startedAt":state.started_at,"uptimeMs":state.started.elapsed().as_millis(),"home":state.home,"sock":state.home.join("run/pultd.sock"),"clients":state.clients.load(Ordering::Relaxed),"subscriptions":0,"lastEventId":0,"mode":"on-demand","capabilities":{"experimental":true,"supportedMethods":SUPPORTED}})
+            }
+            "daemon.stop" => json!({"stopping":true}),
+            "protocol.catalog" => catalog(),
+            _ => {
+                let known = catalog()["methods"]
+                    .as_array()
+                    .is_some_and(|methods| methods.iter().any(|m| m["name"] == method));
+                write_value(&mut output, &json!({"id":id,"error":{"code":if known {"not_implemented"} else {"not_found"},"message":"method is unavailable in Rust core foundation"}})).await?;
+                continue;
+            }
+        };
+        write_value(&mut output, &json!({"id":id,"result":result})).await?;
+        if method == "daemon.stop" {
+            let _ = state.stop.send(true);
+            break;
+        }
+    }
+    Ok(())
+}
+
+pub async fn serve(home: PathBuf) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let home = checked_home(&home)?;
+    let started_at = Utc::now().to_rfc3339();
+    let mut owner = Ownership::acquire(&home, &started_at)?;
+    let socket = owner.run.join("pultd.sock");
+    if let Ok(metadata) = fs::symlink_metadata(&socket) {
+        ensure!(
+            metadata.file_type().is_socket(),
+            "existing socket path is not a socket"
+        );
+        match tokio::time::timeout(Duration::from_secs(1), UnixStream::connect(&socket))
+            .await
+            .context("existing socket probe deadline exceeded")?
+        {
+            Ok(_) => bail!("existing socket still accepts connections"),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                ) => {}
+            Err(error) => {
+                return Err(error).context("cannot establish that existing socket is stale");
+            }
+        }
+        fs::remove_file(&socket)?;
+    }
+    let listener = UnixListener::bind(&socket)?;
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
+    let metadata = fs::symlink_metadata(&socket)?;
+    owner.socket = Some((metadata.dev(), metadata.ino()));
+    ensure!(
+        fs::read(owner.run.join("pultd.lock"))? == owner.record,
+        "daemon lock ownership changed before listen"
+    );
+    owner.write_token()?;
+    let (stop, mut shutdown) = watch::channel(false);
+    let state = Arc::new(State {
+        home,
+        token: owner.token.clone(),
+        started_at,
+        started: Instant::now(),
+        clients: AtomicUsize::new(0),
+        stop,
+    });
+    let permits = Arc::new(Semaphore::new(64));
+    let mut tasks = JoinSet::new();
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => break,
+            _ = terminate.recv() => break,
+            _ = shutdown.changed() => break,
+            connection_result = listener.accept() => {
+                let (socket, _) = connection_result?;
+                if let Ok(permit) = permits.clone().try_acquire_owned() {
+                    let state = state.clone();
+                    let shutdown = shutdown.clone();
+                    tasks.spawn(async move { let _permit = permit; let _ = connection(socket, state, shutdown).await; });
+                }
+            }
+            _ = tasks.join_next(), if !tasks.is_empty() => (),
+        }
+    }
+    let _ = state.stop.send(true);
+    if tokio::time::timeout(Duration::from_secs(2), async {
+        while tasks.join_next().await.is_some() {}
+    })
+    .await
+    .is_err()
+    {
+        tasks.abort_all();
+        while tasks.join_next().await.is_some() {}
+    }
+    drop(listener);
+    drop(owner);
+    Ok(())
+}
+
+pub async fn request(home: &Path, method: &str) -> Result<Value> {
+    let home = checked_home(home)?;
+    let token = fs::read_to_string(home.join("run/token"))?;
+    let socket = tokio::time::timeout(
+        Duration::from_secs(3),
+        UnixStream::connect(home.join("run/pultd.sock")),
+    )
+    .await
+    .context("daemon connection deadline exceeded")??;
+    let (input, mut output) = socket.into_split();
+    let mut input = BufReader::new(input);
+    write_value(
+        &mut output,
+        &json!({"type":"hello","protocol":PROTOCOL,"token":token,"client":"cli"}),
+    )
+    .await?;
+    let hello = tokio::time::timeout(Duration::from_secs(3), read_line(&mut input))
+        .await??
+        .context("daemon closed before hello")?;
+    let hello: Value = serde_json::from_slice(&hello)?;
+    ensure!(
+        hello["type"] == "hello_ok" && hello["protocol"].as_u64() == Some(PROTOCOL),
+        "handshake failed: {hello}"
+    );
+    write_value(&mut output, &json!({"id":1,"method":method,"params":{}})).await?;
+    let response = tokio::time::timeout(Duration::from_secs(3), read_line(&mut input))
+        .await??
+        .context("daemon closed before response")?;
+    let response: Value = serde_json::from_slice(&response)?;
+    ensure!(
+        response["id"].as_u64() == Some(1) && response.get("result").is_some(),
+        "response does not match pending request"
+    );
+    ensure!(
+        response.get("error").is_none(),
+        "request failed: {response}"
+    );
+    Ok(response["result"].clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn protocol_and_version_match_shared_contract() {
+        let package: Value = serde_json::from_str(include_str!("../../package.json")).unwrap();
+        assert_eq!(VERSION, package["version"].as_str().unwrap());
+        let catalog = catalog();
+        assert_eq!(PROTOCOL, catalog["protocolVersion"].as_u64().unwrap());
+        let mut implemented: Vec<_> = catalog["methods"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|method| method["rust"] == "implemented")
+            .map(|method| method["name"].as_str().unwrap())
+            .collect();
+        implemented.sort_unstable();
+        let mut supported = SUPPORTED.to_vec();
+        supported.sort_unstable();
+        assert_eq!(implemented, supported);
+    }
+}
