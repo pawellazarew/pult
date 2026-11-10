@@ -59,9 +59,9 @@ control request. Oversized or malformed frames terminate the session with an err
 prototype limits intentionally differ from production Codex's 16 MiB frame allowance.
 Control stdin uses a dedicated bounded reader thread outside Tokio's blocking pool. The CLI
 does not wait for that thread after awaited provider cleanup; callers may keep stdin open after
-quit/TERM. Control stdout is synchronous:
-a caller that never reads it can still block command processing; qualifying slow-viewer behavior
-requires a nonblocking control transport in R2. A closed stdout returns an error through cleanup.
+quit/TERM. Control stdout uses a dedicated OS writer and a bounded queue. A reply must complete within one
+second; a slow or closed reader returns an error through provider cleanup. The blocked writer does
+not hold Tokio shutdown open. This is an explicit failure, not silent message dropping.
 
 ## Real Codex smoke (explicit, optional)
 
@@ -88,12 +88,20 @@ The raw provider messages are written into the chosen scratch journal: keep that
 - Bounded stdout framing, stderr flood draining, stopping with a backed-up consumer.
 - SIGKILL of the prototype after a confirmed start, followed by validated recovery and interruption.
 
-**Known gate:** killing the prototype itself with SIGKILL can leave the provider process group alive.
-The crash integration test explicitly cleans that group up; it does not claim automatic recovery of
-orphan processes. Solving this requires a supervisor/holder design and platform-specific evidence.
-`kill_on_drop` is only a direct-child fallback on ordinary Rust unwinding, not a SIGKILL guarantee.
-The normal stop path kills the created process group and reaps its direct child. Descendant reaping
-after reparenting, cross-platform lifecycle policy and full R1 crash acceptance remain open.
+**Managed-group supervision:** ship both sibling binaries `pult-r1` and `pult-r1-holder`.
+The holder confirms provider startup before `start` succeeds; the returned `started` PID is the
+holder PID, not the provider. It owns a separate provider process group and checks the original
+parent PID every 20 ms, independently of blocked forwarding threads. Owner SIGKILL therefore
+causes cleanup. Normal stop signals the holder and waits for it; code 125 is reserved for holder
+failure (a provider's natural exit 125 is conservatively classified as supervisor failure).
+Natural provider output is drained before exit; write/drain errors and live adopted children after
+the Linux reaping deadline cannot produce a successful cleanup ACK. Linux uses a safe subreaper
+wrapper; on macOS launchd may briefly retain reparented zombies, so crash tests assert no running
+managed processes, rather than promising that this process can reap somebody else's child.
+
+The guarantee covers the managed process group. Descendants escaping via `setsid`/`setpgid`,
+SIGKILL of the holder itself, and machine/power failure are outside this experiment's guarantee.
+Own source remains `forbid(unsafe_code)`; dependencies and OS internals are separate.
 
 The experiment is not a security or performance superiority claim. It does not implement existing
 Pult questions, resume semantics, approvals, queue/steer, authentication, network guard or UI.

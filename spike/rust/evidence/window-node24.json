@@ -1,0 +1,103 @@
+{
+  "schemaVersion": 1,
+  "measuredAt": "2026-11-10T20:10:37.224Z",
+  "sourceCommit": "1df3ed5cd1a0427b9655663d974d3022d01bcf51",
+  "host": {
+    "platform": "darwin",
+    "release": "25.6.0",
+    "arch": "arm64",
+    "cpu": "Apple M1 Pro",
+    "node": "v24.21.0"
+  },
+  "scope": "Electron source harness + real daemon + fake Codex; no real model, installed app or GPU timing. Electron working set and ps RSS are distinct metrics. CPU is Electron interval estimate, not full-tree CPU.",
+  "startupMs": 19745.38125,
+  "rows": [
+    {
+      "sessions": 0,
+      "electron": [
+        {
+          "type": "Browser",
+          "cpuPercent": 0.10965730533246869,
+          "workingSetKiB": 178768
+        },
+        {
+          "type": "GPU",
+          "cpuPercent": 0.09699807300819732,
+          "workingSetKiB": 93552
+        },
+        {
+          "type": "Utility",
+          "cpuPercent": 0,
+          "workingSetKiB": 43232
+        },
+        {
+          "type": "Tab",
+          "cpuPercent": 0.18621397996590983,
+          "workingSetKiB": 125248
+        }
+      ],
+      "tree": {
+        "processCount": 6,
+        "rssBytes": 585039872
+      }
+    },
+    {
+      "sessions": 1,
+      "electron": [
+        {
+          "type": "Browser",
+          "cpuPercent": 0.06838749588417828,
+          "workingSetKiB": 171360
+        },
+        {
+          "type": "GPU",
+          "cpuPercent": 0.442744580373704,
+          "workingSetKiB": 85472
+        },
+        {
+          "type": "Utility",
+          "cpuPercent": 0.0011374555120196121,
+          "workingSetKiB": 43264
+        },
+        {
+          "type": "Tab",
+          "cpuPercent": 0.4817173981802707,
+          "workingSetKiB": 129968
+        }
+      ],
+      "tree": {
+        "processCount": 6,
+        "rssBytes": 572293120
+      }
+    },
+    {
+      "sessions": 10,
+      "electron": [
+        {
+          "type": "Browser",
+          "cpuPercent": 0.04204152361355527,
+          "workingSetKiB": 166656
+        },
+        {
+          "type": "GPU",
+          "cpuPercent": 0.6579895379493822,
+          "workingSetKiB": 81136
+        },
+        {
+          "type": "Utility",
+          "cpuPercent": 0,
+          "workingSetKiB": 41552
+        },
+        {
+          "type": "Tab",
+          "cpuPercent": 0.4918113767525131,
+          "workingSetKiB": 134624
+        }
+      ],
+      "tree": {
+        "processCount": 6,
+        "rssBytes": 557285376
+      }
+    }
+  ]
+}

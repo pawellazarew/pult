@@ -1,0 +1,18 @@
+{
+  "sourceCommit": "d15a291adba54347ad0f6feb19b37b4b49cd529d",
+  "builds": [
+    {
+      "mode": "fresh_target_warm_registry",
+      "seconds": 24.50314874999458
+    },
+    {
+      "mode": "incremental_no_change",
+      "seconds": 0.16071120800916106
+    }
+  ],
+  "binaryBytes": {
+    "pult-r1": 2171664,
+    "pult-r1-holder": 1076768
+  },
+  "scope": "Fresh target directory, warm downloaded registry/OS cache; release builds; not cold machine or full Pult size."
+}

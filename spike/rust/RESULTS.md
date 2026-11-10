@@ -44,16 +44,46 @@ These smoke observations preceded the final transport/error-handling hardening; 
 suite was rerun after those changes. They establish initial protocol viability, not full adapter parity
 or sustained reliability. Provider startup includes the user's configured MCP integrations.
 
-## Remaining gates
+## Дальнейшие проверки
 
-- SIGKILL of the prototype can orphan the provider process group. The crash test explicitly cleans
-  it up. There is no supervisor/holder yet; this is **not** a full R1 crash-cleanup pass.
-- A slow control stdout reader can block synchronous reply writes. Memory remains bounded, but
-  responsive stop/TERM under this condition requires a nonblocking control transport.
-- No matched Node/Rust memory/latency comparison, disk-full qualification, power-loss guarantees,
-  descendant reaping qualification or long-running soak. R0 production baseline is a separate workload.
-- The experiment does not implement Pult's production protocol, authentication, network guard,
-  permission broker, questions, queue/steer, provider resume, UI or migration/rollback.
+Сравнение одинаковой runtime-нагрузки с провайдерами, disk-full qualification, power-loss
+и длительный soak остаются в плане. Процессы с собственной группой и принудительное
+убийство holder требуют отдельного решения. Следующий раздел содержит результаты
+исправлений после исходного эксперимента.
 
-Next: close supervisor/control-output gaps, extend fault scenarios, then compare matched workloads
-against R0 before deciding whether to start R2.
+## Продолжение R1
+
+Исправлены уборка управляемой группы после SIGKILL владельца и остановка при непрочитанном
+stdout. Владелец группы вынесен в отдельный pult-r1-holder. Его готовность проверяется перед
+успешным start. Последние строки естественно завершившегося провайдера сохраняются, а ошибки
+запуска и forwarding приводят к отказу. Код 125 зарезервирован для ошибки наблюдателя.
+
+Проверены 19 тестов с учётом отдельной проверки Unicode replay, включая 100 циклов,
+TERM-игнорирующего провайдера с ребёнком, SIGKILL владельца, переполненный stdout,
+несуществующую программу и естественный exit 7. Исходный бинарь проваливал новые проверки
+SIGKILL и медленного вывода. Исправленный проходит их без вспомогательной уборки до вердикта.
+
+Ограничения гарантии перечислены в README. Дочерние процессы с собственной группой через
+setsid и принудительное убийство самого наблюдателя требуют отдельного решения. Таймаут
+вывода равен одной секунде на ответ или batch. Для replay batch имеет целевой размер 64 KiB,
+отдельная крупная запись допускается в пределах лимита 1 MiB.
+
+В первой версии writer подтверждал каждую строку отдельно. Replay имел медиану 178 мс у Rust
+и 99 мс у Node. Пакетирование при той же проверке данных дало 38 и 75 мс соответственно.
+Медиана наблюдаемого RSS составила около 17 MiB у Rust и 72 MiB у Node. Сохранены оба
+набора данных с hash бинаря и скриптов. Это измерение одной операции на фиксированной
+ASCII-фикстуре, с ограничениями сравнения из compare/README.md.
+
+- [Исходный replay](evidence/replay-before-batching.json)
+- [Пакетированный replay](evidence/replay-batched.json)
+- [Сборка и размеры бинарей](evidence/build-metrics.json)
+- [Окно Electron и демон с подставными агентами](evidence/window-node24.json)
+
+Release-сборка в новом target с уже скачанными зависимостями заняла 24,50 с,
+повторная сборка без изменения кода 0,16 с. Два бинаря занимают 2 171 664 и 1 076 768 байт.
+Замер окна с Node 24 показал 531–558 MiB суммарного RSS дерева процессов в последовательных
+сценариях 0/1/10 тредов. Различия между сценариями включают прогрев и освобождение памяти.
+
+Решение о полном переходе на Rust принято Павлом следующим сообщением. R2 начинается с
+совместимого транспорта и каталога команд. Для переключения рабочего backend остаются
+обязательными паритет поведения, корректность данных, права и откат по общему плану.
