@@ -72,20 +72,13 @@ policy still applies; this does not promise removal of operating-system copies, 
 you explicitly copy elsewhere. Memory limits are 8 open chats, 512 KiB per chat snapshot and 4 MiB total;
 exceeding a limit returns an error without falling back to disk. See [the developer contract](docs/DEV.md#временные-чаты-отдельный-контур-в-памяти).
 
-## New in 0.3.19
+## New in 0.3.21
 
-- **Start with the task.** A new chat opens as a draft immediately. Pick a folder, write the task and send;
-  unsent drafts survive a window restart, and retrying a send does not create a duplicate session.
-- **Remember folder access.** Pult can remember access settings for a folder. Full access requires explicit
-  consent; you can also keep a choice for the current chat only.
-- **English and Russian throughout.** Choose the language for the window, notifications and CLI in Settings.
-- **More reliable event delivery.** The window recovers ended subscriptions, large histories replay in small
-  pages, and storage failures trigger an error exit so the installed service can restart the daemon.
-  Diagnostic logs rotate, and low disk space produces a warning in the daemon log.
-- **Codex fixes.** Questions work in the default mode. A network profile change is rejected while background
-  tasks, server turns or permission questions still need the shared process; retry after they finish.
+- **Skills from the composer.** Type `/` in an existing chat to choose provider skills and commands. Claude uses `/name`, Codex uses `$name`.
+- **Queue layout.** Rows stay inside the input width, long text truncates, and action buttons keep their size.
+- **Shared status indicator.** Working is blue throughout the interface; background Claude agents stay working until completion.
 
-See the [release notes](docs/releases/0.3.19.md) for details. Update with `pult update` or the update button in the window.
+See the [release notes](docs/releases/0.3.21.md) for details and current limitations. Update with `pult update` or the update button in the window.
 
 ## What it does
 
@@ -96,7 +89,7 @@ See the [release notes](docs/releases/0.3.19.md) for details. Update with `pult 
   question lands in one list. Answer from the window or from the terminal.
 - **Your own CLIs and subscriptions.** Pult starts the `claude` and `codex` you already installed and logged into.
   It has no account and no server, and it never reads your tokens.
-- **A window and a CLI over the same agents.** Everything you do in the window you can script with `pult …`.
+- **A window and a CLI over the same saved agents.** Start and control them from the window or with `pult …`.
 
 ## How it works
 
@@ -105,7 +98,8 @@ you ──▶ pult (CLI) or Pult.app (window) ──▶ pultd (background daemon
 ```
 
 `pultd` is a small background process that starts the agents, keeps their conversations and collects their questions.
-Everything it does is written to an event journal in `~/.pult`, so the CLI and the window always show the same state.
+Saved conversations use an event journal in `~/.pult`, so the CLI and the window show the same state.
+Temporary conversations stay in memory and do not enter that journal.
 
 ### Words used below
 
@@ -748,7 +742,8 @@ copy you installed and logged into, on your own machine.
 - It never reads `~/.claude/.credentials.json`, the macOS keychain or `~/.codex/auth.json`. From `claude auth status` it
   takes only the plan type and login method; your email and organization never reach its reports or logs.
 - No proxying of requests, no server, no accounts: everything runs on your machine, as your user.
-- Its name and logo contain no Claude, Anthropic or Codex branding; it only says, in plain text, that it runs these CLIs.
+- Pult has its own name and logo. Provider names and icons identify the CLIs used by each conversation;
+  [asset notices](ui/assets/providers/NOTICE.txt) accompany the icons.
 
 **The honest risk.** Whether many agents running in parallel still count as «ordinary, individual usage» is not defined
 anywhere. If a provider decides it is not, enforcement would hit **your** account, not Pult. You are responsible for

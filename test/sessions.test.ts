@@ -298,8 +298,9 @@ describe('реестр сессий', () => {
     const dir = mkdtempSync(join(tmpdir(), 'pt-atom-'))
     try {
       const file = join(dir, 'sessions.json')
-      writeSessionsAtomic(file, [rec('старый')])
+      writeSessionsAtomic(file, [rec('old')])
       const before = readFileSync(file, 'utf8')
+      assert.equal(parseSessions(JSON.parse(before)).length, 1, 'старый снимок должен быть допустимым до запуска писателя')
 
       // Ребёнок пишет большой список в цикле, мы убиваем его SIGKILL посреди работы.
       const script = `

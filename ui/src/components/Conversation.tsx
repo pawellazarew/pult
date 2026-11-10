@@ -2,6 +2,8 @@ import './queue.css'
 import { AsyncQuestion } from './AsyncQuestion.js'
 import { t } from '../lib/i18n.js'
 import { ProviderIcon } from './ProviderIcon.js'
+import { StatusDot } from './StatusDot.js'
+import type { DotState } from './StatusDot.js'
 import { archiveFinished, parseSubagentKeys, subagentViews, visibleSubagents } from '../model/subagents.js'
 import type { SubagentView } from '../model/subagents.js'
 // Центр окна: разговор с выбранным агентом (docs/12 §3 п.2). Вся логика ленты — в model/conversation.ts;
@@ -16,10 +18,13 @@ import { contextView } from '../model/context.js'
 import type { SessionContext } from '../model/context.js'
 import type { AgentItem, ConvItem, ItemState, NoticeItem, ToolItem } from '../model/conversation.js'
 import { composerCmdEnter, searchKeys } from '../model/hotkeys.js'
+import { useSlashMenu } from './SlashMenu.js'
+import type { SlashLoader } from './SlashMenu.js'
 import { adjacentUser, itemForEvent, userMarks } from '../model/search.js'
 import { formatSeconds, messageSource, resultText, toolInputText, toolSummary } from '../model/conversation.js'
 import { obj } from '../model/types.js'
 import type { QueueItem } from '../model/types.js'
+import type { SlashListing } from '../model/slash.js'
 import type { ProviderUsage } from '../model/usage.js'
 import { formatClock, formatResetIn, limitHolds, limitWindowsView } from '../model/usage.js'
 import { Dictation } from './Dictation.js'
@@ -118,6 +123,8 @@ export interface ConversationProps {
   userJump?: { dir: -1 | 1; nonce: number } | null
   /** Пути файлов для вставки и перетаскивания в поле реплики; нет — старая оболочка, поле как раньше. */
   filePaths?: FilePathSource | null
+  /** «/» в поле (docs/19): список скиллов и команд по имени чата; нет — меню не открывается. */
+  commands?: ((name: string, force?: boolean) => Promise<SlashListing>) | null
   /** Сменить название (пустое — снять). `false` — не вышло: правка остаётся открытой. */
   onRename(title: string): Promise<boolean>
   onStop(): void
@@ -168,6 +175,8 @@ export function Conversation(p: ConversationProps): ReactElement {
   const sv = statusView(agent.status)
   const feed = useRef<HTMLDivElement>(null)
   const qe = useQueueEdit(p.onQueueEdit, agent.name)
+  const commandsOf = p.commands ?? null
+  const slashLoad = useMemo(() => (commandsOf ? (force?: boolean) => commandsOf(agent.name, force) : null), [commandsOf, agent.name])
   const stick = useRef(true)
   const feedSize = useRef({ height: 0, viewport: 0 })
   const [away, setAway] = useState(false)
@@ -330,7 +339,7 @@ export function Conversation(p: ConversationProps): ReactElement {
       {childTabs.length > 0 && <div className="subagent-tabs" role="tablist" aria-label={t('Родитель и субагенты')} data-testid="subagent-tabs">
         <button type="button" role="tab" aria-selected={activeChild === null} onClick={() => { setActiveChild(null); requestAnimationFrame(() => { if (feed.current) feed.current.scrollTop = parentScroll.current }) }} data-testid="subagent-parent-tab">{agentLabel(agent)}</button>
         {childTabs.map((key) => { const view = views.find((v) => v.key === key); return <div key={key} className={`subagent-tab${activeChild === key ? ' active' : ''}`}>
-          <button type="button" role="tab" aria-selected={activeChild === key} onClick={() => openChild(key)} data-testid="subagent-tab" data-child={key}><ProviderIcon provider={agent.provider} /><span className={`subagent-state t-${view ? stateTone(view.item.state) : 'mut'}`} data-working={view?.item.state === 'running' ? 'true' : 'false'}>●</span>{view?.item.subagentType ?? view?.item.description ?? t('Субагент')}</button>
+          <button type="button" role="tab" aria-selected={activeChild === key} onClick={() => openChild(key)} data-testid="subagent-tab" data-child={key}><ProviderIcon provider={agent.provider} /><StatusDot state={view ? itemDotState(view.item.state) : 'idle'} label={view ? itemStateLabel(view.item.state) : t('Остановлен')} testId="subagent-tab-state" />{view?.item.subagentType ?? view?.item.description ?? t('Субагент')}</button>
           <button type="button" className="subagent-tab-close" aria-label={t('Закрыть вкладку субагента')} onClick={() => { setChildTabs((before) => before.filter((k) => k !== key)); if (activeChild === key) returnToParent() }}><Icon name="x" /></button>
         </div> })}
       </div>}
@@ -397,6 +406,7 @@ export function Conversation(p: ConversationProps): ReactElement {
           {...(p.onQueueEdit ? { edit: qe.view } : {})} notice={qe.notice} />
       ) : null}
       <Composer hidden={activeChild !== null} busy={sv.busy} needsYou={sv.needsYou} permFocused={p.focusedPerm !== null} link={p.link ?? 'up'} disabled={holds} sending={p.sending} error={p.sendError} onSend={p.onSend} agentName={agent.name} label={agentLabel(agent)} filePaths={p.filePaths ?? null}
+        commands={slashLoad} commandScope={`${agent.name}\0${agent.provider}\0${agent.cwd}`}
         accessRed={chip.red} accessNote={pendingStrip(agent)}
         onStop={p.onStop} steerable={agent.provider === 'codex'} queueable={!!p.onQueueRemove} inject={qe.inject} footer={<ChatFooter agent={agent} usage={p.usage} now={p.now} onReveal={p.onReveal} {...(p.onHelp ? { onHelp: p.onHelp } : {})}
         {...(p.onConfigure ? { onConfigure: p.onConfigure } : {})} catalog={p.catalog ?? null} windows={p.windows ?? EMPTY_WINDOWS} consent={p.consent ?? null} />} />
@@ -421,7 +431,7 @@ function SubagentHistory({ child, positions, props, parentLabel, onParent }: { c
   }, [child?.key, child?.item.items, positions])
   return <div className="subagent-view" data-testid="subagent-view">
     <div className="subagent-feed feed" ref={box} onScroll={() => { if (child && box.current) { positions.set(child.key, box.current.scrollTop); follows.current = box.current.scrollHeight - box.current.scrollTop - box.current.clientHeight < 80 } }}>
-      <div className="feed-inner"><div className="subagent-heading"><span>{child?.item.subagentType ?? t('Субагент')}</span>{child && <span className={`t-${stateTone(child.item.state)}`}>{child.item.state === 'running' ? t('Работает') : child.item.state === 'ok' ? t('Завершён') : child.item.state === 'error' ? t('Ошибка') : t('Остановлен')}</span>}</div>
+      <div className="feed-inner"><div className="subagent-heading"><span>{child?.item.subagentType ?? t('Субагент')}</span>{child && <span className={`t-${stateTone(child.item.state)}`}>{itemStateLabel(child.item.state)}</span>}</div>
         {props.earlier?.more && <button type="button" className="btn earlier" disabled={props.earlier.loading} onClick={props.onLoadEarlier}>{props.earlier.loading ? t('Загружаю…') : t('Показать раньше')}</button>}
         {child?.item.description && <p className="subagent-task">{child.item.description}</p>}
         {child && child.item.items.length ? <ActivityItems items={child.item.items} props={props} /> : <p className="mut">{props.historyLoading ? t('Загружаю историю…') : t('История субагента пока недоступна')}</p>}
@@ -764,6 +774,11 @@ function Item({ it, ...p }: { it: ConvItem } & ConversationProps): ReactElement 
 }
 
 const stateTone = (s: ItemState): string => (s === 'running' ? 'run' : s === 'ok' ? 'ok' : s === 'stopped' ? 'mut' : 'fail')
+/** Состояние строки ленты (субагент, инструмент) → точка: «прерван» — пустое кольцо, а не серая «очередь». */
+const itemDotState = (s: ItemState): DotState => (s === 'running' ? 'working' : s === 'ok' ? 'done' : s === 'stopped' ? 'idle' : 'failed')
+const itemStateLabel = (s: ItemState): string => (s === 'running' ? t('Работает') : s === 'ok' ? t('Завершён') : s === 'error' ? t('Ошибка') : t('Остановлен'))
+/** Фаза хода → точка: запуск и фон — нейтральные, ожидание — янтарная, остальное — «работает». */
+const phaseDotState = (p: TurnPhase['phase']): DotState => (p === 'waiting' ? 'waiting' : p === 'starting' || p === 'background' ? 'queued' : 'working')
 
 /** Значок состояния строки инструмента и субагента. `stopped` — ход прервали, конца не будет: не спиннер. */
 function StateMark({ state }: { state: ItemState }): ReactElement {
@@ -995,8 +1010,12 @@ const draftStore: DraftStore = {
   set(k, v) { try { window.localStorage.setItem(k, v) } catch { /* хранилище недоступно */ } },
 }
 
-function Composer({ hidden = false, busy, needsYou, permFocused, link, disabled, sending, error, onSend, onStop, agentName, label, filePaths, queueable, steerable = false, inject, footer, accessRed = false, accessNote = null }: {
+function Composer({ hidden = false, busy, needsYou, permFocused, link, disabled, sending, error, onSend, onStop, agentName, label, filePaths, queueable, steerable = false, inject, footer, accessRed = false, accessNote = null, commands = null, commandScope = agentName }: {
   hidden?: boolean
+  /** «/» в поле (docs/19): список скиллов и команд чата; `null` — старая оболочка, меню нет. */
+  commands?: SlashLoader | null
+  /** Чат, папка и провайдер одной строкой: сменились — список заново. */
+  commandScope?: string
   /** Шаг A: красная рамка поля — чат с полным доступом (выбран или ещё жив процесс с полными правами). */
   accessRed?: boolean
   /** Шаг A: строка под полем при понижении во время хода с полными правами (кадр 11). */
@@ -1107,7 +1126,10 @@ function Composer({ hidden = false, busy, needsYou, permFocused, link, disabled,
   }
   // ⌘V на файлах из Finder и перетаскивание кладут в поле пути (model/filePathsInput.ts).
   const { onPaste, onDragOver, onDrop, notice: pasteNotice } = attached
+  const slash = useSlashMenu({ ta, text, setText, load: commands, scope: commandScope })
   const onKey = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
+    // «/»-меню открыто: ↑↓, Enter/Tab и Esc — его (Enter вставляет команду, а не отправляет реплику).
+    if (slash.onKeyDown(e)) return
     if (e.nativeEvent.isComposing || e.key !== 'Enter' || e.shiftKey) return
     if (e.altKey) {
       if (!e.metaKey && !e.ctrlKey && steerable && busy && !needsYou) {
@@ -1135,8 +1157,10 @@ function Composer({ hidden = false, busy, needsYou, permFocused, link, disabled,
   return (
     <ResizableComposer hidden={hidden}>
       <div className={`box${attached.over ? ' attachment-over' : ''}${accessRed ? ' access-full' : ''}`} data-access-full={accessRed ? '1' : undefined}>
+        {slash.menu && <div className="slash-anchor">{slash.menu}</div>}
         <AttachmentStrip items={attached.items} previews={attached.previews} pending={attached.pending} onRemove={attached.remove} />
         <textarea ref={ta} rows={3} value={text} onChange={(e) => setText(e.target.value)} onKeyDown={onKey}
+          onSelect={slash.onCaret} {...slash.aria}
           onPaste={onPaste} onDragOver={onDragOver} onDragEnter={attached.onDragEnter} onDragLeave={attached.onDragLeave} onDrop={onDrop}
           placeholder={placeholderFor({ link, needsYou, busy, disabled, label, queueable })}
           data-testid="composer" aria-label={t("Реплика в сессию")} />
@@ -1277,7 +1301,7 @@ export function QueueList({ queue, paused, onRemove, onMove, onResume, onSend, e
             <li key={it.id} className="queue-item" data-testid="queue-item" data-id={it.id}
               data-dragging={dragView?.id === it.id ? '1' : undefined}
               data-drop={dragView?.target === it.id && dragView.id !== it.id ? dragView.after ? 'after' : 'before' : undefined}>
-              <button type="button" className="btn btn-ghost btn-sm queue-drag-handle" disabled={blocked || queue.length < 2}
+              <button type="button" className="btn btn-ghost btn-sm queue-act queue-drag-handle" disabled={blocked || queue.length < 2}
                 aria-label={t("Переместить реплику")} aria-keyshortcuts="ArrowUp ArrowDown" title={t("Переместить реплику")} data-testid="queue-drag"
                 onPointerDown={(e) => {
                   if (drag.current || !e.isPrimary || e.button !== 0 || blocked || queue.length < 2) return
@@ -1297,15 +1321,16 @@ export function QueueList({ queue, paused, onRemove, onMove, onResume, onSend, e
               </button>
               <span className="n mono">{i + 1}</span>
               <span className="queue-message"><span className="txt" title={it.text}>{it.text}</span><UserAttachments items={it.attachments ?? []} /></span>
+              {/* Действия — иконки фиксированного размера с подсказкой: подписи не влезали и вылезали за рамку поля. */}
               {edit && (
-                <button type="button" className="btn btn-ghost btn-sm" aria-label={t("Изменить реплику")} title={t("Изменить: очередь подождёт, пока правишь")}
+                <button type="button" className="btn btn-ghost btn-sm queue-act" aria-label={t("Изменить реплику")} title={t("Изменить: очередь подождёт, пока правишь")}
                   disabled={blocked} aria-busy={edit.opening === it.id ? true : undefined}
-                  onClick={() => edit.onStart(it.id)} data-testid="queue-edit">{t("Изменить")}</button>
+                  onClick={() => edit.onStart(it.id)} data-testid="queue-edit"><Icon name="edit" /></button>
               )}
-              {onSend && <button type="button" className="btn btn-ghost btn-sm queue-send-now" disabled={blocked}
-                title={t("Отправить в текущую задачу без остановки")} aria-busy={sending === it.id ? true : undefined}
-                onClick={() => void send(it.id)} data-testid="queue-send">{sending === it.id ? <span className="spin" /> : <Icon name="send" />}{t("Отправить сейчас")}</button>}
-              <button type="button" className="btn btn-ghost btn-sm" aria-label={t("Убрать из очереди")} title={t("Убрать из очереди")} disabled={sending !== null}
+              {onSend && <button type="button" className="btn btn-ghost btn-sm queue-act queue-send-now" disabled={blocked}
+                aria-label={t("Отправить сейчас")} title={t("Отправить в текущую задачу без остановки")} aria-busy={sending === it.id ? true : undefined}
+                onClick={() => void send(it.id)} data-testid="queue-send">{sending === it.id ? <span className="spin" /> : <Icon name="send" />}</button>}
+              <button type="button" className="btn btn-ghost btn-sm queue-act" aria-label={t("Убрать из очереди")} title={t("Убрать из очереди")} disabled={sending !== null}
                 onClick={() => onRemove(it.id)} data-testid="queue-remove"><Icon name="x" /></button>
             </li>
           )))}
@@ -1379,7 +1404,8 @@ export function PhaseLine({ phase, onOpenInbox, now: fixedNow }: { phase: TurnPh
   return (
     <div className={`phase-line ph-${phase.phase}`} data-testid="turn-phase" data-phase={phase.phase}>
       <div className="phase-row">
-        <span className="phase-dot" aria-hidden="true" />
+        {/* Декоративная: смену фазы диктору сообщает строка role="status" ниже. */}
+        <StatusDot state={phaseDotState(phase.phase)} size="md" label={null} testId="turn-phase-dot" />
         <span className="phase-text" data-testid="turn-phase-text">{phaseText(phase)}</span>
         <span className="phase-time mono" data-testid="turn-phase-time" aria-hidden="true">{phaseElapsed(phase, now)}</span>
         {waiting && onOpenInbox && (

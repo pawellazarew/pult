@@ -2,7 +2,7 @@ import { ProviderIcon } from './ProviderIcon.js'
 import { t } from '../lib/i18n.js'
 // Основная навигация — проекты с чатами; недавние остаются отдельными ярлыками снизу.
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { MouseEvent, ReactElement } from 'react'
 import type { ProjectFilter } from '../model/navigation.js'
 import { ContextMenu } from './ContextMenu.js'
@@ -22,6 +22,7 @@ import { draftLabel, folderName } from '../model/draft.js'
 import type { TemporarySummary } from '../../../src/temporary/types.js'
 import { temporaryBusy } from '../model/temporary.js'
 import './temporary-chat.css'
+import { LOUD_STATES, StatusDot, toneState } from './StatusDot.js'
 
 export interface ProjectTreeProps {
   mode?: 'normal'|'expanded'|'focus'
@@ -122,6 +123,8 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
   const archived = p.archived ?? []
   const temporaryChats = p.temporaryChats ?? []
   const [menu, setMenu] = useState<OpenMenu | null>(null)
+  const menuOpen = useRef(false)
+  useLayoutEffect(() => { menuOpen.current = menu !== null }, [menu])
   const [archiveOpen, setArchiveOpen] = useState(false)
   const [query, setQuery] = useState('')
   const [revealRequest, setRevealRequest] = useState(0)
@@ -154,6 +157,8 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
   useEffect(() => {
     if (!p.selected) return
     const timer = window.setTimeout(() => {
+      // Отложенный reveal не должен прокручивать список и закрывать уже открытое меню другого чата.
+      if (menuOpen.current) return
       const area = projectArea.current
       const row = area?.querySelector<HTMLElement>('[data-testid="agent-row"][aria-selected="true"]')
       if (!area || !row || row.closest('details:not([open])')) return
@@ -207,8 +212,8 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
   if (p.mode === 'focus') return <nav className="agents project-rail" aria-label={t("Проекты и сессии")}>
     <span className="sidebar-brand-mark" aria-hidden="true"><Icon name="mark" /></span>
     <button type="button" className="rail-new" onClick={() => p.onNew(null)} aria-label={t('Новый чат')} title={t('Новый чат')} data-testid="new-agent"><Icon name="plus" /></button>
-    {(p.onNewTemporary || temporaryChats.length > 0) && <button type="button" className="rail-group temporary-rail" aria-label={t('Временные чаты')} title={t('Временные чаты')} aria-current={p.activeTemporaryId ? 'true' : undefined} data-testid="temporary-rail" onClick={openTemporaryRail}><Icon name="clock" />{temporaryChats.some((chat) => temporaryBusy(chat.status)) && <span className="temporary-busy-dot" />}</button>}
-    <div className="rail-groups">{p.groups.map((group) => <button key={group.path} type="button" className="rail-group" aria-current={group.path === selectedProject} title={group.name} aria-label={group.name} data-testid="rail-project" onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); setMenu({ at: { x: r.right + 6, y: r.top }, testId: 'rail-chats', items: [{ heading: group.name }, { label: t('Новый чат'), testId: 'rail-new-chat', onSelect: () => p.onNew(group.scope === 'general' ? null : group.path) }, 'sep', ...group.sessions.map((a) => ({ label: agentLabel(a), checked: a.name === p.selected, testId: 'rail-chat', onSelect: () => p.onSelect(a.name) }))] }) }}>{group.scope === 'general' ? <Icon name="model" /> : group.name.slice(0,2)}{group.waiting > 0 && <span className="rail-wait" />}</button>)}</div>
+    {(p.onNewTemporary || temporaryChats.length > 0) && <button type="button" className="rail-group temporary-rail" aria-label={t('Временные чаты')} title={t('Временные чаты')} aria-current={p.activeTemporaryId ? 'true' : undefined} data-testid="temporary-rail" onClick={openTemporaryRail}><Icon name="clock" />{temporaryChats.some((chat) => temporaryBusy(chat.status)) && <StatusDot state="working" className="temporary-busy-dot" />}</button>}
+    <div className="rail-groups">{p.groups.map((group) => <button key={group.path} type="button" className="rail-group" aria-current={group.path === selectedProject} title={group.name} aria-label={group.name} data-testid="rail-project" onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); setMenu({ at: { x: r.right + 6, y: r.top }, testId: 'rail-chats', items: [{ heading: group.name }, { label: t('Новый чат'), testId: 'rail-new-chat', onSelect: () => p.onNew(group.scope === 'general' ? null : group.path) }, 'sep', ...group.sessions.map((a) => ({ label: agentLabel(a), checked: a.name === p.selected, testId: 'rail-chat', onSelect: () => p.onSelect(a.name) }))] }) }}>{group.scope === 'general' ? <Icon name="model" /> : group.name.slice(0,2)}{group.waiting > 0 && <StatusDot state="waiting" size="md" className="rail-wait" />}</button>)}</div>
     {menu && <ContextMenu at={menu.at} items={menu.items.map((entry) => typeof entry === 'object' && 'testId' in entry && entry.testId === 'temporary-new' ? newTemporaryItem() : entry)} onClose={closeMenu} testId={menu.testId} />}
   </nav>
   return (
@@ -268,7 +273,7 @@ export function ProjectTree(p: ProjectTreeProps): ReactElement {
           <div className="temporary-sidebar-list" role="listbox" aria-label={t('Временные чаты')}>
             {temporaryChats.map((chat, index) => <button key={chat.id} type="button" role="option" className="temporary-sidebar-row" aria-selected={chat.id === p.activeTemporaryId} aria-busy={temporaryBusy(chat.status)} aria-label={t`Временный чат ${index + 1}`}
               data-testid="temporary-row" data-temporary-id={chat.id} onClick={() => p.onSelectTemporary?.(chat.id)}>
-              <ProviderIcon provider={chat.settings.provider} /><span>{t('Временный чат')}</span><span className="temporary-row-number">{index + 1}</span>{temporaryBusy(chat.status) && <span className="temporary-busy-dot" />}
+              <ProviderIcon provider={chat.settings.provider} /><span>{t('Временный чат')}</span><span className="temporary-row-number">{index + 1}</span>{temporaryBusy(chat.status) && <StatusDot state="working" className="temporary-busy-dot" />}
             </button>)}
           </div>
         </section>}
@@ -328,14 +333,15 @@ function SessionRow({ a, project, selected, now, onSelect, onMenu, shortcut = fa
   onMenu(e: MouseEvent<HTMLElement>, a: AgentView): void
 }): ReactElement {
   const sv = chatStatus(a)
-  const needs = sv.tone === 'wait'
+  const state = toneState(sv.tone)
+  const needs = state === 'waiting'
   const ctx = a.context && a.context.window && a.context.used / a.context.window >= .8 ? contextRowView(a.context) : null
   return (
     <li className="ag" role="option" aria-selected={selected}
       data-provider={a.provider} data-needs={needs ? '1' : '0'} data-unread={a.unread ? '1' : '0'} data-testid={shortcut ? 'recent-row' : 'agent-row'} data-agent={a.name} data-sidebar-chat="1"
       tabIndex={0} onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onSelect(a.name) } }}
       onClick={() => onSelect(a.name)} onContextMenu={(e) => onMenu(e, a)}>
-      <span className="row-provider" title={a.provider === 'claude' ? 'Claude' : a.provider === 'codex' ? 'Codex' : 'ZCode'}><ProviderIcon provider={a.provider} /><span className={`row-live-dot t-${sv.tone}`} data-state={sv.tone} data-working={sv.tone === 'run' ? 'true' : 'false'} aria-label={sv.label} /></span>
+      <span className="row-provider" title={a.provider === 'claude' ? 'Claude' : a.provider === 'codex' ? 'Codex' : 'ZCode'}><ProviderIcon provider={a.provider} />{LOUD_STATES.has(state) && <StatusDot state={state} label={sv.label} cutout className="row-live-dot" testId="row-live-dot" />}</span>
       <span className="ag-name" title={a.title ? t`${a.title} · имя для CLI: ${a.name}` : undefined}>
         {a.unread && <UnreadDot a={a} testId={shortcut ? 'recent-unread' : 'row-unread'} />}{agentLabel(a)}
       </span>

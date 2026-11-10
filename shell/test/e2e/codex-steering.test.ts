@@ -8,6 +8,7 @@ describe('Codex: async question forms and steering', () => {
   let h: Harness
   before(async () => {
     h = await launch({ name: 'codex-steering' })
+    assert.ok(await waitFor(async () => await h.win.getAttribute('.app', 'data-conn') === 'up', 20_000), 'окно ещё не подключилось к демону')
     h.codexConfig({ scenario: 'hang', asyncQuestions: [{ title: 'What makes questions difficult?', options: ['No form', 'Delivery'] }, { title: 'Any details?', options: null }] })
     const c = await h.client()
     await c.request('agent.start', { name: 'steer-ui', kind: 'codex', cwd: h.workDir('steer-ui') })

@@ -300,6 +300,11 @@ export interface ProviderAdapter {
    * сессии». Живым сессиям — заметка в ленту. `why` — что отозвано, словами.
    */
   reloadPolicy?(why: string): { codex: CodexReload; busy?: string }
+  /**
+   * «/» в поле ввода (docs/19): сырой ответ провайдера со скиллами папки `cwd`. Есть только у Codex (`skills/list`
+   * app-server, через тот же страж сети, что и ходы); Claude снимается отдельным процессом (src/commands/claudeProbe.ts).
+   */
+  listSkills?(cwd: string, force?: boolean): Promise<unknown>
   /** Погасить всё: тёплые процессы, общий процесс Codex, таймеры. */
   shutdown(): Promise<void>
 }

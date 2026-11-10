@@ -618,6 +618,9 @@ describe('окно: рабочие сценарии', () => {
     assert.equal(await h.win.locator('.chat-section [data-testid="agent-row"][data-agent="proj"]').count(), 0, 'архивная сессия осталась в проекте')
     await archive.locator('.proj-h').click()
     await archive.locator('[data-testid="agent-row"][data-agent="proj"]').click({ button: 'right' })
+    // После архивирования выбран другой чат: его отложенный reveal не должен закрыть
+    // это меню, пока человек выбирает действие. До исправления меню исчезало до клика.
+    await new Promise((resolve) => setTimeout(resolve, 300))
     await menu.getByTestId('row-unarchive').click()
     await archive.waitFor({ state: 'detached', timeout: 8000 })
     await h.win.locator('.chat-section [data-testid="agent-row"][data-agent="proj"]').waitFor({ timeout: 5000 })

@@ -81,7 +81,7 @@ describe('accepted workspace: modes, general conversations and subagent history'
     h.codexConfig({ scenario: 'hang' })
     const c = await h.client()
     await c.request('agent.prompt', { name: 'parent', text: 'Проверь индикатор работы' })
-    const dot = row.locator('.row-live-dot[data-working="true"]')
+    const dot = row.locator('.row-live-dot[data-state="working"]')
     await dot.waitFor({ state: 'visible' })
     const style = await dot.evaluate((el) => {
       const s = getComputedStyle(el)
@@ -91,6 +91,41 @@ describe('accepted workspace: modes, general conversations and subagent history'
     assert.equal(style.animation, style.reduced ? 'none' : 'pulse')
     await h.screen('paseo-provider-working-dot')
     await c.request('agent.stop', { name: 'parent' })
+  })
+
+  // Регрессия: вкладка субагента рисовала «●» глифом своего цвета и размера — теперь та же StatusDot, что у строки
+  // чата в боковой панели: тот же синий, то же мигание, тот же размер. Провайдер — только значком.
+  it('subagent tab and sidebar row share one status dot: working, failed, idle', async () => {
+    const c = await h.client()
+    const emit = (kind: string, data: Record<string, unknown>) => c.request('events.emit', { sessionId: 'parent', provider: 'codex', kind, data })
+    const row = h.win.locator('[data-testid="agent-row"][data-agent="parent"]')
+    // Свежий субагент: прошлый тест остановил родителя, и его субагенты уже «прерваны».
+    await emit('agent.spawned', { toolUseId: 'dot-child', subagentType: 'dot_check', description: 'Проверяет точку' })
+    await h.win.getByTestId('subagents-open').click()
+    await h.win.getByTestId('subagent-open').filter({ hasText: 'dot_check' }).click()
+    const tab = h.win.locator('[data-testid="subagent-tab"]').filter({ hasText: 'dot_check' })
+    await tab.waitFor()
+    h.codexConfig({ scenario: 'hang' })
+    await c.request('agent.prompt', { name: 'parent', text: 'Проверь точку вкладки' })
+    const dotState = async (where: typeof row): Promise<string | null> =>
+      await where.locator('.status-dot').count() ? await where.locator('.status-dot').getAttribute('data-state') : null
+    const look = (where: typeof row): Promise<string> => where.locator('.status-dot').evaluate((el) => {
+      const s = getComputedStyle(el)
+      return [s.backgroundColor, s.animationName, s.animationDuration, s.width, s.height].join(' ')
+    })
+    assert.ok(await waitFor(async () => await dotState(row) === 'working' && await dotState(tab) === 'working'), `working on row and tab: ${await dotState(row)} / ${await dotState(tab)}`)
+    assert.equal(await look(tab), await look(row), 'tab dot looks exactly like the row dot')
+    assert.equal(await tab.getByRole('img', { name: 'Codex', exact: true }).count(), 1, 'provider stays with the icon')
+    await h.screen('status-dot-working')
+    await emit('agent.finished', { toolUseId: 'dot-child', isError: true })
+    await c.request('agent.stop', { name: 'parent' })
+    assert.ok(await waitFor(async () => await dotState(tab) === 'failed' && await dotState(row) === null), 'failed tab, quiet row')
+    await h.screen('status-dot-tab-failed-row-idle')
+    await emit('status.changed', { status: 'failed', message: 'codex: код 1', errorCode: 'internal' })
+    assert.ok(await waitFor(async () => await dotState(row) === 'failed'), 'failed row')
+    assert.equal(await look(tab), await look(row))
+    await h.screen('status-dot-failed')
+    await h.win.getByTestId('subagent-return').click()
   })
 
   it('global new chat starts without folder and survives as a separate saved conversation', async () => {

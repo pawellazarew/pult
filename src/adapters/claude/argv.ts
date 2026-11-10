@@ -169,6 +169,15 @@ export function buildClaudeArgv(opts: ClaudeArgvOptions): string[] {
 }
 
 /**
+ * «/команда» в начале реплики без вложений (docs/19). ИЗМЕРЕНО (CLI 2.1.318): CLI разворачивает скилл, команду или
+ * встроенную, только если реплика — один текстовый блок; второй блок (контекст режима) превращает `/context` в текст
+ * для модели. Путь (`/Users/…`) командой не считается.
+ */
+export function isSlashCommandTurn(text: string, attachments = 0): boolean {
+  return attachments === 0 && /^\/[^\s/]+(?:\s|$)/u.test(text)
+}
+
+/**
  * Реплика пользователя в формате `--input-format stream-json`.
  *
  * `uuid` — метка реплики. С ней CLI говорит, какой `result` отвечает именно на неё
