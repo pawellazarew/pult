@@ -24,7 +24,7 @@ try {
   const hash = (bytes) => createHash('sha256').update(bytes).digest('hex')
   const maxRecordBytes = Buffer.byteLength(JSON.stringify({ sequence: options.records, kind: 'provider.message', data: { text: 'x'.repeat(options['payload-bytes']) } })) + 1
   if (maxRecordBytes * options.records > 32 * 1024 * 1024) throw new Error('fixture upper bound exceeds 32 MiB')
-  const fixture = Buffer.from(Array.from({ length: options.records }, (_, i) => JSON.stringify({ sequence: i + 1, kind: 'provider.message', data: { text: 'x'.repeat(options['payload-bytes']) } }) + '\n').join(''))
+  const fixture = Buffer.from(Array.from({ length: options.records }, (_, i) => JSON.stringify({ data: { text: 'x'.repeat(options['payload-bytes']) }, kind: 'provider.message', sequence: i + 1 }) + '\n').join(''))
   if (fixture.length > 32 * 1024 * 1024) throw new Error('fixture exceeds journal limit')
   scratch = mkdtempSync(join(tmpdir(), 'pult-replay-'))
   const run = (runtime, home, expectedSuccess = true) => new Promise((accept, reject) => {

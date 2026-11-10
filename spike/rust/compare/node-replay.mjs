@@ -23,7 +23,7 @@ try {
     if (Buffer.byteLength(line) > 1024 * 1024) throw new Error('oversized journal record')
     const row = JSON.parse(line)
     if (!row || row.sequence !== sequence || !Number.isSafeInteger(row.sequence) || typeof row.kind !== 'string' || !Object.hasOwn(row, 'data')) throw new Error('invalid record or non-contiguous sequence')
-    rows.push({ sequence: sequence++, kind: row.kind, data: row.data })
+    rows.push({ data: row.data, kind: row.kind, sequence: sequence++ })
   }
   for (const row of rows) if (!process.stdout.write(JSON.stringify(row) + '\n')) await once(process.stdout, 'drain')
 } catch (error) {
