@@ -1,0 +1,32 @@
+name: rust-prototype
+
+on:
+  pull_request:
+    paths: ['spike/rust/**', '.github/workflows/rust-prototype.yml']
+  push:
+    branches: [main]
+    paths: ['spike/rust/**', '.github/workflows/rust-prototype.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: spike/rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
