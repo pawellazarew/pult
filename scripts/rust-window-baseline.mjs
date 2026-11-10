@@ -13,6 +13,8 @@ if (args.length !== 2 || args[0] !== '--out') {
   console.error('Usage after root/shell test builds: node scripts/rust-window-baseline.mjs --out /tmp/window.json')
   process.exit(2)
 }
+const { build } = await import('esbuild')
+await build({ entryPoints: [resolve(root, 'shell/test/e2e/harness.ts')], outfile: resolve(root, 'shell/dist-test/e2e/harness.js'), bundle: true, platform: 'node', format: 'esm', packages: 'external' })
 const { launch, waitFor } = await import('../shell/dist-test/e2e/harness.js')
 const start = performance.now()
 const h = await launch({ name: 'rust-r0-window-baseline' })
