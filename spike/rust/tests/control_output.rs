@@ -55,7 +55,9 @@ finally:
   if pid:
    try: os.killpg(pid,signal.SIGKILL)
    except ProcessLookupError: pass
- p.stdin.close();p.stdout.close();p.stderr.close()
+ try: p.stdin.close()
+ except BrokenPipeError: pass
+ p.stdout.close();p.stderr.close()
 "#, env!("CARGO_BIN_EXE_pult-r1"), scratch.path().to_str().unwrap(), if signal { "yes" } else { "no" }])
         .output().unwrap();
     assert!(
