@@ -559,12 +559,42 @@
     {
       "name": "events.subscribe",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "implemented",
       "access": "owner",
       "testOnly": false,
       "description": "Migration inventory for events.subscribe.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "since": {
+            "type": "number"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "live": {
+            "type": "boolean"
+          }
+        },
+        "required": [],
+        "additionalProperties": true
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "sub": {
+            "type": "integer"
+          },
+          "cursor": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sub",
+          "cursor"
+        ],
+        "additionalProperties": true
+      }
     },
     {
       "name": "events.tail",
@@ -647,12 +677,34 @@
     {
       "name": "events.unsubscribe",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "implemented",
       "access": "owner",
       "testOnly": false,
       "description": "Migration inventory for events.unsubscribe.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "sub": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "sub"
+        ],
+        "additionalProperties": true
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "removed": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "removed"
+        ],
+        "additionalProperties": true
+      }
     },
     {
       "name": "folders.clearHistory",

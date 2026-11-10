@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
 pub mod journal;
+mod stream;
+mod subscriptions;
 
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
@@ -30,11 +32,13 @@ use tokio::task::JoinSet;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const PROTOCOL: u64 = 1;
 pub const MAX_LINE: usize = 1024 * 1024;
-pub const SUPPORTED: [&str; 5] = [
+pub const SUPPORTED: [&str; 7] = [
     "daemon.status",
     "daemon.stop",
     "events.emit",
+    "events.subscribe",
     "events.tail",
+    "events.unsubscribe",
     "protocol.catalog",
 ];
 const SCRATCH_MARKER: &str = "pult-rust-scratch-v1\n";
@@ -422,6 +426,9 @@ struct State {
     last_event_id: AtomicU64,
     test_mode: bool,
     projection_degraded: AtomicBool,
+    subscriptions: AtomicUsize,
+    committed: watch::Sender<u64>,
+    live_id: AtomicU64,
 }
 
 #[derive(Serialize)]
@@ -495,6 +502,7 @@ async fn journal_request(
             state
                 .last_event_id
                 .store(store.last_id(), Ordering::Release);
+            state.committed.send_replace(store.last_id());
             if store.projection_error().is_some()
                 && !state.projection_degraded.swap(true, Ordering::Relaxed)
             {
@@ -576,28 +584,39 @@ async fn connection(
         return Ok(());
     }
     write_value(&mut output, &json!({"type":"hello_ok","protocol":PROTOCOL,"daemon":{"version":VERSION,"pid":std::process::id(),"startedAt":state.started_at},"capabilities":{"experimental":true,"supportedMethods":SUPPORTED}})).await?;
+    let (writer, _writer_task) = stream::Writer::start(output);
+    let mut writer_closed = writer.closed();
+    let mut subscriptions = subscriptions::Subscriptions::new();
+    let mut daemon_stopping = false;
     loop {
         let line = tokio::select! {
-            _ = shutdown.changed() => break,
+            _ = shutdown.changed() => { daemon_stopping = true; break; },
+            _ = writer_closed.changed() => break,
             line = read_line(&mut reader) => line,
         };
         let bytes = match line {
             Ok(Some(bytes)) => bytes,
             Ok(None) => break,
             Err(_) => {
-                write_value(&mut output, &json!({"type":"error","code":"line_too_long"})).await?;
+                writer
+                    .response(&json!({"type":"error","code":"line_too_long"}))
+                    .await?;
                 break;
             }
         };
         let request: Value = match serde_json::from_slice(&bytes) {
             Ok(request) => request,
             Err(_) => {
-                write_value(&mut output, &json!({"type":"error","code":"bad_json"})).await?;
+                writer
+                    .response(&json!({"type":"error","code":"bad_json"}))
+                    .await?;
                 break;
             }
         };
         if !request.is_object() {
-            write_value(&mut output, &json!({"type":"error","code":"bad_json"})).await?;
+            writer
+                .response(&json!({"type":"error","code":"bad_json"}))
+                .await?;
             break;
         }
         let id = &request["id"];
@@ -605,16 +624,44 @@ async fn connection(
             || !request["method"].is_string()
             || request.get("params").is_some_and(|v| !v.is_object())
         {
-            write_value(&mut output, &json!({"id":id,"error":{"code":"invalid_params","message":"request needs id, method and object params"}})).await?;
+            writer.response(&json!({"id":id,"error":{"code":"invalid_params","message":"request needs id, method and object params"}})).await?;
             continue;
         }
         let method = request["method"].as_str().unwrap();
         let result = match method {
             "daemon.status" => {
-                json!({"version":VERSION,"protocol":PROTOCOL,"pid":std::process::id(),"startedAt":state.started_at,"uptimeMs":state.started.elapsed().as_millis(),"home":state.home,"sock":state.home.join("run/pultd.sock"),"clients":state.clients.load(Ordering::Relaxed),"subscriptions":0,"lastEventId":state.last_event_id.load(Ordering::Acquire),"mode":"on-demand","journal":{"projectionDegraded":state.projection_degraded.load(Ordering::Relaxed)},"capabilities":{"experimental":true,"supportedMethods":SUPPORTED}})
+                json!({"version":VERSION,"protocol":PROTOCOL,"pid":std::process::id(),"startedAt":state.started_at,"uptimeMs":state.started.elapsed().as_millis(),"home":state.home,"sock":state.home.join("run/pultd.sock"),"clients":state.clients.load(Ordering::Relaxed),"subscriptions":state.subscriptions.load(Ordering::Relaxed),"lastEventId":state.last_event_id.load(Ordering::Acquire),"mode":"on-demand","journal":{"projectionDegraded":state.projection_degraded.load(Ordering::Relaxed)},"capabilities":{"experimental":true,"supportedMethods":SUPPORTED}})
             }
             "daemon.stop" => json!({"stopping":true}),
             "protocol.catalog" => catalog(),
+            "events.subscribe" => {
+                match subscriptions.prepare(&state, &request["params"]) {
+                    Ok(pending) => {
+                        writer.response(&json!({"id":id,"result":{"sub":pending.id,"cursor":pending.cursor}})).await?;
+                        subscriptions.start(pending, state.clone(), writer.clone());
+                    }
+                    Err(error) => {
+                        writer.response(&json!({"id":id,"error":{"code":"invalid_params","message":error.to_string()}})).await?;
+                    }
+                }
+                continue;
+            }
+            "events.unsubscribe" => {
+                let sub = &request["params"]["sub"];
+                if !sub.is_number() {
+                    writer.response(&json!({"id":id,"error":{"code":"invalid_params","message":"sub must be a number"}})).await?;
+                    continue;
+                }
+                let removed = if let Some(number) = sub
+                    .as_f64()
+                    .filter(|n| *n >= 0.0 && n.fract() == 0.0 && *n <= journal::MAX_EVENT_ID as f64)
+                {
+                    subscriptions.unsubscribe(number as u64).await
+                } else {
+                    false
+                };
+                json!({"removed":removed})
+            }
             "events.tail" | "events.emit" => {
                 let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
                 if method == "events.emit" {
@@ -640,17 +687,15 @@ async fn connection(
                         None
                     };
                     if let Some((code, message)) = error {
-                        write_value(
-                            &mut output,
-                            &json!({"id":id,"error":{"code":code,"message":message}}),
-                        )
-                        .await?;
+                        writer
+                            .response(&json!({"id":id,"error":{"code":code,"message":message}}))
+                            .await?;
                         continue;
                     }
                 }
                 match journal_request(state.clone(), method.to_owned(), params).await {
                     Ok(result) => {
-                        write_value(&mut output, &RpcResult { id, result }).await?;
+                        writer.response(&RpcResult { id, result }).await?;
                         continue;
                     }
                     Err(error) => {
@@ -659,11 +704,11 @@ async fn connection(
                         } else {
                             "internal"
                         };
-                        write_value(
-                            &mut output,
-                            &json!({"id":id,"error":{"code":code,"message":error.to_string()}}),
-                        )
-                        .await?;
+                        writer
+                            .response(
+                                &json!({"id":id,"error":{"code":code,"message":error.to_string()}}),
+                            )
+                            .await?;
                         continue;
                     }
                 }
@@ -672,15 +717,19 @@ async fn connection(
                 let known = catalog()["methods"]
                     .as_array()
                     .is_some_and(|methods| methods.iter().any(|m| m["name"] == method));
-                write_value(&mut output, &json!({"id":id,"error":{"code":if known {"not_implemented"} else {"not_found"},"message":"method is unavailable in Rust core foundation"}})).await?;
+                writer.response(&json!({"id":id,"error":{"code":if known {"not_implemented"} else {"not_found"},"message":"method is unavailable in Rust core foundation"}})).await?;
                 continue;
             }
         };
-        write_value(&mut output, &json!({"id":id,"result":result})).await?;
+        writer.response(&json!({"id":id,"result":result})).await?;
         if method == "daemon.stop" {
+            daemon_stopping = true;
             let _ = state.stop.send(true);
             break;
         }
+    }
+    if daemon_stopping {
+        subscriptions.shutdown(&writer).await;
     }
     Ok(())
 }
@@ -716,6 +765,7 @@ pub async fn serve(home: PathBuf) -> Result<()> {
     let events = home.join("events");
     let store = tokio::task::spawn_blocking(move || journal::EventStore::open(&events)).await??;
     let last_event_id = AtomicU64::new(store.last_id());
+    let (committed, _) = watch::channel(store.last_id());
     let listener = UnixListener::bind(&socket)?;
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
     let metadata = fs::symlink_metadata(&socket)?;
@@ -737,6 +787,9 @@ pub async fn serve(home: PathBuf) -> Result<()> {
         last_event_id,
         test_mode: std::env::var("PULT_TEST").as_deref() == Ok("1"),
         projection_degraded: AtomicBool::new(false),
+        subscriptions: AtomicUsize::new(0),
+        committed,
+        live_id: AtomicU64::new(subscriptions::LIVE_BASE),
     });
     let permits = Arc::new(Semaphore::new(64));
     let mut tasks = JoinSet::new();
