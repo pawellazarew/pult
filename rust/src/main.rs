@@ -50,7 +50,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     if args.skill {
         println!(
-            "Rust core protocol 1. Use an explicit private scratch --home.\nCommands: daemon serve, daemon status, daemon stop, catalog, events tail [--since ID] [--session NAME] [--limit N].\nOwner-token connections support daemon.status, daemon.stop, events.tail and protocol.catalog.\nevents.emit requires PULT_TEST=1 and is for deterministic verification.\nJournal append is acknowledged after sync. A failed append has an unknown outcome until replay.\nOther catalogued methods return not_implemented. Scoped credentials are rejected.\nProduction migration and session execution follow later compatibility steps."
+            "Rust core protocol 1. Use an explicit private scratch --home.\nCommands: daemon serve, daemon status, daemon stop, catalog, events tail [--since ID] [--session NAME] [--limit N].\nOwner-token connections support daemon.status, daemon.stop, events.tail, events.subscribe, events.unsubscribe and protocol.catalog.\nSubscriptions replay committed events with bounded output. live=true sends an empty-session reset.\nevents.emit requires PULT_TEST=1 and is for deterministic verification.\nJournal append is acknowledged after sync. A failed append has an unknown outcome until replay.\nOther catalogued methods return not_implemented. Scoped credentials are rejected.\nProduction migration and session execution follow later compatibility steps."
         );
         return Ok(());
     }

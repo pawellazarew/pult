@@ -130,7 +130,7 @@ fn event_id(value: &Value) -> Result<u64> {
     Ok(id)
 }
 
-fn decode_js_string(raw: &RawValue) -> Result<Vec<u16>> {
+pub(crate) fn decode_js_string(raw: &RawValue) -> Result<Vec<u16>> {
     let text = raw.get();
     ensure!(
         text.starts_with('"') && text.ends_with('"'),

@@ -2,8 +2,8 @@
 
 В этом crate находятся сервер Unix socket и CLI для протокола Пульта версии 1.
 Текущий TypeScript-клиент проходит интеграционный тест с настоящим Rust-сервером.
-Перенесены `daemon.status`, `daemon.stop`, `events.tail`, тестовый `events.emit`
-и `protocol.catalog`. Журнал использует нынешний формат `events/journal.jsonl`.
+Перенесены `daemon.status`, `daemon.stop`, `events.tail`, тестовый `events.emit`,
+`events.subscribe`, `events.unsubscribe` и `protocol.catalog`. Журнал использует нынешний формат `events/journal.jsonl`.
 
 Полный список методов берётся из `../protocol/methods.json`. В `hello_ok` и статусе
 публикуются `capabilities.experimental` и `supportedMethods`. Каталог отмечает остальные
@@ -79,4 +79,8 @@ JSON lock содержит PID и время старта процесса, со
 `journal.projectionDegraded` до конца запуска. Подробный договор и оставшиеся проверки
 описаны в [R2-JOURNAL](../docs/rust/R2-JOURNAL.md).
 
-Подписки, история для окна, сессии и провайдеры переносятся следующими шагами R2/R3.
+Подписки используют ограниченный общий писатель и durable-курсор. Договор приведён в
+[R2-SUBSCRIPTIONS](../docs/rust/R2-SUBSCRIPTIONS.md). Live-канал пока выдаёт reset и пустой
+снимок, поскольку Rust ещё не исполняет сессии.
+
+История для окна, сессии и провайдеры переносятся следующими шагами R2/R3.
