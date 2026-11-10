@@ -12,6 +12,10 @@ const self = fileURLToPath(import.meta.url)
 const root = resolve(dirname(self), '..')
 const args = process.argv.slice(2)
 const pause = (ms) => new Promise((r) => setTimeout(r, ms))
+const send = (child, message) => new Promise((resolve, reject) => {
+  if (!child.connected) { reject(new Error('baseline IPC disconnected')); return }
+  child.send(message, (error) => error ? reject(error) : resolve())
+})
 
 if (args.includes('--worker')) {
   const { tempHome, startTestDaemon } = await import('../dist-test/helpers.js')
@@ -30,13 +34,13 @@ if (args.includes('--worker')) {
   process.on('disconnect', () => void stop())
   process.on('message', (m) => {
     if (m === 'stop') void stop()
-    if (m === 'sample') process.send?.({ kind: 'sample', rssBytes: process.memoryUsage().rss, cpu: process.cpuUsage() })
+    if (m === 'sample') process.connected && process.send({ kind: 'sample', rssBytes: process.memoryUsage().rss, cpu: process.cpuUsage() }, () => {})
   })
   try {
     daemon = await startTestDaemon(home)
-    process.send?.({ kind: 'ready', paths: home.paths })
+    process.connected && process.send({ kind: 'ready', paths: home.paths }, () => {})
   } catch (error) {
-    process.send?.({ kind: 'failure', message: String(error) })
+    process.connected && process.send({ kind: 'failure', message: String(error) }, () => {})
     await stop()
   }
 } else {
@@ -48,7 +52,7 @@ if (args.includes('--worker')) {
   const { connectClient } = await import('../dist/cli/client.js')
   const rows = []
   let active = null
-  const abort = () => { if (active?.connected) active.send('stop'); process.exitCode = 130 }
+  const abort = () => { process.exitCode = 130; if (active) void send(active, 'stop').catch(() => {}) }
   process.on('SIGINT', abort)
   process.on('SIGTERM', abort)
   const quantile = (values, p) => [...values].sort((a, b) => a - b)[Math.max(0, Math.ceil(values.length * p) - 1)]
@@ -78,6 +82,9 @@ if (args.includes('--worker')) {
     child.on('message', (m) => {
       if (waiting) { const w = waiting; waiting = null; clearTimeout(w.timer); w.resolve(m) }
       else messages.push(m)
+    })
+    child.on('error', (error) => {
+      if (waiting) { clearTimeout(waiting.timer); waiting.reject(error); waiting = null }
     })
     child.on('exit', (code) => {
       exited = true
@@ -120,12 +127,12 @@ if (args.includes('--worker')) {
           await pause(20)
         }
         const status = await timing(() => request('daemon.status'))
-        child.send('sample')
+        await send(child, 'sample')
         const before = await next()
         const processTree = tree(child.pid)
         const sampleStart = performance.now()
         await pause(1000)
-        child.send('sample')
+        await send(child, 'sample')
         const after = await next()
         const idleCpuPercentOneCore = ((after.cpu.user - before.cpu.user) + (after.cpu.system - before.cpu.system)) / ((performance.now() - sampleStart) * 1000) * 100
         const histories = []
@@ -143,7 +150,7 @@ if (args.includes('--worker')) {
         client?.close()
         if (child.exitCode === null && child.signalCode === null) {
           const ended = new Promise((r) => child.once('exit', r))
-          child.send('stop')
+          void send(child, 'stop').catch(() => child.kill('SIGTERM'))
           const timer = setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL') } catch { child.kill('SIGKILL') } }, 10_000)
           await ended
           clearTimeout(timer)
