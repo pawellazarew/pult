@@ -44,19 +44,12 @@ These smoke observations preceded the final transport/error-handling hardening; 
 suite was rerun after those changes. They establish initial protocol viability, not full adapter parity
 or sustained reliability. Provider startup includes the user's configured MCP integrations.
 
-## Remaining gates
+## Дальнейшие проверки
 
-- SIGKILL of the prototype can orphan the provider process group. The crash test explicitly cleans
-  it up. There is no supervisor/holder yet; this is **not** a full R1 crash-cleanup pass.
-- A slow control stdout reader can block synchronous reply writes. Memory remains bounded, but
-  responsive stop/TERM under this condition requires a nonblocking control transport.
-- No matched Node/Rust memory/latency comparison, disk-full qualification, power-loss guarantees,
-  descendant reaping qualification or long-running soak. R0 production baseline is a separate workload.
-- The experiment does not implement Pult's production protocol, authentication, network guard,
-  permission broker, questions, queue/steer, provider resume, UI or migration/rollback.
-
-Next: close supervisor/control-output gaps, extend fault scenarios, then compare matched workloads
-against R0 before deciding whether to start R2.
+Сравнение одинаковой runtime-нагрузки с провайдерами, disk-full qualification, power-loss
+и длительный soak остаются в плане. Процессы с собственной группой и принудительное
+убийство holder требуют отдельного решения. Следующий раздел содержит результаты
+исправлений после исходного эксперимента.
 
 ## Продолжение R1
 
