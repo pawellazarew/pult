@@ -15,6 +15,7 @@ export const componentsEn: Readonly<Record<string, string>> = {
   "Начать уборку": "Start cleanup",
   "Настройки хранения": "Storage settings",
 
+  "Сайт": "Website",
   "Язык": "Language",
   "AirPods, название гарнитуры": "AirPods, headset name",
   "{0} с · Готово": "{0} s · Finish",

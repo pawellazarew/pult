@@ -131,6 +131,7 @@ Pult checks the drive containing its data once a minute and shows a warning belo
 In **Settings → Files and storage**, change the threshold and cleanup prompt. The default prompt follows
 English/Russian interface language; custom text stays unchanged. Clear the field to restore the default.
 Disk figures use decimal GB. If disk statistics are unavailable, Settings shows that status.
+HTML and HTM files open as websites beside the chat, with a source toggle. Inline CSS and JavaScript and HTTPS resources are supported. Relative local assets require a web server. Truncated files remain in source view.
 
 ## Dictation and settings
 

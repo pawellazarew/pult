@@ -31,7 +31,7 @@ devDependencies корня. Electron и всё его — только в `shell
   Это отдельный owner-only путь без журнала и сохранённых сессий; актуальные границы — в
   [DEV.md](DEV.md#временные-чаты-отдельный-контур-в-памяти), полный список — `shell/src/contract.ts`.
 - Безопасность окна: `contextIsolation`, `sandbox`, без `nodeIntegration`, `webSecurity`; навигация и `window.open` запрещены; CSP
-  `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; worker-src 'self'; connect-src 'self'`. Fuses: `RunAsNode` off,
+  `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; worker-src 'self'; connect-src 'self'; frame-src pult-preview:`. Fuses: `RunAsNode` off,
   `EnableNodeOptionsEnvironmentVariable` off, `EnableNodeCliInspectArguments` off, `EnableEmbeddedAsarIntegrityValidation` on, `OnlyLoadAppFromAsar` on.
 - Переподключение: демон ушёл (стоп, обновление, падение) — плашка «демон недоступен», повтор с растущей паузой, после подключения —
   `events.subscribe {since: последний увиденный id}`: окно доигрывает пропущенное, ничего не теряет.
