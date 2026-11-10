@@ -48,7 +48,8 @@ import type { SessionMenuApi } from './ProjectTree.js'
 import { settingsMenu } from '../model/sessionSettings.js'
 import type { SettingsPick } from '../model/sessionSettings.js'
 import type { ProviderCatalog } from '../model/types.js'
-import { copyToClipboard, Markdown, MdBridgeContext, useFlash } from './Markdown.js'
+import { copyToClipboard, MdBridgeContext, useFlash } from './Markdown.js'
+import { MessageText as MessageBody, messagePreview } from './MessageText.js'
 import { restoreDraft, sendFromComposer } from '../model/pending.js'
 import { DRAFT_SAVE_MS, peekDraft, saveDraft } from '../model/drafts.js'
 import type { DraftStore } from '../model/drafts.js'
@@ -169,6 +170,14 @@ const flashTimers = new WeakMap<Element, number>()
 interface FoldState { open: ReadonlySet<string>; set(key: string, open: boolean): void }
 const FoldContext = createContext<FoldState>({ open: new Set(), set: () => {} })
 
+const messageBodyKey = (key: string): string => `message:${key}`
+
+function MessageText({ text, foldKey, human, streaming }: { text: string; foldKey: string; human?: boolean; streaming?: boolean }): ReactElement {
+  const fold = useContext(FoldContext)
+  return <MessageBody text={text} human={human} streaming={streaming} expanded={fold.open.has(foldKey)}
+    onExpandedChange={expanded => fold.set(foldKey, expanded)} />
+}
+
 export function Conversation(p: ConversationProps): ReactElement {
   const { agent } = p
   const imageBridge = useContext(MdBridgeContext)
@@ -181,12 +190,15 @@ export function Conversation(p: ConversationProps): ReactElement {
   const feedSize = useRef({ height: 0, viewport: 0 })
   const [away, setAway] = useState(false)
   const [folds, setFolds] = useState<ReadonlySet<string>>(() => new Set())
-  const setFold = useCallback((key: string, open: boolean): void => setFolds((before) => {
-    if (before.has(key) === open) return before
-    const next = new Set(before)
-    if (open) next.add(key); else next.delete(key)
-    return next
-  }), [])
+  const setFold = useCallback((key: string, open: boolean): void => {
+    if (key.startsWith('message:')) stick.current = false
+    setFolds((before) => {
+      if (before.has(key) === open) return before
+      const next = new Set(before)
+      if (open) next.add(key); else next.delete(key)
+      return next
+    })
+  }, [])
   const foldState = useMemo<FoldState>(() => ({ open: folds, set: setFold }), [folds, setFold])
   const views = subagentViews(p.items)
   const stateKey = `pult.subagents.${agent.name}`
@@ -288,6 +300,7 @@ export function Conversation(p: ConversationProps): ReactElement {
     if (!it) return
     // Цель в свёрнутой пачке или истории субагента: её ещё нет в DOM. Раскрываем путь — эффект придёт сюда снова.
     const closed = (foldPath(p.items, it.key) ?? []).filter((key) => !folds.has(key))
+    if ((it.type === 'user' || it.type === 'model') && messagePreview(it.text) !== null && !folds.has(messageBodyKey(it.key))) closed.push(messageBodyKey(it.key))
     if (closed.length) { setFolds((before) => new Set([...before, ...closed])); return }
     if (reveal(it.id, 'center')) {
       doneJump.current = t.nonce
@@ -379,7 +392,7 @@ export function Conversation(p: ConversationProps): ReactElement {
               <div className="it it-user it-pending" data-testid="msg-user-pending" aria-busy="true">
                 <Gutter who={t("ты")} cls="who-you" ts={p.pending.ts} />
                 <div className="body">
-                  <UserAttachments items={p.pending.attachments ?? []} /><Markdown text={p.pending.text} human />
+                  <UserAttachments items={p.pending.attachments ?? []} /><MessageText text={p.pending.text} foldKey={messageBodyKey(`pending:${p.pending.ts}`)} human />
                   <div className="pending-note" role="status">{t("отправляется…")}</div>
                 </div>
               </div>
@@ -742,14 +755,14 @@ function Item({ it, ...p }: { it: ConvItem } & ConversationProps): ReactElement 
         <div className="it it-user" data-testid="msg-user" data-event-id={it.id}>
           <Gutter who={t("ты")} cls="who-you" ts={it.ts} {...(src !== null ? { copy: { text: src, what: t('реплику') } } : {})} />
           {/* M8e: реплика человека — тот же безопасный Markdown, что у модели (ссылки, код, переносы строк). */}
-          <div className="body"><UserAttachments items={it.attachments ?? []} /><Markdown text={it.text} human /></div>
+          <div className="body"><UserAttachments items={it.attachments ?? []} /><MessageText text={it.text} foldKey={messageBodyKey(it.key)} human /></div>
         </div>
       )
     case 'model':
       return (
         <div className="it it-model" data-testid="msg-model" data-streaming={it.streaming ? '1' : '0'} data-event-id={it.id}>
           <Gutter who={prov} cls={`who-${prov}`} ts={it.ts} {...(src !== null ? { copy: { text: src, what: t('ответ') } } : {})} />
-          <div className={`body${it.error ? ' err' : ''}`}>{it.questions?.length && !p.readOnly ? <AsyncQuestion item={it} session={p.agent.name} now={p.now} {...(p.onAsyncAnswer ? { onAnswer: p.onAsyncAnswer } : {})} /> : <Markdown text={it.text} streaming={it.streaming} />}</div>
+          <div className={`body${it.error ? ' err' : ''}`}>{it.questions?.length && !p.readOnly ? <AsyncQuestion item={it} session={p.agent.name} now={p.now} {...(p.onAsyncAnswer ? { onAnswer: p.onAsyncAnswer } : {})} /> : <MessageText text={it.text} foldKey={messageBodyKey(it.key)} streaming={it.streaming} />}</div>
         </div>
       )
     case 'tool':
@@ -1171,8 +1184,8 @@ function Composer({ hidden = false, busy, needsYou, permFocused, link, disabled,
           setText((draft) => appendDictation(draft, spoken))
           requestAnimationFrame(() => ta.current?.focus())
         }} />
-        {attached.enabled && <><input ref={picker} className="attach-picker-input" type="file" multiple data-testid="attachment-picker" onChange={(e) => { attached.addFiles(Array.from(e.target.files ?? [])); e.target.value = '' }} /><button type="button" className="btn attach-picker" title={t("Прикрепить файлы")} aria-label={t("Прикрепить файлы")} onClick={() => picker.current?.click()} disabled={blocked}>＋</button></>}
-        {steerable && busy && !needsYou && <button type="button" className="btn" data-testid="steer" title={t("Уточнить текущую задачу без остановки")} onClick={() => void send('steer')} disabled={blocked || dictating || (!text.trim() && !attached.items.length)}>{t("Уточнить сейчас")}</button>}
+        {attached.enabled && <><input ref={picker} className="attach-picker-input" type="file" multiple data-testid="attachment-picker" onChange={(e) => { attached.addFiles(Array.from(e.target.files ?? [])); e.target.value = '' }} /><button type="button" className="btn attach-picker" title={t("Прикрепить файлы")} aria-label={t("Прикрепить файлы")} onClick={() => picker.current?.click()} disabled={blocked}><Icon name="plus" /></button></>}
+        {steerable && busy && !needsYou && <button type="button" className="btn" data-testid="steer" title={t("Уточнить текущую задачу без остановки")} aria-label={t("Уточнить сейчас")} onClick={() => void send('steer')} disabled={blocked || dictating || (!text.trim() && !attached.items.length)}><Icon name="steer" /><span className="sr-only">{t("Уточнить сейчас")}</span></button>}
         {busy && <button type="button" className="btn btn-danger composer-stop" onClick={onStop} data-testid="stop-turn" title={t("Остановить ход")} aria-label={t("Остановить ход")}><Icon name="stop" />{t("Стоп")}</button>}
         <button type="button" className="btn btn-primary" onClick={() => void send()} disabled={blocked || dictating || (!text.trim() && !attached.items.length)} data-testid="send"
           title={busy && queueable ? t("В очередь") : t("Отправить")} aria-label={busy && queueable ? t("В очередь") : t("Отправить")}>

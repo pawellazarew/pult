@@ -8,7 +8,7 @@ import { shortPath } from '../model/agents.js'
 import { suggestName } from '../model/newAgent.js'
 import { Dialog } from './Panels.js'
 import { Icon } from './common.js'
-import { Markdown } from './Markdown.js'
+import { MessageText } from './MessageText.js'
 
 export function ExternalSessions({ bridge, taken, onImported, onClose }: {
   bridge: PultBridge; taken: readonly string[]; onImported(name: string): void; onClose(): void
@@ -91,8 +91,8 @@ export function ExternalSessions({ bridge, taken, onImported, onClose }: {
           {reading ? <p className="mut">{t("Загружаю разговор…")}</p> : conversation ? <>
             <div className="external-meta"><strong>{conversation.session.title}</strong><span className="mono mut">{conversation.session.cwd}</span></div>
             {conversation.truncated && <p className="mut">{t("Показана последняя часть разговора. Копия сохранит полный контекст.")}</p>}
-            {conversation.messages.map((m, i) => <div key={i} className={`external-message external-${m.role}`}>
-              <span className="lbl">{m.role === 'user' ? t('ты') : provider}</span><Markdown text={m.text} />
+            {conversation.messages.map((m, i) => <div key={`${conversation.session.provider}:${conversation.session.id}:${i}`} className={`external-message external-${m.role}`}>
+              <span className="lbl">{m.role === 'user' ? t('ты') : provider}</span><MessageText text={m.text} />
             </div>)}
             {!conversation.messages.length && <p className="mut">{t("В этом разговоре нет текстовых сообщений")}</p>}
           </> : <p className="mut">{t("Выбери разговор")}</p>}

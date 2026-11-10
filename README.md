@@ -19,6 +19,13 @@ For a single CLI command, override the setting with `PULT_LANG=en pult --help` (
 The saved setting is `language: "auto" | "ru" | "en"` in `~/.pult/config.json`. Model responses and your own text are
 shown as written; changing the interface language does not translate your conversations.
 
+The **CLI** button in the sidebar footer opens daemon controls, diagnostics, and Claude Code / Codex
+install, update and sign-in actions. Local diagnostics also work while the daemon is stopped.
+See the [controls contract](docs/20-CLI-CONTROLS.md).
+
+Messages longer than 500 characters start collapsed. Use **Expand / Collapse** to read the full
+message. Copy still copies the complete original text, and search opens a matching message.
+
 ## Codex questions and mid-turn updates
 
 Codex questions appear as forms with choices and a custom answer field. Draft answers survive switching

@@ -11,6 +11,7 @@ const PATHS: Record<string, ReactElement> = {
   file: <><path d="M3.5 1.5h5l4 4v9h-9zM8.5 1.5v4h4M5.5 8h5M5.5 10.5h4" /></>,
   sidebar: <><rect x="2" y="2.5" width="12" height="11" rx="2" /><path d="M6 2.5v11" /></>,
   plus: <path d="M8 3v10M3 8h10" />,
+  steer: <><path d="M6.5 3.5H5.5a3 3 0 0 0 0 6h8" /><path d="M10 6l3.5 3.5L10 13" /></>,
   stop: <rect x="4" y="4" width="8" height="8" rx="1" fill="currentColor" stroke="none" />,
   check: <path d="M3.5 8.5l3 3 6-7" />,
   x: <path d="M4 4l8 8M12 4l-8 8" />,

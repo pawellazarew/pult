@@ -4,6 +4,7 @@ import type { ReactElement } from 'react'
 import type { SpeechStatus } from '../../../shell/src/contract.js'
 import { errorText } from '../bridge.js'
 import { chooseMicrophone, pcmWav } from '../model/speech.js'
+import { Icon } from './common.js'
 import './dictation.css'
 
 type Phase = 'idle' | 'starting' | 'recording' | 'transcribing'
@@ -166,7 +167,7 @@ export function Dictation({ disabled, onText, onBusy, settingsOnly = false }: { 
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8"/></svg>
       {phase === 'recording' ? t`${seconds} с · Готово` : phase === 'transcribing' ? t('Распознаю…') : phase === 'starting' ? t('Подключаю…') : null}
     </button>
-    <button type="button" className="btn dictation-options" aria-label={t("Настройки диктовки")} aria-expanded={settings} disabled={phase !== 'idle'} onClick={() => { if (document.querySelector('[data-testid="open-settings"]')) window.dispatchEvent(new CustomEvent('pult:settings', { detail: 'voice' })); else setSettings(!settings) }}>⌄</button>
+    <button type="button" className="btn dictation-options" aria-label={t("Настройки диктовки")} aria-expanded={settings} disabled={phase !== 'idle'} onClick={() => { if (document.querySelector('[data-testid="open-settings"]')) window.dispatchEvent(new CustomEvent('pult:settings', { detail: 'voice' })); else setSettings(!settings) }}><Icon name="chevd" /></button>
     {phase !== 'idle' && <button type="button" className="btn" onClick={cancel} title={t("Отменить диктовку (Esc)")}>{t("Отмена")}</button>}
     {phase === 'recording' && <span className="dictation-state" role="status">{activeMic}{t("· до 2 минут")}</span>}
     </>}

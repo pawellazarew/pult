@@ -212,6 +212,11 @@ export interface SpeechBridge {
   cancel(): Promise<void>
 }
 
+export interface MaintenanceInfo { home: string; packageRoot: string; node: string | null; logs: string; serviceLog: string; operations?: ProviderOperation[] }
+export type ProviderAction = 'install' | 'update' | 'login'
+export interface ProviderTool { provider: 'claude' | 'codex'; path: string | null; realpath: string | null; version: string | null; source: 'missing' | 'application' | 'homebrew' | 'npm' | 'native' | 'unknown' }
+export interface ProviderOperation { id: string; provider: 'claude' | 'codex'; action: ProviderAction; state: 'running' | 'succeeded' | 'failed' | 'handoff' | 'unknown'; command: string; application?: string; exitCode?: number; message?: string }
+
 export interface PultBridge {
   speech?: SpeechBridge
   readonly version: number
@@ -236,6 +241,12 @@ export interface PultBridge {
   onConnection(cb: (s: ConnState) => void): () => void
   /** Поднять демона (кнопка «запустить» на плашке «демон недоступен»). */
   startDaemon(): Promise<void>
+  restartDaemon?(): Promise<boolean>
+  maintenanceInfo?(): Promise<MaintenanceInfo>
+  runDoctor?(): Promise<import('../../src/env/doctor.js').DoctorReport>
+  providerTools?(): Promise<ProviderTool[]>
+  providerAction?(provider: 'claude' | 'codex', action: ProviderAction): Promise<ProviderOperation | null>
+  providerOperation?(id: string): Promise<ProviderOperation>
   /** Остановить демона. main спрашивает подтверждение системным диалогом; отказ человека — `false`. */
   stopDaemon(): Promise<boolean>
   /** Системный выбор папки; `null` — человек передумал. */
@@ -318,6 +329,12 @@ export const IPC = {
   connectionGet: 'pult:connection-get',
   startDaemon: 'pult:start-daemon',
   stopDaemon: 'pult:stop-daemon',
+  restartDaemon: 'pult:restart-daemon',
+  maintenanceInfo: 'pult:maintenance-info',
+  runDoctor: 'pult:run-doctor',
+  providerTools: 'pult:provider-tools',
+  providerAction: 'pult:provider-action',
+  providerOperation: 'pult:provider-operation',
   pickFolder: 'pult:pick-folder',
   revealPath: 'pult:reveal-path',
   openFile: 'pult:open-file',

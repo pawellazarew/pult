@@ -17,7 +17,7 @@ export function Header(p: {
   providers?: ProviderCatalog | null; providersChecking?: boolean; onProvidersCheck?(): void
   doctorTone: Tone; inboxCount: number; inboxOpen: boolean
   sidebarHidden?: boolean; onToggleSidebar?(): void
-  onDoctor(): void; onInbox(): void
+  onDoctor(): void; onInbox(): void; onMaintenance?(): void
   runtimeOpen?: boolean; runtimeAvailable?: boolean; onRuntime?(): void
   filesOpen?: boolean; filesAvailable?: boolean; onFiles?(): void
   onSettings?(): void; onHelp?(): void; onNews?(): void; onExternal?(): void; onAddProject?(): void
@@ -47,6 +47,7 @@ export function Header(p: {
         {p.onExternal && <button type="button" className="footer-menu-item" disabled={!up} onClick={p.onExternal} data-testid="open-external-sessions"><Icon name="folder" />{t('Существующие чаты')}</button>}
       </div>
     </details>
+    {p.onMaintenance && <button type="button" className="footer-icon maintenance-shortcut" title={t('Управление Пультом и CLI')} aria-label={t('Управление Пультом и CLI')} onClick={p.onMaintenance} data-testid="open-maintenance">CLI</button>}
     <span className="grow" />
     <button type="button" className="footer-icon" aria-label={t('Помощь')} title={t('Помощь')} data-testid="open-help" aria-haspopup="menu" aria-expanded={help !== null} onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); setHelp(help ? null : { x: r.left, y: r.top - 6 }) }}><Icon name="help" /></button>
     <button type="button" className="footer-icon" title={t('Настройки')} aria-label={t('Настройки')} onClick={p.onSettings} data-testid="open-settings"><Icon name="settings" /></button>
@@ -55,6 +56,7 @@ export function Header(p: {
       { label: t('Сочетания клавиш'), onSelect: () => p.onHelp?.(), testId: 'help-shortcuts' },
       { label: t('Что нового'), onSelect: () => p.onNews?.(), testId: 'help-news' },
       { label: t('Запустить диагностику'), onSelect: p.onDoctor, testId: 'help-diagnostics' },
+      ...(p.onMaintenance ? [{ label: t('Управление Пультом и CLI'), onSelect: p.onMaintenance, testId: 'help-maintenance' }] : []),
       'sep', { note: t`Пульт ${up && p.conn.state === 'up' ? p.conn.daemon.version : '—'}` },
     ]} />}
   </footer>

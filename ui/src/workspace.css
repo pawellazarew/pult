@@ -93,9 +93,10 @@
 .composer .composer-preferences .settings > .provider-icon { width: 16px; height: 16px; }
 .composer .composer-preferences .settings > .ic { transform: none; }
 .composer-actions { flex: none; display: flex; gap: 4px; align-items: center; }
-.composer .composer-actions > .btn-primary, .composer .composer-actions > .composer-stop { width: 32px; height: 32px; padding: 7px; border-radius: 50%; font-size: 0; justify-content: center; }
+.composer .composer-actions > .btn-primary, .composer .composer-actions > .composer-stop { width: 32px; height: 32px; padding: 7px; border-radius: 50%; font-size: 0; justify-content: center; gap: 0; }
 .composer .composer-actions > .btn-primary .ic, .composer .composer-actions > .composer-stop .ic { width: 18px; height: 18px; }
-.composer .composer-actions > .attach-picker { width: 30px; height: 30px; border: 0; padding: 0; font-size: 21px; background: transparent; color: var(--mut); }
+.composer .composer-actions > .attach-picker { width: 30px; height: 30px; border: 0; padding: 0; justify-content: center; gap: 0; background: transparent; color: var(--mut); }
+.composer .composer-actions > .attach-picker > .ic { width: 18px; height: 18px; }
 .chat-info .help-btn { display: none; }
 .attachment-card { border-radius: 10px; max-width: 270px; }
 /* Левый край кнопки = левый край рамки поля ввода: тот же отступ, что у .composer, плюс половина лишней ширины. */
@@ -105,7 +106,7 @@
 .subagent-tabs > button, .subagent-tab > button { display: flex; align-items: center; gap: 7px; max-width: 230px; padding: 8px; border: 0; background: transparent; color: var(--mut); font: 12px var(--body); white-space: nowrap; cursor: pointer; overflow: hidden; text-overflow: ellipsis; }
 .subagent-tabs > button[aria-selected="true"], .subagent-tab.active { border-bottom: 2px solid var(--accent); color: var(--ink); background: var(--accent-soft); }
 .subagent-tab { display: flex; align-items: center; flex: none; }
-.subagent-tab .subagent-tab-close { width: 24px; padding: 3px; }
+.subagent-tab .subagent-tab-close { width: 24px; padding: 3px; justify-content: center; gap: 0; }
 .subagent-view { display: flex; flex: 1; flex-direction: column; min-height: 0; }
 .subagent-feed { flex: 1; min-height: 0; overflow: auto; }
 .subagent-heading { display: flex; justify-content: space-between; gap: 12px; color: var(--mut); font-size: 12px; }
@@ -151,7 +152,7 @@
   .composer .chat-status { flex: 1 1 190px; min-width: min(100%,190px); }.composer-toolbar { gap: 3px; }
   .composer .chat-status .settings { max-width: 140px; gap: 4px; overflow: hidden; font-size: 11px; }
   .composer .chat-status .approval { max-width: 70px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .composer-actions { gap: 2px; }.composer-actions .btn[data-testid="steer"] { font-size: 0; width: 28px; padding: 0; }.composer-actions .btn[data-testid="steer"]::before { content: '↪'; font-size: 17px; }
+  .composer-actions { gap: 2px; }
   .parent-callout { width: calc(100% - 16px); padding: 10px; margin-bottom: max(8px,env(safe-area-inset-bottom)); }.parent-callout .btn { font-size: 11px; padding: 0 8px; }
   .app[data-interface-mode="focus"] .grid > .agents-col { width: 64px; }
   .conversation-summary { display: none; }
@@ -181,10 +182,10 @@
 
 /* Keep controls in their own row when a narrow screen cannot fit the active-turn actions. */
 .composer .composer-actions > .btn { flex: none; }
-.composer .composer-actions > .btn[data-testid="steer"] { width: 30px; padding: 0; font-size: 0; justify-content: center; }
-.composer .composer-actions > .btn[data-testid="steer"]::before { content: '↪'; font-size: 18px; }
+.composer .composer-actions > .btn[data-testid="steer"] { width: 30px; padding: 0; font-size: 0; justify-content: center; gap: 0; }
+.composer .composer-actions > .btn[data-testid="steer"] > .ic { width: 18px; height: 18px; }
 .composer .dictation-mic { width: 32px; padding: 0; justify-content: center; border: 0; background: transparent; }
-.composer .dictation-options { width: 20px; padding: 0; justify-content: center; border: 0; background: transparent; }
+.composer .dictation-options { width: 20px; padding: 0; justify-content: center; gap: 0; border: 0; background: transparent; }
 @media(max-width:760px) {
   .composer .composer-actions > .btn-primary, .composer .composer-actions > .composer-stop, .composer .dictation-mic { width: 34px; height: 34px; }
 }
@@ -207,3 +208,16 @@
   .navigation-scrim { left: min(320px, 88vw); }
   .app[data-interface-mode="focus"] .navigation-scrim { left: 64px; }
 }
+
+/* Maintenance uses the existing dialog and compact control vocabulary. */
+.maintenance-shortcut { font-family: var(--mono); font-size: 10px; font-weight: 600; }
+.maintenance-stack { display: flex; flex-direction: column; gap: 20px; }
+.maintenance-section { min-width: 0; }
+.maintenance-section h3 { margin: 0; font-size: 13px; }
+.maintenance-section p { margin: 8px 0; }
+.maintenance-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.maintenance-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.maintenance-cli { border-top: 1px solid var(--hair); margin-top: 14px; padding-top: 14px; }
+.maintenance-path { overflow-wrap: anywhere; font-size: 11px; }
+.maintenance-operation { margin-top: 14px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 12px; }
+.maintenance-operation code { display: block; white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 8px; }
