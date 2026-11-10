@@ -1,0 +1,31 @@
+name: rust-core
+on:
+  pull_request:
+    paths: ['rust/**', 'protocol/**', 'scripts/generate-rpc-catalog.mjs', 'src/core/methodCatalog.ts', '.github/workflows/rust-core.yml']
+  push:
+    branches: [main]
+    paths: ['rust/**', 'protocol/**', 'scripts/generate-rpc-catalog.mjs', 'src/core/methodCatalog.ts', '.github/workflows/rust-core.yml']
+permissions:
+  contents: read
+jobs:
+  core:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
+          components: rustfmt, clippy
+      - run: npm ci && npm run build
+      - run: node scripts/generate-rpc-catalog.mjs --check
+      - run: cargo fmt --manifest-path rust/Cargo.toml --check
+      - run: cargo clippy --manifest-path rust/Cargo.toml --locked --all-targets -- -D warnings
+      - run: cargo test --manifest-path rust/Cargo.toml --locked
