@@ -1,0 +1,132 @@
+{
+  "schemaVersion": 1,
+  "measuredAt": "2026-11-10T20:09:59.888Z",
+  "commit": "1df3ed5cd1a0427b9655663d974d3022d01bcf51",
+  "trackedDirty": false,
+  "scriptSha256": "f1da999ab8cfa175641702dead3d669f931e77cd7834e2f19961c4e892d6b563",
+  "host": {
+    "platform": "darwin",
+    "release": "25.6.0",
+    "arch": "arm64",
+    "cpu": "Apple M1 Pro",
+    "logicalCpus": 10,
+    "node": "v24.21.0"
+  },
+  "scope": "Fixture baseline: real isolated daemon and RPC; fake Codex threads sharing one app-server; daemon RSS includes imported test helpers. No Electron, real model traffic, or claims about production throughput.",
+  "rows": [
+    {
+      "sessions": 0,
+      "provider": "fake-codex-app-server",
+      "startupMs": 118.68387499999999,
+      "status": {
+        "n": 30,
+        "p50Ms": 0.2789579999999887,
+        "p95Ms": 0.42129099999999653
+      },
+      "idleCpuPercentOneCore": 0.020467631300738396,
+      "daemonRssBytes": 75366400,
+      "processTree": {
+        "processCount": 1,
+        "rssBytes": 75366400
+      },
+      "histories": [
+        {
+          "events": 100,
+          "firstPageMs": 1.5965840000001208,
+          "repeatedFirstPage": {
+            "n": 10,
+            "p50Ms": 0.41895900000008623,
+            "p95Ms": 0.6101670000000468
+          },
+          "responseBytes": 40133
+        },
+        {
+          "events": 10000,
+          "firstPageMs": 24.95658400000002,
+          "repeatedFirstPage": {
+            "n": 10,
+            "p50Ms": 9.554417000000285,
+            "p95Ms": 11.565958000000137
+          },
+          "responseBytes": 523964
+        }
+      ]
+    },
+    {
+      "sessions": 1,
+      "provider": "fake-codex-app-server",
+      "startupMs": 124.36354100000017,
+      "status": {
+        "n": 30,
+        "p50Ms": 0.2871250000002874,
+        "p95Ms": 0.6741659999997864
+      },
+      "idleCpuPercentOneCore": 0.15375035431968825,
+      "daemonRssBytes": 75956224,
+      "processTree": {
+        "processCount": 3,
+        "rssBytes": 157319168
+      },
+      "histories": [
+        {
+          "events": 100,
+          "firstPageMs": 1.371375000000171,
+          "repeatedFirstPage": {
+            "n": 10,
+            "p50Ms": 0.5183750000001055,
+            "p95Ms": 0.5779999999999745
+          },
+          "responseBytes": 40139
+        },
+        {
+          "events": 10000,
+          "firstPageMs": 32.16329200000018,
+          "repeatedFirstPage": {
+            "n": 10,
+            "p50Ms": 10.886459000000286,
+            "p95Ms": 18.869792000000416
+          },
+          "responseBytes": 523967
+        }
+      ]
+    },
+    {
+      "sessions": 10,
+      "provider": "fake-codex-app-server",
+      "startupMs": 168.5659999999998,
+      "status": {
+        "n": 30,
+        "p50Ms": 0.3427499999997963,
+        "p95Ms": 2.1019999999998618
+      },
+      "idleCpuPercentOneCore": 0.030220859125165953,
+      "daemonRssBytes": 78069760,
+      "processTree": {
+        "processCount": 2,
+        "rssBytes": 129318912
+      },
+      "histories": [
+        {
+          "events": 100,
+          "firstPageMs": 1.8577499999992142,
+          "repeatedFirstPage": {
+            "n": 10,
+            "p50Ms": 0.390041999999994,
+            "p95Ms": 0.626749999999447
+          },
+          "responseBytes": 40163
+        },
+        {
+          "events": 10000,
+          "firstPageMs": 21.029125000000022,
+          "repeatedFirstPage": {
+            "n": 10,
+            "p50Ms": 10.55108299999938,
+            "p95Ms": 16.02258299999994
+          },
+          "responseBytes": 523985
+        }
+      ]
+    }
+  ]
+}
