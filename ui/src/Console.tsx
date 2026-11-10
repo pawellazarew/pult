@@ -1592,11 +1592,40 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     <div className="app" data-conn={conn.state} data-interface-mode={appearance.mode} data-nav-open={mobileNavOpen ? "true" : "false"}>
 
 
-      {conn.state === 'up' && settings?.disk?.status.state === 'low' && <div className="banner" role="status" data-testid="disk-warning" style={{ flexWrap: 'wrap' }}>
-        <Icon name="alert" /><span className="grow" style={{ flex: '1 1 240px', minWidth: 0 }} title={settings.disk.status.path}>{tr('Мало места на диске с данными Pult.')} {freeDiskText(settings.disk.status)}</span>
-        <button type="button" className="btn" onClick={openCleanupDraft} data-testid="disk-cleanup">{tr('Начать уборку')}</button>
-        <button type="button" className="btn" onClick={() => setModal({ type: 'settings', section: 'storage' })}>{tr('Настройки хранения')}</button>
-      </div>}
+
+      {mobile && mobileNavOpen && <button type="button" className="navigation-scrim" aria-label={tr("Закрыть навигацию")} onClick={() => setMobileNavOpen(false)} />}
+      <WorkspaceLayout mode={appearance.mode} sidebarHidden={effectiveSidebarHidden} inboxOpen={inboxOpen || summaryShown} filesOpen={filesOpen || (!!current && runtimeOpen)} filesExpanded={filesOpen && filesExpanded}>
+        <div className="agents-col">
+          <ProjectTree mode={appearance.mode} groups={groups} selected={current?.name ?? null} revealSend={revealSend} now={now} collapsed={collapsed}
+            temporaryChats={temporaryChats.listing?.chats ?? []} activeTemporaryId={temporaryChats.activeId}
+            onSelectTemporary={openTemporary} onNewTemporary={newTemporary}
+            temporaryAvailable={conn.state === 'up' && !!temporaryChats.listing?.capabilities.some((item) => item.available)} temporaryStarting={temporaryChats.starting}
+            drafts={drafts} activeDraft={draft?.id ?? null} onDiscardDraft={discardDraft}
+            onOpenDraft={(id) => {
+              temporaryChats.activate(null)
+              setMobileNavOpen(false)
+              // Открыл сам — поле черновика из ссылки дальше ведёт себя как обычное (фокус).
+              setQuietDrafts((q) => { if (!q.has(id)) return q; const n = new Set(q); n.delete(id); return n })
+              if (id !== activeDraft) { leaveDraft(); setActiveDraft(id) }
+            }}
+            onSelect={select} onNew={(cwd) => openDraft(cwd)} onToggle={toggleProject}
+            onAddProject={() => void addProject()} onPin={pinProject}
+            onHide={(path, sessions, busy) => setModal({ type: 'hide', path, sessions, busy })}
+            archived={archivedViews} onRename={(name) => setModal({ type: 'rename', name })}
+            onArchive={archiveSession} onRemove={(name) => setModal({ type: 'rm', name })} onExport={exportAgent}
+            onReveal={(p) => void bridge.revealPath(p)} onBrowser={setBrowser} />
+      <Header conn={conn} status={status} statusAt={statusAt} now={now} guard={guard} usage={ui.usage}
+        providers={providers} providersChecking={providersChecking} onProvidersCheck={() => void checkProviders()}
+        doctorTone={doctorTone(doctor.report)} inboxCount={inboxNums.all} inboxOpen={inboxOpen}
+        sidebarHidden={sidebarHidden} onToggleSidebar={() => setSidebarHidden((v) => !v)}
+        runtimeOpen={runtimeOpen} runtimeAvailable={!!current && conn.state === 'up'} onRuntime={() => { setMobileNavOpen(false); setRuntimeOpen((v) => !v); setFilesOpen(false); setInboxOpen(false) }}
+        filesOpen={filesOpen} filesAvailable={!!current && !!bridge.listFiles && !!bridge.previewFile} onFiles={() => filesOpen ? closeFiles() : showFiles()}
+        onDoctor={() => { setModal({ type: 'doctor' }); if (!doctor.loading) void runDoctor() }}
+        onAddProject={() => void addProject()} onExternal={() => setModal({ type: 'external' })}
+        onHelp={() => setModal({ type: 'help' })} onSettings={() => setModal({ type: 'settings' })}
+        onNews={() => { void followLink(bridge, 'https://github.com/pawellazarew/pult/releases', 'https://github.com/pawellazarew/pult/releases') }}
+        onInbox={() => { setMobileNavOpen(false); setFilesOpen(false); setRuntimeOpen(false); setInboxOpen((v) => !v) }}
+        noticeTone={view.banner || blocked.length || guard.tone === 'fail' || bannerError ? 'fail' : updateView || updNote || settings?.disk?.status.state === 'low' ? 'wait' : undefined}>
       {view.banner && (
         <div className="banner banner-fail" role="alert" data-testid="conn-banner">
           <Icon name="alert" />
@@ -1643,38 +1672,13 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         </div>
       )}
 
-      {mobile && mobileNavOpen && <button type="button" className="navigation-scrim" aria-label={tr("Закрыть навигацию")} onClick={() => setMobileNavOpen(false)} />}
-      <WorkspaceLayout mode={appearance.mode} sidebarHidden={effectiveSidebarHidden} inboxOpen={inboxOpen || summaryShown} filesOpen={filesOpen || (!!current && runtimeOpen)} filesExpanded={filesOpen && filesExpanded}>
-        <div className="agents-col">
-          <ProjectTree mode={appearance.mode} groups={groups} selected={current?.name ?? null} revealSend={revealSend} now={now} collapsed={collapsed}
-            temporaryChats={temporaryChats.listing?.chats ?? []} activeTemporaryId={temporaryChats.activeId}
-            onSelectTemporary={openTemporary} onNewTemporary={newTemporary}
-            temporaryAvailable={conn.state === 'up' && !!temporaryChats.listing?.capabilities.some((item) => item.available)} temporaryStarting={temporaryChats.starting}
-            drafts={drafts} activeDraft={draft?.id ?? null} onDiscardDraft={discardDraft}
-            onOpenDraft={(id) => {
-              temporaryChats.activate(null)
-              setMobileNavOpen(false)
-              // Открыл сам — поле черновика из ссылки дальше ведёт себя как обычное (фокус).
-              setQuietDrafts((q) => { if (!q.has(id)) return q; const n = new Set(q); n.delete(id); return n })
-              if (id !== activeDraft) { leaveDraft(); setActiveDraft(id) }
-            }}
-            onSelect={select} onNew={(cwd) => openDraft(cwd)} onToggle={toggleProject}
-            onAddProject={() => void addProject()} onPin={pinProject}
-            onHide={(path, sessions, busy) => setModal({ type: 'hide', path, sessions, busy })}
-            archived={archivedViews} onRename={(name) => setModal({ type: 'rename', name })}
-            onArchive={archiveSession} onRemove={(name) => setModal({ type: 'rm', name })} onExport={exportAgent}
-            onReveal={(p) => void bridge.revealPath(p)} onBrowser={setBrowser} />
-      <Header conn={conn} status={status} statusAt={statusAt} now={now} guard={guard} usage={ui.usage}
-        providers={providers} providersChecking={providersChecking} onProvidersCheck={() => void checkProviders()}
-        doctorTone={doctorTone(doctor.report)} inboxCount={inboxNums.all} inboxOpen={inboxOpen}
-        sidebarHidden={sidebarHidden} onToggleSidebar={() => setSidebarHidden((v) => !v)}
-        runtimeOpen={runtimeOpen} runtimeAvailable={!!current && conn.state === 'up'} onRuntime={() => { setMobileNavOpen(false); setRuntimeOpen((v) => !v); setFilesOpen(false); setInboxOpen(false) }}
-        filesOpen={filesOpen} filesAvailable={!!current && !!bridge.listFiles && !!bridge.previewFile} onFiles={() => filesOpen ? closeFiles() : showFiles()}
-        onDoctor={() => { setModal({ type: 'doctor' }); if (!doctor.loading) void runDoctor() }}
-        onAddProject={() => void addProject()} onExternal={() => setModal({ type: 'external' })}
-        onHelp={() => setModal({ type: 'help' })} onSettings={() => setModal({ type: 'settings' })}
-        onNews={() => { void followLink(bridge, 'https://github.com/pawellazarew/pult/releases', 'https://github.com/pawellazarew/pult/releases') }}
-        onInbox={() => { setMobileNavOpen(false); setFilesOpen(false); setRuntimeOpen(false); setInboxOpen((v) => !v) }} />
+      {conn.state === 'up' && settings?.disk?.status.state === 'low' && <div className="banner" role="status" data-testid="disk-warning" style={{ flexWrap: 'wrap' }}>
+        <Icon name="alert" /><span className="grow" style={{ flex: '1 1 240px', minWidth: 0 }} title={settings.disk.status.path}>{tr('Мало места на диске с данными Pult.')} {freeDiskText(settings.disk.status)}</span>
+        <button type="button" className="btn" onClick={openCleanupDraft} data-testid="disk-cleanup">{tr('Начать уборку')}</button>
+        <button type="button" className="btn" onClick={() => setModal({ type: 'settings', section: 'storage' })}>{tr('Настройки хранения')}</button>
+      </div>}
+
+      </Header>
           <div className="ag-foot mono journal" data-testid="event-count" title={tr("Курсор журнала демона (служебный, скрыт с экрана)")}>{tr("журнал #")}{ui.lastId}</div>
         </div>
         <div className="conv-col">
