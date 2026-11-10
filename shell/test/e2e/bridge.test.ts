@@ -48,7 +48,8 @@ describe('окно: мост, подписка, переподключение',
     assert.deepEqual(probe.bridgeKeys, [
       'attachments', 'call', 'clipboardFilePaths', 'clipboardImage', 'copyText', 'language', 'languageOverride', 'listFiles', 'notify', 'onConnection', 'onNavigate', 'openExternal', 'openFile', 'openImage', 'pathsForFiles', 'pickFolder', 'previewFile', 'readImage', 'reloadWindow', 'revealPath', 'runtimeView', 'saveImage',
       'speech', 'startDaemon', 'stopDaemon', 'subscribe', 'testMode', 'version',
-    ])
+      'maintenanceInfo', 'providerAction', 'providerOperation', 'providerTools', 'restartDaemon', 'runDoctor',
+    ].sort())
   })
 
   it('окно 0.1.16: clipboardImage.save(сессия) пишет только под PULT_HOME/attachments/<сессия> — путь и байты окна мимо', async () => {

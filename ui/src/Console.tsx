@@ -16,6 +16,7 @@ import { CMD, Icon, IS_MAC, Kbd } from './components/common.js'
 import { Conversation } from './components/Conversation.js'
 import type { SendMode } from './components/Conversation.js'
 import { Header } from './components/Header.js'
+import { MaintenancePanel } from './components/Maintenance.js'
 import { useAppearance } from './useAppearance.js'
 import { useTemporaryChats } from './useTemporaryChats.js'
 import { TemporaryChat } from './components/TemporaryChat.js'
@@ -103,7 +104,7 @@ declare global {
   }
 }
 
-type Modal = null | { type: 'external' } | { type: 'doctor' } | { type: 'mcp' } | { type: 'stop'; name: string } | { type: 'rm'; name: string } | { type: 'hide'; path: string; sessions: readonly string[]; busy: readonly string[] } | { type: 'rename'; name: string } | { type: 'help' } | { type: 'search' }
+type Modal = null | { type: 'maintenance' } | { type: 'external' } | { type: 'doctor' } | { type: 'mcp' } | { type: 'stop'; name: string } | { type: 'rm'; name: string } | { type: 'hide'; path: string; sessions: readonly string[]; busy: readonly string[] } | { type: 'rename'; name: string } | { type: 'help' } | { type: 'search' }
   | { type: 'temporary-end'; identity: TemporaryIdentity }
   | { type: 'settings'; section?: import('./components/Settings.js').SettingsSection } | { type: 'configure'; name: string; pick: SettingsPick; reason: 'misfit'; text?: string }
   /** Шаг A: полный доступ без согласия — один диалог на всё время; после «Разрешить» смена уходит сама. */
@@ -354,12 +355,14 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   const runDoctor = useCallback(async (): Promise<void> => {
     setDoctor((d) => ({ ...d, loading: true, error: null }))
     try {
-      const report = (await bridge.call('doctor.run', { net: true, locale: getLanguage() })) as DoctorReport
+      const report = (conn.state !== 'up' && bridge.runDoctor
+        ? await bridge.runDoctor()
+        : await bridge.call('doctor.run', { net: true, locale: getLanguage() })) as DoctorReport
       setDoctor({ report, loading: false, error: null })
     } catch (e) {
       setDoctor((d) => ({ ...d, loading: false, error: errorText(e) }))
     }
-  }, [bridge])
+  }, [bridge, conn.state])
   // Пути файлов для поля реплики (⌘V из Finder, перетаскивание). Старая оболочка мост не знает — поле как раньше.
   // Окно 0.1.16 ещё и сохраняет картинку из буфера (`clipboardImage.save`); у старого метода нет — ⌘V на картинке
   // подсказывает обновить окно.
@@ -1620,6 +1623,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         sidebarHidden={sidebarHidden} onToggleSidebar={() => setSidebarHidden((v) => !v)}
         runtimeOpen={runtimeOpen} runtimeAvailable={!!current && conn.state === 'up'} onRuntime={() => { setMobileNavOpen(false); setRuntimeOpen((v) => !v); setFilesOpen(false); setInboxOpen(false) }}
         filesOpen={filesOpen} filesAvailable={!!current && !!bridge.listFiles && !!bridge.previewFile} onFiles={() => filesOpen ? closeFiles() : showFiles()}
+        onMaintenance={() => setModal({ type: 'maintenance' })}
         onDoctor={() => { setModal({ type: 'doctor' }); if (!doctor.loading) void runDoctor() }}
         onAddProject={() => void addProject()} onExternal={() => setModal({ type: 'external' })}
         onHelp={() => setModal({ type: 'help' })} onSettings={() => setModal({ type: 'settings' })}
@@ -1767,6 +1771,9 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
 
       {modal?.type === 'external' && <ExternalSessions bridge={bridge} taken={records.map((r) => r.name)} onClose={() => setModal(null)}
         onImported={(name) => { select(name); setModal(null); void refreshAgents() }} />}
+      {modal?.type === 'maintenance' && <MaintenancePanel bridge={bridge} conn={conn} status={status} doctor={doctor} starting={starting}
+        onStart={startDaemon} onDoctor={() => setModal({ type: 'doctor' })} onRunDoctor={runDoctor} onCopy={copy}
+        onUpdates={() => setModal({ type: 'settings', section: 'updates' })} onClose={() => setModal(null)} />}
       {modal?.type === 'doctor' && (
         <DoctorPanel report={doctor.report} groups={doctorGroupsList} loading={doctor.loading} error={doctor.error} copied={copied}
           onRerun={() => void runDoctor()} onCopy={copy} onClose={() => setModal(null)} onMcp={openMcp} />

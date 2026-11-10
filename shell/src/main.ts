@@ -20,6 +20,10 @@ import {
 import type { IpcMainEvent, IpcMainInvokeEvent, MenuItemConstructorOptions, NativeImage, WebContents } from 'electron'
 import { readScopedImage } from '../../src/core/images.js'
 import { LocalSpeech } from './speech.js'
+import { Maintenance } from './maintenance.js'
+import { execAsync } from '../../src/env/exec.js'
+import { buildChildEnv } from '../../src/env/allowlist.js'
+import { redactString } from '../../src/core/log.js'
 import { HtmlPreviews, HTML_PREVIEW_SCHEME } from './htmlPreview.js'
 import { localFile } from './localFile.js'
 import { listWorkspaceFiles, readWorkspaceFile } from '../../src/core/fileBrowser.js'
@@ -81,6 +85,8 @@ let uiRoot = ''
 let speech: LocalSpeech | null = null
 let microphoneUntil = 0
 let pultHome = ''
+let maintenance: Maintenance | null = null
+let daemonActionBusy = false
 let setPackageLanguage: ((value: 'ru' | 'en') => void) | null = null
 let tray: Tray | null = null
 let runtimeWeb: RuntimeWeb | null = null
@@ -548,25 +554,73 @@ function registerIpc(): void {
 
   ipcMain.handle(IPC.startDaemon, async (e): Promise<CallReply> => {
     if (!trusted(e) || !link) return fail('forbidden', tr('вызов не из окна Пульта'))
+    if (daemonActionBusy) return fail('busy', tr('Действие с демоном уже выполняется.'))
+    daemonActionBusy = true
     try { await link.startDaemon(); return { ok: true, result: null } } catch (err) { return toReply(err) }
+    finally { daemonActionBusy = false }
   })
 
   ipcMain.handle(IPC.stopDaemon, async (e): Promise<CallReply> => {
     if (!trusted(e) || !link) return fail('forbidden', tr('вызов не из окна Пульта'))
-    const win = BrowserWindow.fromWebContents(e.sender)
-    // Подтверждение — системным диалогом в main, а не только в интерфейсе: код страницы сам
-    // остановить демона не может, нужен клик человека.
-    const opts = {
-      type: 'warning' as const,
-      buttons: [tr('Остановить'), tr('Отмена')],
-      defaultId: 1,
-      cancelId: 1,
-      message: tr('Остановить демона Пульта?'),
-      detail: tr('Все агенты остановятся, текущие ходы прервутся. Окно останется открытым — запустить демона можно кнопкой.'),
-    }
-    const { response } = win ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts)
-    if (response !== 0) return { ok: true, result: false }
-    try { await link.stopDaemon(); return { ok: true, result: true } } catch (err) { return toReply(err) }
+    if (daemonActionBusy) return fail('busy', tr('Действие с демоном уже выполняется.'))
+    daemonActionBusy = true
+    try {
+      const win = BrowserWindow.fromWebContents(e.sender)
+      const opts = {
+        type: 'warning' as const, buttons: [tr('Остановить'), tr('Отмена')], defaultId: 1, cancelId: 1,
+        message: tr('Остановить демона Пульта?'),
+        detail: tr('Все агенты остановятся, текущие ходы прервутся. Окно останется открытым — запустить демона можно кнопкой.'),
+      }
+      const { response } = win ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts)
+      if (response !== 0) return { ok: true, result: false }
+      await link.stopDaemon()
+      return { ok: true, result: true }
+    } catch (error) { return toReply(error) }
+    finally { daemonActionBusy = false }
+  })
+
+  ipcMain.handle(IPC.restartDaemon, async (e): Promise<CallReply> => {
+    if (!trusted(e) || !link) return fail('forbidden', tr('вызов не из окна Пульта'))
+    if (daemonActionBusy) return fail('busy', tr('Действие с демоном уже выполняется.'))
+    daemonActionBusy = true
+    try {
+      const win = BrowserWindow.fromWebContents(e.sender)
+      const opts = { type: 'warning' as const, buttons: [tr('Перезапустить'), tr('Отмена')], defaultId: 1, cancelId: 1,
+        message: tr('Перезапустить демона Пульта?'), detail: tr('Текущие ходы прервутся. Разговоры сохранятся, окно подключится к новому процессу.') }
+      const { response } = win ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts)
+      if (response !== 0) return { ok: true, result: false }
+      await link.restartDaemon()
+      return { ok: true, result: true }
+    } catch (error) { return toReply(error) }
+    finally { daemonActionBusy = false }
+  })
+  ipcMain.handle(IPC.maintenanceInfo, (e): CallReply => trusted(e) && maintenance ? { ok: true, result: maintenance.info() } : fail('forbidden', tr('вызов не из окна Пульта')))
+  ipcMain.handle(IPC.runDoctor, async (e): Promise<CallReply> => {
+    if (!trusted(e) || !maintenance) return fail('forbidden', tr('вызов не из окна Пульта'))
+    try { return { ok: true, result: await maintenance.doctor() } } catch (error) { return toReply(error) }
+  })
+  ipcMain.handle(IPC.providerTools, async (e): Promise<CallReply> => {
+    if (!trusted(e) || !maintenance) return fail('forbidden', tr('вызов не из окна Пульта'))
+    try { return { ok: true, result: await maintenance.providers() } } catch (error) { return toReply(error) }
+  })
+  ipcMain.handle(IPC.providerAction, async (e, provider: unknown, action: unknown): Promise<CallReply> => {
+    if (!trusted(e) || !maintenance) return fail('forbidden', tr('вызов не из окна Пульта'))
+    if ((provider !== 'claude' && provider !== 'codex') || (action !== 'install' && action !== 'update' && action !== 'login')) return fail('invalid_params', tr('Неверное действие CLI.'))
+    try {
+      const prepared = await maintenance.prepare(provider, action)
+      const win = BrowserWindow.fromWebContents(e.sender)
+      const opts = { type: 'question' as const, buttons: [tr('Открыть Терминал'), tr('Отмена')], defaultId: 1, cancelId: 1,
+        message: tr`Действие с CLI ${provider}`, detail: (prepared.uncertain ? tr('Исход предыдущего действия неизвестен. Проверь Терминал перед повтором.') + '\n\n' : '') + tr`Команда выполнится на этом Mac в отдельном окне Терминала.
+${prepared.plan.command}` }
+      const { response } = win ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts)
+      if (response !== 0) return { ok: true, result: null }
+      return { ok: true, result: await maintenance.start(provider, action, prepared) }
+    } catch (error) { return toReply(error) }
+  })
+  ipcMain.handle(IPC.providerOperation, (e, id: unknown): CallReply => {
+    if (!trusted(e) || !maintenance) return fail('forbidden', tr('вызов не из окна Пульта'))
+    if (typeof id !== 'string' || !/^[0-9a-f]{24}$/.test(id)) return fail('invalid_params', tr('Неверное действие CLI.'))
+    try { return { ok: true, result: maintenance.operation(id) } } catch (error) { return toReply(error) }
   })
 
   ipcMain.handle(IPC.pickFolder, async (e): Promise<string | null> => {
@@ -748,6 +802,57 @@ async function boot(): Promise<void> {
     setPackageLanguage(getLanguage())
   } catch { /* older packages predate localization */ }
   const nodePath = resolveNode(process.env, paths.nodePath, realFs)
+  const locate = await load<typeof import('../../src/env/locate.js')>('env/locate.js')
+  const login = await load<typeof import('../../src/env/loginShell.js')>('env/loginShell.js')
+  const maintenanceInfo = { home: paths.home, packageRoot: pkg, node: nodePath, logs: paths.logs, serviceLog: paths.serviceLog }
+  maintenance = new Maintenance({
+    info: maintenanceInfo,
+    env: process.env,
+    run: (file, args, timeoutMs) => execAsync(file, args, { timeoutMs, maxBuffer: 4 * 1024 * 1024,
+      env: buildChildEnv(process.env, { extra: { PULT_HOME: paths.home, PULT_LANG: getLanguage(), ...(TEST_MODE ? { PULT_TEST: '1', PULT_SERVICE_DIR: process.env['PULT_SERVICE_DIR'] ?? path.join(paths.home, 'svc') } : {}) } }) }),
+    inventory: async () => {
+      const pathEntries = TEST_MODE ? (process.env['PATH'] ?? '').split(':') : await login.loginShellPath(paths.envCache)
+      const tools = await (TEST_MODE ? locate.testLocate : locate.locateAllAsync)({ pathEntries })
+      for (const provider of ['claude', 'codex'] as const) {
+        const override = process.env[provider === 'claude' ? 'PULT_CLAUDE_BIN' : 'PULT_CODEX_BIN']
+        if (override) {
+          const selected = path.resolve(override)
+          const version = await execAsync(selected, ['--version'], { timeoutMs: 5_000, env: buildChildEnv(process.env, { path: pathEntries.join(':') }) })
+          tools[provider] = { ...tools[provider], path: selected, realpath: realFs.isFile(selected) ? realpathSync(selected) : null,
+            version: version.status === 0 ? redactString(version.stdout.trim().split('\n')[0] ?? '') || null : null, versionExitCode: version.status }
+        }
+      }
+      return { claude: tools.claude, codex: tools.codex, npm: tools.npm, pathEntries, home: process.env['HOME'] ?? app.getPath('home') }
+    },
+    network: async (provider) => {
+      const configModule = await load<typeof import('../../src/core/config.js')>('core/config.js')
+      const networkModule = await load<typeof import('../../src/env/net.js')>('env/net.js')
+      const { config } = configModule.loadConfig(paths.config)
+      const check = await networkModule.checkNetwork(provider, config.network[provider], config.guard, {
+        fresh: true, timeoutMs: 5_000,
+        ...(TEST_MODE ? { probe: async () => ({ status: 0, stdout: `loc=${process.env['PULT_TEST_NET'] === 'blocked' ? 'RU' : process.env['PULT_TEST_NET_LOC'] ?? 'XX'}\n`, stderr: '' }) } : {}),
+      })
+      if (!check.ok) throw Object.assign(new Error(tr`Страж сети запретил действие CLI: ${check.reason}`), { code: 'blocked_network' })
+      const adapter = provider === 'claude'
+        ? await load<typeof import('../../src/adapters/claude/adapter.js')>('adapters/claude/adapter.js')
+        : await load<typeof import('../../src/adapters/codex/adapter.js')>('adapters/codex/adapter.js')
+      return 'claudeNetworkEnv' in adapter ? adapter.claudeNetworkEnv(check) : adapter.codexNetworkEnv(check)
+    },
+    launch: async (file) => {
+      if (TEST_MODE) {
+        // Hermetic UI tests observe the fixed command and complete it without
+        // launching real installers, OAuth, Terminal or provider processes.
+        ;(globalThis as { __pultTestMaintenanceScripts?: string[] }).__pultTestMaintenanceScripts ??= []
+        ;(globalThis as unknown as { __pultTestMaintenanceScripts: string[] }).__pultTestMaintenanceScripts.push(file)
+        try { (await import('node:fs')).unlinkSync(path.join(path.dirname(file), 'network.env')) } catch {}
+        writeFileSync(path.join(path.dirname(file), 'result'), '0\n', { mode: 0o600 })
+        return
+      }
+      const result = await execAsync('/usr/bin/open', ['-a', 'Terminal', file], { timeoutMs: 10_000, env: buildChildEnv(process.env) })
+      if (result.status !== 0) throw new Error(tr('Не удалось открыть Терминал.'))
+    },
+  })
+
 
   link = new DaemonLink({
     connect: () => clientMod.connectClient(paths, { client: 'shell' }),

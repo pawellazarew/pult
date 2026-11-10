@@ -32,7 +32,8 @@ it('visualize HTML runs CSS and JavaScript in an isolated site beside the chat',
   await button.waitFor()
   assert.equal(await button.evaluate((el) => getComputedStyle(el).color), 'rgb(12, 34, 56)')
   await button.click()
-  assert.equal(await button.textContent(), 'Clicked')
+  assert.ok(await waitFor(async () => await button.textContent() === 'Clicked'),
+    'the isolated frame handles the click before its result is inspected')
   assert.equal(await frame.locator('body').getAttribute('data-bridge'), 'undefined')
   assert.equal(await frame.locator('body').getAttribute('data-isolated'), 'yes')
   assert.equal(await h.win.locator('body').getAttribute('data-compromised'), null)

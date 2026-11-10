@@ -164,11 +164,25 @@ export class DaemonLink {
     if (!c) throw new LinkError('no_daemon', tr('демон недоступен'))
     this.stoppedByUser = true
     try {
-      await c.request('daemon.stop')
+      await c.request('daemon.stop', undefined, { timeoutMs: 10_000 })
     } catch (e) {
       this.stoppedByUser = false
       throw e
     }
+  }
+
+  async restartDaemon(): Promise<void> {
+    const client = this.client
+    if (!client) { await this.startDaemon(); return }
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const stopped = new Promise<void>((resolve, reject) => {
+      client.onClose(resolve)
+      timer = setTimeout(() => reject(new LinkError('timeout', tr('Демон ещё завершается. Дождись остановки и нажми «Запустить».'))), 15_000)
+    })
+    // Register before stop so an immediate disconnect cannot be missed.
+    stopped.catch(() => {})
+    try { await this.stopDaemon(); await stopped; await this.startDaemon() }
+    finally { clearTimeout(timer) }
   }
 
   private setState(s: ConnState): void {

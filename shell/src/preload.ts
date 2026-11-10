@@ -80,6 +80,13 @@ const bridge: PultBridge = {
     unwrap((await ipcRenderer.invoke(IPC.startDaemon)) as CallReply)
   },
 
+  async restartDaemon() { return unwrap(await ipcRenderer.invoke(IPC.restartDaemon) as CallReply) === true },
+  async maintenanceInfo() { return unwrap(await ipcRenderer.invoke(IPC.maintenanceInfo) as CallReply) as import('./contract.js').MaintenanceInfo },
+  async runDoctor() { return unwrap(await ipcRenderer.invoke(IPC.runDoctor) as CallReply) as import('../../src/env/doctor.js').DoctorReport },
+  async providerTools() { return unwrap(await ipcRenderer.invoke(IPC.providerTools) as CallReply) as import('./contract.js').ProviderTool[] },
+  async providerAction(provider, action) { return unwrap(await ipcRenderer.invoke(IPC.providerAction, provider, action) as CallReply) as import('./contract.js').ProviderOperation | null },
+  async providerOperation(id) { return unwrap(await ipcRenderer.invoke(IPC.providerOperation, id) as CallReply) as import('./contract.js').ProviderOperation },
+
   async stopDaemon(): Promise<boolean> {
     return unwrap((await ipcRenderer.invoke(IPC.stopDaemon)) as CallReply) === true
   },

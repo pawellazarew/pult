@@ -9,6 +9,7 @@ import { effortOptions } from '../model/sessionSettings.js'
 import { FilePreviewContext } from '../model/filePreviewContext.js'
 import { t } from '../lib/i18n.js'
 import { MdBridgeContext } from './Markdown.js'
+import { MessageText } from './MessageText.js'
 import { ImageContext } from './Images.js'
 import { ProviderIcon } from './ProviderIcon.js'
 import { Icon } from './common.js'
@@ -166,7 +167,7 @@ export function TemporaryChat(props: TemporaryChatProps): ReactElement {
       <div className="temporary-feed" ref={feed} data-testid="temporary-feed" role="log" aria-label={t('Временный разговор')} onScroll={() => { const el = feed.current; if (el) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80 }}>
         {closed || chat.messages.length === 0 ? <div className="temporary-empty"><Icon name="clock" /><h1>{closed ? t('Временный чат завершён') : t('О чём поговорим?')}</h1><p>{closed ? temporaryErrorMessage({ code: 'temporary_expired' }) : t('Без контекста проекта. Не сохраняется в истории.')}</p></div> : <div className="temporary-messages">{chat.messages.map((message) => <article key={message.id} className={`temporary-message temporary-${message.role}`} data-testid={`temporary-${message.role}`} data-state={message.state}>
           <div className="temporary-message-heading">{message.role === 'assistant' ? <ProviderIcon provider={chat.settings.provider} /> : <span>{t('Ты')}</span>}{props.copyText && <button type="button" aria-label={t('Скопировать сообщение')} className="temporary-copy" onClick={() => { void props.copyText!(message.text).catch(() => {}) }}><Icon name="copy" /></button>}</div>
-          <div className="temporary-message-body"><TemporaryMarkdown text={message.text} human={message.role === 'user'} streaming={message.state === 'streaming'} {...actions} /></div>
+          <div className="temporary-message-body"><MessageText text={message.text} renderExpanded={() => <TemporaryMarkdown text={message.text} human={message.role === 'user'} streaming={message.state === 'streaming'} {...actions} />} /></div>
         </article>)}</div>}
       </div>
       <div className="temporary-composer">
