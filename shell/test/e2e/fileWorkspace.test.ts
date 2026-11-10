@@ -33,7 +33,7 @@ describe('файлы проекта рядом с беседой', () => {
   })
   after(async () => { await h?.close() })
 
-  it('дерево → Markdown → исходник; относительная ссылка открывает код; HTML остаётся текстом', async () => {
+  it('дерево → Markdown → исходник; относительная ссылка открывает код; HTML изолирован и доступен исходник', async () => {
     await h.win.getByTestId('toggle-files').click()
     await h.win.locator('[data-testid="workspace-file"][data-path="README.md"]').click()
     await h.win.getByTestId('file-markdown').getByRole('heading', { name: 'План релиза' }).waitFor()
@@ -50,6 +50,10 @@ describe('файлы проекта рядом с беседой', () => {
     }
 
     await h.win.locator('[data-testid="workspace-file"][data-path="demo.html"]').click()
+    const html = h.win.frameLocator('[data-testid="file-html"]')
+    assert.ok(await waitFor(async () => await html.locator('body').evaluate(() => (window as unknown as { __pultViewerPwned?: number }).__pultViewerPwned) === 1))
+    assert.equal(await h.win.evaluate(() => (window as unknown as { __pultViewerPwned?: number }).__pultViewerPwned), undefined)
+    await h.win.getByTestId('file-source-toggle').click()
     assert.ok(await waitFor(async () => (await h.win.getByTestId('file-source').textContent())?.includes('<script>') === true))
     assert.equal(await h.win.evaluate(() => (window as unknown as { __pultViewerPwned?: number }).__pultViewerPwned), undefined)
     await h.win.keyboard.press('Escape')

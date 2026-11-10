@@ -62,10 +62,11 @@ describe('«/» в поле ввода', () => {
     assert.notEqual(first, second)
     await box.press('Tab')
     assert.equal(await box.inputValue(), `${second} `)
+    assert.ok(await waitFor(async () => await menu.count() === 0), 'вставка Tab завершена, список закрыт')
 
-    await box.fill('')
-    await box.press('/')
+    await box.fill('/')
     await menu.waitFor()
+    assert.equal(await box.inputValue(), '/', 'перед Escape поле содержит только проверяемую команду')
     await box.press('Escape')
     assert.equal(await menu.count(), 0)
     assert.equal(await box.inputValue(), '/', 'Esc только закрывает список')
