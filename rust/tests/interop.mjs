@@ -59,7 +59,7 @@ try {
     assert.equal(status.protocol, 1)
     assert.equal(status.pid, daemon.child.pid)
     assert.equal(status.home, realpathSync(home))
-    assert.deepEqual(status.capabilities.supportedMethods, ['daemon.status', 'daemon.stop', 'protocol.catalog'])
+    assert.deepEqual(status.capabilities.supportedMethods, ['daemon.status', 'daemon.stop', 'events.emit', 'events.tail', 'protocol.catalog'])
     assert.equal(status.lastEventId, 0)
   })
   await check('private runtime paths', async () => {

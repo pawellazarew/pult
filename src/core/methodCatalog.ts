@@ -435,12 +435,89 @@ export const RPC_CATALOG = {
     {
       "name": "events.emit",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "implemented",
       "access": "owner",
       "testOnly": true,
       "description": "Migration inventory for events.emit.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "session.started",
+              "session.ended",
+              "message.delta",
+              "message.done",
+              "message.user",
+              "tool.called",
+              "tool.finished",
+              "agent.spawned",
+              "agent.finished",
+              "permission.requested",
+              "permission.resolved",
+              "question.asked",
+              "usage.updated",
+              "context.updated",
+              "limit.hit",
+              "net.blocked",
+              "provider.blocked",
+              "provider.restarted",
+              "background.changed",
+              "status.changed",
+              "turn.stalled",
+              "browser.install",
+              "runtime.changed",
+              "session.configured",
+              "queue.updated",
+              "rule.revoked",
+              "daemon.started",
+              "daemon.stopping"
+            ]
+          },
+          "count": {
+            "type": "number"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "parentId": {
+            "type": "string"
+          },
+          "data": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "additionalProperties": true
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          },
+          "lastEventId": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "ids",
+          "lastEventId"
+        ],
+        "additionalProperties": true
+      }
     },
     {
       "name": "events.get",
@@ -495,12 +572,80 @@ export const RPC_CATALOG = {
     {
       "name": "events.tail",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "implemented",
       "access": "owner",
       "testOnly": false,
       "description": "Migration inventory for events.tail.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "since": {
+            "type": "number"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "number"
+          }
+        },
+        "required": [],
+        "additionalProperties": true
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "integer"
+                },
+                "ts": {
+                  "type": "string"
+                },
+                "sessionId": {
+                  "type": "string"
+                },
+                "parentId": {
+                  "type": "string"
+                },
+                "provider": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "data": {
+                  "type": "object",
+                  "properties": {},
+                  "required": [],
+                  "additionalProperties": true
+                }
+              },
+              "required": [
+                "id",
+                "ts",
+                "sessionId",
+                "provider",
+                "kind",
+                "data"
+              ],
+              "additionalProperties": true
+            }
+          },
+          "cursor": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "events",
+          "cursor"
+        ],
+        "additionalProperties": true
+      }
     },
     {
       "name": "events.unsubscribe",
@@ -1038,16 +1183,20 @@ export const RPC_CATALOG = {
 } as const
 
 export type RpcMethodName = typeof RPC_CATALOG.methods[number]['name']
-export type RustFoundationMethod = "daemon.status" | "daemon.stop" | "protocol.catalog"
+export type RustFoundationMethod = "daemon.status" | "daemon.stop" | "events.emit" | "events.tail" | "protocol.catalog"
 
 export interface RustFoundationParams {
   "daemon.status": { [key: string]: unknown }
   "daemon.stop": { [key: string]: unknown }
+  "events.emit": { "kind": "session.started" | "session.ended" | "message.delta" | "message.done" | "message.user" | "tool.called" | "tool.finished" | "agent.spawned" | "agent.finished" | "permission.requested" | "permission.resolved" | "question.asked" | "usage.updated" | "context.updated" | "limit.hit" | "net.blocked" | "provider.blocked" | "provider.restarted" | "background.changed" | "status.changed" | "turn.stalled" | "browser.install" | "runtime.changed" | "session.configured" | "queue.updated" | "rule.revoked" | "daemon.started" | "daemon.stopping"; "count"?: number; "sessionId"?: string; "provider"?: string; "parentId"?: string; "data"?: { [key: string]: unknown }; [key: string]: unknown }
+  "events.tail": { "since"?: number; "sessionId"?: string; "limit"?: number; [key: string]: unknown }
   "protocol.catalog": { [key: string]: unknown }
 }
 
 export interface RustFoundationResults {
   "daemon.status": { "version": string; "protocol": number; "pid": number; "startedAt": string; "uptimeMs": number; "home": string; "sock": string; "clients": number; "subscriptions": number; "lastEventId": number; "mode": "service" | "on-demand"; [key: string]: unknown }
   "daemon.stop": { "stopping": true }
+  "events.emit": { "ids": Array<number>; "lastEventId": number; [key: string]: unknown }
+  "events.tail": { "events": Array<{ "id": number; "ts": string; "sessionId": string; "parentId"?: string; "provider": string; "kind": string; "data": { [key: string]: unknown }; [key: string]: unknown }>; "cursor": number; [key: string]: unknown }
   "protocol.catalog": { "catalogVersion": 1; "protocolVersion": 1; "methods": Array<{ "name": string; "node": "implemented" | "reserved" | "extension"; "rust": "implemented" | "unported"; "access": "owner" | "ask" | "owner-or-runtime" | "owner-shell"; "testOnly": boolean; "description": string; "paramsSchema": { [key: string]: unknown } | null; "resultSchema": { [key: string]: unknown } | null }> }
 }

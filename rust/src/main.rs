@@ -20,6 +20,22 @@ enum Action {
         action: DaemonAction,
     },
     Catalog,
+    Events {
+        #[command(subcommand)]
+        action: EventsAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum EventsAction {
+    Tail {
+        #[arg(long, default_value_t = 0)]
+        since: u64,
+        #[arg(long)]
+        session: Option<String>,
+        #[arg(long)]
+        limit: Option<usize>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -34,7 +50,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     if args.skill {
         println!(
-            "Rust core foundation protocol 1. Use an explicit private scratch --home.\nCommands: daemon serve, daemon status, daemon stop, catalog.\nOwner-token connections support daemon.status, daemon.stop and protocol.catalog.\nOther catalogued methods return not_implemented. Scoped credentials are rejected.\nProduction migration and session execution follow later compatibility steps."
+            "Rust core protocol 1. Use an explicit private scratch --home.\nCommands: daemon serve, daemon status, daemon stop, catalog, events tail [--since ID] [--session NAME] [--limit N].\nOwner-token connections support daemon.status, daemon.stop, events.tail and protocol.catalog.\nevents.emit requires PULT_TEST=1 and is for deterministic verification.\nJournal append is acknowledged after sync. A failed append has an unknown outcome until replay.\nOther catalogued methods return not_implemented. Scoped credentials are rejected.\nProduction migration and session execution follow later compatibility steps."
         );
         return Ok(());
     }
@@ -52,6 +68,23 @@ async fn main() -> Result<()> {
             action: DaemonAction::Stop,
         } => pult_core::request(&home, "daemon.stop").await?,
         Action::Catalog => pult_core::request(&home, "protocol.catalog").await?,
+        Action::Events {
+            action:
+                EventsAction::Tail {
+                    since,
+                    session,
+                    limit,
+                },
+        } => {
+            let mut params = serde_json::json!({"since":since});
+            if let Some(session) = session {
+                params["sessionId"] = serde_json::json!(session);
+            }
+            if let Some(limit) = limit {
+                params["limit"] = serde_json::json!(limit);
+            }
+            pult_core::request_with_params(&home, "events.tail", params).await?
+        }
     };
     println!("{}", serde_json::to_string(&result)?);
     Ok(())

@@ -432,12 +432,89 @@
     {
       "name": "events.emit",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "implemented",
       "access": "owner",
       "testOnly": true,
       "description": "Migration inventory for events.emit.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "session.started",
+              "session.ended",
+              "message.delta",
+              "message.done",
+              "message.user",
+              "tool.called",
+              "tool.finished",
+              "agent.spawned",
+              "agent.finished",
+              "permission.requested",
+              "permission.resolved",
+              "question.asked",
+              "usage.updated",
+              "context.updated",
+              "limit.hit",
+              "net.blocked",
+              "provider.blocked",
+              "provider.restarted",
+              "background.changed",
+              "status.changed",
+              "turn.stalled",
+              "browser.install",
+              "runtime.changed",
+              "session.configured",
+              "queue.updated",
+              "rule.revoked",
+              "daemon.started",
+              "daemon.stopping"
+            ]
+          },
+          "count": {
+            "type": "number"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "parentId": {
+            "type": "string"
+          },
+          "data": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "additionalProperties": true
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          },
+          "lastEventId": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "ids",
+          "lastEventId"
+        ],
+        "additionalProperties": true
+      }
     },
     {
       "name": "events.get",
@@ -492,12 +569,80 @@
     {
       "name": "events.tail",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "implemented",
       "access": "owner",
       "testOnly": false,
       "description": "Migration inventory for events.tail.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "since": {
+            "type": "number"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "number"
+          }
+        },
+        "required": [],
+        "additionalProperties": true
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "integer"
+                },
+                "ts": {
+                  "type": "string"
+                },
+                "sessionId": {
+                  "type": "string"
+                },
+                "parentId": {
+                  "type": "string"
+                },
+                "provider": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "data": {
+                  "type": "object",
+                  "properties": {},
+                  "required": [],
+                  "additionalProperties": true
+                }
+              },
+              "required": [
+                "id",
+                "ts",
+                "sessionId",
+                "provider",
+                "kind",
+                "data"
+              ],
+              "additionalProperties": true
+            }
+          },
+          "cursor": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "events",
+          "cursor"
+        ],
+        "additionalProperties": true
+      }
     },
     {
       "name": "events.unsubscribe",
