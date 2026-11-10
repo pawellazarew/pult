@@ -142,7 +142,10 @@ describe('workspace phone viewports: readable messages and reachable controls', 
           await health.locator('summary').click()
           const popover = await health.locator('.health-popover').boundingBox()
           assert.ok(popover && popover.x >= 0 && popover.x + popover.width <= width, 'connection details extend beyond the phone screen')
-          await h.win.locator('.navigation-scrim').click({ position: { x: width - 5, y: 5 } })
+          const scrim = h.win.locator('.navigation-scrim')
+          const scrimBounds = await scrim.boundingBox()
+          assert.ok(scrimBounds, 'navigation scrim is visible')
+          await scrim.click({ position: { x: scrimBounds.width - 5, y: 5 } })
         }
       }
       await conversationGeometry()
