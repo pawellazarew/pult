@@ -85,8 +85,13 @@ describe('скриншоты экранов (демо)', () => {
     await h.win.keyboard.press('Escape')
     await d.waitFor({ state: 'detached', timeout: 3000 })
     // Субагент ui-refactor успел «напечатать» хвост до паузы.
+    // Свёрнутая история субагента не рисуется — раскрываем её, сверяем текст и сворачиваем обратно для кадра.
     await h.win.locator('[data-testid="agent-row"][data-agent="ui-refactor"]').click()
+    const history = h.win.locator('[data-testid="subagent"] .sub-body')
+    await history.locator('> summary').click({ timeout: 15_000 })
     assert.ok(await waitFor(async () => ((await h.win.getByTestId('feed').textContent()) ?? '').includes('99,6'), 15_000), 'дельты субагента не дошли')
+    await history.locator('> summary').click()
+    assert.ok(await waitFor(async () => (await history.getAttribute('open')) === null, 3000), 'история субагента не свернулась')
   })
 
   it('главный экран: агент за работой (Inbox скрыт)', async () => {

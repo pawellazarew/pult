@@ -20,6 +20,34 @@ export function groupActivity(items: readonly ConvItem[]): ActivityEntry[] {
   return out
 }
 
+/**
+ * Ключи сворачиваемых блоков ленты: пачки «N действий» (по первой строке пачки — она не меняется, пока пачка
+ * растёт) и истории субагента. По ним лента помнит, что раскрыто, и раскрывает путь к цели перехода.
+ */
+export const toolsGroupKey = (firstKey: string): string => `tools:${firstKey}`
+export const subagentBodyKey = (agentKey: string): string => `sub:${agentKey}`
+
+/**
+ * Свёрнутые блоки, внутри которых лежит элемент с этим ключом, — от внешнего к внутреннему; `[]` — элемент
+ * на виду, `null` — его нет. Свёрнутое не рисуется вовсе (иначе большой чат монтировал сотни скрытых строк),
+ * поэтому переход из поиска сперва раскрывает этот путь и только потом ищет элемент в DOM.
+ */
+export function foldPath(items: readonly ConvItem[], key: string): string[] | null {
+  for (const entry of groupActivity(items)) {
+    if (entry.type === 'tools') {
+      if (entry.items.some((it) => it.key === key)) return [toolsGroupKey(entry.key)]
+      continue
+    }
+    const it = entry.item
+    if (it.key === key) return []
+    if (it.type === 'agent') {
+      const inner = foldPath(it.items, key)
+      if (inner) return [subagentBodyKey(it.key), ...inner]
+    }
+  }
+  return null
+}
+
 export function friendlyTool(name: string): string {
   if (/commandExecution|^Bash$|exec_command|write_stdin/.test(name)) return tr('Команда')
   if (/fileChange|^Edit$|^Write$|apply_patch/.test(name)) return tr('Правка файлов')

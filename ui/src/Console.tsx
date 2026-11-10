@@ -132,8 +132,10 @@ const JUMP_TIMEOUT_MS = 30_000
 
 /** Лента сессии с ранними страницами истории впереди (model/state.ts finishEarlier). */
 function withEarlier(ui: UiState, name: string): readonly ConvItem[] {
-  const items = ui.sessions[name]?.conv.items ?? []
-  const early = ui.earlier[name]?.items
+  return joinEarlier(ui.sessions[name]?.conv.items ?? [], ui.earlier[name]?.items)
+}
+
+function joinEarlier(items: readonly ConvItem[], early: readonly ConvItem[] | undefined): readonly ConvItem[] {
   return reconcileAsyncAnswers(early && early.length ? [...early, ...items] : items)
 }
 
@@ -651,6 +653,11 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   const uiRef = useRef(ui)
   uiRef.current = ui
   const currentName = current?.name ?? null
+  // Лента открытой сессии — один и тот же массив между перерисовками: склейка с ранними страницами давала новый на
+  // каждый тик часов и на события чужих сессий, и эффекты ленты (прокрутка, метки, переход) перезапускались впустую.
+  const currentConv = currentName ? ui.sessions[currentName]?.conv.items : undefined
+  const currentEarly = currentName ? ui.earlier[currentName]?.items : undefined
+  const currentItems = useMemo(() => joinEarlier(currentConv ?? [], currentEarly), [currentConv, currentEarly])
 
   // --- О2: «прочитал» ------------------------------------------------------------------
   // Непрочитанная сессия открыта, окно перед глазами — через полсекунды демону уходит `agent.seen`
@@ -1692,7 +1699,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
             onApproval={(a) => draftApproval(draft.id, a)} onSend={(f) => void startDraft(draft.id, f)} onDiscard={() => discardDraft(draft.id)}
             onCheckProviders={() => void checkProviders()} onClaim={() => void claimDraft(draft.id)} />
         ) : current ? (
-          <Conversation key={current.name} headerActions={workspaceActions} menuExtras={modeMenuItems(appearance.mode, (mode) => setAppearance({ mode }))} agent={current} items={withEarlier(ui, current.name)} now={now}
+          <Conversation key={current.name} headerActions={workspaceActions} menuExtras={modeMenuItems(appearance.mode, (mode) => setAppearance({ mode }))} agent={current} items={currentItems} now={now}
             historyLoading={ui.hydration[current.name] === 'loading'} loadEvents={loadEvents}
             earlier={ui.earlier[current.name]} onLoadEarlier={() => loadEarlier(current.name)}
             scrollTo={jump && jump.name === current.name && jumpState === 'ready'
@@ -1700,7 +1707,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
             onScrolled={onScrolled} onParentVisibility={onParentVisibility} userJump={userJump}
             usage={ui.usage[current.provider]} focusedPerm={ownFocused?.id ?? null} permBusy={permBusy} link={conn.state}
             sending={send.sending} sendError={send.error}
-            pending={pendingBubble(outgoing, current.name, withEarlier(ui, current.name))}
+            pending={pendingBubble(outgoing, current.name, currentItems)}
             onSend={sendPrompt} onAsyncAnswer={async (questionId, answers) => { await bridge.call('agent.question.answer', { name: current.name, questionId, answers }); await refreshAgents() }} filePaths={filePaths}
             commands={slashCommands}
             onQueueRemove={(id) => queueCall('agent.queue.remove', { name: current.name, id })}
@@ -1734,7 +1741,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
           </section>
         )}
         </div>
-        {summaryShown && current && <ConversationSummary agent={current} items={withEarlier(ui, current.name)} />}
+        {summaryShown && current && <ConversationSummary agent={current} items={currentItems} />}
         {current && bridge.previewFile && bridge.listFiles && <FileWorkspace bridge={bridge} sessionId={current.name} cwd={current.cwd}
           open={filesOpen} expanded={filesExpanded} request={fileRequest} onClose={closeFiles}
           onExpand={() => setFilesExpanded((v) => window.innerWidth < 1200 ? true : !v)} />}

@@ -575,9 +575,18 @@ export function messageSource(it: ConvItem): string | null {
 /** Короткая подпись инструмента для свёрнутой строки — та же, что у строки фазы хода (демон считает её сам). */
 export { toolSummary } from '../../../src/sessions/turnPhase.js'
 
+/**
+ * Форматтер длительности на язык: `toLocaleString` с опциями заводит новый Intl.NumberFormat на КАЖДЫЙ вызов, и
+ * в ленте на сотни строк инструментов это была заметная доля открытия большого чата (замер 06.11.2026).
+ */
+const secondsFormat = new Map<string, Intl.NumberFormat>()
+
 /** Длительность в секундах по-русски: «0,3 с», а не «0.3 с» (`toFixed` всегда пишет точку). */
 export function formatSeconds(ms: number): string {
-  return tr`${(ms / 1000).toLocaleString(getLanguage() === 'ru' ? 'ru-RU' : 'en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} с`
+  const locale = getLanguage() === 'ru' ? 'ru-RU' : 'en-US'
+  let f = secondsFormat.get(locale)
+  if (!f) { f = new Intl.NumberFormat(locale, { minimumFractionDigits: 1, maximumFractionDigits: 1 }); secondsFormat.set(locale, f) }
+  return tr`${f.format(ms / 1000)} с`
 }
 
 /**
