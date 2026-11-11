@@ -437,3 +437,38 @@ async fn cancelling_spawn_before_holder_ready_keeps_the_term_drop_guard() {
     assert_gone(&[pid], home.path()).await;
     assert!(!provider_marker.exists());
 }
+
+#[tokio::test]
+async fn owned_startup_failure_retains_unconfirmed_process_for_quarantine() {
+    use pult_core::worker_process::Framing;
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let holder = home.path().join("bad-holder");
+    std::fs::write(&holder, "#!/bin/sh\nprintf 'not-json\\n'\nexit 125\n").unwrap();
+    std::fs::set_permissions(&holder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut request = launch(home.path(), "echo");
+    request.holder = holder;
+    let failure = match Process::spawn_owned(request, Framing::codex()).await {
+        Ok(_) => panic!("bad holder acknowledged startup"),
+        Err(failure) => failure,
+    };
+    assert!(format!("{failure:?}").contains("retained_process: true"));
+    let mut process = failure
+        .process
+        .expect("startup must preserve child ownership");
+    assert!(process.stop().await.is_err());
+    assert!(
+        process.stop().await.is_err(),
+        "retry cannot turn exit 125 into proof"
+    );
+    let mut invalid = launch(home.path(), "echo");
+    invalid.program = home.path().join("missing");
+    let failure = match Process::spawn_owned(invalid, Framing::codex()).await {
+        Ok(_) => panic!("missing program accepted"),
+        Err(failure) => failure,
+    };
+    assert!(
+        failure.process.is_none(),
+        "validation failure created no child"
+    );
+}
