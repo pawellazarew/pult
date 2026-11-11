@@ -48,11 +48,51 @@ describe('«/» в поле ввода', () => {
 
     await box.pressSequentially('hel')
     assert.equal(await menu.locator('.slash-name').first().textContent(), '/hello-pult')
-    await box.press('Enter')
-    assert.equal(await box.inputValue(), '/hello-pult ')
-    assert.equal(await menu.count(), 0, 'после вставки список закрыт')
-
-    await box.fill('')
+    // Playwright fill('') selects text, then sends Delete in another renderer turn.
+    // Pin a pending slash RAF between those steps: it must not collapse the newer selection.
+    await box.evaluate((el: HTMLTextAreaElement & { __slashFrames?: { flush(): void; restore(): void } }) => {
+      const original = window.requestAnimationFrame
+      const originalCancel = window.cancelAnimationFrame
+      const pending = new Map<number, FrameRequestCallback>()
+      let nextId = -1
+      window.requestAnimationFrame = (callback) => {
+        const id = nextId--
+        pending.set(id, callback)
+        return id
+      }
+      window.cancelAnimationFrame = (id) => {
+        if (!pending.delete(id)) originalCancel.call(window, id)
+      }
+      el.__slashFrames = {
+        flush: () => {
+          const callbacks = [...pending.values()]
+          pending.clear()
+          for (const callback of callbacks) callback(performance.now())
+        },
+        restore: () => {
+          window.requestAnimationFrame = original
+          window.cancelAnimationFrame = originalCancel
+          for (const callback of pending.values()) original.call(window, callback)
+          pending.clear()
+          delete el.__slashFrames
+        },
+      }
+    })
+    try {
+      await box.press('Enter')
+      assert.equal(await box.inputValue(), '/hello-pult ')
+      assert.equal(await menu.count(), 0, 'после вставки список закрыт')
+      await box.evaluate((el: HTMLTextAreaElement & { __slashFrames?: { flush(): void } }) => {
+        el.selectionStart = 0
+        el.selectionEnd = el.value.length
+        el.focus()
+        el.__slashFrames?.flush()
+      })
+      await box.press('Delete')
+      assert.equal(await box.inputValue(), '', 'отложенная каретка предыдущей вставки не отменяет новое выделение для удаления')
+    } finally {
+      await box.evaluate((el: HTMLTextAreaElement & { __slashFrames?: { restore(): void } }) => el.__slashFrames?.restore())
+    }
     await box.press('/')
     await menu.waitFor()
     await box.pressSequentially('co')
@@ -63,6 +103,17 @@ describe('«/» в поле ввода', () => {
     await box.press('Tab')
     assert.equal(await box.inputValue(), `${second} `)
     assert.ok(await waitFor(async () => await menu.count() === 0), 'вставка Tab завершена, список закрыт')
+
+    // Re-selecting the same command still commits its caret, even if the text is unchanged.
+    await box.press('End')
+    await box.press('ArrowLeft')
+    await menu.waitFor()
+    assert.equal(await menu.locator('.slash-name').first().textContent(), second)
+    await box.press('Enter')
+    assert.equal(await box.inputValue(), `${second} `)
+    assert.equal(await menu.count(), 0, 'повторный выбор той же команды закрывает список')
+    assert.deepEqual(await box.evaluate((el: HTMLTextAreaElement) => [el.selectionStart, el.selectionEnd]),
+      [(`${second} `).length, (`${second} `).length], 'каретка после пробела, хотя текст не изменился')
 
     await box.fill('/')
     await menu.waitFor()

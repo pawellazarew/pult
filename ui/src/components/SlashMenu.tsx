@@ -92,6 +92,7 @@ export function useSlashMenu({ ta, text, setText, load, scope }: {
   const [loading, setLoading] = useState<string | null>(null)
   const [active, setActive] = useState(0)
   const [dismissed, setDismissed] = useState<number | null>(null)
+  const [pickedCaret, setPickedCaret] = useState<{ text: string; caret: number; scope: string } | null>(null)
   const id = useMemo(() => `slash-${Math.random().toString(36).slice(2, 8)}`, [])
 
   const onCaret = useCallback((): void => {
@@ -100,6 +101,17 @@ export function useSlashMenu({ ta, text, setText, load, scope }: {
   }, [ta])
   // Каретку после набора знаем из самого поля: onChange обновляет текст раньше, чем React отдаст onSelect.
   useLayoutEffect(() => { onCaret() }, [text, onCaret])
+  // Apply the caret in the text commit. A later RAF could collapse a newer selection
+  // between select-all and Delete. Separate state also commits a same-text choice.
+  useLayoutEffect(() => {
+    if (!pickedCaret) return
+    setPickedCaret(null)
+    const el = ta.current
+    if (!el || scope !== pickedCaret.scope || el.value !== pickedCaret.text) return
+    el.focus()
+    el.setSelectionRange(pickedCaret.caret, pickedCaret.caret)
+    setCaret({ start: pickedCaret.caret, end: pickedCaret.caret })
+  }, [pickedCaret, scope, text, ta])
 
   const token: SlashToken | null = load && caret ? findSlashToken(text, caret.start, caret.end) : null
   const open = token !== null && dismissed !== token.start
@@ -126,13 +138,10 @@ export function useSlashMenu({ ta, text, setText, load, scope }: {
     const el = ta.current
     if (!token) return
     const r = applySlash(el?.value ?? text, token, item.insert)
+    setPickedCaret({ ...r, scope })
     setText(r.text)
     setDismissed(null)
-    requestAnimationFrame(() => {
-      const box = ta.current
-      if (box && box.value === r.text) { box.focus(); box.setSelectionRange(r.caret, r.caret); setCaret({ start: r.caret, end: r.caret }) }
-    })
-  }, [ta, text, token, setText])
+  }, [ta, text, token, setText, scope])
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): boolean => {
     if (!open || !token || e.nativeEvent.isComposing) return false

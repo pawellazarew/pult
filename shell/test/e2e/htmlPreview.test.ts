@@ -31,6 +31,9 @@ it('visualize HTML runs CSS and JavaScript in an isolated site beside the chat',
   const button = frame.locator('#counter')
   await button.waitFor()
   assert.equal(await button.evaluate((el) => getComputedStyle(el).color), 'rgb(12, 34, 56)')
+  // The child locator checks its own layout; also wait for the embedding frame
+  // to settle before routing a native pointer event across the frame boundary.
+  await h.win.getByTestId('file-html').click({ trial: true })
   await button.click()
   assert.ok(await waitFor(async () => await button.textContent() === 'Clicked'),
     'the isolated frame handles the click before its result is inspected')
