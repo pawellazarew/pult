@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+pub mod codex_events;
 pub mod codex_process;
 pub mod prompt_attachments;
 pub mod network_guard;
