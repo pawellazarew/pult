@@ -467,6 +467,12 @@ mod tests {
             );
         }
         assert_eq!(
+            core.provider_started(&ticket, "valid-but-not-dispatched")
+                .unwrap_err()
+                .code,
+            ErrorCode::Transition
+        );
+        assert_eq!(
             core.complete(&ticket, Outcome::Success).unwrap_err().code,
             ErrorCode::Transition
         );
@@ -490,6 +496,11 @@ mod tests {
             ErrorCode::Invalid
         );
         core.dispatch_start(&ticket).unwrap();
+        assert_eq!(
+            core.dispatch_start(&ticket).unwrap_err().code,
+            ErrorCode::Transition
+        );
+        assert_eq!(core.active(&ticket).unwrap().phase(), Phase::Dispatching);
         core.provider_started(&ticket, "turn").unwrap();
         assert_eq!(
             core.start_failed(&ticket, failure()).unwrap_err().code,
