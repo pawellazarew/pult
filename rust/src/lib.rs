@@ -2,6 +2,7 @@
 pub mod codex_process;
 pub mod prompt_attachments;
 pub mod network_guard;
+pub mod permission_broker;
 
 pub mod codex_rpc;
 pub mod consent_store;
