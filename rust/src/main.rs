@@ -162,6 +162,7 @@ enum DaemonAction {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    pult_core::panic_guard::install();
     let args = Args::parse();
     if args.skill {
         println!(
