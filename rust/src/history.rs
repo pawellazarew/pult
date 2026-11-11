@@ -97,62 +97,14 @@ fn value_end(bytes: &[u8], start: usize) -> usize {
     }
 }
 
-/// JavaScript stringifies finite IEEE-754 values in fixed notation between
-/// 1e-6 and 1e21. Rust supplies the shortest roundtrippable coefficient; apply
-/// ECMAScript's notation thresholds and treatment of -0/non-finite numbers.
+/// Rust Display and ECMAScript choose different decimal ties for the same
+/// float. Use the ECMAScript formatter, not a hand-maintained approximation.
 fn js_number(text: &str) -> Result<String> {
     let number: f64 = text.parse()?;
     if !number.is_finite() {
         return Ok("null".into());
     }
-    if number == 0.0 {
-        return Ok("0".into());
-    }
-    let shortest = number.abs().to_string();
-    let (coefficient, shift) = shortest
-        .split_once(['e', 'E'])
-        .map_or(Ok((shortest.as_str(), 0_i32)), |(coefficient, exponent)| {
-            Ok::<_, anyhow::Error>((coefficient, exponent.parse::<i32>()?))
-        })?;
-    let point = coefficient.find('.').unwrap_or(coefficient.len());
-    let digits: String = coefficient.chars().filter(|ch| *ch != '.').collect();
-    let first = digits
-        .find(|ch| ch != '0')
-        .context("nonzero number has digits")?;
-    let exponent = shift + point as i32 - first as i32 - 1;
-    let digits = digits[first..].trim_end_matches('0');
-    let mut out = if number.is_sign_negative() {
-        "-".to_owned()
-    } else {
-        String::new()
-    };
-    if !(-6..21).contains(&exponent) {
-        out.push_str(&digits[..1]);
-        if digits.len() > 1 {
-            out.push('.');
-            out.push_str(&digits[1..]);
-        }
-        out.push('e');
-        if exponent >= 0 {
-            out.push('+');
-        }
-        out.push_str(&exponent.to_string());
-    } else if exponent < 0 {
-        out.push_str("0.");
-        out.push_str(&"0".repeat((-exponent - 1) as usize));
-        out.push_str(digits);
-    } else {
-        let point = exponent as usize + 1;
-        if point >= digits.len() {
-            out.push_str(digits);
-            out.push_str(&"0".repeat(point - digits.len()));
-        } else {
-            out.push_str(&digits[..point]);
-            out.push('.');
-            out.push_str(&digits[point..]);
-        }
-    }
-    Ok(out)
+    Ok(ryu_js::Buffer::new().format_finite(number).to_owned())
 }
 
 fn normalize(value: &RawValue) -> Result<Raw> {
@@ -820,6 +772,18 @@ mod tests {
         read(&mut cache, "missing", None);
         assert_eq!(loads.get(), 9);
     }
+    #[test]
+    fn decimal_ties_match_ecmascript_instead_of_rust_display() {
+        assert_eq!(
+            js_number("1976642435050427.2").unwrap(),
+            "1976642435050427.2"
+        );
+        assert_eq!(
+            js_number("167772206605557.12").unwrap(),
+            "167772206605557.12"
+        );
+    }
+
     #[test]
     fn canonicalizes_numbers_duplicates_and_string_escapes_for_byte_budgets() {
         for (number, expected) in [
