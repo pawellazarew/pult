@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod codex_rpc;
 mod history;
 pub mod journal;
 mod locale;
