@@ -104,3 +104,8 @@ JSON lock содержит PID и время старта процесса, со
 Owned driver обычной реплики и его соединение с настоящим журналом описаны в
 [R3-TURN-DRIVER](../docs/rust/R3-TURN-DRIVER.md). Worker пока контролируемый;
 RPC и реальные CLI-процессы будут подключены после host guards и supervision.
+
+
+Native transport и lifecycle process group описаны в
+[R3-PROCESS-WORKER](../docs/rust/R3-PROCESS-WORKER.md). Companion `pult-worker-holder`
+собирается вместе с core; его argv — внутренний протокол доверенного host, не RPC.
