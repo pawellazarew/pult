@@ -3,6 +3,7 @@ pub mod network_guard;
 pub mod permission_broker;
 pub mod prompt_attachments;
 
+pub mod codex_permissions;
 pub mod codex_events;
 pub mod codex_process;
 pub mod codex_rpc;
