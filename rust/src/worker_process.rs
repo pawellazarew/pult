@@ -19,6 +19,27 @@ use tokio::task::JoinHandle;
 
 pub const MAX_FRAME: usize = 1024 * 1024;
 const QUEUE: usize = 16;
+const CODEX_FRAME: usize = 16 * 1024 * 1024;
+#[derive(Clone, Copy, Debug)]
+pub struct Framing {
+    max_wire_bytes: usize,
+    recover: bool,
+}
+impl Framing {
+    pub fn strict() -> Self {
+        Self {
+            max_wire_bytes: MAX_FRAME,
+            recover: false,
+        }
+    }
+    pub fn codex() -> Self {
+        Self {
+            max_wire_bytes: CODEX_FRAME + 1,
+            recover: true,
+        }
+    }
+}
+
 const START_TIMEOUT: Duration = Duration::from_secs(3);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -97,14 +118,20 @@ pub struct Process {
     child: Child,
     stdin: Option<ChildStdin>,
     output: mpsc::Receiver<Result<Value>>,
+    output_taken: bool,
     readers: Vec<Option<JoinHandle<()>>>,
     stderr_bytes: Arc<AtomicU64>,
     write_failed: bool,
     exit: Option<Exit>,
+    framing: Framing,
+    discarded: Arc<AtomicU64>,
 }
 
 impl Process {
     pub async fn spawn(launch: Launch) -> Result<Self> {
+        Self::spawn_with_framing(launch, Framing::strict()).await
+    }
+    pub async fn spawn_with_framing(launch: Launch, framing: Framing) -> Result<Self> {
         launch.validate()?;
         let mut command = Command::new(&launch.holder);
         command
@@ -120,7 +147,8 @@ impl Process {
             .kill_on_drop(false)
             .process_group(0);
         let child = command.spawn().context("worker holder spawn failed")?;
-        let (sender, output) = mpsc::channel(QUEUE);
+        let (sender, output) = mpsc::channel(if framing.recover { 1 } else { QUEUE });
+        let discarded = Arc::new(AtomicU64::new(0));
         let stderr_bytes = Arc::new(AtomicU64::new(0));
         // The guard exists before any await: cancelling the startup handshake
         // sends TERM to the holder, whose handler precedes provider launch.
@@ -128,10 +156,13 @@ impl Process {
             child,
             stdin: None,
             output,
+            output_taken: false,
             readers: Vec::new(),
             stderr_bytes: stderr_bytes.clone(),
             write_failed: false,
             exit: None,
+            framing,
+            discarded: discarded.clone(),
         };
         process.stdin = process.child.stdin.take();
         let stdout = process
@@ -184,11 +215,29 @@ impl Process {
         }
         process.readers.push(Some(tokio::spawn(async move {
             loop {
-                let value = match bounded_line(&mut reader).await {
-                    Ok(Some(line)) => serde_json::from_slice(&line)
-                        .map_err(|_| anyhow::anyhow!("invalid subprocess JSON")),
-                    Ok(None) => break,
-                    Err(error) => Err(error),
+                let value = if framing.recover {
+                    match recovering_line(&mut reader, framing.max_wire_bytes).await {
+                        Ok(Line::Bytes(line)) => match serde_json::from_slice::<Value>(&line) {
+                            Ok(value) if value.is_object() => Ok(value),
+                            _ => {
+                                discarded.fetch_add(1, Ordering::Relaxed);
+                                continue;
+                            }
+                        },
+                        Ok(Line::Discarded) => {
+                            discarded.fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        }
+                        Ok(Line::Eof) => break,
+                        Err(error) => Err(error),
+                    }
+                } else {
+                    match bounded_line(&mut reader).await {
+                        Ok(Some(line)) => serde_json::from_slice(&line)
+                            .map_err(|_| anyhow::anyhow!("invalid subprocess JSON")),
+                        Ok(None) => break,
+                        Err(error) => Err(error),
+                    }
                 };
                 let failed = value.is_err();
                 if sender.send(value).await.is_err() || failed {
@@ -199,6 +248,9 @@ impl Process {
         Ok(process)
     }
 
+    pub fn discarded_frames(&self) -> u64 {
+        self.discarded.load(Ordering::Relaxed)
+    }
     pub fn pid(&self) -> Option<u32> {
         self.child.id()
     }
@@ -209,7 +261,10 @@ impl Process {
             "worker input is unavailable"
         );
         let mut bytes = serde_json::to_vec(value).context("worker request serialization failed")?;
-        ensure!(bytes.len() < MAX_FRAME, "worker request exceeds 1 MiB");
+        ensure!(
+            bytes.len() < self.framing.max_wire_bytes,
+            "worker request exceeds framing limit"
+        );
         bytes.push(b'\n');
         let mut write = WriteGuard {
             stdin: &mut self.stdin,
@@ -231,7 +286,18 @@ impl Process {
         }
     }
 
+    /// Transfer the single receiver to a reader task. A second transfer fails.
+    pub fn take_output(&mut self) -> Result<mpsc::Receiver<Result<Value>>> {
+        ensure!(!self.output_taken, "worker output already transferred");
+        self.output_taken = true;
+        let (_sender, empty) = mpsc::channel(1);
+        Ok(std::mem::replace(&mut self.output, empty))
+    }
     pub async fn recv(&mut self) -> Result<Option<Value>> {
+        ensure!(
+            !self.output_taken,
+            "worker output belongs to another reader"
+        );
         self.output.recv().await.transpose()
     }
 
@@ -312,6 +378,50 @@ impl Drop for WriteGuard<'_> {
     }
 }
 
+enum Line {
+    Bytes(Vec<u8>),
+    Discarded,
+    Eof,
+}
+async fn recovering_line<R: AsyncBufRead + Unpin>(reader: &mut R, limit: usize) -> Result<Line> {
+    let mut line = Vec::new();
+    let mut oversized = false;
+    loop {
+        let bytes = reader
+            .fill_buf()
+            .await
+            .context("worker output read failed")?;
+        if bytes.is_empty() {
+            return Ok(if line.is_empty() && !oversized {
+                Line::Eof
+            } else {
+                Line::Discarded
+            });
+        }
+        let count = bytes
+            .iter()
+            .position(|b| *b == b'\n')
+            .map_or(bytes.len(), |n| n + 1);
+        let ended = bytes[count - 1] == b'\n';
+        if !oversized {
+            if line.len() + count > limit {
+                oversized = true;
+                line.clear();
+            } else {
+                line.extend_from_slice(&bytes[..count]);
+            }
+        }
+        reader.consume(count);
+        if ended {
+            return Ok(if oversized {
+                Line::Discarded
+            } else {
+                Line::Bytes(line)
+            });
+        }
+    }
+}
+
 async fn bounded_line<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Option<Vec<u8>>> {
     let mut line = Vec::new();
     loop {
@@ -342,6 +452,27 @@ async fn bounded_line<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn recovery_drains_fragmented_oversize_and_discards_unterminated_tail() {
+        let bytes = b"123456789\n{}\n{broken";
+        let mut reader = BufReader::with_capacity(1, &bytes[..]);
+        assert!(matches!(
+            recovering_line(&mut reader, 4).await.unwrap(),
+            Line::Discarded
+        ));
+        assert!(
+            matches!(recovering_line(&mut reader, 4).await.unwrap(), Line::Bytes(line) if line == b"{}\n")
+        );
+        assert!(matches!(
+            recovering_line(&mut reader, 4).await.unwrap(),
+            Line::Discarded
+        ));
+        assert!(matches!(
+            recovering_line(&mut reader, 4).await.unwrap(),
+            Line::Eof
+        ));
+    }
 
     #[test]
     fn launch_debug_exposes_only_counts_not_paths_arguments_or_credentials() {
