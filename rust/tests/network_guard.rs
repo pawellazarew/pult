@@ -805,7 +805,10 @@ async fn codex_proxy_sets_both_proxy_variables_while_other_providers_only_use_ht
 
 #[test]
 fn guard_debug_hides_unvalidated_legacy_country_strings() {
-    let guard = GuardRule { mode: GuardMode::Deny, countries: vec!["PRIVATE_CONFIG_SECRET".into()] };
+    let guard = GuardRule {
+        mode: GuardMode::Deny,
+        countries: vec!["PRIVATE_CONFIG_SECRET".into()],
+    };
     let diagnostic = format!("{guard:?}");
     assert!(!diagnostic.contains("PRIVATE"));
     assert!(diagnostic.contains("country_count: 1"));

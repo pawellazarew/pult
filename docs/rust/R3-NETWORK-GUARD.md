@@ -35,7 +35,7 @@ Strict country-rule parsing uses the existing 250-code table including XK.
 Location parsing preserves JavaScript multiline separators; invalid UTF-8
 trace bodies fail closed instead of Node's replacement decoding.
 
-20 injected/fake-curl tests cover profiles, rule semantics, truncation, cache
+21 injected/fake-curl tests cover profiles, rule semantics, truncation, cache
 TTL/key/generation races, stdout/stderr bounds, cancellation/reaping, shutdown
 and route-to-environment behavior. Unicode line-separator and missing Codex
 ALL_PROXY regressions were confirmed RED before fixing. Three worker-env
