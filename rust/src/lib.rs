@@ -1,10 +1,6 @@
 #![forbid(unsafe_code)]
 pub mod codex_events;
 pub mod codex_process;
-pub mod prompt_attachments;
-pub mod network_guard;
-pub mod permission_broker;
-
 pub mod codex_rpc;
 pub mod consent_store;
 mod history;
@@ -17,7 +13,10 @@ mod memory_api;
 mod memory_catalog;
 pub mod memory_client;
 mod memory_project;
+pub mod network_guard;
 pub mod panic_guard;
+pub mod permission_broker;
+pub mod prompt_attachments;
 mod read_api;
 mod registry;
 mod session_api;
