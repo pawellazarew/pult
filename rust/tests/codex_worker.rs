@@ -1,6 +1,7 @@
 use pult_core::codex_events::{RedactionError, Redactor};
 use pult_core::codex_worker::{
-    CodexHost, HostConfig, HostStatus, Limits, Services, SessionSpec, Timeouts,
+    CodexHost, HostConfig, HostStatus, Limits, Services, SessionSpec, ThreadPrepared,
+    ThreadReceipt, ThreadStore, ThreadStoreError, Timeouts,
 };
 use pult_core::turn_coordinator::{Coordinator, Limits as CoordinatorLimits, Outcome, Ticket};
 use pult_core::turn_driver::{self, DispatchDecision, EventSink, Receipt, SinkError, Task, Worker};
@@ -44,6 +45,67 @@ impl EventSink for MemorySink {
     }
 }
 struct Identity;
+struct Acknowledge;
+impl ThreadStore for Acknowledge {
+    fn persist(&self, request: ThreadPrepared) -> Task<Result<ThreadReceipt, ThreadStoreError>> {
+        Box::pin(async move { Ok(request.acknowledge()) })
+    }
+}
+type StoreRecord = (SessionKey, Ticket, String, PathBuf, String);
+struct ControlledStore {
+    records: Mutex<Vec<StoreRecord>>,
+    entered: tokio::sync::Notify,
+    release: Arc<tokio::sync::Semaphore>,
+    mode: AtomicUsize,
+    stale: Mutex<Option<ThreadReceipt>>,
+}
+impl ControlledStore {
+    fn new(permits: usize, mode: usize) -> Arc<Self> {
+        Arc::new(Self {
+            records: Mutex::new(vec![]),
+            entered: tokio::sync::Notify::new(),
+            release: Arc::new(tokio::sync::Semaphore::new(permits)),
+            mode: AtomicUsize::new(mode),
+            stale: Mutex::new(None),
+        })
+    }
+}
+impl ThreadStore for ControlledStore {
+    fn persist(&self, request: ThreadPrepared) -> Task<Result<ThreadReceipt, ThreadStoreError>> {
+        self.records.lock().unwrap().push((
+            request.session().clone(),
+            request.ticket().clone(),
+            request.native_thread_id().to_owned(),
+            request.cwd().to_owned(),
+            request.model().to_owned(),
+        ));
+        assert!(
+            request.native_thread_id().starts_with("native-thread-")
+                || request.native_thread_id() == "resume-receipt"
+        );
+        assert!(matches!(
+            request.sandbox().mode,
+            pult_core::codex_worker::SandboxMode::ReadOnly
+        ));
+        self.entered.notify_one();
+        let semaphore = self.release.clone();
+        let mode = self.mode.load(Ordering::Acquire);
+        let stale = self.stale.lock().unwrap().take();
+        if mode == 3 {
+            *self.stale.lock().unwrap() = Some(request.acknowledge());
+            return Box::pin(async { Err(ThreadStoreError::Rejected) });
+        }
+        Box::pin(async move {
+            semaphore.acquire_owned().await.unwrap().forget();
+            match mode {
+                1 => Err(ThreadStoreError::Rejected),
+                2 => Err(ThreadStoreError::Unknown),
+                4 => Ok(stale.unwrap()),
+                _ => Ok(request.acknowledge()),
+            }
+        })
+    }
+}
 impl Redactor for Identity {
     fn redact(&mut self, value: &Value) -> Result<Value, RedactionError> {
         Ok(value.clone())
@@ -111,6 +173,7 @@ fn services(
         fresh_gate: gate,
         approval: None,
         fatal_storage: fatal,
+        thread_store: Arc::new(Acknowledge),
     }
 }
 fn host(home: &Path, sink: Arc<MemorySink>) -> Arc<CodexHost> {
@@ -194,6 +257,270 @@ fn assert_gone(home: &Path) {
         assert!(!running(pid));
     }
 }
+case!(
+    thread_receipt_blocks_model_and_checks_resumed_and_warm_ticket_each_time,
+    {
+        let home = tempfile::tempdir().unwrap();
+        let store = ControlledStore::new(0, 0);
+        let mut service = services(
+            Arc::new(MemorySink::default()),
+            Arc::new(|_: &Ticket, _: &TurnSnapshot| DispatchDecision::Allow),
+            Arc::new(|| {}),
+        );
+        service.thread_store = store.clone();
+        let host = CodexHost::start(config(home.path()), service).unwrap();
+        let snapshot = snapshot(home.path(), "receipt", Approval::ReadOnly);
+        let worker = worker(&host, home.path(), &snapshot, Some("resume-receipt"), true);
+        for index in 0..2 {
+            let key = ticket(&snapshot);
+            let future = worker.start(key.clone(), snapshot.clone(), "normal".into());
+            store.entered.notified().await;
+            assert_eq!(
+                logs(home.path())
+                    .iter()
+                    .filter(|v| v["method"] == "turn/start")
+                    .count(),
+                index
+            );
+            {
+                let records = store.records.lock().unwrap();
+                let record = records.last().unwrap();
+                assert_eq!(record.0, snapshot.key);
+                assert_eq!(record.1, key);
+                assert_eq!(record.2, "resume-receipt");
+                assert_eq!(record.3, home.path());
+                assert_eq!(record.4, "fixture-model");
+            }
+            store.release.add_permits(1);
+            let started = future.await.unwrap();
+            assert_eq!(started.done.await, Outcome::Success);
+            worker.close(key).await.unwrap();
+        }
+        assert_eq!(store.records.lock().unwrap().len(), 2);
+        assert_eq!(
+            logs(home.path())
+                .iter()
+                .filter(|v| v["method"] == "thread/resume")
+                .count(),
+            1
+        );
+        host.shutdown().await.unwrap();
+    }
+);
+
+case!(
+    dropped_start_waiter_keeps_store_owned_and_never_dispatches_late,
+    {
+        let home = tempfile::tempdir().unwrap();
+        let store = ControlledStore::new(0, 0);
+        let mut service = services(
+            Arc::new(MemorySink::default()),
+            Arc::new(|_: &Ticket, _: &TurnSnapshot| DispatchDecision::Allow),
+            Arc::new(|| {}),
+        );
+        service.thread_store = store.clone();
+        let host = CodexHost::start(config(home.path()), service).unwrap();
+        let snapshot = snapshot(home.path(), "cancel-store", Approval::ReadOnly);
+        let worker = worker(&host, home.path(), &snapshot, None, true);
+        let key = ticket(&snapshot);
+        let future = worker.start(key.clone(), snapshot, "normal".into());
+        store.entered.notified().await;
+        drop(future);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), worker.close(key.clone()))
+                .await
+                .is_err()
+        );
+        assert_eq!(store.records.lock().unwrap().len(), 1);
+        assert!(
+            logs(home.path())
+                .iter()
+                .all(|v| v["method"] != "turn/start")
+        );
+        let mut shutdown = host.shutdown();
+        until(|| host.status() == HostStatus::Stopped).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), shutdown.as_mut())
+                .await
+                .is_err()
+        );
+        store.release.add_permits(1);
+        worker.close(key).await.unwrap();
+        assert!(
+            logs(home.path())
+                .iter()
+                .all(|v| v["method"] != "turn/start")
+        );
+        shutdown.await.unwrap();
+    }
+);
+
+case!(
+    driver_keeps_quarantined_slot_until_cancelled_store_finishes,
+    {
+        let home = tempfile::tempdir().unwrap();
+        let store = ControlledStore::new(0, 0);
+        let sink = Arc::new(MemorySink::default());
+        let driver = turn_driver::Driver::new(
+            sink.clone(),
+            Arc::new(str::to_owned),
+            turn_driver::Options {
+                close_timeout: Duration::from_millis(20),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut service = services(
+            sink,
+            Arc::new(|_: &Ticket, _: &TurnSnapshot| DispatchDecision::Allow),
+            Arc::new(|| {}),
+        );
+        service.thread_store = store.clone();
+        let host = CodexHost::start(config(home.path()), service).unwrap();
+        let snapshot = snapshot(home.path(), "driver-store", Approval::ReadOnly);
+        let worker = worker(&host, home.path(), &snapshot, None, true);
+        let mut handle = driver.start(snapshot, "normal".into(), worker).unwrap();
+        store.entered.notified().await;
+        assert!(driver.cancel(handle.ticket()));
+        assert!(matches!(
+            handle.wait().await,
+            Err(turn_driver::DriverError::CleanupUnconfirmed)
+        ));
+        assert_eq!(driver.active_count(), 1);
+        assert!(
+            logs(home.path())
+                .iter()
+                .all(|v| v["method"] != "turn/start")
+        );
+        store.release.add_permits(1);
+        driver.shutdown(Duration::from_secs(2)).await.unwrap();
+        assert_eq!(driver.active_count(), 0);
+        assert!(
+            logs(home.path())
+                .iter()
+                .all(|v| v["method"] != "turn/start")
+        );
+        host.shutdown().await.unwrap();
+    }
+);
+
+case!(
+    stale_or_unknown_thread_store_never_dispatches_and_unknown_latches_fault,
+    {
+        for mode in [1, 2] {
+            let home = tempfile::tempdir().unwrap();
+            let store = ControlledStore::new(1, mode);
+            let faults = Arc::new(AtomicUsize::new(0));
+            let mark = faults.clone();
+            let mut service = services(
+                Arc::new(MemorySink::default()),
+                Arc::new(|_: &Ticket, _: &TurnSnapshot| DispatchDecision::Allow),
+                Arc::new(move || {
+                    mark.fetch_add(1, Ordering::AcqRel);
+                }),
+            );
+            service.thread_store = store;
+            let host = CodexHost::start(config(home.path()), service).unwrap();
+            let snapshot = snapshot(home.path(), "stale", Approval::ReadOnly);
+            let worker = worker(&host, home.path(), &snapshot, None, true);
+            let key = ticket(&snapshot);
+            assert!(
+                worker
+                    .start(key.clone(), snapshot, "normal".into())
+                    .await
+                    .is_err()
+            );
+            worker.close(key).await.unwrap();
+            assert_eq!(faults.load(Ordering::Acquire), usize::from(mode == 2));
+            assert!(
+                logs(home.path())
+                    .iter()
+                    .all(|v| v["method"] != "turn/start")
+            );
+            host.shutdown().await.unwrap();
+        }
+    }
+);
+
+case!(
+    receipt_from_another_prepare_is_rejected_without_model_dispatch,
+    {
+        let home = tempfile::tempdir().unwrap();
+        let store = ControlledStore::new(1, 3);
+        let faults = Arc::new(AtomicUsize::new(0));
+        let mark = faults.clone();
+        let mut service = services(
+            Arc::new(MemorySink::default()),
+            Arc::new(|_: &Ticket, _: &TurnSnapshot| DispatchDecision::Allow),
+            Arc::new(move || {
+                mark.fetch_add(1, Ordering::AcqRel);
+            }),
+        );
+        service.thread_store = store.clone();
+        let host = CodexHost::start(config(home.path()), service).unwrap();
+        let snapshot = snapshot(home.path(), "wrong-receipt", Approval::ReadOnly);
+        let worker = worker(&host, home.path(), &snapshot, None, true);
+        let first = ticket(&snapshot);
+        assert!(
+            worker
+                .start(first.clone(), snapshot.clone(), "normal".into())
+                .await
+                .is_err()
+        );
+        worker.close(first).await.unwrap();
+        store.mode.store(4, Ordering::Release);
+        let second = ticket(&snapshot);
+        assert!(
+            worker
+                .start(second.clone(), snapshot, "normal".into())
+                .await
+                .is_err()
+        );
+        worker.close(second).await.unwrap();
+        assert_eq!(faults.load(Ordering::Acquire), 1);
+        assert!(
+            logs(home.path())
+                .iter()
+                .all(|v| v["method"] != "turn/start")
+        );
+        host.shutdown().await.unwrap();
+    }
+);
+
+case!(
+    reported_thread_cwd_must_match_before_store_or_turn_dispatch,
+    {
+        let home = tempfile::tempdir().unwrap();
+        let store = ControlledStore::new(1, 0);
+        let mut service = services(
+            Arc::new(MemorySink::default()),
+            Arc::new(|_: &Ticket, _: &TurnSnapshot| DispatchDecision::Allow),
+            Arc::new(|| {}),
+        );
+        service.thread_store = store.clone();
+        let mut config = config(home.path());
+        config.launch.args.push("wrong-cwd".into());
+        let host = CodexHost::start(config, service).unwrap();
+        let snapshot = snapshot(home.path(), "cwd", Approval::ReadOnly);
+        let worker = worker(&host, home.path(), &snapshot, None, true);
+        let key = ticket(&snapshot);
+        assert!(
+            worker
+                .start(key.clone(), snapshot, "normal".into())
+                .await
+                .is_err()
+        );
+        worker.close(key).await.unwrap();
+        assert!(store.records.lock().unwrap().is_empty());
+        assert!(
+            logs(home.path())
+                .iter()
+                .all(|v| v["method"] != "turn/start")
+        );
+        host.shutdown().await.unwrap();
+    }
+);
+
 case!(redactor_can_reenter_close_and_host_shutdown, {
     let home = tempfile::tempdir().unwrap();
     let called = Arc::new(AtomicBool::new(false));

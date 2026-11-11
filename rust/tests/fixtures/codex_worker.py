@@ -95,7 +95,8 @@ for line in sys.stdin:
         if kind == 'workspaceWrite':
             sandbox.update(networkAccess=True, writableRoots=[str(home / 'owner-root')])
         threads[thread] = params
-        send({'id': frame['id'], 'result': {'thread': {'id': thread}, 'model': params.get('model', 'fixture-model'), 'sandbox': sandbox, 'approvalPolicy': params['approvalPolicy']}})
+        cwd = str(home / 'foreign') if len(sys.argv) > 2 and sys.argv[2] == 'wrong-cwd' else params['cwd']
+        send({'id': frame['id'], 'result': {'thread': {'id': thread}, 'cwd': cwd, 'model': params.get('model', 'fixture-model'), 'sandbox': sandbox, 'approvalPolicy': params['approvalPolicy']}})
     elif method == 'config/read':
         send({'id': frame['id'], 'result': {'config': {'sandbox_workspace_write': {'network_access': True, 'writable_roots': [str(home / 'owner-root')], 'exclude_slash_tmp': True}}}})
     elif method == 'turn/start':
