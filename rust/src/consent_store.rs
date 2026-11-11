@@ -1,5 +1,7 @@
 //! Private, durable consent.json storage. Refresh on every read; never infer a
 //! grant from unreadable state. Unknown commit outcomes require reopening.
+//! The host must serialize all writers through one store; identity checks are
+//! conflict detection, not a lock across concurrent store instances/processes.
 use crate::{host_policy, session_model, turn_snapshot::Provider};
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -107,9 +109,19 @@ fn parse(bytes: &[u8]) -> ConsentData {
             .and_then(|raw| serde_json::from_str::<String>(raw.get()).ok())
             .filter(|s| session_model::date_millis(s).is_some())
     };
-    let revoked_at: Option<String> = fields
-        .get("revokedAt")
-        .and_then(|raw| serde_json::from_str::<String>(raw.get()).ok());
+    let revoked_at: Option<String> = fields.get("revokedAt").and_then(|raw| {
+        // RawValue accepts JSON UTF-16 strings that Rust String cannot represent.
+        // V8 may still recognize a date with such a code unit in a comment.
+        // Never turn that decoding failure into absence of revocation.
+        if raw.get().starts_with('"') {
+            Some(
+                serde_json::from_str::<String>(raw.get())
+                    .unwrap_or_else(|_| "[unsupported Unicode revocation]".into()),
+            )
+        } else {
+            None
+        }
+    });
     let uncertain_revoked_at = revoked_at.filter(|s| session_model::date_millis(s).is_none());
     ConsentData {
         version,

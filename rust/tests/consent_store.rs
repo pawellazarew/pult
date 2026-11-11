@@ -261,3 +261,14 @@ fn debug_redacts_untrusted_revocation_and_other_raw_date_strings() {
     assert!(!debug.contains("2024-01-01"));
     assert!(debug.contains("uncertain_revocation: true"));
 }
+
+#[test]
+fn unpaired_unicode_in_revocation_string_never_restores_full() {
+    let home = private_home();
+    put(home.path(), br#"{"version":1,"rev":92,"providers":["claude"],"grantedAt":"2024-01-01","revokedAt":"Mon, 01 Jan 2024 00:00:00 GMT (\ud800)"}"#);
+    let data = ConsentStore::open(home.path()).unwrap().read().unwrap();
+    assert!(!data.facts().covers(Provider::Claude));
+    assert!(data.value().get("grantedAt").is_none());
+    assert_eq!(data.value()["providers"], json!([]));
+    assert_eq!(data.rev, 92);
+}

@@ -310,6 +310,9 @@ fn grant_lifetime_follows_explicit_approval_selection() {
 fn invalid_inherit_provider_is_rejected_even_when_configure_looks_like_a_noop() {
     for provider in [Provider::Codex, Provider::Zcode] {
         let f = facts(provider, Approval::Inherit);
-        assert_eq!(validate_configure_selection(&f, Some(&f), selection()), Err(PolicyError::InvalidParams));
+        assert_eq!(
+            validate_configure_selection(&f, Some(&f), selection()),
+            Err(PolicyError::InvalidParams)
+        );
     }
 }
