@@ -334,7 +334,7 @@ impl MemoryStore {
                 keys(params, &["id", "scope", "session"])?;
                 let filter = Filter::new(params, context, false)?;
                 let id = required_identifier(params, "id")?;
-                let record = find(&self.connection, id)?
+                let record = find(&self.connection, id, &filter)?
                     .filter(|r| !r.deleted && filter.contains(r))
                     .ok_or_else(|| error("not_found", "memory not found"))?;
                 record.value()
@@ -493,7 +493,7 @@ impl MemoryStore {
             }
         } else {
             let id = required_identifier(params, "id")?;
-            let mut record = find(&transaction, id)?
+            let mut record = find(&transaction, id, &filter)?
                 .filter(|record| !record.deleted && filter.contains(record))
                 .ok_or_else(|| error("not_found", "memory not found"))?;
             let expected = integer(params, "expectedVersion", 1, MAX_VERSION)?
@@ -641,7 +641,7 @@ impl MemoryStore {
         keys(params, &["id", "scope", "session", "limit", "offset"])?;
         let filter = Filter::new(params, context, false)?;
         let id = required_identifier(params, "id")?;
-        let current = find(&self.connection, id)?
+        let current = find(&self.connection, id, &filter)?
             .filter(|r| filter.contains(r))
             .ok_or_else(|| error("not_found", "memory not found"))?;
         let (limit, offset) = page(params)?;
@@ -718,8 +718,8 @@ fn decode_stored(row: StoredRow) -> MemoryResult<Record> {
     }
     Ok(record)
 }
-fn find(connection: &Connection, id: &str) -> MemoryResult<Option<Record>> {
-    connection.query_row("SELECT id,scope,project_id,version,deleted,pinned,updated_at,record FROM memories WHERE id=?1",[id],stored_row)
+fn find(connection: &Connection, id: &str, filter: &Filter) -> MemoryResult<Option<Record>> {
+    connection.query_row("SELECT id,scope,project_id,version,deleted,pinned,updated_at,record FROM memories WHERE id=?1 AND ((?2='global' AND scope='global') OR (?2='project' AND scope='project' AND project_id=?3) OR (?2='visible' AND (scope='global' OR (scope='project' AND project_id=?3))))",params![id,filter.mode,filter.project],stored_row)
         .optional().map_err(internal)?.map(decode_stored).transpose()
 }
 struct Filter {
@@ -916,6 +916,32 @@ mod tests {
     }
     fn request(store: &mut MemoryStore, method: &str, params: Value, context: &Context) -> Value {
         store.execute(method, &params, context).unwrap()
+    }
+
+    #[test]
+    fn foreign_corrupt_records_are_filtered_before_decoding() {
+        let home = scratch_home();
+        let mut store = MemoryStore::open(home.path()).unwrap();
+        let foreign = request(
+            &mut store,
+            "memory.add",
+            add("foreign-corrupt"),
+            &project("two"),
+        );
+        store
+            .connection
+            .execute(
+                "UPDATE memories SET record=?2 WHERE id=?1",
+                params![foreign["id"].as_str().unwrap(), "{broken-private-data"],
+            )
+            .unwrap();
+        for method in ["memory.get", "memory.history"] {
+            let failure = store
+                .execute(method, &json!({"id":foreign["id"]}), &project("one"))
+                .unwrap_err();
+            assert_eq!(failure.code, "not_found", "{method}");
+            assert_eq!(failure.message, "memory not found");
+        }
     }
 
     #[test]

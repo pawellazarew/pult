@@ -59,7 +59,7 @@ function validateCatalog(catalog, inventory, protocolSource) {
     if (typeof method.name !== 'string' || !/^[a-z][a-zA-Z0-9]*(\.[a-z][a-zA-Z0-9]*)+$/.test(method.name) || names.has(method.name)) fail(`Invalid or duplicate method ${method.name}`)
     names.add(method.name)
     if (!['implemented', 'reserved', 'extension'].includes(method.node) || !['implemented', 'unported'].includes(method.rust)) fail(`Invalid implementation state for ${method.name}`)
-    if (!['owner', 'ask', 'owner-or-runtime', 'owner-shell'].includes(method.access) || typeof method.testOnly !== 'boolean' || typeof method.description !== 'string' || !method.description.trim()) fail(`Invalid metadata for ${method.name}`)
+    if (!['owner', 'ask', 'owner-or-runtime', 'owner-or-memory', 'owner-shell'].includes(method.access) || typeof method.testOnly !== 'boolean' || typeof method.description !== 'string' || !method.description.trim()) fail(`Invalid metadata for ${method.name}`)
     if (method.node === 'implemented' && !inventory.routes.has(method.name)) fail(`Catalog Node route missing from source: ${method.name}`)
     if (method.node === 'reserved' && (!inventory.reserved.has(method.name) || inventory.routes.has(method.name))) fail(`Catalog reserved route missing from LATER_METHODS: ${method.name}`)
     if (method.node === 'extension' && (inventory.routes.has(method.name) || inventory.reserved.has(method.name))) fail(`Extension now exists in Node source: ${method.name}; update its state`)

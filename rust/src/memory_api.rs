@@ -5,8 +5,13 @@ use serde_json::Value;
 use serde_json::value::RawValue;
 use std::{path::Path, sync::Arc};
 
-pub(crate) const METHODS: [&str; 7] = [
+pub(crate) const METHODS: [&str; 12] = [
     "memory.add",
+    "memory.catalog",
+    "memory.context.bind",
+    "memory.context.issue",
+    "memory.context.revoke",
+    "memory.context.status",
     "memory.forget",
     "memory.get",
     "memory.history",
@@ -68,9 +73,16 @@ pub(crate) async fn execute(
     method: String,
     params: Value,
 ) -> Result<Value, MemoryError> {
+    if crate::session_memory_api::METHODS.contains(&method.as_str()) {
+        return crate::session_memory_api::execute(state, method, params).await;
+    }
+    if method == "memory.catalog" {
+        return crate::session_memory_api::read(state, method, params, None).await;
+    }
     tokio::task::spawn_blocking(move || {
         // Copy the trusted session context before filesystem IO and the memory lock.
-        // Never hold a memory lock while acquiring registry/journal locks.
+        // Release registry before acquiring memory; scoped reads use memory -> registry.
+        // Never add a registry -> memory nesting here.
         let (session, cwd) = {
             let session = match params.get("session") {
                 None => None,

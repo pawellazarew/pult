@@ -1379,6 +1379,299 @@
       }
     },
     {
+      "name": "memory.catalog",
+      "node": "extension",
+      "rust": "implemented",
+      "access": "owner-or-memory",
+      "testOnly": false,
+      "description": "Bounded JSON-lines catalog of visible memory summaries. Owner must select session; memory credentials must omit it.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "session": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "memories": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "version": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "id",
+                "version"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "context": {
+            "type": "object",
+            "properties": {
+              "session": {
+                "type": "string"
+              },
+              "generation": {
+                "type": "string"
+              },
+              "projectId": {
+                "type": "string"
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "readOnly": {
+                "type": "boolean",
+                "enum": [
+                  true
+                ]
+              }
+            },
+            "required": [
+              "session",
+              "generation",
+              "enabled",
+              "readOnly"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "text",
+          "memories",
+          "truncated",
+          "context"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "memory.context.bind",
+      "node": "extension",
+      "rust": "implemented",
+      "access": "owner",
+      "testOnly": false,
+      "description": "Pin an active session project for read-only memory. Rebinding invalidates earlier keys.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "session": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "session"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "session": {
+            "type": "string"
+          },
+          "generation": {
+            "type": "string"
+          },
+          "projectId": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "readOnly": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          }
+        },
+        "required": [
+          "session",
+          "generation",
+          "enabled",
+          "readOnly"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "memory.context.issue",
+      "node": "extension",
+      "rust": "implemented",
+      "access": "owner",
+      "testOnly": false,
+      "description": "Issue a read-only memory key for a registered session; rotate previous keys.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "session": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "context": {
+            "type": "object",
+            "properties": {
+              "session": {
+                "type": "string"
+              },
+              "generation": {
+                "type": "string"
+              },
+              "projectId": {
+                "type": "string"
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "readOnly": {
+                "type": "boolean",
+                "enum": [
+                  true
+                ]
+              }
+            },
+            "required": [
+              "session",
+              "generation",
+              "enabled",
+              "readOnly"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "key",
+          "context"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "memory.context.revoke",
+      "node": "extension",
+      "rust": "implemented",
+      "access": "owner",
+      "testOnly": false,
+      "description": "Remove the session memory context and revoke every issued key.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "session": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "revoked": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "revoked"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "memory.context.status",
+      "node": "extension",
+      "rust": "implemented",
+      "access": "owner",
+      "testOnly": false,
+      "description": "List ephemeral memory registrations without credentials or fingerprints.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "session": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "contexts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "session": {
+                  "type": "string"
+                },
+                "generation": {
+                  "type": "string"
+                },
+                "projectId": {
+                  "type": "string"
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "readOnly": {
+                  "type": "boolean",
+                  "enum": [
+                    true
+                  ]
+                }
+              },
+              "required": [
+                "session",
+                "generation",
+                "enabled",
+                "readOnly"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "contexts"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "memory.forget",
       "node": "extension",
       "rust": "implemented",
@@ -1490,7 +1783,7 @@
       "name": "memory.get",
       "node": "extension",
       "rust": "implemented",
-      "access": "owner",
+      "access": "owner-or-memory",
       "testOnly": false,
       "description": "Owner-only shared memory get; experimental Rust scratch service, agent turn integration follows separately.",
       "paramsSchema": {
@@ -1706,7 +1999,7 @@
       "name": "memory.list",
       "node": "extension",
       "rust": "implemented",
-      "access": "owner",
+      "access": "owner-or-memory",
       "testOnly": false,
       "description": "Owner-only shared memory list; experimental Rust scratch service, agent turn integration follows separately.",
       "paramsSchema": {
@@ -1816,7 +2109,7 @@
       "name": "memory.search",
       "node": "extension",
       "rust": "implemented",
-      "access": "owner",
+      "access": "owner-or-memory",
       "testOnly": false,
       "description": "Owner-only shared memory search; experimental Rust scratch service, agent turn integration follows separately.",
       "paramsSchema": {
@@ -2198,7 +2491,8 @@
                     "owner",
                     "ask",
                     "owner-or-runtime",
-                    "owner-shell"
+                    "owner-shell",
+                    "owner-or-memory"
                   ]
                 },
                 "testOnly": {

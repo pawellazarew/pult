@@ -5,10 +5,14 @@ pub mod journal;
 mod locale;
 mod memory;
 mod memory_api;
+mod memory_catalog;
+pub mod memory_client;
 mod memory_project;
 mod read_api;
 mod registry;
 mod session_api;
+mod session_memory;
+mod session_memory_api;
 mod session_model;
 mod session_read;
 mod session_tree;
@@ -44,7 +48,7 @@ use tokio::task::JoinSet;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const PROTOCOL: u64 = 1;
 pub const MAX_LINE: usize = 1024 * 1024;
-pub const SUPPORTED: [&str; 22] = [
+pub const SUPPORTED: [&str; 27] = [
     "agent.archive",
     "agent.read",
     "agent.rename",
@@ -60,6 +64,11 @@ pub const SUPPORTED: [&str; 22] = [
     "events.tail",
     "events.unsubscribe",
     "memory.add",
+    "memory.catalog",
+    "memory.context.bind",
+    "memory.context.issue",
+    "memory.context.revoke",
+    "memory.context.status",
     "memory.forget",
     "memory.get",
     "memory.history",
@@ -454,6 +463,7 @@ struct State {
     history: Mutex<history::HistoryCache>,
     registry: Mutex<registry::Registry>,
     memory: Mutex<std::result::Result<memory::MemoryStore, String>>,
+    session_memory: Mutex<session_memory::SessionMemory>,
     last_event_id: AtomicU64,
     test_mode: bool,
     projection_degraded: AtomicBool,
@@ -603,14 +613,28 @@ async fn connection(
         write_value(&mut output, &json!({"type":"error","code":"bad_json"})).await?;
         return Ok(());
     }
+    let memory_given = hello.get("memory");
+    let memory_lease = if memory_given.is_some()
+        && hello.get("token").is_none()
+        && hello.get("ask").is_none()
+        && hello.get("runtime").is_none()
+    {
+        memory_given
+            .and_then(Value::as_str)
+            .and_then(|key| state.session_memory.lock().ok()?.lookup(key))
+    } else {
+        None
+    };
     let error = if hello["type"] != "hello" {
         Some("handshake_required")
     } else {
         let given = hello["token"].as_str().unwrap_or("");
-        let scoped = hello.get("ask").is_some() || hello.get("runtime").is_some();
-        let valid = given.len() == state.token.len()
+        let owner_valid = memory_given.is_none()
+            && hello.get("ask").is_none()
+            && hello.get("runtime").is_none()
+            && given.len() == state.token.len()
             && bool::from(given.as_bytes().ct_eq(state.token.as_bytes()));
-        if !valid || scoped {
+        if !owner_valid && memory_lease.is_none() {
             Some("bad_token")
         } else if hello
             .get("protocol")
@@ -625,7 +649,12 @@ async fn connection(
         write_value(&mut output, &json!({"type":"error","code":code})).await?;
         return Ok(());
     }
-    write_value(&mut output, &json!({"type":"hello_ok","protocol":PROTOCOL,"daemon":{"version":VERSION,"pid":std::process::id(),"startedAt":state.started_at},"capabilities":{"experimental":true,"supportedMethods":SUPPORTED}})).await?;
+    let supported: &[&str] = if memory_lease.is_some() {
+        &session_memory_api::READ_METHODS
+    } else {
+        &SUPPORTED
+    };
+    write_value(&mut output, &json!({"type":"hello_ok","protocol":PROTOCOL,"daemon":{"version":VERSION,"pid":std::process::id(),"startedAt":state.started_at},"capabilities":{"experimental":true,"supportedMethods":supported}})).await?;
     let (writer, _writer_task) = stream::Writer::start(output);
     let mut writer_closed = writer.closed();
     let mut subscriptions = subscriptions::Subscriptions::new();
@@ -646,6 +675,62 @@ async fn connection(
                 break;
             }
         };
+        if let Some(lease) = &memory_lease {
+            // This role never reaches the owner dispatcher, including on malformed
+            // or unknown methods. Re-authorize the lease for every permitted read.
+            let header = (|| -> Result<(Value, String)> {
+                let raw: Box<RawValue> = serde_json::from_slice(&bytes)?;
+                let fields = history::Fields::parse(&raw)?;
+                let id = fields
+                    .get("id")
+                    .and_then(|v| serde_json::from_str::<Value>(v.get()).ok())
+                    .unwrap_or(Value::Null);
+                let method = fields
+                    .get("method")
+                    .and_then(|v| serde_json::from_str::<String>(v.get()).ok())
+                    .unwrap_or_default();
+                Ok((id, method))
+            })();
+            let (id, method) = match header {
+                Ok(value) => value,
+                Err(_) => {
+                    writer
+                        .response(&json!({"type":"error","code":"bad_json"}))
+                        .await?;
+                    break;
+                }
+            };
+            let response = if !session_memory_api::READ_METHODS.contains(&method.as_str()) {
+                json!({"id":id,"error":{"code":"forbidden","message":"memory credential only permits scoped memory reads"}})
+            } else if let Some((_, command)) = memory_api::parse(&bytes) {
+                match command {
+                    Ok((method, params)) => match session_memory_api::read(
+                        state.clone(),
+                        method,
+                        params,
+                        Some(lease.clone()),
+                    )
+                    .await
+                    {
+                        Ok(result) => json!({"id":id,"result":result}),
+                        Err(error) => {
+                            json!({"id":id,"error":{"code":error.code,"message":error.message}})
+                        }
+                    },
+                    Err(error) => {
+                        json!({"id":id,"error":{"code":error.code,"message":error.message}})
+                    }
+                }
+            } else {
+                json!({"id":id,"error":{"code":"invalid_params","message":"invalid scoped memory request"}})
+            };
+            if serde_json::to_vec(&response)?.len() < MAX_LINE {
+                writer.response(&response).await?;
+            } else {
+                writer.response(&json!({"id":id,"error":{"code":"internal","message":"response exceeds frame budget; reduce limit or advance offset"}})).await?;
+            }
+            continue;
+        }
         if let Some((id, command)) = session_api::parse(&bytes) {
             match command {
                 Err(error) => writer.response(&json!({"id":id,"error":{"code":"invalid_params","message":error.to_string()}})).await?,
@@ -836,6 +921,9 @@ async fn connection(
         writer.response(&json!({"id":id,"result":result})).await?;
         if method == "daemon.stop" {
             daemon_stopping = true;
+            if let Ok(mut contexts) = state.session_memory.lock() {
+                contexts.revoke_all();
+            }
             let _ = state.stop.send(true);
             break;
         }
@@ -906,6 +994,7 @@ pub async fn serve(home: PathBuf) -> Result<()> {
         history: Mutex::new(history::HistoryCache::default()),
         registry: Mutex::new(registry),
         memory: Mutex::new(memory),
+        session_memory: Mutex::new(session_memory::SessionMemory::default()),
         last_event_id,
         test_mode: std::env::var("PULT_TEST").as_deref() == Ok("1"),
         projection_degraded: AtomicBool::new(false),

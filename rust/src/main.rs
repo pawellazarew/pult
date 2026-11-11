@@ -34,9 +34,17 @@ enum Action {
     },
 }
 
-/// Owner administration of the experimental shared-memory service.
+/// Memory administration and read-only session access.
 #[derive(Subcommand)]
 enum MemoryAction {
+    Catalog {
+        #[arg(long, default_value = "{}")]
+        params: String,
+    },
+    Context {
+        #[command(subcommand)]
+        action: MemoryContextAction,
+    },
     Add {
         #[arg(long)]
         params: String,
@@ -63,6 +71,26 @@ enum MemoryAction {
     },
     History {
         #[arg(long)]
+        params: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum MemoryContextAction {
+    Bind {
+        #[arg(long)]
+        params: String,
+    },
+    Issue {
+        #[arg(long)]
+        params: String,
+    },
+    Revoke {
+        #[arg(long)]
+        params: String,
+    },
+    Status {
+        #[arg(long, default_value = "{}")]
         params: String,
     },
 }
@@ -137,7 +165,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     if args.skill {
         println!(
-            "Rust core protocol 1. Use an explicit private scratch --home.\nCommands: memory add|update|forget|get|list|search|history --params JSON (owner only; no turn injection yet), daemon serve, daemon status, daemon stop, catalog, events tail, events snapshot, events history --session NAME [--before ID] [--budget BYTES], events get ID..., agent read NAME [--since N] [--format text|json], agent tree NAME [--json], agent rename NAME [TITLE] [--title TEXT], agent archive|unarchive NAME, agent seen NAME [--unread]\nOwner-token connections support memory.add, memory.update, memory.forget, memory.get, memory.list, memory.search, memory.history, agent.read, agent.tree, agent.rename, agent.archive, agent.seen, daemon.status, daemon.stop, events.tail, events.subscribe, events.unsubscribe, events.snapshot, events.history, events.get and protocol.catalog.\nHistory reads per-session files, snapshots and get use the global journal.\nSubscriptions replay committed events with bounded output. live=true sends an empty-session reset.\nevents.emit requires PULT_TEST=1 and is for deterministic verification.\nJournal append is acknowledged after sync. A failed append has an unknown outcome until replay.\nOther catalogued methods return not_implemented. Scoped credentials are rejected.\nPrivate sessions/config are allowed only in a marked Rust scratch home. Startup recovers sessions cold and pauses queues; no provider is started. Production migration and session execution follow later compatibility steps."
+            "Rust core protocol 1. Use an explicit private scratch --home.\nCommands: memory add|update|forget|get|list|search|history|catalog --params JSON, memory context bind|issue|revoke|status --params JSON (owner administration; no turn injection yet), daemon serve, daemon status, daemon stop, catalog, events tail, events snapshot, events history --session NAME [--before ID] [--budget BYTES], events get ID..., agent read NAME [--since N] [--format text|json], agent tree NAME [--json], agent rename NAME [TITLE] [--title TEXT], agent archive|unarchive NAME, agent seen NAME [--unread]\nPULT_MEMORY_KEY selects memory-only authentication for every RPC without reading the owner token or display config. Memory credentials allow only get/list/search/catalog; they never grant owner authority.\nOwner-token connections support memory.context.bind, memory.context.issue, memory.context.revoke, memory.context.status, memory.catalog, memory.add, memory.update, memory.forget, memory.get, memory.list, memory.search, memory.history, agent.read, agent.tree, agent.rename, agent.archive, agent.seen, daemon.status, daemon.stop, events.tail, events.subscribe, events.unsubscribe, events.snapshot, events.history, events.get and protocol.catalog.\nHistory reads per-session files, snapshots and get use the global journal.\nSubscriptions replay committed events with bounded output. live=true sends an empty-session reset.\nevents.emit requires PULT_TEST=1 and is for deterministic verification.\nJournal append is acknowledged after sync. A failed append has an unknown outcome until replay.\nOther catalogued methods return not_implemented. Legacy ask/runtime credentials remain rejected.\nPrivate sessions/config are allowed only in a marked Rust scratch home. Startup recovers sessions cold and pauses queues; no provider is started. Production migration and session execution follow later compatibility steps."
         );
         return Ok(());
     }
@@ -147,7 +175,13 @@ async fn main() -> Result<()> {
     }) {
         Action::Daemon {
             action: DaemonAction::Serve,
-        } => return pult_core::serve(home).await,
+        } => {
+            anyhow::ensure!(
+                std::env::var_os("PULT_MEMORY_KEY").is_none(),
+                "memory credentials cannot start an owner daemon"
+            );
+            return pult_core::serve(home).await;
+        }
         Action::Daemon {
             action: DaemonAction::Status,
         } => cli_request(&home, "daemon.status", serde_json::json!({})).await?,
@@ -157,6 +191,13 @@ async fn main() -> Result<()> {
         Action::Catalog => cli_request(&home, "protocol.catalog", serde_json::json!({})).await?,
         Action::Memory { action } => {
             let (method, params) = match action {
+                MemoryAction::Catalog { params } => ("memory.catalog", params),
+                MemoryAction::Context { action } => match action {
+                    MemoryContextAction::Bind { params } => ("memory.context.bind", params),
+                    MemoryContextAction::Issue { params } => ("memory.context.issue", params),
+                    MemoryContextAction::Revoke { params } => ("memory.context.revoke", params),
+                    MemoryContextAction::Status { params } => ("memory.context.status", params),
+                },
                 MemoryAction::Add { params } => ("memory.add", params),
                 MemoryAction::Update { params } => ("memory.update", params),
                 MemoryAction::Forget { params } => ("memory.forget", params),
@@ -188,7 +229,7 @@ async fn main() -> Result<()> {
                             String,
                             Box<serde_json::value::RawValue>,
                         > = serde_json::from_str(wt.get())?;
-                        let label = if pult_core::cli_locale(&home)? == "ru" {
+                        let label = if cli_language(&home)? == "ru" {
                             "ветка"
                         } else {
                             "branch"
@@ -228,7 +269,7 @@ async fn main() -> Result<()> {
                         println!(
                             "{}",
                             if text.is_empty() {
-                                if pult_core::cli_locale(&home)? == "ru" {
+                                if cli_language(&home)? == "ru" {
                                     "дерево пустое: ни одного инструмента и субагента"
                                 } else {
                                     "Tree is empty: no tools or subagents"
@@ -309,8 +350,27 @@ async fn cli_request(
     method: &str,
     params: serde_json::Value,
 ) -> Result<Box<serde_json::value::RawValue>> {
+    if let Some(key) = std::env::var_os("PULT_MEMORY_KEY") {
+        let key = key
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("PULT_MEMORY_KEY must be valid UTF-8"))?;
+        return pult_core::memory_client::request(home, &key, method, params).await;
+    }
     let locale = pult_core::cli_locale(home)?;
     pult_core::request_with_locale(home, method, params, Some(locale)).await
+}
+
+// Even a rejected or misbehaving scoped endpoint cannot make the CLI inspect
+// owner display configuration when formatting a response.
+fn cli_language(home: &std::path::Path) -> Result<&'static str> {
+    if std::env::var_os("PULT_MEMORY_KEY").is_some() {
+        return Ok(if std::env::var("PULT_LANG").as_deref() == Ok("ru") {
+            "ru"
+        } else {
+            "en"
+        });
+    }
+    pult_core::cli_locale(home)
 }
 
 // Node's CLI uses Number.parseInt(value, 10), while RPC accepts finite fractions.

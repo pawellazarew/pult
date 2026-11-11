@@ -246,7 +246,16 @@ pub(crate) async fn execute(
                 unreachable!("read queries returned above")
             }
             Command::Rename { name, title } => registry.rename(&name, &title),
-            Command::Archive { name, archived } => registry.archive(&name, archived),
+            Command::Archive { name, archived } => {
+                let result = registry.archive(&name, archived);
+                if archived
+                    && result.is_ok()
+                    && let Ok(mut contexts) = state.session_memory.lock()
+                {
+                    contexts.revoke(&name);
+                }
+                result
+            }
             Command::Seen {
                 name,
                 unread,
