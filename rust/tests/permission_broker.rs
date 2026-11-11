@@ -719,3 +719,77 @@ async fn global_fault_cannot_be_followed_by_allow_from_another_pending_commit() 
     bounded(rig.broker.drain()).await;
     assert!(rig.calls.try_recv().is_err());
 }
+
+#[tokio::test]
+async fn node_zero_submillisecond_and_overflow_timers_deny_while_requested_append_is_blocked() {
+    for timeout in [
+        Duration::ZERO,
+        Duration::from_nanos(125_000),
+        Duration::from_millis(NODE_MAX_TIMEOUT_MS) + Duration::from_micros(500),
+        Duration::MAX,
+    ] {
+        let mut rig = rig(Options {
+            pending: 1,
+            timeout,
+        });
+        let mut handle = rig.broker.request(request("Bash", json!({}))).unwrap();
+        let pending = next(&mut rig).await;
+        assert!(matches!(
+            bounded(handle.decision()).await,
+            Decision::Deny { .. }
+        ));
+        assert_eq!(rig.broker.reserved_count(), 1);
+        assert!(rig.broker.list(None).is_empty());
+        assert!(rig.calls.try_recv().is_err());
+        pending.commit();
+        let resolved = next(&mut rig).await;
+        assert_eq!(resolved.draft["data"]["decision"], "deny");
+        assert_eq!(resolved.draft["data"]["by"], "timeout");
+        resolved.commit();
+        bounded(rig.broker.drain()).await;
+        assert!(rig.calls.try_recv().is_err());
+    }
+}
+#[tokio::test]
+async fn finite_float_factory_zero_and_huge_timeouts_keep_fail_closed_owned_io() {
+    for milliseconds in [0.0, 0.125, 1.75, NODE_MAX_TIMEOUT_MS as f64 + 0.5, 1e100] {
+        let mut rig = rig(Options {
+            pending: 1,
+            ..Options::from_timeout_ms(milliseconds).unwrap()
+        });
+        let mut handle = rig.broker.request(request("Read", json!({}))).unwrap();
+        let pending = next(&mut rig).await;
+        assert!(matches!(
+            bounded(handle.decision()).await,
+            Decision::Deny { .. }
+        ));
+        pending.commit();
+        next(&mut rig).await.commit();
+        bounded(rig.broker.drain()).await;
+        assert!(!rig.broker.storage_failed());
+    }
+}
+#[tokio::test]
+async fn timers_longer_than_default_are_accepted_then_provider_gone_cleans_them_up() {
+    for timeout in [
+        Duration::from_millis(600001),
+        Duration::from_millis(NODE_MAX_TIMEOUT_MS),
+    ] {
+        let mut rig = rig(Options {
+            pending: 1,
+            timeout,
+        });
+        let mut handle = publish(&mut rig, request("Bash", json!({}))).await;
+        assert_eq!(rig.broker.pending_count(), 1);
+        assert_eq!(rig.broker.provider_gone("chat"), 1);
+        assert!(matches!(
+            bounded(handle.decision()).await,
+            Decision::Deny { .. }
+        ));
+        let resolved = next(&mut rig).await;
+        assert_eq!(resolved.draft["data"]["by"], "provider_gone");
+        resolved.commit();
+        bounded(rig.broker.drain()).await;
+        assert!(rig.calls.try_recv().is_err());
+    }
+}
