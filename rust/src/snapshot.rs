@@ -11,23 +11,29 @@ pub(crate) struct SnapshotIndex {
 
 impl SnapshotIndex {
     pub fn note(&mut self, id: u64, event: &RawValue) -> Result<()> {
+        // Borrow each value from the validated record. Copying/decoding the
+        // entire tool output for four field lookups made large-journal startup
+        // several times slower. Map insertion also provides last-key-wins.
+        let fields: HashMap<String, &RawValue> = serde_json::from_str(event.get())?;
         let session = crate::journal::decode_js_string(
-            &crate::history::field(event, "sessionId")?.context("event has sessionId")?,
+            fields.get("sessionId").context("event has sessionId")?,
         )?;
-        let kind = crate::history::field(event, "kind")?
+        let kind = fields
+            .get("kind")
             .and_then(|v| serde_json::from_str::<String>(v.get()).ok());
-        let data = crate::history::field(event, "data")?;
-        let reason = data
-            .as_ref()
-            .filter(|v| v.get().starts_with('{'))
-            .map(|v| crate::history::field(v, "reason"))
-            .transpose()?
-            .flatten();
-        let removed = kind.as_deref() == Some("session.ended")
-            && reason
+        let removed = if kind.as_deref() == Some("session.ended") {
+            fields
+                .get("data")
+                .filter(|v| v.get().starts_with('{'))
+                .map(|v| crate::history::field(v, "reason"))
+                .transpose()?
+                .flatten()
                 .and_then(|v| serde_json::from_str::<String>(v.get()).ok())
                 .as_deref()
-                == Some("rm");
+                == Some("rm")
+        } else {
+            false
+        };
         if removed {
             self.latest.remove(&session);
             self.activity.remove(&session);
@@ -50,8 +56,8 @@ impl SnapshotIndex {
                 .insert(kind.to_owned(), id);
         }
         if !matches!(kind.as_deref(), Some("message.delta" | "context.updated")) {
-            if let Some(ts) = crate::history::field(event, "ts")? {
-                self.activity.insert(session, ts);
+            if let Some(ts) = fields.get("ts") {
+                self.activity.insert(session, (*ts).to_owned());
             } else {
                 self.activity.remove(&session);
             }

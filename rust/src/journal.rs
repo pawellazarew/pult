@@ -188,7 +188,10 @@ fn parse_event(line: &[u8]) -> Result<(JournalRecord, Vec<u16>)> {
 
 /// Validate every committed row before returning the incomplete tail boundary.
 /// The caller can then repair only that tail without hiding earlier corruption.
-fn scan(file: &File) -> Result<(Vec<Entry>, u64, u64)> {
+fn scan(
+    file: &File,
+    mut note: impl FnMut(&JournalRecord) -> Result<()>,
+) -> Result<(Vec<Entry>, u64, u64)> {
     let mut input = file.try_clone()?;
     input.seek(SeekFrom::Start(0))?;
     let mut input = BufReader::new(input);
@@ -210,6 +213,7 @@ fn scan(file: &File) -> Result<(Vec<Entry>, u64, u64)> {
                 id > last_id,
                 "journal event ids must be strictly increasing at byte {offset}"
             );
+            note(&record)?;
             index.push(Entry {
                 id,
                 offset,
@@ -267,9 +271,10 @@ impl EventStore {
         let (file, created) = open_file(&directory.join("journal.jsonl"))?;
         file.try_lock_exclusive()
             .context("another writer owns the journal")?;
-        let (index, size, _) = scan(&file)?;
+        let mut snapshot = crate::snapshot::SnapshotIndex::default();
+        let (index, size, _) = scan(&file, |record| snapshot.note(record.id, &record.json))?;
         repair(&file, &directory, size, created)?;
-        let mut store = Self {
+        Ok(Self {
             directory,
             file,
             index,
@@ -277,13 +282,8 @@ impl EventStore {
             poisoned: false,
             projections: HashMap::new(),
             projection_error: None,
-            snapshot: crate::snapshot::SnapshotIndex::default(),
-        };
-        for position in 0..store.index.len() {
-            let record = store.read_at(position)?;
-            store.snapshot.note(record.id, &record.json)?;
-        }
-        Ok(store)
+            snapshot,
+        })
     }
 
     pub fn last_id(&self) -> u64 {
@@ -387,7 +387,7 @@ impl EventStore {
             Some(projection) => projection,
             None => {
                 let (file, created) = open_file(&self.directory.join(&name))?;
-                let (_, size, last_id) = scan(&file)?;
+                let (_, size, last_id) = scan(&file, |_| Ok(()))?;
                 repair(&file, &self.directory, size, created)?;
                 Projection {
                     file,
