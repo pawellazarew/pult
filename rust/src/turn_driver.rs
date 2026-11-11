@@ -302,6 +302,11 @@ impl Driver {
             .core
             .active_count()
     }
+    /// Trusted host bridge for a failed provider/broker journal write. An
+    /// unknown outcome must stop admission and cancel every owned execution.
+    pub fn report_storage_failure(&self) {
+        latch_storage(&self.inner);
+    }
     pub fn storage_failed(&self) -> bool {
         self.inner
             .state
