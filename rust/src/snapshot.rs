@@ -1,12 +1,15 @@
 //! Lightweight journal projection for the window; no conversation bodies retained.
 use anyhow::{Context, Result};
 use serde_json::value::RawValue;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+pub(crate) type QueueReceipts = HashSet<(Vec<u16>, Vec<u16>)>;
 
 #[derive(Default, Debug)]
 pub(crate) struct SnapshotIndex {
     latest: HashMap<Vec<u16>, HashMap<String, u64>>,
     activity: HashMap<Vec<u16>, Box<RawValue>>,
+    receipts: HashMap<Vec<u16>, QueueReceipts>,
 }
 
 impl SnapshotIndex {
@@ -35,9 +38,26 @@ impl SnapshotIndex {
             false
         };
         if removed {
+            self.receipts.remove(&session);
             self.latest.remove(&session);
             self.activity.remove(&session);
             return Ok(());
+        }
+        if kind.as_deref() == Some("message.user")
+            && let Some(data) = fields.get("data").filter(|v| v.get().starts_with('{'))
+        {
+            let data = crate::history::Fields::parse(data)?;
+            if let (Some(id), Some(at)) = (data.get("queueItemId"), data.get("queueItemAt"))
+                && let (Ok(id), Ok(at)) = (
+                    crate::journal::decode_js_string(id),
+                    crate::journal::decode_js_string(at),
+                )
+            {
+                self.receipts
+                    .entry(session.clone())
+                    .or_default()
+                    .insert((id, at));
+            }
         }
         if let Some(kind) = kind.as_deref().filter(|kind| {
             matches!(
@@ -63,6 +83,13 @@ impl SnapshotIndex {
             }
         }
         Ok(())
+    }
+
+    pub fn receipts(&self, session: &str) -> QueueReceipts {
+        self.receipts
+            .get(&session.encode_utf16().collect::<Vec<_>>())
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub fn ids(&self) -> Vec<u64> {

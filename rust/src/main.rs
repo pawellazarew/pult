@@ -20,9 +20,34 @@ enum Action {
         action: DaemonAction,
     },
     Catalog,
+    Agent {
+        #[command(subcommand)]
+        action: AgentAction,
+    },
     Events {
         #[command(subcommand)]
         action: EventsAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentAction {
+    Rename {
+        name: String,
+        words: Vec<String>,
+        #[arg(long, conflicts_with = "words")]
+        title: Option<String>,
+    },
+    Archive {
+        name: String,
+    },
+    Unarchive {
+        name: String,
+    },
+    Seen {
+        name: String,
+        #[arg(long)]
+        unread: bool,
     },
 }
 
@@ -63,7 +88,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     if args.skill {
         println!(
-            "Rust core protocol 1. Use an explicit private scratch --home.\nCommands: daemon serve, daemon status, daemon stop, catalog, events tail, events snapshot, events history --session NAME [--before ID] [--budget BYTES], events get ID...\nOwner-token connections support daemon.status, daemon.stop, events.tail, events.subscribe, events.unsubscribe, events.snapshot, events.history, events.get and protocol.catalog.\nHistory reads per-session files, snapshots and get use the global journal.\nSubscriptions replay committed events with bounded output. live=true sends an empty-session reset.\nevents.emit requires PULT_TEST=1 and is for deterministic verification.\nJournal append is acknowledged after sync. A failed append has an unknown outcome until replay.\nOther catalogued methods return not_implemented. Scoped credentials are rejected.\nProduction migration and session execution follow later compatibility steps."
+            "Rust core protocol 1. Use an explicit private scratch --home.\nCommands: daemon serve, daemon status, daemon stop, catalog, events tail, events snapshot, events history --session NAME [--before ID] [--budget BYTES], events get ID..., agent rename NAME [TITLE] [--title TEXT], agent archive|unarchive NAME, agent seen NAME [--unread]\nOwner-token connections support agent.rename, agent.archive, agent.seen, daemon.status, daemon.stop, events.tail, events.subscribe, events.unsubscribe, events.snapshot, events.history, events.get and protocol.catalog.\nHistory reads per-session files, snapshots and get use the global journal.\nSubscriptions replay committed events with bounded output. live=true sends an empty-session reset.\nevents.emit requires PULT_TEST=1 and is for deterministic verification.\nJournal append is acknowledged after sync. A failed append has an unknown outcome until replay.\nOther catalogued methods return not_implemented. Scoped credentials are rejected.\nPrivate sessions/config are allowed only in a marked Rust scratch home. Startup recovers sessions cold and pauses queues; no provider is started. Production migration and session execution follow later compatibility steps."
         );
         return Ok(());
     }
@@ -81,6 +106,27 @@ async fn main() -> Result<()> {
             action: DaemonAction::Stop,
         } => pult_core::request(&home, "daemon.stop").await?,
         Action::Catalog => pult_core::request(&home, "protocol.catalog").await?,
+        Action::Agent { action } => {
+            let (method, params) = match action {
+                AgentAction::Rename { name, words, title } => (
+                    "agent.rename",
+                    serde_json::json!({"name":name,"title":title.unwrap_or_else(||words.join(" "))}),
+                ),
+                AgentAction::Archive { name } => (
+                    "agent.archive",
+                    serde_json::json!({"name":name,"archived":true}),
+                ),
+                AgentAction::Unarchive { name } => (
+                    "agent.archive",
+                    serde_json::json!({"name":name,"archived":false}),
+                ),
+                AgentAction::Seen { name, unread } => (
+                    "agent.seen",
+                    serde_json::json!({"name":name,"unread":unread}),
+                ),
+            };
+            pult_core::request_with_params(&home, method, params).await?
+        }
         Action::Events {
             action: EventsAction::Snapshot,
         } => pult_core::request(&home, "events.snapshot").await?,

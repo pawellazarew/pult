@@ -3,8 +3,8 @@
 В этом crate находятся сервер Unix socket и CLI для протокола Пульта версии 1.
 Текущий TypeScript-клиент проходит интеграционный тест с настоящим Rust-сервером.
 Перенесены `daemon.status`, `daemon.stop`, `events.tail`, тестовый `events.emit`,
-`events.subscribe`, `events.unsubscribe`, `events.snapshot`, `events.history`, `events.get`
-и `protocol.catalog`. Журнал использует нынешний формат `events/journal.jsonl`.
+`events.subscribe`, `events.unsubscribe`, `events.snapshot`, `events.history`, `events.get`,
+`agent.rename`, `agent.archive`, `agent.seen` и `protocol.catalog`. Журнал использует нынешний формат `events/journal.jsonl`.
 
 Полный список методов берётся из `../protocol/methods.json`. В `hello_ok` и статусе
 публикуются `capabilities.experimental` и `supportedMethods`. Каталог отмечает остальные
@@ -70,9 +70,8 @@ JSON lock содержит PID и время старта процесса, со
 ответ своему авторизованному клиенту, затем закрывает listener и остальные соединения.
 
 `--home` обязателен. Сервер проверяет канонический путь и отвергает production `~/.pult`,
-настроенный `PULT_HOME`, их родителей и вложенные каталоги. Он также отвергает существующие
-`config.json`, `sessions.json`, symlink-home и общедоступные каталоги. Существующий `events`
-разрешён только в scratch-home с приватным маркером `.rust-core-scratch`, который сервер
+настроенный `PULT_HOME`, их родителей и вложенные каталоги. Он также отвергает symlink-home и общедоступные каталоги. Существующие `events`,
+`config.json` и `sessions.json` разрешены в scratch-home с приватным маркером `.rust-core-scratch`, который сервер
 публикует при первом запуске. Это позволяет перезапускать собственный проверочный журнал.
 Статус возвращает канонический home и `lastEventId`.
 
@@ -88,5 +87,6 @@ JSON lock содержит PID и время старта процесса, со
 снимок, поскольку Rust ещё не исполняет сессии.
 
 Снимок, история окна и исходные события описаны в [R2-HISTORY](../docs/rust/R2-HISTORY.md).
-Далее переносятся реестр сессий и провайдеры. Автовосстановление срезов требует отдельного
-разрешения конфликтов с внешними изменениями и пока не выполняется.
+Реестр, миграция доступа, восстановление очереди и метаданные сессий описаны в
+[R3-REGISTRY](../docs/rust/R3-REGISTRY.md). Далее переносятся менеджер исполнения,
+разрешения и провайдеры. Восстановление истории требует обработки конфликтов с внешними данными.

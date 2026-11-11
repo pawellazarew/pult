@@ -28,12 +28,62 @@ export const RPC_CATALOG = {
     {
       "name": "agent.archive",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "implemented",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.archive.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Persist session metadata without executing a provider; returns queue previews.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "archived": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "archived"
+        ],
+        "additionalProperties": true
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "lastStatus": {
+            "type": "string"
+          },
+          "lastEventId": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "provider",
+          "cwd",
+          "mode",
+          "createdAt",
+          "lastStatus",
+          "lastEventId"
+        ],
+        "additionalProperties": true
+      }
     },
     {
       "name": "agent.browser",
@@ -178,12 +228,62 @@ export const RPC_CATALOG = {
     {
       "name": "agent.rename",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "implemented",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.rename.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Persist session metadata without executing a provider; returns queue previews.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "title"
+        ],
+        "additionalProperties": true
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "lastStatus": {
+            "type": "string"
+          },
+          "lastEventId": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "provider",
+          "cwd",
+          "mode",
+          "createdAt",
+          "lastStatus",
+          "lastEventId"
+        ],
+        "additionalProperties": true
+      }
     },
     {
       "name": "agent.retry",
@@ -208,12 +308,64 @@ export const RPC_CATALOG = {
     {
       "name": "agent.seen",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "implemented",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.seen.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Persist session metadata without executing a provider; returns queue previews.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "unread": {
+            "type": "boolean"
+          },
+          "upTo": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": true
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "lastStatus": {
+            "type": "string"
+          },
+          "lastEventId": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "provider",
+          "cwd",
+          "mode",
+          "createdAt",
+          "lastStatus",
+          "lastEventId"
+        ],
+        "additionalProperties": true
+      }
     },
     {
       "name": "agent.start",
@@ -1447,9 +1599,12 @@ export const RPC_CATALOG = {
 } as const
 
 export type RpcMethodName = typeof RPC_CATALOG.methods[number]['name']
-export type RustFoundationMethod = "daemon.status" | "daemon.stop" | "events.emit" | "events.get" | "events.history" | "events.snapshot" | "events.subscribe" | "events.tail" | "events.unsubscribe" | "protocol.catalog"
+export type RustFoundationMethod = "agent.archive" | "agent.rename" | "agent.seen" | "daemon.status" | "daemon.stop" | "events.emit" | "events.get" | "events.history" | "events.snapshot" | "events.subscribe" | "events.tail" | "events.unsubscribe" | "protocol.catalog"
 
 export interface RustFoundationParams {
+  "agent.archive": { "name": string; "archived": boolean; [key: string]: unknown }
+  "agent.rename": { "name": string; "title": string; [key: string]: unknown }
+  "agent.seen": { "name": string; "unread"?: boolean; "upTo"?: number; [key: string]: unknown }
   "daemon.status": { [key: string]: unknown }
   "daemon.stop": { [key: string]: unknown }
   "events.emit": { "kind": "session.started" | "session.ended" | "message.delta" | "message.done" | "message.user" | "tool.called" | "tool.finished" | "agent.spawned" | "agent.finished" | "permission.requested" | "permission.resolved" | "question.asked" | "usage.updated" | "context.updated" | "limit.hit" | "net.blocked" | "provider.blocked" | "provider.restarted" | "background.changed" | "status.changed" | "turn.stalled" | "browser.install" | "runtime.changed" | "session.configured" | "queue.updated" | "rule.revoked" | "daemon.started" | "daemon.stopping"; "count"?: number; "sessionId"?: string; "provider"?: string; "parentId"?: string; "data"?: { [key: string]: unknown }; [key: string]: unknown }
@@ -1463,6 +1618,9 @@ export interface RustFoundationParams {
 }
 
 export interface RustFoundationResults {
+  "agent.archive": { "name": string; "provider": string; "cwd": string; "mode": string; "createdAt": string; "lastStatus": string; "lastEventId": number; [key: string]: unknown }
+  "agent.rename": { "name": string; "provider": string; "cwd": string; "mode": string; "createdAt": string; "lastStatus": string; "lastEventId": number; [key: string]: unknown }
+  "agent.seen": { "name": string; "provider": string; "cwd": string; "mode": string; "createdAt": string; "lastStatus": string; "lastEventId": number; [key: string]: unknown }
   "daemon.status": { "version": string; "protocol": number; "pid": number; "startedAt": string; "uptimeMs": number; "home": string; "sock": string; "clients": number; "subscriptions": number; "lastEventId": number; "mode": "service" | "on-demand"; [key: string]: unknown }
   "daemon.stop": { "stopping": true }
   "events.emit": { "ids": Array<number>; "lastEventId": number; [key: string]: unknown }
