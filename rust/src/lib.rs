@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 pub mod codex_process;
+pub mod prompt_attachments;
 
 pub mod codex_rpc;
 pub mod consent_store;
