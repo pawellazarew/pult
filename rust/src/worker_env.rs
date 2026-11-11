@@ -8,6 +8,7 @@ use std::{
 pub type Environment = BTreeMap<OsString, OsString>;
 const BASE: &[&str] = &["HOME", "USER", "PATH", "LANG", "TERM", "TMPDIR"];
 const EXPLICIT: &[&str] = &[
+    "ALL_PROXY",
     "HTTPS_PROXY",
     "NO_PROXY",
     "PULT_MEMORY_KEY",
@@ -93,6 +94,7 @@ mod tests {
             ("LD_PRELOAD", "other"),
             ("PYTHONPATH", "other"),
             ("HTTPS_PROXY", "ambient"),
+            ("ALL_PROXY", "ambient-wss"),
         ]);
         assert_eq!(
             from_parent(&parent, &Environment::new()).unwrap(),

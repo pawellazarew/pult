@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+pub mod network_guard;
 
 mod history;
 pub mod journal;
