@@ -44,3 +44,26 @@ JSON, чрезмерный кадр и частичная/неизвестная
 Код 125 зарезервирован для неподтверждённой очистки/доставки вывода; совпадающий
 нативный exit code тоже трактуется консервативно. Остальные естественные exit codes
 сохраняются. Это транспорт, а не перезапуск команд и не готовая sandbox policy.
+
+
+## Codex framing profile
+
+The default strict JSON-lines profile remains bounded to 1 MiB and fails on
+malformed input. `Framing::codex()` explicitly permits up to 16 MiB of JSON
+plus LF, matching the native app-server client. It drains oversized lines,
+discards malformed/non-object JSON and unterminated tails, and resumes at the
+next LF. Only a discard counter is exposed; raw bad lines are not logged.
+The reader queue is one frame, with one additional frame potentially waiting
+for enqueue. Allocation and decoding overhead are additional to wire bytes.
+
+`take_output()` transfers the single receiver to a reader task while Process
+retains the writer and cleanup guard. A second transfer or direct recv then
+fails. Shutdown still bounds/aborts blocked reader tasks, including a held or
+full transferred receiver; dropping Process still signals the holder.
+This profile supplies transport plumbing, not a native Codex handshake,
+thread authorization, permission broker or execution RPC.
+
+Three real-process tests cover malformed/oversized recovery followed by large
+Unicode replies and natural exit 7, and a 2 MiB roundtrip through a transferred
+receiver, plus cleanup with a full or dropped receiver. A fragmented-reader test verifies oversized drain and truncated
+EOF recovery. The previous process lifecycle tests remain required.
