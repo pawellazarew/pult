@@ -24,6 +24,8 @@ pub mod turn_coordinator;
 pub mod turn_driver;
 pub mod turn_journal;
 pub mod turn_snapshot;
+pub mod worker_env;
+pub mod worker_process;
 
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
