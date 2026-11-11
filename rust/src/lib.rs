@@ -12,6 +12,7 @@ mod memory_project;
 pub mod panic_guard;
 mod read_api;
 mod registry;
+pub mod runtime_config;
 mod session_api;
 mod session_memory;
 mod session_memory_api;
