@@ -3,6 +3,7 @@ pub mod codex_events;
 pub mod codex_permissions;
 pub mod codex_process;
 pub mod codex_rpc;
+pub mod codex_worker;
 pub mod consent_store;
 mod history;
 pub mod host_paths;
