@@ -19,7 +19,7 @@ pub mod panic_guard;
 pub mod permission_broker;
 pub mod prompt_attachments;
 mod read_api;
-mod registry;
+pub mod registry;
 mod session_api;
 mod session_memory;
 mod session_memory_api;
