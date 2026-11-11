@@ -8,6 +8,7 @@ mod memory_api;
 mod memory_catalog;
 pub mod memory_client;
 mod memory_project;
+pub mod panic_guard;
 mod read_api;
 mod registry;
 mod session_api;
@@ -20,6 +21,8 @@ mod snapshot;
 mod stream;
 mod subscriptions;
 pub mod turn_coordinator;
+pub mod turn_driver;
+pub mod turn_journal;
 pub mod turn_snapshot;
 
 use anyhow::{Context, Result, bail, ensure};
