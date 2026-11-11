@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+pub mod prompt_attachments;
 
 pub mod consent_store;
 mod history;
