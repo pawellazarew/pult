@@ -28,6 +28,19 @@ enum Action {
 
 #[derive(Subcommand)]
 enum EventsAction {
+    Snapshot,
+    History {
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        before: Option<i64>,
+        #[arg(long)]
+        budget: Option<usize>,
+    },
+    Get {
+        #[arg(required = true)]
+        ids: Vec<u64>,
+    },
     Tail {
         #[arg(long, default_value_t = 0)]
         since: u64,
@@ -50,7 +63,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     if args.skill {
         println!(
-            "Rust core protocol 1. Use an explicit private scratch --home.\nCommands: daemon serve, daemon status, daemon stop, catalog, events tail [--since ID] [--session NAME] [--limit N].\nOwner-token connections support daemon.status, daemon.stop, events.tail, events.subscribe, events.unsubscribe and protocol.catalog.\nSubscriptions replay committed events with bounded output. live=true sends an empty-session reset.\nevents.emit requires PULT_TEST=1 and is for deterministic verification.\nJournal append is acknowledged after sync. A failed append has an unknown outcome until replay.\nOther catalogued methods return not_implemented. Scoped credentials are rejected.\nProduction migration and session execution follow later compatibility steps."
+            "Rust core protocol 1. Use an explicit private scratch --home.\nCommands: daemon serve, daemon status, daemon stop, catalog, events tail, events snapshot, events history --session NAME [--before ID] [--budget BYTES], events get ID...\nOwner-token connections support daemon.status, daemon.stop, events.tail, events.subscribe, events.unsubscribe, events.snapshot, events.history, events.get and protocol.catalog.\nHistory reads per-session files, snapshots and get use the global journal.\nSubscriptions replay committed events with bounded output. live=true sends an empty-session reset.\nevents.emit requires PULT_TEST=1 and is for deterministic verification.\nJournal append is acknowledged after sync. A failed append has an unknown outcome until replay.\nOther catalogued methods return not_implemented. Scoped credentials are rejected.\nProduction migration and session execution follow later compatibility steps."
         );
         return Ok(());
     }
@@ -68,6 +81,32 @@ async fn main() -> Result<()> {
             action: DaemonAction::Stop,
         } => pult_core::request(&home, "daemon.stop").await?,
         Action::Catalog => pult_core::request(&home, "protocol.catalog").await?,
+        Action::Events {
+            action: EventsAction::Snapshot,
+        } => pult_core::request(&home, "events.snapshot").await?,
+        Action::Events {
+            action:
+                EventsAction::History {
+                    session,
+                    before,
+                    budget,
+                },
+        } => {
+            let mut params = serde_json::json!({"sessionId":session});
+            if let Some(before) = before {
+                params["before"] = serde_json::json!(before);
+            }
+            if let Some(budget) = budget {
+                params["budget"] = serde_json::json!(budget);
+            }
+            pult_core::request_with_params(&home, "events.history", params).await?
+        }
+        Action::Events {
+            action: EventsAction::Get { ids },
+        } => {
+            pult_core::request_with_params(&home, "events.get", serde_json::json!({"ids":ids}))
+                .await?
+        }
         Action::Events {
             action:
                 EventsAction::Tail {

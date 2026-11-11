@@ -55,6 +55,7 @@ pub struct EventStore {
     poisoned: bool,
     projections: HashMap<String, Projection>,
     projection_error: Option<String>,
+    snapshot: crate::snapshot::SnapshotIndex,
 }
 
 impl Drop for EventStore {
@@ -187,7 +188,10 @@ fn parse_event(line: &[u8]) -> Result<(JournalRecord, Vec<u16>)> {
 
 /// Validate every committed row before returning the incomplete tail boundary.
 /// The caller can then repair only that tail without hiding earlier corruption.
-fn scan(file: &File) -> Result<(Vec<Entry>, u64, u64)> {
+fn scan(
+    file: &File,
+    mut note: impl FnMut(&JournalRecord) -> Result<()>,
+) -> Result<(Vec<Entry>, u64, u64)> {
     let mut input = file.try_clone()?;
     input.seek(SeekFrom::Start(0))?;
     let mut input = BufReader::new(input);
@@ -209,6 +213,7 @@ fn scan(file: &File) -> Result<(Vec<Entry>, u64, u64)> {
                 id > last_id,
                 "journal event ids must be strictly increasing at byte {offset}"
             );
+            note(&record)?;
             index.push(Entry {
                 id,
                 offset,
@@ -266,7 +271,8 @@ impl EventStore {
         let (file, created) = open_file(&directory.join("journal.jsonl"))?;
         file.try_lock_exclusive()
             .context("another writer owns the journal")?;
-        let (index, size, _) = scan(&file)?;
+        let mut snapshot = crate::snapshot::SnapshotIndex::default();
+        let (index, size, _) = scan(&file, |record| snapshot.note(record.id, &record.json))?;
         repair(&file, &directory, size, created)?;
         Ok(Self {
             directory,
@@ -276,6 +282,7 @@ impl EventStore {
             poisoned: false,
             projections: HashMap::new(),
             projection_error: None,
+            snapshot,
         })
     }
 
@@ -363,6 +370,8 @@ impl EventStore {
                 .collect(),
         });
         self.size += line.len() as u64;
+        self.snapshot
+            .note(id, &serde_json::value::to_raw_value(&event)?)?;
         if let Err(error) = self.append_projection(event["sessionId"].as_str().unwrap(), id, &line)
         {
             self.projection_error = Some(format!("session projection update failed: {error:#}"));
@@ -378,7 +387,7 @@ impl EventStore {
             Some(projection) => projection,
             None => {
                 let (file, created) = open_file(&self.directory.join(&name))?;
-                let (_, size, last_id) = scan(&file)?;
+                let (_, size, last_id) = scan(&file, |_| Ok(()))?;
                 repair(&file, &self.directory, size, created)?;
                 Projection {
                     file,
@@ -442,6 +451,102 @@ impl EventStore {
             }
         }
         Ok(out)
+    }
+
+    fn read_at(&mut self, position: usize) -> Result<JournalRecord> {
+        let entry = &self.index[position];
+        self.file.seek(SeekFrom::Start(entry.offset))?;
+        let mut bytes = vec![0; usize::try_from(entry.length)?];
+        self.file.read_exact(&mut bytes)?;
+        let (record, session) = parse_event(&bytes)?;
+        ensure!(
+            record.id == entry.id && session == entry.session_id,
+            "journal record changed after indexing"
+        );
+        Ok(record)
+    }
+
+    /// Preserve requested order and duplicates; unknown IDs do not produce rows.
+    pub fn read_ids(&mut self, ids: &[u64]) -> Result<Vec<JournalRecord>> {
+        let mut records = Vec::new();
+        for id in ids {
+            if let Ok(position) = self.index.binary_search_by_key(id, |entry| entry.id) {
+                records.push(self.read_at(position)?);
+            }
+        }
+        Ok(records)
+    }
+
+    pub fn snapshot(&mut self) -> Result<Box<RawValue>> {
+        #[derive(serde::Serialize)]
+        struct Snapshot {
+            events: Vec<Box<RawValue>>,
+            activity: Box<RawValue>,
+            cursor: u64,
+        }
+        let records = self.read_ids(&self.snapshot.ids())?;
+        Ok(serde_json::value::to_raw_value(&Snapshot {
+            events: records.into_iter().map(|record| record.json).collect(),
+            activity: self.snapshot.activity()?,
+            cursor: self.last_id(),
+        })?)
+    }
+
+    /// The Node history API reads the session projection, including external
+    /// rewrites. Never silently replace these bytes with the global journal.
+    pub fn read_session(&self, session: &[u16]) -> Result<Vec<JournalRecord>> {
+        let name = String::from_utf16(session)
+            .map(|session| session_file_name(&session))
+            .unwrap_or_else(|_| "_other.jsonl".into());
+        let file = match OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+            .open(self.directory.join(name))
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        checked_file(&file)?;
+        let mut input = BufReader::new(file);
+        let mut line = Vec::new();
+        let mut records = Vec::new();
+        let mut last = 0;
+        loop {
+            line.clear();
+            if input.read_until(b'\n', &mut line)? == 0 {
+                break;
+            }
+            if let Ok((record, own_session)) = parse_event(&line)
+                && own_session == session
+                && record.id > last
+            {
+                last = record.id;
+                records.push(record);
+            }
+        }
+        Ok(records)
+    }
+
+    pub fn session_stamp(&self, session: &[u16]) -> Result<Option<(u64, u64, i64, i64)>> {
+        let name = String::from_utf16(session)
+            .map(|session| session_file_name(&session))
+            .unwrap_or_else(|_| "_other.jsonl".into());
+        let metadata = match fs::symlink_metadata(self.directory.join(name)) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        ensure!(
+            metadata.is_file() && metadata.nlink() == 1 && metadata.mode() & 0o077 == 0,
+            "session projection must be a private regular file without links"
+        );
+        Ok(Some((
+            metadata.len(),
+            metadata.ino(),
+            metadata.mtime(),
+            metadata.mtime_nsec(),
+        )))
     }
 }
 

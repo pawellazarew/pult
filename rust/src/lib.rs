@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 
+mod history;
 pub mod journal;
+mod read_api;
+mod snapshot;
 mod stream;
 mod subscriptions;
 
@@ -32,10 +35,13 @@ use tokio::task::JoinSet;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const PROTOCOL: u64 = 1;
 pub const MAX_LINE: usize = 1024 * 1024;
-pub const SUPPORTED: [&str; 7] = [
+pub const SUPPORTED: [&str; 10] = [
     "daemon.status",
     "daemon.stop",
     "events.emit",
+    "events.get",
+    "events.history",
+    "events.snapshot",
     "events.subscribe",
     "events.tail",
     "events.unsubscribe",
@@ -423,6 +429,7 @@ struct State {
     clients: AtomicUsize,
     stop: watch::Sender<bool>,
     store: Mutex<journal::EventStore>,
+    history: Mutex<history::HistoryCache>,
     last_event_id: AtomicU64,
     test_mode: bool,
     projection_degraded: AtomicBool,
@@ -604,6 +611,22 @@ async fn connection(
                 break;
             }
         };
+        if let Some((id, query)) = read_api::parse(&bytes) {
+            match query {
+                Err(error) => writer.response(&json!({"id":id,"error":{"code":"invalid_params","message":error.to_string()}})).await?,
+                Ok(query) => {
+                    let result = read_api::execute(state.clone(), query).await;
+                    match result {
+                        Ok(result) if result.get().len() < MAX_LINE - 256 => writer.response(&RpcResult { id: &id, result }).await?,
+                        result => {
+                            let message = result.err().map_or_else(|| "response exceeds frame budget".to_owned(), |error| error.to_string());
+                            writer.response(&json!({"id":id,"error":{"code":"internal","message":message}})).await?;
+                        }
+                    }
+                }
+            }
+            continue;
+        }
         let request: Value = match serde_json::from_slice(&bytes) {
             Ok(request) => request,
             Err(_) => {
@@ -784,6 +807,7 @@ pub async fn serve(home: PathBuf) -> Result<()> {
         clients: AtomicUsize::new(0),
         stop,
         store: Mutex::new(store),
+        history: Mutex::new(history::HistoryCache::default()),
         last_event_id,
         test_mode: std::env::var("PULT_TEST").as_deref() == Ok("1"),
         projection_degraded: AtomicBool::new(false),

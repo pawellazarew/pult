@@ -141,7 +141,7 @@ impl Writer {
     }
 }
 
-fn encode_units(units: &[u16]) -> String {
+pub(crate) fn encode_units(units: &[u16]) -> String {
     let mut out = String::from("\"");
     for character in char::decode_utf16(units.iter().copied()) {
         match character {

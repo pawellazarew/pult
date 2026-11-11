@@ -522,22 +522,169 @@ export const RPC_CATALOG = {
     {
       "name": "events.get",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "implemented",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for events.get.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Original journal events in requested order with bounded string values.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          }
+        },
+        "required": [
+          "ids"
+        ],
+        "additionalProperties": true
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "integer"
+                },
+                "ts": {
+                  "type": "string"
+                },
+                "sessionId": {
+                  "type": "string"
+                },
+                "parentId": {
+                  "type": "string"
+                },
+                "provider": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "data": {
+                  "type": "object",
+                  "properties": {},
+                  "required": [],
+                  "additionalProperties": true
+                }
+              },
+              "required": [
+                "id",
+                "ts",
+                "sessionId",
+                "provider",
+                "kind",
+                "data"
+              ],
+              "additionalProperties": true
+            }
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "events"
+        ],
+        "additionalProperties": true
+      }
     },
     {
       "name": "events.history",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "implemented",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for events.history.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Compacted session projection, paged backwards within the window frame budget.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string"
+          },
+          "before": {
+            "type": "number"
+          },
+          "budget": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "sessionId"
+        ],
+        "additionalProperties": true
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "integer"
+                },
+                "ts": {
+                  "type": "string"
+                },
+                "sessionId": {
+                  "type": "string"
+                },
+                "parentId": {
+                  "type": "string"
+                },
+                "provider": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "data": {
+                  "type": "object",
+                  "properties": {},
+                  "required": [],
+                  "additionalProperties": true
+                }
+              },
+              "required": [
+                "id",
+                "ts",
+                "sessionId",
+                "provider",
+                "kind",
+                "data"
+              ],
+              "additionalProperties": true
+            }
+          },
+          "more": {
+            "type": "boolean"
+          },
+          "oldest": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "cursor": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "events",
+          "more",
+          "oldest",
+          "cursor"
+        ],
+        "additionalProperties": true
+      }
     },
     {
       "name": "events.search",
@@ -552,12 +699,77 @@ export const RPC_CATALOG = {
     {
       "name": "events.snapshot",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "implemented",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for events.snapshot.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Latest window-state events and session activity from the durable journal.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": true
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "integer"
+                },
+                "ts": {
+                  "type": "string"
+                },
+                "sessionId": {
+                  "type": "string"
+                },
+                "parentId": {
+                  "type": "string"
+                },
+                "provider": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "data": {
+                  "type": "object",
+                  "properties": {},
+                  "required": [],
+                  "additionalProperties": true
+                }
+              },
+              "required": [
+                "id",
+                "ts",
+                "sessionId",
+                "provider",
+                "kind",
+                "data"
+              ],
+              "additionalProperties": true
+            }
+          },
+          "activity": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": true
+          },
+          "cursor": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "events",
+          "activity",
+          "cursor"
+        ],
+        "additionalProperties": true
+      }
     },
     {
       "name": "events.subscribe",
@@ -1235,12 +1447,15 @@ export const RPC_CATALOG = {
 } as const
 
 export type RpcMethodName = typeof RPC_CATALOG.methods[number]['name']
-export type RustFoundationMethod = "daemon.status" | "daemon.stop" | "events.emit" | "events.subscribe" | "events.tail" | "events.unsubscribe" | "protocol.catalog"
+export type RustFoundationMethod = "daemon.status" | "daemon.stop" | "events.emit" | "events.get" | "events.history" | "events.snapshot" | "events.subscribe" | "events.tail" | "events.unsubscribe" | "protocol.catalog"
 
 export interface RustFoundationParams {
   "daemon.status": { [key: string]: unknown }
   "daemon.stop": { [key: string]: unknown }
   "events.emit": { "kind": "session.started" | "session.ended" | "message.delta" | "message.done" | "message.user" | "tool.called" | "tool.finished" | "agent.spawned" | "agent.finished" | "permission.requested" | "permission.resolved" | "question.asked" | "usage.updated" | "context.updated" | "limit.hit" | "net.blocked" | "provider.blocked" | "provider.restarted" | "background.changed" | "status.changed" | "turn.stalled" | "browser.install" | "runtime.changed" | "session.configured" | "queue.updated" | "rule.revoked" | "daemon.started" | "daemon.stopping"; "count"?: number; "sessionId"?: string; "provider"?: string; "parentId"?: string; "data"?: { [key: string]: unknown }; [key: string]: unknown }
+  "events.get": { "ids": Array<number>; [key: string]: unknown }
+  "events.history": { "sessionId": string; "before"?: number; "budget"?: number; [key: string]: unknown }
+  "events.snapshot": { [key: string]: unknown }
   "events.subscribe": { "since"?: number; "sessionId"?: string; "live"?: boolean; [key: string]: unknown }
   "events.tail": { "since"?: number; "sessionId"?: string; "limit"?: number; [key: string]: unknown }
   "events.unsubscribe": { "sub": number; [key: string]: unknown }
@@ -1251,6 +1466,9 @@ export interface RustFoundationResults {
   "daemon.status": { "version": string; "protocol": number; "pid": number; "startedAt": string; "uptimeMs": number; "home": string; "sock": string; "clients": number; "subscriptions": number; "lastEventId": number; "mode": "service" | "on-demand"; [key: string]: unknown }
   "daemon.stop": { "stopping": true }
   "events.emit": { "ids": Array<number>; "lastEventId": number; [key: string]: unknown }
+  "events.get": { "events": Array<{ "id": number; "ts": string; "sessionId": string; "parentId"?: string; "provider": string; "kind": string; "data": { [key: string]: unknown }; [key: string]: unknown }>; "truncated"?: boolean; [key: string]: unknown }
+  "events.history": { "events": Array<{ "id": number; "ts": string; "sessionId": string; "parentId"?: string; "provider": string; "kind": string; "data": { [key: string]: unknown }; [key: string]: unknown }>; "more": boolean; "oldest": number | null; "cursor": number; [key: string]: unknown }
+  "events.snapshot": { "events": Array<{ "id": number; "ts": string; "sessionId": string; "parentId"?: string; "provider": string; "kind": string; "data": { [key: string]: unknown }; [key: string]: unknown }>; "activity": { [key: string]: unknown }; "cursor": number; [key: string]: unknown }
   "events.subscribe": { "sub": number; "cursor": number; [key: string]: unknown }
   "events.tail": { "events": Array<{ "id": number; "ts": string; "sessionId": string; "parentId"?: string; "provider": string; "kind": string; "data": { [key: string]: unknown }; [key: string]: unknown }>; "cursor": number; [key: string]: unknown }
   "events.unsubscribe": { "removed": boolean; [key: string]: unknown }
