@@ -215,12 +215,111 @@
     {
       "name": "agent.read",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "implemented",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.read.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Read persisted session events or assistant text without starting a provider.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "since": {
+            "type": "number"
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "text",
+              "json"
+            ]
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "number"
+          },
+          "text": {
+            "type": "string"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "integer"
+                },
+                "ts": {
+                  "type": "string"
+                },
+                "sessionId": {
+                  "type": "string"
+                },
+                "parentId": {
+                  "type": "string"
+                },
+                "provider": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "data": {
+                  "type": "object",
+                  "properties": {},
+                  "required": [],
+                  "additionalProperties": true
+                }
+              },
+              "required": [
+                "id",
+                "ts",
+                "sessionId",
+                "provider",
+                "kind",
+                "data"
+              ],
+              "additionalProperties": true
+            }
+          },
+          "worktree": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "branch": {
+                "type": "string"
+              },
+              "repo": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "branch",
+              "repo"
+            ],
+            "additionalProperties": false
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "cursor"
+        ],
+        "additionalProperties": false
+      }
     },
     {
       "name": "agent.rename",
@@ -397,12 +496,46 @@
     {
       "name": "agent.tree",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "implemented",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.tree.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Reconstruct persisted tool and subagent activity without starting a provider.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "roots": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "orphans": {
+            "type": "integer"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "roots",
+          "orphans",
+          "text"
+        ],
+        "additionalProperties": false
+      }
     },
     {
       "name": "agent.wait",

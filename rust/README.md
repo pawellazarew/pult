@@ -4,7 +4,7 @@
 Текущий TypeScript-клиент проходит интеграционный тест с настоящим Rust-сервером.
 Перенесены `daemon.status`, `daemon.stop`, `events.tail`, тестовый `events.emit`,
 `events.subscribe`, `events.unsubscribe`, `events.snapshot`, `events.history`, `events.get`,
-`agent.rename`, `agent.archive`, `agent.seen` и `protocol.catalog`. Журнал использует нынешний формат `events/journal.jsonl`.
+`agent.rename`, `agent.archive`, `agent.seen`, `agent.read`, `agent.tree` и `protocol.catalog`. Журнал использует нынешний формат `events/journal.jsonl`.
 
 Полный список методов берётся из `../protocol/methods.json`. В `hello_ok` и статусе
 публикуются `capabilities.experimental` и `supportedMethods`. Каталог отмечает остальные
@@ -88,5 +88,6 @@ JSON lock содержит PID и время старта процесса, со
 
 Снимок, история окна и исходные события описаны в [R2-HISTORY](../docs/rust/R2-HISTORY.md).
 Реестр, миграция доступа, восстановление очереди и метаданные сессий описаны в
-[R3-REGISTRY](../docs/rust/R3-REGISTRY.md). Далее переносятся менеджер исполнения,
+[R3-REGISTRY](../docs/rust/R3-REGISTRY.md), чтение результатов и дерева — в
+[R3-QUERIES](../docs/rust/R3-QUERIES.md). Далее переносятся менеджер исполнения,
 разрешения и провайдеры. Восстановление истории требует обработки конфликтов с внешними данными.

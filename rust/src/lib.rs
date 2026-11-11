@@ -2,10 +2,13 @@
 
 mod history;
 pub mod journal;
+mod locale;
 mod read_api;
 mod registry;
 mod session_api;
 mod session_model;
+mod session_read;
+mod session_tree;
 mod snapshot;
 mod stream;
 mod subscriptions;
@@ -38,10 +41,12 @@ use tokio::task::JoinSet;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const PROTOCOL: u64 = 1;
 pub const MAX_LINE: usize = 1024 * 1024;
-pub const SUPPORTED: [&str; 13] = [
+pub const SUPPORTED: [&str; 15] = [
     "agent.archive",
+    "agent.read",
     "agent.rename",
     "agent.seen",
+    "agent.tree",
     "daemon.status",
     "daemon.stop",
     "events.emit",
@@ -622,10 +627,19 @@ async fn connection(
         if let Some((id, command)) = session_api::parse(&bytes) {
             match command {
                 Err(error) => writer.response(&json!({"id":id,"error":{"code":"invalid_params","message":error.to_string()}})).await?,
-                Ok(command) => match session_api::execute(state.clone(), command).await {
-                    Ok(result) if result.get().len() < MAX_LINE - 256 => writer.response(&RpcResult { id: &id, result }).await?,
-                    Ok(_) => writer.response(&json!({"id":id,"error":{"code":"internal","message":"operation committed but response exceeds frame budget"}})).await?,
+                Ok(command) => {
+                    let overflow = if command.is_mutation() { "operation committed but response exceeds frame budget" } else { "response exceeds frame budget" };
+                    match session_api::execute(state.clone(), command).await {
+                    Ok(result) => {
+                        let response = RpcResult { id: &id, result };
+                        if serde_json::to_vec(&response)?.len() < MAX_LINE {
+                            writer.response(&response).await?;
+                        } else {
+                            writer.response(&json!({"id":id,"error":{"code":"internal","message":overflow}})).await?;
+                        }
+                    },
                     Err(error) => writer.response(&json!({"id":id,"error":{"code":error.code,"message":error.message}})).await?,
+                    }
                 }
             }
             continue;
@@ -884,6 +898,32 @@ pub async fn request_with_params(
     method: &str,
     params: Value,
 ) -> Result<Box<RawValue>> {
+    request_with_locale(home, method, params, None).await
+}
+
+pub fn display_string(raw: &RawValue) -> Result<String> {
+    Ok(String::from_utf16_lossy(&journal::decode_js_string(raw)?))
+}
+
+pub fn cli_locale(home: &Path) -> Result<&'static str> {
+    let configured = registry::Registry::configured_language(home).unwrap_or(locale::Setting::Auto);
+    let setting = std::env::var("PULT_LANG")
+        .ok()
+        .and_then(|s| locale::cli_setting(&s))
+        .unwrap_or(configured);
+    Ok(if locale::english(setting, None) {
+        "en"
+    } else {
+        "ru"
+    })
+}
+
+pub async fn request_with_locale(
+    home: &Path,
+    method: &str,
+    params: Value,
+    locale: Option<&str>,
+) -> Result<Box<RawValue>> {
     let home = checked_home(home)?;
     let token = fs::read_to_string(home.join("run/token"))?;
     let socket = tokio::time::timeout(
@@ -909,7 +949,7 @@ pub async fn request_with_params(
     );
     write_value(
         &mut output,
-        &json!({"id":1,"method":method,"params":params}),
+        &json!({"id":1,"method":method,"params":params,"locale":locale}),
     )
     .await?;
     let response = tokio::time::timeout(Duration::from_secs(3), read_line(&mut input))
