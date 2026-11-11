@@ -21,6 +21,9 @@ use tokio::time::Instant;
 pub const MAX_PENDING: usize = 128;
 pub const MAX_INPUT_BYTES: usize = 256 * 1024;
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
+/// Node setTimeout's signed 32-bit millisecond ceiling. Larger delays become
+/// 1ms, not the maximum; check the original value before truncating fractions.
+pub const NODE_MAX_TIMEOUT_MS: u64 = 2_147_483_647;
 const SAFE_ID: u64 = 9_007_199_254_740_991;
 const SETTLED: u8 = 4;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -132,6 +135,8 @@ pub struct Redactors {
 #[derive(Clone, Copy)]
 pub struct Options {
     pub pending: usize,
+    /// Existing Duration callers use the same Node normalization in Broker::new.
+    /// Runtime config callers should use from_timeout_ms before any conversion.
     pub timeout: Duration,
 }
 impl Default for Options {
@@ -140,6 +145,34 @@ impl Default for Options {
             pending: MAX_PENDING,
             timeout: DEFAULT_TIMEOUT,
         }
+    }
+}
+impl Options {
+    /// Accept config.ts's finite, nonnegative milliseconds without first
+    /// converting an overflowing float into Duration. Node clamps <1ms and
+    /// >MAX to 1ms, then truncates the remaining fractional milliseconds.
+    pub fn from_timeout_ms(milliseconds: f64) -> Result<Self, BrokerError> {
+        if !milliseconds.is_finite() || milliseconds < 0.0 {
+            return Err(BrokerError::Invalid);
+        }
+        let milliseconds = if milliseconds < 1.0 || milliseconds > NODE_MAX_TIMEOUT_MS as f64 {
+            1
+        } else {
+            milliseconds.trunc() as u64
+        };
+        Ok(Self {
+            timeout: Duration::from_millis(milliseconds),
+            ..Self::default()
+        })
+    }
+}
+fn normalize_timeout(timeout: Duration) -> Duration {
+    let minimum = Duration::from_millis(1);
+    if timeout < minimum || timeout > Duration::from_millis(NODE_MAX_TIMEOUT_MS) {
+        minimum
+    } else {
+        // The upper-bound check proves this u128 -> u64 conversion is exact.
+        Duration::from_millis(timeout.as_millis() as u64)
     }
 }
 struct Control {
@@ -307,11 +340,7 @@ impl Broker {
         options: Options,
     ) -> Result<Self, BrokerError> {
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| BrokerError::Invalid)?;
-        if options.pending == 0
-            || options.pending > MAX_PENDING
-            || options.timeout.is_zero()
-            || options.timeout > DEFAULT_TIMEOUT
-        {
+        if options.pending == 0 || options.pending > MAX_PENDING {
             return Err(BrokerError::Invalid);
         }
         let mut random = [0u8; 16];
@@ -330,7 +359,7 @@ impl Broker {
             sequence: AtomicU64::new(1),
             generation,
             redactors,
-            timeout: options.timeout,
+            timeout: normalize_timeout(options.timeout),
         });
         runtime.spawn(run(shared.clone(), receiver, sink));
         Ok(Self {
@@ -421,6 +450,9 @@ impl Broker {
             return Err(BrokerError::Invalid);
         }
         let created = Instant::now();
+        let deadline = created
+            .checked_add(shared.timeout)
+            .ok_or(BrokerError::Invalid)?;
         let control = Arc::new(Control {
             session: request.session_id.clone(),
             sequence: seq,
@@ -435,7 +467,7 @@ impl Broker {
             card,
             control: control.clone(),
             created,
-            deadline: created + shared.timeout,
+            deadline,
             asker: Some(asker),
             stage: Stage::Requesting,
             pending_choice: None,
@@ -975,6 +1007,35 @@ async fn run(shared: Arc<Shared>, mut commands: mpsc::Receiver<Command>, sink: A
                     }
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod timer_tests {
+    use super::*;
+
+    #[test]
+    fn duration_api_matches_the_node_oracled_float_factory() {
+        for (duration, milliseconds) in [
+            (Duration::ZERO, 0.0),
+            (Duration::from_micros(125), 0.125),
+            (Duration::from_micros(1750), 1.75),
+            (Duration::from_millis(600001), 600001.0),
+            (
+                Duration::from_millis(NODE_MAX_TIMEOUT_MS),
+                NODE_MAX_TIMEOUT_MS as f64,
+            ),
+            (
+                Duration::from_millis(NODE_MAX_TIMEOUT_MS) + Duration::from_micros(500),
+                NODE_MAX_TIMEOUT_MS as f64 + 0.5,
+            ),
+            (Duration::MAX, f64::MAX),
+        ] {
+            assert_eq!(
+                normalize_timeout(duration),
+                Options::from_timeout_ms(milliseconds).unwrap().timeout
+            );
         }
     }
 }
