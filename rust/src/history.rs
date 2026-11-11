@@ -21,7 +21,7 @@ fn key(text: &str) -> Key {
     text.encode_utf16().collect()
 }
 
-fn encode_string(units: &[u16]) -> String {
+pub(crate) fn encode_string(units: &[u16]) -> String {
     let mut out = String::from("\"");
     for character in char::decode_utf16(units.iter().copied()) {
         match character {
@@ -112,9 +112,9 @@ fn normalize(value: &RawValue) -> Result<Raw> {
 }
 
 #[derive(Clone, Default)]
-struct Fields(Vec<(Key, Raw)>);
+pub(crate) struct Fields(Vec<(Key, Raw)>);
 impl Fields {
-    fn parse(value: &RawValue) -> Result<Self> {
+    pub(crate) fn parse(value: &RawValue) -> Result<Self> {
         ensure!(value.get().starts_with('{'), "event must be a JSON object");
         let text = value.get();
         let bytes = text.as_bytes();
@@ -155,19 +155,19 @@ impl Fields {
             self.0.push((name, value));
         }
     }
-    fn set(&mut self, name: &str, value: Raw) {
+    pub(crate) fn set(&mut self, name: &str, value: Raw) {
         self.set_key(key(name), value);
     }
-    fn get(&self, name: &str) -> Option<&RawValue> {
+    pub(crate) fn get(&self, name: &str) -> Option<&RawValue> {
         let name = key(name);
         self.0.iter().find(|(k, _)| *k == name).map(|(_, v)| &**v)
     }
-    fn remove(&mut self, name: &str) -> Option<Raw> {
+    pub(crate) fn remove(&mut self, name: &str) -> Option<Raw> {
         let name = key(name);
         let at = self.0.iter().position(|(k, _)| *k == name)?;
         Some(self.0.remove(at).1)
     }
-    fn into_raw(self) -> Result<Raw> {
+    pub(crate) fn into_raw(self) -> Result<Raw> {
         let mut out = String::from("{");
         for (at, (name, value)) in self.0.into_iter().enumerate() {
             if at > 0 {
@@ -188,7 +188,7 @@ pub(crate) fn field(value: &RawValue, name: &str) -> Result<Option<Raw>> {
     Ok(Fields::parse(value)?.get(name).map(RawValue::to_owned))
 }
 
-fn array_values(value: &RawValue) -> Result<Vec<Raw>> {
+pub(crate) fn array_values(value: &RawValue) -> Result<Vec<Raw>> {
     let text = value.get();
     let bytes = text.as_bytes();
     let mut at = 1;

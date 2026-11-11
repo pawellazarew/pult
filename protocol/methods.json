@@ -25,12 +25,62 @@
     {
       "name": "agent.archive",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "implemented",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.archive.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Persist session metadata without executing a provider; returns queue previews.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "archived": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "archived"
+        ],
+        "additionalProperties": true
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "lastStatus": {
+            "type": "string"
+          },
+          "lastEventId": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "provider",
+          "cwd",
+          "mode",
+          "createdAt",
+          "lastStatus",
+          "lastEventId"
+        ],
+        "additionalProperties": true
+      }
     },
     {
       "name": "agent.browser",
@@ -175,12 +225,62 @@
     {
       "name": "agent.rename",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "implemented",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.rename.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Persist session metadata without executing a provider; returns queue previews.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "title"
+        ],
+        "additionalProperties": true
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "lastStatus": {
+            "type": "string"
+          },
+          "lastEventId": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "provider",
+          "cwd",
+          "mode",
+          "createdAt",
+          "lastStatus",
+          "lastEventId"
+        ],
+        "additionalProperties": true
+      }
     },
     {
       "name": "agent.retry",
@@ -205,12 +305,64 @@
     {
       "name": "agent.seen",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "implemented",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.seen.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Persist session metadata without executing a provider; returns queue previews.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "unread": {
+            "type": "boolean"
+          },
+          "upTo": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": true
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "lastStatus": {
+            "type": "string"
+          },
+          "lastEventId": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "provider",
+          "cwd",
+          "mode",
+          "createdAt",
+          "lastStatus",
+          "lastEventId"
+        ],
+        "additionalProperties": true
+      }
     },
     {
       "name": "agent.start",

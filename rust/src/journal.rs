@@ -286,6 +286,10 @@ impl EventStore {
         })
     }
 
+    pub(crate) fn accepted_queue_receipts(&self, session: &str) -> crate::snapshot::QueueReceipts {
+        self.snapshot.receipts(session)
+    }
+
     pub fn last_id(&self) -> u64 {
         self.index.last().map_or(0, |entry| entry.id)
     }

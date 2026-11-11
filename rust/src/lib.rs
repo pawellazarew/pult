@@ -3,6 +3,9 @@
 mod history;
 pub mod journal;
 mod read_api;
+mod registry;
+mod session_api;
+mod session_model;
 mod snapshot;
 mod stream;
 mod subscriptions;
@@ -35,7 +38,10 @@ use tokio::task::JoinSet;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const PROTOCOL: u64 = 1;
 pub const MAX_LINE: usize = 1024 * 1024;
-pub const SUPPORTED: [&str; 10] = [
+pub const SUPPORTED: [&str; 13] = [
+    "agent.archive",
+    "agent.rename",
+    "agent.seen",
     "daemon.status",
     "daemon.stop",
     "events.emit",
@@ -135,11 +141,12 @@ pub fn checked_home(home: &Path) -> Result<PathBuf> {
         );
     }
     for name in ["config.json", "sessions.json"] {
-        ensure!(
-            fs::symlink_metadata(canonical.join(name))
-                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
-            "existing Pult state is not supported by this foundation"
-        );
+        if fs::symlink_metadata(canonical.join(name)).is_ok() {
+            ensure!(
+                marked_scratch(&canonical)?,
+                "existing Pult state requires a Rust scratch home"
+            );
+        }
     }
     if fs::symlink_metadata(canonical.join("events")).is_ok() {
         ensure!(
@@ -430,6 +437,7 @@ struct State {
     stop: watch::Sender<bool>,
     store: Mutex<journal::EventStore>,
     history: Mutex<history::HistoryCache>,
+    registry: Mutex<registry::Registry>,
     last_event_id: AtomicU64,
     test_mode: bool,
     projection_degraded: AtomicBool,
@@ -611,6 +619,17 @@ async fn connection(
                 break;
             }
         };
+        if let Some((id, command)) = session_api::parse(&bytes) {
+            match command {
+                Err(error) => writer.response(&json!({"id":id,"error":{"code":"invalid_params","message":error.to_string()}})).await?,
+                Ok(command) => match session_api::execute(state.clone(), command).await {
+                    Ok(result) if result.get().len() < MAX_LINE - 256 => writer.response(&RpcResult { id: &id, result }).await?,
+                    Ok(_) => writer.response(&json!({"id":id,"error":{"code":"internal","message":"operation committed but response exceeds frame budget"}})).await?,
+                    Err(error) => writer.response(&json!({"id":id,"error":{"code":error.code,"message":error.message}})).await?,
+                }
+            }
+            continue;
+        }
         if let Some((id, query)) = read_api::parse(&bytes) {
             match query {
                 Err(error) => writer.response(&json!({"id":id,"error":{"code":"invalid_params","message":error.to_string()}})).await?,
@@ -653,7 +672,7 @@ async fn connection(
         let method = request["method"].as_str().unwrap();
         let result = match method {
             "daemon.status" => {
-                json!({"version":VERSION,"protocol":PROTOCOL,"pid":std::process::id(),"startedAt":state.started_at,"uptimeMs":state.started.elapsed().as_millis(),"home":state.home,"sock":state.home.join("run/pultd.sock"),"clients":state.clients.load(Ordering::Relaxed),"subscriptions":state.subscriptions.load(Ordering::Relaxed),"lastEventId":state.last_event_id.load(Ordering::Acquire),"mode":"on-demand","journal":{"projectionDegraded":state.projection_degraded.load(Ordering::Relaxed)},"capabilities":{"experimental":true,"supportedMethods":SUPPORTED}})
+                json!({"version":VERSION,"protocol":PROTOCOL,"pid":std::process::id(),"startedAt":state.started_at,"uptimeMs":state.started.elapsed().as_millis(),"home":state.home,"sock":state.home.join("run/pultd.sock"),"clients":state.clients.load(Ordering::Relaxed),"subscriptions":state.subscriptions.load(Ordering::Relaxed),"lastEventId":state.last_event_id.load(Ordering::Acquire),"mode":"on-demand","journal":{"projectionDegraded":state.projection_degraded.load(Ordering::Relaxed)},"registry":state.registry.try_lock().ok().map(|r|r.status()),"capabilities":{"experimental":true,"supportedMethods":SUPPORTED}})
             }
             "daemon.stop" => json!({"stopping":true}),
             "protocol.catalog" => catalog(),
@@ -786,7 +805,13 @@ pub async fn serve(home: PathBuf) -> Result<()> {
     }
     initialize_scratch(&home)?;
     let events = home.join("events");
-    let store = tokio::task::spawn_blocking(move || journal::EventStore::open(&events)).await??;
+    let registry_home = home.clone();
+    let (store, registry) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let mut store = journal::EventStore::open(&events)?;
+        let registry = registry::Registry::open(&registry_home, &mut store)?;
+        Ok((store, registry))
+    })
+    .await??;
     let last_event_id = AtomicU64::new(store.last_id());
     let (committed, _) = watch::channel(store.last_id());
     let listener = UnixListener::bind(&socket)?;
@@ -808,6 +833,7 @@ pub async fn serve(home: PathBuf) -> Result<()> {
         stop,
         store: Mutex::new(store),
         history: Mutex::new(history::HistoryCache::default()),
+        registry: Mutex::new(registry),
         last_event_id,
         test_mode: std::env::var("PULT_TEST").as_deref() == Ok("1"),
         projection_degraded: AtomicBool::new(false),
