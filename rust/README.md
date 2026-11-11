@@ -109,3 +109,8 @@ RPC и реальные CLI-процессы будут подключены п�
 Native transport и lifecycle process group описаны в
 [R3-PROCESS-WORKER](../docs/rust/R3-PROCESS-WORKER.md). Companion `pult-worker-holder`
 собирается вместе с core; его argv — внутренний протокол доверенного host, не RPC.
+
+
+Правила доступа, хранилище согласий и проверки рабочих папок описаны в
+[R3-HOST-POLICY](../docs/rust/R3-HOST-POLICY.md). Это библиотечные проверки;
+перед включением исполнения их ещё нужно соединить с driver и настройками.
