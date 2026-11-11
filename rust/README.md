@@ -3,7 +3,8 @@
 В этом crate находятся сервер Unix socket и CLI для протокола Пульта версии 1.
 Текущий TypeScript-клиент проходит интеграционный тест с настоящим Rust-сервером.
 Перенесены `daemon.status`, `daemon.stop`, `events.tail`, тестовый `events.emit`,
-`events.subscribe`, `events.unsubscribe` и `protocol.catalog`. Журнал использует нынешний формат `events/journal.jsonl`.
+`events.subscribe`, `events.unsubscribe`, `events.snapshot`, `events.history`, `events.get`
+и `protocol.catalog`. Журнал использует нынешний формат `events/journal.jsonl`.
 
 Полный список методов берётся из `../protocol/methods.json`. В `hello_ok` и статусе
 публикуются `capabilities.experimental` и `supportedMethods`. Каталог отмечает остальные
@@ -46,6 +47,9 @@ scratch=$(mktemp -d)
 ./rust/target/release/pultd-rust --home /absolute/scratch daemon status
 ./rust/target/release/pultd-rust --home /absolute/scratch catalog
 ./rust/target/release/pultd-rust --home /absolute/scratch events tail --since 0 --session chat --limit 100
+./rust/target/release/pultd-rust --home /absolute/scratch events snapshot
+./rust/target/release/pultd-rust --home /absolute/scratch events history --session chat --budget 65536
+./rust/target/release/pultd-rust --home /absolute/scratch events get 1 2
 ./rust/target/release/pultd-rust --home /absolute/scratch daemon stop
 ./rust/target/release/pultd-rust --skill
 ```
@@ -83,4 +87,6 @@ JSON lock содержит PID и время старта процесса, со
 [R2-SUBSCRIPTIONS](../docs/rust/R2-SUBSCRIPTIONS.md). Live-канал пока выдаёт reset и пустой
 снимок, поскольку Rust ещё не исполняет сессии.
 
-История для окна, сессии и провайдеры переносятся следующими шагами R2/R3.
+Снимок, история окна и исходные события описаны в [R2-HISTORY](../docs/rust/R2-HISTORY.md).
+Далее переносятся реестр сессий и провайдеры. Автовосстановление срезов требует отдельного
+разрешения конфликтов с внешними изменениями и пока не выполняется.
