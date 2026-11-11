@@ -1,7 +1,9 @@
 //! Durable registry transactions. The owner daemon is the only writer; observed
 //! external edits fail rather than being overwritten. Unknown post-rename
 //! outcomes poison this instance until it is reopened.
-use crate::session_model::{self, Record};
+use crate::session_model;
+pub use crate::session_model::Record;
+use crate::turn_snapshot::{SessionKey, TurnSnapshot};
 use anyhow::{Context, Result, ensure};
 use chrono::{SecondsFormat, Utc};
 use serde_json::value::RawValue;
@@ -205,7 +207,7 @@ fn backup_once(home: &Path, original: &Observed) -> Result<()> {
     Ok(())
 }
 
-pub(crate) struct Registry {
+pub struct Registry {
     path: PathBuf,
     observed: Option<Observed>,
     records: Vec<Record>,
@@ -309,7 +311,7 @@ impl Registry {
         })
     }
 
-    pub fn language(&self) -> crate::locale::Setting {
+    pub(crate) fn language(&self) -> crate::locale::Setting {
         self.language
     }
 
@@ -333,6 +335,146 @@ impl Registry {
         self.records.iter().find(|record| record.name() == name)
     }
 
+    /// Trusted owner data, including private queued input. Redact the public
+    /// projection in the host; this is not the agent.list wire representation.
+    pub fn records(&self) -> &[Record] {
+        &self.records
+    }
+
+    fn validate_record(record: &Record) -> Result<SessionKey> {
+        let snapshot = TurnSnapshot::try_from(record)?;
+        snapshot.validate()?;
+        ensure!(
+            serde_json::to_vec(record)?.len() < crate::MAX_LINE - 4096,
+            "session record exceeds metadata budget"
+        );
+        Ok(snapshot.key)
+    }
+
+    fn current(&self, expected: &SessionKey) -> Result<&Record> {
+        expected.validate()?;
+        let record = self.find(&expected.name).context("session not found")?;
+        ensure!(
+            record.scalar("createdAt").as_deref() == Some(expected.created_at.as_str()),
+            "session identity changed"
+        );
+        Ok(record)
+    }
+
+    /// Host-only metadata creation, not permission to launch a provider. The
+    /// host validates consent, cwd, settings and lifecycle before calling this.
+    pub fn insert(&mut self, mut record: Record) -> Result<Record> {
+        let key = Self::validate_record(&record)?;
+        // Record::name reads canonical ASCII directly from its JSON string.
+        // Public typed callers can supply escaped JSON; normalize before any
+        // lookup or persistence so an escape cannot disguise a duplicate.
+        record.set_string("name", &key.name);
+        ensure!(self.find(&key.name).is_none(), "session already exists");
+        if record.get("lastStatus").is_none() {
+            record.set_string("lastStatus", "cold");
+        }
+        if record.get("lastTurnAt").is_none() {
+            record.set_string("lastTurnAt", &key.created_at);
+        }
+        if record.get("lastSeenEventId").is_none() {
+            record.set_number("lastSeenEventId", 0.0);
+        }
+        Self::validate_record(&record)?;
+        let mut records = self.records.clone();
+        records.push(record.clone());
+        self.commit_records(records, |_| Ok(()))?;
+        Ok(record)
+    }
+
+    /// A delayed callback cannot overwrite a newer record or a recreated
+    /// session. previous must be the exact snapshot used to prepare record.
+    /// Prefer update_checked for a small update to freshly read metadata.
+    pub fn replace_checked(
+        &mut self,
+        expected: &SessionKey,
+        previous: &Record,
+        mut record: Record,
+    ) -> Result<Record> {
+        let current = self.current(expected)?;
+        ensure!(
+            current.0.len() == previous.0.len()
+                && current.0.iter().all(|(key, value)| previous
+                    .0
+                    .get(key)
+                    .is_some_and(|old| old.get() == value.get())),
+            "session metadata changed"
+        );
+        ensure!(
+            Self::validate_record(&record)? == *expected,
+            "session identity changed"
+        );
+        record.set_string("name", &expected.name);
+        ensure!(
+            record.string("provider") == current.string("provider")
+                && record.string("cwd") == current.string("cwd"),
+            "session execution identity changed"
+        );
+        self.replace(&expected.name, record, |_| Ok(()))
+    }
+
+    /// Applies a synchronous host patch to current metadata. No record snapshot
+    /// is carried across an await, so unrelated title/settings/queue changes
+    /// cannot be lost when a provider callback stores its thread ID. Callback
+    /// panics are caught; hosts install panic_guard before callbacks to suppress
+    /// the default panic hook, which runs before catch_unwind.
+    pub fn update_checked(
+        &mut self,
+        expected: &SessionKey,
+        update: impl FnOnce(&mut Record) -> Result<()>,
+    ) -> Result<Record> {
+        let previous = self.current(expected)?.clone();
+        let mut next = previous.clone();
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| update(&mut next)))
+            .map_err(|_| anyhow::anyhow!("session metadata mutation failed"))??;
+        self.replace_checked(expected, &previous, next)
+    }
+
+    /// The host must first quiesce this exact session's workers and revoke its
+    /// credentials; removing metadata is not proof that execution stopped.
+    pub fn remove_checked(&mut self, expected: &SessionKey) -> Result<Record> {
+        let removed = self.current(expected)?.clone();
+        let records = self
+            .records
+            .iter()
+            .filter(|r| r.name() != expected.name)
+            .cloned()
+            .collect();
+        self.commit_records(records, |_| Ok(()))?;
+        Ok(removed)
+    }
+
+    fn commit_records(
+        &mut self,
+        records: Vec<Record>,
+        before: impl FnMut(Step) -> std::io::Result<()>,
+    ) -> Result<()> {
+        ensure!(
+            !self.poisoned,
+            "registry commit outcome unknown; reopen before further writes"
+        );
+        match atomic_write(&self.path, &self.observed, &envelope(&records)?, before) {
+            Ok(observed) => {
+                self.observed = Some(observed);
+                self.records = records;
+                Ok(())
+            }
+            Err(failure) => {
+                self.poisoned |= failure.uncertain;
+                if failure.uncertain {
+                    Err(failure.error)
+                        .context("registry commit outcome unknown; reopen before further writes")
+                } else {
+                    Err(failure.error).context("registry write failed; memory unchanged")
+                }
+            }
+        }
+    }
+
     fn replace(
         &mut self,
         name: &str,
@@ -350,22 +492,8 @@ impl Registry {
             .context("session not found")?;
         let mut records = self.records.clone();
         records[index] = next.clone();
-        match atomic_write(&self.path, &self.observed, &envelope(&records)?, before) {
-            Ok(observed) => {
-                self.observed = Some(observed);
-                self.records = records;
-                Ok(next)
-            }
-            Err(failure) => {
-                self.poisoned |= failure.uncertain;
-                if failure.uncertain {
-                    Err(failure.error)
-                        .context("registry commit outcome unknown; reopen before further writes")
-                } else {
-                    Err(failure.error).context("registry write failed; memory unchanged")
-                }
-            }
-        }
+        self.commit_records(records, before)?;
+        Ok(next)
     }
 
     pub fn rename(&mut self, name: &str, title: &[u16]) -> Result<Record> {
@@ -556,5 +684,246 @@ mod tests {
         assert_eq!(fs::read(&registry.path).unwrap(), bytes);
         assert!(!home.path().join("config.json").exists());
         assert!(!home.path().join("sessions.json.bak-v1").exists());
+    }
+
+    fn key(record: &Record) -> SessionKey {
+        SessionKey {
+            name: record.name().into(),
+            created_at: record.scalar("createdAt").unwrap(),
+        }
+    }
+    fn new_record() -> Record {
+        let mut record = Record::default();
+        record.set_string("name", "beta");
+        record.set_string("provider", "codex");
+        record.set_string("cwd", "/fixture/beta");
+        record.set_string("createdAt", "2026-11-12T00:00:00.000Z");
+        record
+    }
+    #[test]
+    fn insert_is_durable_preserves_other_sessions_and_rejects_escaped_duplicate() {
+        let (_home, mut registry) = fixture();
+        let record = registry.insert(new_record()).unwrap();
+        assert_eq!(record.scalar("lastStatus").as_deref(), Some("cold"));
+        assert_eq!(registry.records().len(), 2);
+        let disk: Box<RawValue> =
+            serde_json::from_slice(&fs::read(&registry.path).unwrap()).unwrap();
+        let parsed = session_model::parse(&disk).unwrap();
+        assert_eq!(
+            parsed.iter().map(Record::name).collect::<Vec<_>>(),
+            ["alpha", "beta"]
+        );
+        let before = fs::read(&registry.path).unwrap();
+        let mut duplicate = new_record();
+        duplicate.set_raw(
+            "name",
+            RawValue::from_string(r#""\u0062eta""#.into()).unwrap(),
+        );
+        assert!(registry.insert(duplicate).is_err());
+        assert_eq!(fs::read(&registry.path).unwrap(), before);
+    }
+    #[test]
+    fn malformed_new_records_never_change_disk_or_memory() {
+        let (_home, mut registry) = fixture();
+        let before = fs::read(&registry.path).unwrap();
+        let mut records = vec![Record::default()];
+        for (field, value) in [
+            ("name", "../beta"),
+            ("provider", "unknown"),
+            ("cwd", "relative"),
+            ("createdAt", ""),
+            ("approval", "inherit"),
+        ] {
+            let mut record = new_record();
+            record.set_string(field, value);
+            records.push(record);
+        }
+        let mut oversized = new_record();
+        oversized.set_string("privateMetadata", &"x".repeat(crate::MAX_LINE));
+        records.push(oversized);
+        for record in records {
+            assert!(registry.insert(record).is_err());
+            assert_eq!(fs::read(&registry.path).unwrap(), before);
+            assert_eq!(registry.records().len(), 1);
+        }
+    }
+    #[test]
+    fn checked_replacement_and_removal_reject_stale_identity_and_execution_changes() {
+        let (_home, mut registry) = fixture();
+        let created = registry.insert(new_record()).unwrap();
+        let expected = key(&created);
+        let mut stale = expected.clone();
+        stale.created_at = "2025-01-01T00:00:00.000Z".into();
+        let before = fs::read(&registry.path).unwrap();
+        assert!(
+            registry
+                .replace_checked(&stale, &created, created.clone())
+                .is_err()
+        );
+        assert!(registry.remove_checked(&stale).is_err());
+        for (field, value) in [
+            ("name", "gamma"),
+            ("createdAt", "different"),
+            ("provider", "claude"),
+            ("cwd", "/foreign"),
+        ] {
+            let mut changed = created.clone();
+            changed.set_string(field, value);
+            assert!(
+                registry
+                    .replace_checked(&expected, &created, changed)
+                    .is_err()
+            );
+        }
+        assert_eq!(fs::read(&registry.path).unwrap(), before);
+        let mut changed = created.clone();
+        changed.set_raw(
+            "name",
+            RawValue::from_string(r#""\u0062eta""#.into()).unwrap(),
+        );
+        changed.set_string("providerSessionId", "native-thread");
+        let updated = registry
+            .replace_checked(&expected, &created, changed)
+            .unwrap();
+        assert_eq!(updated.name(), "beta");
+        assert_eq!(
+            registry
+                .find("beta")
+                .unwrap()
+                .scalar("providerSessionId")
+                .as_deref(),
+            Some("native-thread")
+        );
+        registry.remove_checked(&expected).unwrap();
+        assert!(registry.find("beta").is_none());
+        assert_eq!(registry.records().len(), 1);
+    }
+    #[test]
+    fn lifecycle_transactions_preserve_observed_external_edits() {
+        for operation in 0..3 {
+            let (_home, mut registry) = fixture();
+            let current = registry.find("alpha").unwrap().clone();
+            let expected = key(&current);
+            let external = b"external owner edit";
+            fs::write(&registry.path, external).unwrap();
+            let failed = match operation {
+                0 => registry.insert(new_record()).is_err(),
+                1 => registry
+                    .replace_checked(&expected, &current, current.clone())
+                    .is_err(),
+                _ => registry.remove_checked(&expected).is_err(),
+            };
+            assert!(failed);
+            assert_eq!(fs::read(&registry.path).unwrap(), external);
+            assert_eq!(registry.records().len(), 1);
+        }
+    }
+    #[test]
+    fn stale_full_record_cannot_overwrite_a_newer_title() {
+        let (_home, mut registry) = fixture();
+        let mut stale = registry.insert(new_record()).unwrap();
+        let expected = key(&stale);
+        let previous = stale.clone();
+        registry
+            .rename("beta", &"new title".encode_utf16().collect::<Vec<_>>())
+            .unwrap();
+        stale.set_string("providerSessionId", "native-thread");
+        assert!(
+            registry
+                .replace_checked(&expected, &previous, stale)
+                .is_err()
+        );
+        assert_eq!(
+            registry.find("beta").unwrap().scalar("title").as_deref(),
+            Some("new title")
+        );
+        let updated = registry
+            .update_checked(&expected, |record| {
+                record.set_string("providerSessionId", "native-thread");
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(updated.scalar("title").as_deref(), Some("new title"));
+        assert_eq!(
+            updated.scalar("providerSessionId").as_deref(),
+            Some("native-thread")
+        );
+    }
+
+    #[test]
+    fn raw_record_debug_is_private_and_invalid_names_do_not_panic() {
+        let mut record = Record::default();
+        assert_eq!(record.name(), "");
+        record.set_string("name", "../private");
+        record.set_string("queue", "PRIVATE_QUEUE_SECRET");
+        record.set_string("cwd", "/PRIVATE_PATH");
+        assert_eq!(record.name(), "");
+        let debug = format!("{record:?}");
+        assert!(!debug.contains("PRIVATE"));
+        assert!(debug.contains("fields: 3"));
+        record.set_raw(
+            "name",
+            RawValue::from_string(r#""\u0062eta""#.into()).unwrap(),
+        );
+        assert_eq!(record.name(), "");
+        record.set_string("name", "beta");
+        assert_eq!(record.name(), "beta");
+    }
+
+    #[test]
+    fn failed_or_panicking_metadata_patch_does_not_write_or_poison_the_owner_lock() {
+        let (_home, registry) = fixture();
+        let before = fs::read(&registry.path).unwrap();
+        let expected = key(registry.find("alpha").unwrap());
+        let registry = std::sync::Mutex::new(registry);
+        for panic in [false, true] {
+            let error = registry
+                .lock()
+                .unwrap()
+                .update_checked(&expected, |next| {
+                    next.set_string("title", "must not persist");
+                    if panic {
+                        panic!("PRIVATE_CALLBACK_SECRET");
+                    }
+                    anyhow::bail!("validation failed")
+                })
+                .unwrap_err();
+            if panic {
+                assert!(!error.to_string().contains("PRIVATE"));
+            }
+            assert!(!registry.is_poisoned());
+            let owner = registry.lock().unwrap();
+            assert!(owner.find("alpha").unwrap().get("title").is_none());
+            assert_eq!(fs::read(&owner.path).unwrap(), before);
+        }
+    }
+    #[test]
+    fn stale_callback_cannot_restore_full_after_read_only_selection() {
+        let (_home, mut registry) = fixture();
+        let mut initial = new_record();
+        initial.set_string("approval", "full");
+        let previous = registry.insert(initial).unwrap();
+        let expected = key(&previous);
+        registry
+            .update_checked(&expected, |record| {
+                record.set_string("approval", "read-only");
+                Ok(())
+            })
+            .unwrap();
+        let mut stale = previous.clone();
+        stale.set_string("providerSessionId", "thread");
+        assert!(
+            registry
+                .replace_checked(&expected, &previous, stale)
+                .is_err()
+        );
+        let fresh = registry
+            .update_checked(&expected, |record| {
+                record.set_string("providerSessionId", "thread");
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(fresh.scalar("approval").as_deref(), Some("read-only"));
+        assert_eq!(fresh.scalar("providerSessionId").as_deref(), Some("thread"));
     }
 }
