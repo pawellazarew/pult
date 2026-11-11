@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
-pub mod codex_permissions;
 pub mod codex_events;
+pub mod codex_permissions;
 pub mod codex_process;
 pub mod codex_rpc;
 pub mod consent_store;
@@ -22,6 +22,7 @@ mod read_api;
 pub mod redaction;
 pub mod registry;
 pub mod runtime_config;
+mod runtime_journal;
 mod session_api;
 mod session_memory;
 mod session_memory_api;
@@ -53,7 +54,7 @@ use std::os::unix::fs::{DirBuilderExt, FileTypeExt, OpenOptionsExt, PermissionsE
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{
-    Arc, Mutex,
+    Arc, Mutex, OnceLock,
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
@@ -488,6 +489,8 @@ struct State {
     subscriptions: AtomicUsize,
     committed: watch::Sender<u64>,
     live_id: AtomicU64,
+    driver: OnceLock<Arc<turn_driver::Driver>>,
+    execution_storage_failed: AtomicBool,
 }
 
 fn memory_status(state: &State) -> Value {
@@ -519,11 +522,11 @@ async fn journal_request(
     params: Value,
 ) -> Result<Box<RawValue>> {
     tokio::task::spawn_blocking(move || {
-        let mut store = state
-            .store
-            .lock()
-            .map_err(|_| anyhow::anyhow!("journal lock poisoned"))?;
         if method == "events.tail" {
+            let mut store = state
+                .store
+                .lock()
+                .map_err(|_| anyhow::anyhow!("journal lock poisoned"))?;
             let since = params["since"].as_f64().unwrap_or(0.0).floor().max(0.0) as u64;
             let limit = params["limit"]
                 .as_f64()
@@ -568,20 +571,29 @@ async fn journal_request(
             if let Some(parent) = params["parentId"].as_str() {
                 draft["parentId"] = json!(parent);
             }
-            let event = store.append(draft)?;
-            state
-                .last_event_id
-                .store(store.last_id(), Ordering::Release);
-            state.committed.send_replace(store.last_id());
-            if store.projection_error().is_some()
-                && !state.projection_degraded.swap(true, Ordering::Relaxed)
-            {
-                eprintln!("journal is committed but a session projection needs repair");
-            }
+            let mut store = match state.store.lock() {
+                Ok(store) => store,
+                Err(_) => {
+                    state.execution_storage_failed();
+                    bail!("journal lock poisoned");
+                }
+            };
+            let result = store.append(draft);
+            let last = store.last_id();
+            let degraded = store.projection_error().is_some();
+            drop(store);
+            state.publish_commit(last, degraded);
+            let event = match result {
+                Ok(event) => event,
+                Err(error) => {
+                    state.execution_storage_failed();
+                    return Err(error);
+                }
+            };
             ids.push(event["id"].clone());
         }
         Ok(to_raw_value(
-            &json!({"ids":ids,"lastEventId":store.last_id()}),
+            &json!({"ids":ids,"lastEventId":state.last_event_id.load(Ordering::Acquire)}),
         )?)
     })
     .await
@@ -845,7 +857,7 @@ async fn connection(
         let method = request["method"].as_str().unwrap();
         let result = match method {
             "daemon.status" => {
-                json!({"version":VERSION,"protocol":PROTOCOL,"pid":std::process::id(),"startedAt":state.started_at,"uptimeMs":state.started.elapsed().as_millis(),"home":state.home,"sock":state.home.join("run/pultd.sock"),"clients":state.clients.load(Ordering::Relaxed),"subscriptions":state.subscriptions.load(Ordering::Relaxed),"lastEventId":state.last_event_id.load(Ordering::Acquire),"mode":"on-demand","journal":{"projectionDegraded":state.projection_degraded.load(Ordering::Relaxed)},"registry":state.registry.try_lock().ok().map(|r|r.status()),"memory":memory_status(&state),"capabilities":{"experimental":true,"supportedMethods":SUPPORTED}})
+                json!({"version":VERSION,"protocol":PROTOCOL,"pid":std::process::id(),"startedAt":state.started_at,"uptimeMs":state.started.elapsed().as_millis(),"home":state.home,"sock":state.home.join("run/pultd.sock"),"clients":state.clients.load(Ordering::Relaxed),"subscriptions":state.subscriptions.load(Ordering::Relaxed),"lastEventId":state.last_event_id.load(Ordering::Acquire),"mode":"on-demand","journal":{"projectionDegraded":state.projection_degraded.load(Ordering::Relaxed),"executionUnavailable":state.execution_storage_failed.load(Ordering::Acquire)},"registry":state.registry.try_lock().ok().map(|r|r.status()),"memory":memory_status(&state),"capabilities":{"experimental":true,"supportedMethods":SUPPORTED}})
             }
             "daemon.stop" => json!({"stopping":true}),
             "protocol.catalog" => catalog(),
@@ -952,8 +964,29 @@ async fn connection(
     Ok(())
 }
 
+struct ServeCancellation(watch::Sender<bool>);
+impl Drop for ServeCancellation {
+    fn drop(&mut self) {
+        let _ = self.0.send(true);
+    }
+}
+
+/// Cancelling the caller requests shutdown; the owned supervisor retains the
+/// daemon lease until execution cleanup finishes. It is not aborted with RPC.
 pub async fn serve(home: PathBuf) -> Result<()> {
+    let (cancel, cancellation) = watch::channel(false);
+    let _cancel_on_drop = ServeCancellation(cancel);
+    let supervisor = tokio::spawn(serve_owned(home, cancellation));
+    supervisor
+        .await
+        .map_err(|_| anyhow::anyhow!("daemon supervisor failed"))?
+}
+
+async fn serve_owned(home: PathBuf, mut cancellation: watch::Receiver<bool>) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
+    if *cancellation.borrow() {
+        return Ok(());
+    }
     let home = checked_home(&home)?;
     let started_at = Utc::now().to_rfc3339();
     let mut owner = Ownership::acquire(&home, &started_at)?;
@@ -1019,17 +1052,28 @@ pub async fn serve(home: PathBuf) -> Result<()> {
         subscriptions: AtomicUsize::new(0),
         committed,
         live_id: AtomicU64::new(subscriptions::LIVE_BASE),
+        driver: OnceLock::new(),
+        execution_storage_failed: AtomicBool::new(false),
     });
+    runtime_journal::initialize(&state)?;
     let permits = Arc::new(Semaphore::new(64));
     let mut tasks = JoinSet::new();
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut accept_error = None;
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break,
             _ = terminate.recv() => break,
             _ = shutdown.changed() => break,
+            _ = cancellation.changed() => break,
             connection_result = listener.accept() => {
-                let (socket, _) = connection_result?;
+                let (socket, _) = match connection_result {
+                    Ok(connection) => connection,
+                    Err(error) => {
+                        accept_error = Some(error);
+                        break;
+                    }
+                };
                 if let Ok(permit) = permits.clone().try_acquire_owned() {
                     let state = state.clone();
                     let shutdown = shutdown.clone();
@@ -1050,8 +1094,11 @@ pub async fn serve(home: PathBuf) -> Result<()> {
         while tasks.join_next().await.is_some() {}
     }
     drop(listener);
-    drop(owner);
-    Ok(())
+    runtime_journal::shutdown(&state, owner).await;
+    match accept_error {
+        Some(error) => Err(error).context("daemon accept failed"),
+        None => Ok(()),
+    }
 }
 
 pub async fn request(home: &Path, method: &str) -> Result<Box<RawValue>> {

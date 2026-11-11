@@ -1,0 +1,405 @@
+//! Execution events share the daemon's authoritative journal and commit cursor.
+//! The sink keeps only a weak host reference; an owned append keeps the host
+//! alive until its blocking commit and publication finish, even if RPC is gone.
+use crate::State;
+use crate::turn_driver::{Driver, EventSink, Receipt, SinkError, Task};
+use serde_json::Value;
+use std::sync::{Arc, Weak, atomic::Ordering};
+
+struct HostSink(Weak<State>);
+
+impl State {
+    pub(crate) fn execution_sink(self: &Arc<Self>) -> Arc<dyn EventSink> {
+        Arc::new(HostSink(Arc::downgrade(self)))
+    }
+    pub(crate) fn publish_commit(&self, last: u64, degraded: bool) {
+        // An older writer can finish publishing after a newer writer has
+        // released the journal mutex. Neither public cursor may go backwards.
+        self.last_event_id.fetch_max(last, Ordering::AcqRel);
+        self.committed.send_if_modified(|current| {
+            if last > *current {
+                *current = last;
+                true
+            } else {
+                false
+            }
+        });
+        if degraded && !self.projection_degraded.swap(true, Ordering::AcqRel) {
+            eprintln!("journal is committed but a session projection needs repair");
+        }
+    }
+
+    pub(crate) fn execution_storage_failed(&self) {
+        self.execution_storage_failed.store(true, Ordering::Release);
+        if let Some(driver) = self.driver.get() {
+            driver.report_storage_failure();
+        }
+    }
+}
+
+pub(crate) fn initialize(state: &Arc<State>) -> anyhow::Result<()> {
+    let driver = Driver::new(
+        state.execution_sink(),
+        Arc::new(crate::redaction::redact_string),
+        crate::turn_driver::Options::default(),
+    )?;
+    state
+        .driver
+        .set(Arc::new(driver))
+        .map_err(|_| anyhow::anyhow!("execution driver already initialized"))?;
+    if state.execution_storage_failed.load(Ordering::Acquire) {
+        state
+            .driver
+            .get()
+            .expect("driver initialized")
+            .report_storage_failure();
+    }
+    Ok(())
+}
+
+pub(crate) async fn shutdown(state: &State, owner: crate::Ownership) {
+    retain_owner_until_stopped(
+        state.driver.get().expect("driver initialized"),
+        owner,
+        std::time::Duration::from_secs(10),
+    )
+    .await;
+}
+
+async fn retain_owner_until_stopped(
+    driver: &Driver,
+    owner: crate::Ownership,
+    checkpoint: std::time::Duration,
+) {
+    let mut reported = false;
+    while driver.shutdown(checkpoint).await.is_err() {
+        if !reported {
+            eprintln!("execution cleanup is unconfirmed; daemon ownership retained");
+            reported = true;
+        }
+        // shutdown closes admission and requests another cleanup attempt. The
+        // ownership guard remains on this stack until every job proves closure.
+    }
+    drop(owner);
+}
+
+fn unavailable() -> SinkError {
+    SinkError {
+        message: "execution journal unavailable".into(),
+    }
+}
+
+impl EventSink for HostSink {
+    fn append(&self, draft: Value) -> Task<Result<Receipt, SinkError>> {
+        let weak = self.0.clone();
+        Box::pin(async move {
+            let state = weak.upgrade().ok_or_else(unavailable)?;
+            let failed = Arc::downgrade(&state);
+            // Keep commit publication inside the owned blocking job. Dropping
+            // this future must not lose a successfully committed event notice.
+            let result = tokio::task::spawn_blocking(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let mut store = state.store.lock().map_err(|_| unavailable())?;
+                    let event = store.append(draft).map_err(|_| unavailable())?;
+                    let receipt = Receipt {
+                        id: event["id"].as_u64().ok_or_else(unavailable)?,
+                        ts: event["ts"].as_str().ok_or_else(unavailable)?.to_owned(),
+                    };
+                    let last = store.last_id();
+                    let degraded = store.projection_error().is_some();
+                    drop(store);
+                    state.publish_commit(last, degraded);
+                    Ok(receipt)
+                }))
+                .unwrap_or_else(|_| Err(unavailable()));
+                if result.is_err() {
+                    // Never call the driver while holding the journal mutex.
+                    state.execution_storage_failed();
+                }
+                result
+            })
+            .await;
+            match result {
+                Ok(result) => result,
+                Err(_) => {
+                    if let Some(state) = failed.upgrade() {
+                        state.execution_storage_failed();
+                    }
+                    Err(unavailable())
+                }
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
+    use std::sync::{Mutex, OnceLock};
+    use std::task::{Context, Waker};
+    use std::time::{Duration, Instant};
+    use tokio::sync::watch;
+
+    fn fixture() -> (tempfile::TempDir, Arc<State>, HostSink) {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut store = crate::journal::EventStore::open(&home.path().join("events")).unwrap();
+        let registry = crate::registry::Registry::open(home.path(), &mut store).unwrap();
+        let (stop, _) = watch::channel(false);
+        let (committed, _) = watch::channel(store.last_id());
+        let state = Arc::new(State {
+            home: home.path().into(),
+            started_at: "fixture".into(),
+            started: Instant::now(),
+            token: "fixture".into(),
+            clients: AtomicUsize::new(0),
+            stop,
+            store: Mutex::new(store),
+            history: Mutex::new(Default::default()),
+            registry: Mutex::new(registry),
+            memory: Mutex::new(Err("fixture disabled".into())),
+            session_memory: Mutex::new(Default::default()),
+            last_event_id: AtomicU64::new(0),
+            test_mode: true,
+            projection_degraded: AtomicBool::new(false),
+            subscriptions: AtomicUsize::new(0),
+            committed,
+            live_id: AtomicU64::new(1),
+            driver: OnceLock::new(),
+            execution_storage_failed: AtomicBool::new(false),
+        });
+        initialize(&state).unwrap();
+        let sink = HostSink(Arc::downgrade(&state));
+        (home, state, sink)
+    }
+    fn draft() -> Value {
+        json!({"sessionId":"chat","provider":"codex","kind":"message.user","data":{"text":"fixture"}})
+    }
+    #[tokio::test]
+    async fn execution_events_update_the_same_daemon_cursor_and_subscription() {
+        let (_home, state, sink) = fixture();
+        let mut cursor = state.committed.subscribe();
+        let receipt = sink.append(draft()).await.unwrap();
+        assert_eq!(receipt.id, 1);
+        assert_eq!(state.last_event_id.load(Ordering::Acquire), 1);
+        assert_eq!(*cursor.borrow_and_update(), 1);
+        state.publish_commit(0, true);
+        assert_eq!(*cursor.borrow(), 1);
+        assert_eq!(state.last_event_id.load(Ordering::Acquire), 1);
+        assert!(state.projection_degraded.load(Ordering::Acquire));
+    }
+    #[tokio::test]
+    async fn disconnected_caller_cannot_lose_commit_publication() {
+        let (_home, state, sink) = fixture();
+        let mut cursor = state.committed.subscribe();
+        {
+            let guard = state.store.lock().unwrap();
+            let mut append = sink.append(draft());
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(append.as_mut().poll(&mut context).is_pending());
+            drop(append);
+            drop(guard);
+        }
+        tokio::time::timeout(Duration::from_secs(5), cursor.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(*cursor.borrow(), 1);
+        assert_eq!(state.last_event_id.load(Ordering::Acquire), 1);
+    }
+    #[tokio::test]
+    async fn driver_and_sink_do_not_keep_the_host_alive() {
+        let (_home, state, sink) = fixture();
+        let driver = state.driver.get().unwrap().clone();
+        let weak = Arc::downgrade(&state);
+        drop(state);
+        assert!(weak.upgrade().is_none());
+        assert_eq!(
+            sink.append(draft()).await.unwrap_err().message,
+            "execution journal unavailable"
+        );
+        drop(driver);
+    }
+    #[tokio::test]
+    async fn journal_failure_latches_global_execution_admission() {
+        let (_home, state, sink) = fixture();
+        assert!(sink.append(json!({"sessionId":"chat"})).await.is_err());
+        assert!(state.execution_storage_failed.load(Ordering::Acquire));
+        assert!(state.driver.get().unwrap().storage_failed());
+        assert_eq!(state.store.lock().unwrap().last_id(), 0);
+        // A later successful append cannot clear the global execution latch.
+        sink.append(draft()).await.unwrap();
+        assert!(state.execution_storage_failed.load(Ordering::Acquire));
+    }
+    #[tokio::test]
+    async fn shutdown_retains_daemon_ownership_through_unconfirmed_cleanup() {
+        use crate::turn_coordinator::Ticket;
+        use crate::turn_driver::{Started, Worker, WorkerError};
+        use crate::turn_snapshot::{Provider, SessionKey, TurnSettings, TurnSnapshot};
+        struct Quarantine {
+            allow: Arc<AtomicBool>,
+            attempts: tokio::sync::mpsc::UnboundedSender<()>,
+        }
+        impl Worker for Quarantine {
+            fn start(
+                &self,
+                _: Ticket,
+                _: TurnSnapshot,
+                _: String,
+            ) -> Task<Result<Started, WorkerError>> {
+                Box::pin(async {
+                    Ok(Started {
+                        turn_id: "fixture-turn".into(),
+                        done: Box::pin(std::future::pending()),
+                    })
+                })
+            }
+            fn close(&self, _: Ticket) -> Task<Result<(), WorkerError>> {
+                let allow = self.allow.clone();
+                let attempts = self.attempts.clone();
+                Box::pin(async move {
+                    let _ = attempts.send(());
+                    if allow.load(Ordering::Acquire) {
+                        Ok(())
+                    } else {
+                        Err(WorkerError {
+                            code: "cleanup_unconfirmed".into(),
+                            message: "fixture".into(),
+                        })
+                    }
+                })
+            }
+        }
+        let (_home, state, _sink) = fixture();
+        let driver = state.driver.get().unwrap().clone();
+        let allow = Arc::new(AtomicBool::new(false));
+        let (attempts, mut observed) = tokio::sync::mpsc::unbounded_channel();
+        let mut handle = driver
+            .start(
+                TurnSnapshot {
+                    key: SessionKey {
+                        name: "chat".into(),
+                        created_at: "fixture-created".into(),
+                    },
+                    provider: Provider::Codex,
+                    cwd: state.home.clone(),
+                    settings: TurnSettings::default(),
+                },
+                "fixture".into(),
+                Arc::new(Quarantine {
+                    allow: allow.clone(),
+                    attempts,
+                }),
+            )
+            .unwrap();
+        handle.accepted().await.unwrap();
+        let owner = crate::Ownership::acquire(&state.home, "fixture").unwrap();
+        let stopping = tokio::spawn(async move {
+            retain_owner_until_stopped(&driver, owner, Duration::from_millis(10)).await;
+        });
+        // A second attempt proves a shutdown checkpoint expired and cleanup
+        // was retried, rather than assuming it from an arbitrary sleep.
+        for _ in 0..2 {
+            tokio::time::timeout(Duration::from_secs(5), observed.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        assert!(!stopping.is_finished());
+        assert!(crate::Ownership::acquire(&state.home, "replacement").is_err());
+        allow.store(true, Ordering::Release);
+        tokio::time::timeout(Duration::from_secs(5), stopping)
+            .await
+            .unwrap()
+            .unwrap();
+        let replacement = crate::Ownership::acquire(&state.home, "replacement").unwrap();
+        drop(replacement);
+    }
+    #[tokio::test]
+    async fn poisoned_journal_emit_latches_execution_before_any_append() {
+        let (_home, state, _sink) = fixture();
+        let poisoned = state.clone();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _guard = poisoned.store.lock().unwrap();
+            panic!("fixture poison");
+        }));
+        assert!(
+            crate::journal_request(
+                state.clone(),
+                "events.emit".into(),
+                json!({"kind":"message.user"})
+            )
+            .await
+            .is_err()
+        );
+        assert!(state.execution_storage_failed.load(Ordering::Acquire));
+        assert!(state.driver.get().unwrap().storage_failed());
+    }
+    #[tokio::test]
+    async fn foundation_emit_and_execution_append_share_one_cursor() {
+        let (_home, state, sink) = fixture();
+        let result = crate::journal_request(
+            state.clone(),
+            "events.emit".into(),
+            json!({"kind":"message.user","count":2}),
+        )
+        .await
+        .unwrap();
+        let result: Value = serde_json::from_str(result.get()).unwrap();
+        assert_eq!(result["ids"], json!([1, 2]));
+        let receipt = sink.append(draft()).await.unwrap();
+        assert_eq!(receipt.id, 3);
+        assert_eq!(state.last_event_id.load(Ordering::Acquire), 3);
+        assert_eq!(*state.committed.borrow(), 3);
+    }
+    #[tokio::test]
+    async fn cancelling_serve_caller_still_completes_owned_daemon_shutdown() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = home.path().to_owned();
+        let first_home = path.clone();
+        let first = tokio::spawn(async move { crate::serve(first_home).await });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if crate::request(&path, "daemon.status").await.is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while path.join("run/pultd.lock").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // Reopen the real registry/journal and acquire the same daemon lease,
+        // proving the detached supervisor released all of its owned resources.
+        let second_home = path.clone();
+        let second = tokio::spawn(async move { crate::serve(second_home).await });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if crate::request(&path, "daemon.status").await.is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        crate::request(&path, "daemon.stop").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), second)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+}
