@@ -107,7 +107,7 @@ fn js_number(text: &str) -> Result<String> {
     Ok(ryu_js::Buffer::new().format_finite(number).to_owned())
 }
 
-fn normalize(value: &RawValue) -> Result<Raw> {
+pub(crate) fn normalize(value: &RawValue) -> Result<Raw> {
     Ok(transform(value, None)?.0)
 }
 

@@ -211,6 +211,7 @@ pub(crate) struct Registry {
     records: Vec<Record>,
     poisoned: bool,
     recovery: serde_json::Value,
+    language: crate::locale::Setting,
 }
 
 impl Registry {
@@ -227,6 +228,7 @@ impl Registry {
             .context("config.json root must be an object")?,
             None => crate::history::Fields::default(),
         };
+        let language = crate::locale::setting(config_fields.get("language"));
         let raw = observed
             .as_ref()
             .map(|o| registry_document(&o.bytes))
@@ -303,7 +305,24 @@ impl Registry {
             records,
             poisoned: false,
             recovery: serde_json::json!({"migrationCount":migrated,"startup":stats}),
+            language,
         })
+    }
+
+    pub fn language(&self) -> crate::locale::Setting {
+        self.language
+    }
+
+    pub(crate) fn configured_language(home: &Path) -> Result<crate::locale::Setting> {
+        let config = read_private(&home.join("config.json"))?;
+        match config {
+            None => Ok(crate::locale::Setting::Auto),
+            Some(config) => {
+                let raw: Box<RawValue> = serde_json::from_slice(&config.bytes)?;
+                let fields = crate::history::Fields::parse(&raw)?;
+                Ok(crate::locale::setting(fields.get("language")))
+            }
+        }
     }
 
     pub fn status(&self) -> serde_json::Value {
@@ -438,6 +457,7 @@ mod tests {
                 records,
                 poisoned: false,
                 recovery: serde_json::json!({}),
+                language: crate::locale::Setting::Auto,
             },
         )
     }

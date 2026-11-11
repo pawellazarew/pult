@@ -32,6 +32,18 @@ enum Action {
 
 #[derive(Subcommand)]
 enum AgentAction {
+    Read {
+        name: String,
+        #[arg(long, default_value = "0", allow_hyphen_values = true, num_args = 0..=1, default_missing_value = "")]
+        since: String,
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
+    Tree {
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
     Rename {
         name: String,
         words: Vec<String>,
@@ -88,7 +100,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     if args.skill {
         println!(
-            "Rust core protocol 1. Use an explicit private scratch --home.\nCommands: daemon serve, daemon status, daemon stop, catalog, events tail, events snapshot, events history --session NAME [--before ID] [--budget BYTES], events get ID..., agent rename NAME [TITLE] [--title TEXT], agent archive|unarchive NAME, agent seen NAME [--unread]\nOwner-token connections support agent.rename, agent.archive, agent.seen, daemon.status, daemon.stop, events.tail, events.subscribe, events.unsubscribe, events.snapshot, events.history, events.get and protocol.catalog.\nHistory reads per-session files, snapshots and get use the global journal.\nSubscriptions replay committed events with bounded output. live=true sends an empty-session reset.\nevents.emit requires PULT_TEST=1 and is for deterministic verification.\nJournal append is acknowledged after sync. A failed append has an unknown outcome until replay.\nOther catalogued methods return not_implemented. Scoped credentials are rejected.\nPrivate sessions/config are allowed only in a marked Rust scratch home. Startup recovers sessions cold and pauses queues; no provider is started. Production migration and session execution follow later compatibility steps."
+            "Rust core protocol 1. Use an explicit private scratch --home.\nCommands: daemon serve, daemon status, daemon stop, catalog, events tail, events snapshot, events history --session NAME [--before ID] [--budget BYTES], events get ID..., agent read NAME [--since N] [--format text|json], agent tree NAME [--json], agent rename NAME [TITLE] [--title TEXT], agent archive|unarchive NAME, agent seen NAME [--unread]\nOwner-token connections support agent.read, agent.tree, agent.rename, agent.archive, agent.seen, daemon.status, daemon.stop, events.tail, events.subscribe, events.unsubscribe, events.snapshot, events.history, events.get and protocol.catalog.\nHistory reads per-session files, snapshots and get use the global journal.\nSubscriptions replay committed events with bounded output. live=true sends an empty-session reset.\nevents.emit requires PULT_TEST=1 and is for deterministic verification.\nJournal append is acknowledged after sync. A failed append has an unknown outcome until replay.\nOther catalogued methods return not_implemented. Scoped credentials are rejected.\nPrivate sessions/config are allowed only in a marked Rust scratch home. Startup recovers sessions cold and pauses queues; no provider is started. Production migration and session execution follow later compatibility steps."
         );
         return Ok(());
     }
@@ -101,13 +113,82 @@ async fn main() -> Result<()> {
         } => return pult_core::serve(home).await,
         Action::Daemon {
             action: DaemonAction::Status,
-        } => pult_core::request(&home, "daemon.status").await?,
+        } => cli_request(&home, "daemon.status", serde_json::json!({})).await?,
         Action::Daemon {
             action: DaemonAction::Stop,
-        } => pult_core::request(&home, "daemon.stop").await?,
-        Action::Catalog => pult_core::request(&home, "protocol.catalog").await?,
+        } => cli_request(&home, "daemon.stop", serde_json::json!({})).await?,
+        Action::Catalog => cli_request(&home, "protocol.catalog", serde_json::json!({})).await?,
         Action::Agent { action } => {
             let (method, params) = match action {
+                AgentAction::Read {
+                    name,
+                    since,
+                    format,
+                } => {
+                    let json = format == "json";
+                    let since = parse_cli_cursor(&since);
+                    let result = cli_request(&home, "agent.read", serde_json::json!({"name": name, "since": if since.is_finite() { since } else { 0.0 }, "format": if json { "json" } else { "text" }})).await?;
+                    let fields: std::collections::HashMap<
+                        String,
+                        Box<serde_json::value::RawValue>,
+                    > = serde_json::from_str(result.get())?;
+                    if let Some(wt) = fields.get("worktree") {
+                        let wt: std::collections::HashMap<
+                            String,
+                            Box<serde_json::value::RawValue>,
+                        > = serde_json::from_str(wt.get())?;
+                        let label = if pult_core::cli_locale(&home)? == "ru" {
+                            "ветка"
+                        } else {
+                            "branch"
+                        };
+                        eprintln!(
+                            "worktree {} · {} {}",
+                            pult_core::display_string(&wt["path"])?,
+                            label,
+                            pult_core::display_string(&wt["branch"])?
+                        );
+                    }
+                    if json {
+                        let events: Vec<Box<serde_json::value::RawValue>> =
+                            serde_json::from_str(fields["events"].get())?;
+                        for event in events {
+                            println!("{}", event.get());
+                        }
+                    } else {
+                        let text = pult_core::display_string(&fields["text"])?;
+                        if !text.is_empty() {
+                            println!("{text}");
+                        }
+                    }
+                    return Ok(());
+                }
+                AgentAction::Tree { name, json } => {
+                    let result =
+                        cli_request(&home, "agent.tree", serde_json::json!({"name": name})).await?;
+                    if json {
+                        println!("{}", result.get());
+                    } else {
+                        let fields: std::collections::HashMap<
+                            String,
+                            Box<serde_json::value::RawValue>,
+                        > = serde_json::from_str(result.get())?;
+                        let text = pult_core::display_string(&fields["text"])?;
+                        println!(
+                            "{}",
+                            if text.is_empty() {
+                                if pult_core::cli_locale(&home)? == "ru" {
+                                    "дерево пустое: ни одного инструмента и субагента"
+                                } else {
+                                    "Tree is empty: no tools or subagents"
+                                }
+                            } else {
+                                &text
+                            }
+                        );
+                    }
+                    return Ok(());
+                }
                 AgentAction::Rename { name, words, title } => (
                     "agent.rename",
                     serde_json::json!({"name":name,"title":title.unwrap_or_else(||words.join(" "))}),
@@ -125,11 +206,11 @@ async fn main() -> Result<()> {
                     serde_json::json!({"name":name,"unread":unread}),
                 ),
             };
-            pult_core::request_with_params(&home, method, params).await?
+            cli_request(&home, method, params).await?
         }
         Action::Events {
             action: EventsAction::Snapshot,
-        } => pult_core::request(&home, "events.snapshot").await?,
+        } => cli_request(&home, "events.snapshot", serde_json::json!({})).await?,
         Action::Events {
             action:
                 EventsAction::History {
@@ -145,14 +226,11 @@ async fn main() -> Result<()> {
             if let Some(budget) = budget {
                 params["budget"] = serde_json::json!(budget);
             }
-            pult_core::request_with_params(&home, "events.history", params).await?
+            cli_request(&home, "events.history", params).await?
         }
         Action::Events {
             action: EventsAction::Get { ids },
-        } => {
-            pult_core::request_with_params(&home, "events.get", serde_json::json!({"ids":ids}))
-                .await?
-        }
+        } => cli_request(&home, "events.get", serde_json::json!({"ids":ids})).await?,
         Action::Events {
             action:
                 EventsAction::Tail {
@@ -168,9 +246,57 @@ async fn main() -> Result<()> {
             if let Some(limit) = limit {
                 params["limit"] = serde_json::json!(limit);
             }
-            pult_core::request_with_params(&home, "events.tail", params).await?
+            cli_request(&home, "events.tail", params).await?
         }
     };
     println!("{}", serde_json::to_string(&result)?);
     Ok(())
+}
+
+async fn cli_request(
+    home: &std::path::Path,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<Box<serde_json::value::RawValue>> {
+    let locale = pult_core::cli_locale(home)?;
+    pult_core::request_with_locale(home, method, params, Some(locale)).await
+}
+
+// Node's CLI uses Number.parseInt(value, 10), while RPC accepts finite fractions.
+fn parse_cli_cursor(value: &str) -> f64 {
+    let value = value.trim_start_matches(|ch: char| matches!(ch as u32, 0x0009..=0x000d | 0x0020 | 0x00a0 | 0x1680 | 0x2000..=0x200a | 0x2028 | 0x2029 | 0x202f | 0x205f | 0x3000 | 0xfeff));
+    let sign = usize::from(value.starts_with(['+', '-']));
+    let digits = value.as_bytes()[sign..]
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    if digits == 0 {
+        return 0.0;
+    }
+    value[..sign + digits]
+        .parse::<f64>()
+        .ok()
+        .filter(|number| number.is_finite())
+        .unwrap_or(0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn read_cli_cursor_matches_node_parse_int() {
+        for (input, expected) in [
+            ("1.9", 1.0),
+            ("\u{feff}12", 12.0),
+            ("\u{0085}12", 0.0),
+            ("12abc", 12.0),
+            ("1e3", 1.0),
+            ("0x10", 0.0),
+            (" -3.9", -3.0),
+            ("", 0.0),
+            ("invalid", 0.0),
+            ("Infinity", 0.0),
+        ] {
+            assert_eq!(super::parse_cli_cursor(input), expected);
+        }
+    }
 }

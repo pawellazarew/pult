@@ -218,12 +218,111 @@ export const RPC_CATALOG = {
     {
       "name": "agent.read",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "implemented",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.read.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Read persisted session events or assistant text without starting a provider.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "since": {
+            "type": "number"
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "text",
+              "json"
+            ]
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "number"
+          },
+          "text": {
+            "type": "string"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "integer"
+                },
+                "ts": {
+                  "type": "string"
+                },
+                "sessionId": {
+                  "type": "string"
+                },
+                "parentId": {
+                  "type": "string"
+                },
+                "provider": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "data": {
+                  "type": "object",
+                  "properties": {},
+                  "required": [],
+                  "additionalProperties": true
+                }
+              },
+              "required": [
+                "id",
+                "ts",
+                "sessionId",
+                "provider",
+                "kind",
+                "data"
+              ],
+              "additionalProperties": true
+            }
+          },
+          "worktree": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "branch": {
+                "type": "string"
+              },
+              "repo": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "branch",
+              "repo"
+            ],
+            "additionalProperties": false
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "cursor"
+        ],
+        "additionalProperties": false
+      }
     },
     {
       "name": "agent.rename",
@@ -400,12 +499,46 @@ export const RPC_CATALOG = {
     {
       "name": "agent.tree",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "implemented",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.tree.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Reconstruct persisted tool and subagent activity without starting a provider.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "roots": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "orphans": {
+            "type": "integer"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "roots",
+          "orphans",
+          "text"
+        ],
+        "additionalProperties": false
+      }
     },
     {
       "name": "agent.wait",
@@ -1599,12 +1732,14 @@ export const RPC_CATALOG = {
 } as const
 
 export type RpcMethodName = typeof RPC_CATALOG.methods[number]['name']
-export type RustFoundationMethod = "agent.archive" | "agent.rename" | "agent.seen" | "daemon.status" | "daemon.stop" | "events.emit" | "events.get" | "events.history" | "events.snapshot" | "events.subscribe" | "events.tail" | "events.unsubscribe" | "protocol.catalog"
+export type RustFoundationMethod = "agent.archive" | "agent.read" | "agent.rename" | "agent.seen" | "agent.tree" | "daemon.status" | "daemon.stop" | "events.emit" | "events.get" | "events.history" | "events.snapshot" | "events.subscribe" | "events.tail" | "events.unsubscribe" | "protocol.catalog"
 
 export interface RustFoundationParams {
   "agent.archive": { "name": string; "archived": boolean; [key: string]: unknown }
+  "agent.read": { "name": string; "since"?: number; "format"?: "text" | "json" }
   "agent.rename": { "name": string; "title": string; [key: string]: unknown }
   "agent.seen": { "name": string; "unread"?: boolean; "upTo"?: number; [key: string]: unknown }
+  "agent.tree": { "name": string }
   "daemon.status": { [key: string]: unknown }
   "daemon.stop": { [key: string]: unknown }
   "events.emit": { "kind": "session.started" | "session.ended" | "message.delta" | "message.done" | "message.user" | "tool.called" | "tool.finished" | "agent.spawned" | "agent.finished" | "permission.requested" | "permission.resolved" | "question.asked" | "usage.updated" | "context.updated" | "limit.hit" | "net.blocked" | "provider.blocked" | "provider.restarted" | "background.changed" | "status.changed" | "turn.stalled" | "browser.install" | "runtime.changed" | "session.configured" | "queue.updated" | "rule.revoked" | "daemon.started" | "daemon.stopping"; "count"?: number; "sessionId"?: string; "provider"?: string; "parentId"?: string; "data"?: { [key: string]: unknown }; [key: string]: unknown }
@@ -1619,8 +1754,10 @@ export interface RustFoundationParams {
 
 export interface RustFoundationResults {
   "agent.archive": { "name": string; "provider": string; "cwd": string; "mode": string; "createdAt": string; "lastStatus": string; "lastEventId": number; [key: string]: unknown }
+  "agent.read": { "cursor": number; "text"?: string; "events"?: Array<{ "id": number; "ts": string; "sessionId": string; "parentId"?: string; "provider": string; "kind": string; "data": { [key: string]: unknown }; [key: string]: unknown }>; "worktree"?: { "path": string; "branch": string; "repo": string }; "truncated"?: boolean }
   "agent.rename": { "name": string; "provider": string; "cwd": string; "mode": string; "createdAt": string; "lastStatus": string; "lastEventId": number; [key: string]: unknown }
   "agent.seen": { "name": string; "provider": string; "cwd": string; "mode": string; "createdAt": string; "lastStatus": string; "lastEventId": number; [key: string]: unknown }
+  "agent.tree": { "roots": Array<{ [key: string]: unknown }>; "orphans": number; "text": string }
   "daemon.status": { "version": string; "protocol": number; "pid": number; "startedAt": string; "uptimeMs": number; "home": string; "sock": string; "clients": number; "subscriptions": number; "lastEventId": number; "mode": "service" | "on-demand"; [key: string]: unknown }
   "daemon.stop": { "stopping": true }
   "events.emit": { "ids": Array<number>; "lastEventId": number; [key: string]: unknown }
