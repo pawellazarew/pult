@@ -20,6 +20,7 @@ pub mod permission_broker;
 pub mod prompt_attachments;
 mod read_api;
 pub mod registry;
+pub mod runtime_config;
 mod session_api;
 mod session_memory;
 mod session_memory_api;
