@@ -33,9 +33,9 @@ ECMAScript whitespace rather than Rust's default `trim`.
 
 ## Required before enabling execution RPC
 
-- Persist the validated native thread identity through a typed host callback
-  before dispatching a model turn. The current later `session.started` journal
-  event is insufficient for this crash boundary.
+- Implement the mandatory typed `ThreadStore` using the owner's checked registry
+  transactions. The worker now waits for its bound durable receipt before model
+  dispatch, including warm reuse; later `session.started` JSON is not authority.
 - Connect the owner registry, current consent/configuration and network-route
   selection to the host; wire the broker and real redactor.
 - Implement queue/steer/questions/background work and browser/MCP parity, model

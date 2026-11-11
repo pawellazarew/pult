@@ -99,12 +99,79 @@ pub struct HostConfig {
     pub timeouts: Timeouts,
 }
 pub type RedactorFactory = Arc<dyn Fn() -> Box<dyn Redactor> + Send + Sync>;
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SandboxMode {
+    ReadOnly,
+    WorkspaceWrite,
+    Full,
+}
+/// Validated, bounded provider policy. This is authority metadata, never redacted JSON.
+pub struct PreparedSandbox {
+    pub mode: SandboxMode,
+    pub network_access: Option<bool>,
+    pub writable_roots: Vec<PathBuf>,
+    pub exclude_slash_tmp: Option<bool>,
+    pub exclude_tmpdir_env_var: Option<bool>,
+}
+/// Immutable trusted persistence request, freshly created for every prepare,
+/// including warm reuse. The store must check session incarnation and ticket.
+pub struct ThreadPrepared {
+    session: SessionKey,
+    ticket: Ticket,
+    native_thread_id: String,
+    cwd: PathBuf,
+    model: String,
+    sandbox: PreparedSandbox,
+    seal: Arc<()>,
+}
+impl ThreadPrepared {
+    pub fn session(&self) -> &SessionKey {
+        &self.session
+    }
+    pub fn ticket(&self) -> &Ticket {
+        &self.ticket
+    }
+    pub fn native_thread_id(&self) -> &str {
+        &self.native_thread_id
+    }
+    pub fn cwd(&self) -> &std::path::Path {
+        &self.cwd
+    }
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+    pub fn sandbox(&self) -> &PreparedSandbox {
+        &self.sandbox
+    }
+    /// Call only after the exact request has durably committed, or an idempotent
+    /// checked read proves that its current incarnation already has this value.
+    pub fn acknowledge(self) -> ThreadReceipt {
+        ThreadReceipt { seal: self.seal }
+    }
+}
+/// Single-use proof bound privately to one prepare request; not forgeable or cloneable.
+pub struct ThreadReceipt {
+    seal: Arc<()>,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ThreadStoreError {
+    /// Known rejection before mutation, e.g. removed/archived/stale session.
+    Rejected,
+    /// Persistence outcome is unconfirmed; closes admission and latches storage failure.
+    Unknown,
+}
+pub trait ThreadStore: Send + Sync + 'static {
+    /// Once polled this IO stays owned until completion, including cancellation.
+    /// A permanently pending store keeps cleanup unconfirmed and retains ownership.
+    fn persist(&self, request: ThreadPrepared) -> Task<Result<ThreadReceipt, ThreadStoreError>>;
+}
 pub struct Services {
     pub sink: Arc<dyn EventSink>,
     pub redactors: RedactorFactory,
     pub fresh_gate: Arc<dyn DispatchGate>,
     pub approval: Option<Arc<dyn ApprovalHandler>>,
     pub fatal_storage: Arc<dyn Fn() + Send + Sync>,
+    pub thread_store: Arc<dyn ThreadStore>,
 }
 /// This capability is routed only for the active trusted ticket and native turn.
 /// Raw params/permission data are intentionally not Debug or journaled here.
@@ -226,6 +293,18 @@ pub struct CodexWorker {
     host: Arc<CodexHost>,
     spec: Arc<SessionSpec>,
 }
+struct StartWaiter(Option<Arc<Job>>);
+struct PendingStart {
+    waiter: StartWaiter,
+    receiver: oneshot::Receiver<Result<Started, WorkerError>>,
+}
+impl Drop for StartWaiter {
+    fn drop(&mut self) {
+        if let Some(job) = &self.0 {
+            cancel_job(job);
+        }
+    }
+}
 struct Info {
     thread: Option<String>,
     native: Option<String>,
@@ -257,6 +336,7 @@ struct Job {
     event_stop: watch::Sender<bool>,
     closed: watch::Sender<Closed>,
     changed: Notify,
+    persistence: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 struct Envelope {
     event: Event,
@@ -398,8 +478,12 @@ impl CodexHost {
                 let notified = shared.changed.notified();
                 tokio::pin!(notified);
                 notified.as_mut().enable();
-                match shared.state.lock().expect("Codex host state").status {
-                    HostStatus::Stopped => return Ok(()),
+                let (status, quiet) = {
+                    let state = shared.state.lock().expect("Codex host state");
+                    (state.status, state.jobs.is_empty())
+                };
+                match status {
+                    HostStatus::Stopped if quiet => return Ok(()),
                     HostStatus::Unconfirmed => {
                         return Err(error(
                             "cleanup_unconfirmed",
@@ -432,9 +516,20 @@ impl Worker for CodexWorker {
             snapshot,
             text,
         );
+        // Construct outside the future, so dropping an unpolled start also
+        // revokes dispatch synchronously against the final cancellation gate.
         Box::pin(async move {
             match result {
-                Ok(receiver) => receiver.await.unwrap_or_else(|_| Err(unavailable())),
+                Ok(PendingStart {
+                    mut waiter,
+                    receiver,
+                }) => {
+                    let result = receiver.await.unwrap_or_else(|_| Err(unavailable()));
+                    if result.is_ok() {
+                        waiter.0 = None;
+                    }
+                    result
+                }
                 Err(error) => Err(error),
             }
         })
@@ -518,7 +613,7 @@ fn begin(
     ticket: Ticket,
     snapshot: TurnSnapshot,
     text: String,
-) -> Result<oneshot::Receiver<Result<Started, WorkerError>>, WorkerError> {
+) -> Result<PendingStart, WorkerError> {
     if snapshot.validate().is_err()
         || snapshot.provider != Provider::Codex
         || snapshot.key != spec.key
@@ -561,6 +656,7 @@ fn begin(
         event_stop,
         closed,
         changed: Notify::new(),
+        persistence: Mutex::new(None),
     });
     {
         let mut state = shared.state.lock().expect("Codex host state");
@@ -589,9 +685,19 @@ fn begin(
     let (sender, receiver) = mpsc::channel(shared.limits.event_slots);
     let (started, started_rx) = oneshot::channel();
     tokio::spawn(run_job(
-        shared, spec, job, snapshot, text, sender, receiver, started,
+        shared,
+        spec,
+        job.clone(),
+        snapshot,
+        text,
+        sender,
+        receiver,
+        started,
     ));
-    Ok(started_rx)
+    Ok(PendingStart {
+        waiter: StartWaiter(Some(job)),
+        receiver: started_rx,
+    })
 }
 fn cancel_job(job: &Job) {
     job.approval_closed.send_replace(true);
@@ -1116,6 +1222,77 @@ fn sandbox_rank(value: &Value) -> u8 {
         _ => 2,
     }
 }
+async fn persist_thread(
+    shared: &Arc<Shared>,
+    spec: &SessionSpec,
+    job: &Arc<Job>,
+    thread: &str,
+    actual: &Value,
+    model: &str,
+) -> Result<(), WorkerError> {
+    if *job.cancel.borrow() || shared.storage_failed.load(Ordering::Acquire) {
+        return Err(unavailable());
+    }
+    let seal = Arc::new(());
+    let request = ThreadPrepared {
+        session: spec.key.clone(),
+        ticket: job.ticket.clone(),
+        native_thread_id: thread.to_owned(),
+        cwd: spec.cwd.clone(),
+        model: model.to_owned(),
+        sandbox: PreparedSandbox {
+            mode: match actual["type"].as_str() {
+                Some("readOnly") => SandboxMode::ReadOnly,
+                Some("workspaceWrite") => SandboxMode::WorkspaceWrite,
+                _ => SandboxMode::Full,
+            },
+            network_access: actual["networkAccess"].as_bool(),
+            writable_roots: actual["writableRoots"]
+                .as_array()
+                .map(|roots| {
+                    roots
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(PathBuf::from)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            exclude_slash_tmp: actual["excludeSlashTmp"].as_bool(),
+            exclude_tmpdir_env_var: actual["excludeTmpdirEnvVar"].as_bool(),
+        },
+        seal: seal.clone(),
+    };
+    let (completed, mut result) = watch::channel(None);
+    let store = shared.services.thread_store.clone();
+    let owner = shared.clone();
+    let task = tokio::spawn(async move {
+        let outcome = match tokio::spawn(async move { store.persist(request).await }).await {
+            Ok(Ok(receipt)) if Arc::ptr_eq(&receipt.seal, &seal) => Ok(()),
+            Ok(Err(ThreadStoreError::Rejected)) => Err(ThreadStoreError::Rejected),
+            _ => Err(ThreadStoreError::Unknown),
+        };
+        if outcome == Err(ThreadStoreError::Unknown) {
+            fatal_storage(&owner);
+        }
+        completed.send_replace(Some(outcome));
+    });
+    *job.persistence.lock().expect("Codex persistence") = Some(task);
+    loop {
+        if let Some(outcome) = *result.borrow_and_update() {
+            return outcome.map_err(|fault| match fault {
+                ThreadStoreError::Rejected => error(
+                    "thread_store_rejected",
+                    "Codex thread persistence was rejected",
+                ),
+                ThreadStoreError::Unknown => error(
+                    "storage_unavailable",
+                    "Codex thread persistence is unconfirmed",
+                ),
+            });
+        }
+        result.changed().await.map_err(|_| unavailable())?;
+    }
+}
 async fn prepare(
     shared: Arc<Shared>,
     spec: Arc<SessionSpec>,
@@ -1214,6 +1391,15 @@ async fn prepare(
         if resume.as_ref().is_some_and(|id| id != &thread) {
             return Err(error("start_unknown", "Codex resumed a different thread"));
         }
+        if reply["cwd"]
+            .as_str()
+            .is_none_or(|cwd| std::path::Path::new(cwd) != spec.cwd)
+        {
+            return Err(error(
+                "start_unknown",
+                "Codex thread cwd differs from trusted scope",
+            ));
+        }
         let actual = typed_sandbox(&reply["sandbox"])?;
         let requested_rank = match initial {
             Approval::ReadOnly => 0,
@@ -1251,8 +1437,17 @@ async fn prepare(
     {
         let mut info = job.info.lock().expect("Codex job");
         info.thread = Some(thread.clone());
-        info.model = snapshot.settings.model.clone().or(model);
+        info.model = snapshot.settings.model.clone().or_else(|| model.clone());
     }
+    persist_thread(
+        &shared,
+        &spec,
+        &job,
+        &thread,
+        &actual,
+        model.as_deref().ok_or_else(unavailable)?,
+    )
+    .await?;
     {
         let mut state = shared.state.lock().expect("Codex host state");
         if state.routes.contains_key(&thread) {
@@ -1789,7 +1984,7 @@ async fn run_job(
     text: String,
     sender: mpsc::Sender<Envelope>,
     receiver: mpsc::Receiver<Envelope>,
-    started: oneshot::Sender<Result<Started, WorkerError>>,
+    mut started: oneshot::Sender<Result<Started, WorkerError>>,
 ) {
     if started.is_closed() {
         cancel_job(&job);
@@ -1817,7 +2012,7 @@ async fn run_job(
         let _ = preparation.await;
         Err(error("interrupted", "Codex start cancelled"))
     } else {
-        tokio::select! {result=&mut preparation=>result.unwrap_or_else(|_|Err(error("provider_unavailable","Codex preparation failed"))),_=cancel.changed()=>{preparation.abort();let _=preparation.await;Err(error("interrupted","Codex start cancelled"))}}
+        tokio::select! {result=&mut preparation=>result.unwrap_or_else(|_|Err(error("provider_unavailable","Codex preparation failed"))),_=cancel.changed()=>{preparation.abort();let _=preparation.await;Err(error("interrupted","Codex start cancelled"))},_=started.closed()=>{cancel_job(&job);preparation.abort();let _=preparation.await;Err(error("interrupted","Codex start waiter dropped"))}}
     };
     if prepared.is_ok() {
         let result = Started {
@@ -1881,6 +2076,12 @@ async fn run_job(
     shared.changed.notify_waiters();
 }
 async fn cleanup_job(shared: &Shared, job: &Job) {
+    // Never release the ticket/daemon ownership while its durable write can
+    // still mutate the registry. Preparation cancellation cannot detach this IO.
+    let persistence = { job.persistence.lock().expect("Codex persistence").take() };
+    if let Some(persistence) = persistence {
+        let _ = persistence.await;
+    }
     let responders_quiet = tokio::time::timeout(shared.timeouts.interrupt, async {
         loop {
             let changed = job.changed.notified();
