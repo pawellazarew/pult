@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 
 mod history;
+pub mod host_policy;
+pub mod consent_store;
+pub mod host_paths;
 pub mod journal;
 mod locale;
 mod memory;
