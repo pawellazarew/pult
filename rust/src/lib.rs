@@ -1,7 +1,10 @@
 #![forbid(unsafe_code)]
 pub mod network_guard;
 
+pub mod consent_store;
 mod history;
+pub mod host_paths;
+pub mod host_policy;
 pub mod journal;
 mod locale;
 mod memory;
