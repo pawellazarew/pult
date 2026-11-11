@@ -3,8 +3,8 @@
 use pult_core::journal::EventStore;
 use pult_core::turn_coordinator::{Limits, Outcome, Ticket};
 use pult_core::turn_driver::{
-    Driver, DriverError, EventSink, Handle, Options, Receipt, SinkError, Started, Task, Worker,
-    WorkerError,
+    DispatchDecision, Driver, DriverError, EventSink, Handle, Options, Receipt, SinkError, Started,
+    Task, Worker, WorkerError,
 };
 use pult_core::turn_journal::JournalSink;
 use pult_core::turn_snapshot::{Approval, Provider, SessionKey, TurnSettings, TurnSnapshot};
@@ -12,7 +12,7 @@ use serde_json::Value;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Waker};
 use std::time::Duration;
@@ -795,4 +795,200 @@ async fn retry_requested_during_pending_close_clears_quarantine_before_the_next_
     bounded(driver.shutdown(Duration::from_secs(5)))
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn checked_dispatch_refreshes_revocation_and_hold_after_blocked_user_append() {
+    use pult_core::consent_store::ConsentStore;
+    for set_hold in [false, true] {
+        let fixture = Fixture::new();
+        let mut consent = ConsentStore::open(&fixture._home.path().join("consent-home")).unwrap();
+        consent
+            .grant(&[Provider::Codex], chrono::Utc::now())
+            .unwrap();
+        let consent = Arc::new(Mutex::new(consent));
+        let hold = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (gate_tx, mut gate_rx) = mpsc::unbounded_channel();
+        let driver = fixture.with_sink(Arc::new(GateSink {
+            inner: fixture.sink.clone(),
+            gate: Mutex::new(Some(gate_tx)),
+        }));
+        let mut worker = WorkerControl::new();
+        let gate_consent = consent.clone();
+        let gate_hold = hold.clone();
+        let gate_calls = calls.clone();
+        let mut initial = snapshot();
+        initial.settings.approval = Approval::Full;
+        let expected = initial.clone();
+        let gate_store = fixture.store.clone();
+        let mut handle = driver
+            .start_checked(
+                initial,
+                "hello".into(),
+                worker.worker.clone(),
+                Arc::new(move |ticket: &Ticket, initial: &TurnSnapshot| {
+                    gate_calls.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(initial, &expected);
+                    assert_eq!(ticket.session(), &expected.key);
+                    assert_eq!(gate_store.lock().unwrap().last_id(), 1);
+                    if gate_hold.load(Ordering::SeqCst)
+                        || !gate_consent
+                            .lock()
+                            .unwrap()
+                            .read()
+                            .unwrap()
+                            .facts()
+                            .covers(Provider::Codex)
+                    {
+                        DispatchDecision::Deny
+                    } else {
+                        DispatchDecision::Allow
+                    }
+                }),
+            )
+            .unwrap();
+        let pending = next(&mut gate_rx).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        if set_hold {
+            hold.store(true, Ordering::SeqCst);
+        } else {
+            consent.lock().unwrap().revoke(chrono::Utc::now()).unwrap();
+        }
+        pending.release.send(()).unwrap();
+        assert_eq!(
+            bounded(handle.accepted()).await,
+            Err(DriverError::AccessDenied)
+        );
+        let terminal = bounded(handle.wait()).await.unwrap();
+        assert!(
+            matches!(terminal.turn.outcome, Outcome::Failure { ref code, .. } if code == "access_denied")
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(worker.starts.try_recv().is_err());
+        assert!(worker.closes.try_recv().is_err());
+        assert_eq!(driver.active_count(), 0);
+        assert_eq!(terminal_status(&fixture.rows()), "failed");
+    }
+}
+
+#[tokio::test]
+async fn checked_dispatch_applies_narrower_snapshot_once_and_allow_preserves_settings() {
+    for decision in [
+        DispatchDecision::Restrict(Approval::Ask),
+        DispatchDecision::Allow,
+    ] {
+        let fixture = Fixture::new();
+        let driver = fixture.driver();
+        let mut worker = WorkerControl::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gate_calls = calls.clone();
+        let mut initial = snapshot();
+        initial.settings.approval = Approval::Full;
+        let mut handle = driver
+            .start_checked(
+                initial.clone(),
+                "hello".into(),
+                worker.worker.clone(),
+                Arc::new(move |_: &Ticket, _: &TurnSnapshot| {
+                    gate_calls.fetch_add(1, Ordering::SeqCst);
+                    decision
+                }),
+            )
+            .unwrap();
+        let call = next(&mut worker.starts).await;
+        let mut expected = initial;
+        if let DispatchDecision::Restrict(approval) = decision {
+            expected.settings.approval = approval;
+        }
+        assert_eq!(call.snapshot, expected);
+        let (reply, done, _) = started();
+        call.reply
+            .send(StartReply::Started(reply))
+            .unwrap_or_else(|_| panic!("lost start reply"));
+        bounded(handle.accepted()).await.unwrap();
+        done.send(Outcome::Success).unwrap();
+        next(&mut worker.closes).await.reply.send(Ok(())).unwrap();
+        assert_eq!(
+            bounded(handle.wait()).await.unwrap().turn.outcome,
+            Outcome::Success
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn checked_dispatch_denies_expansion_and_gate_panic_without_start_or_secret() {
+    pult_core::panic_guard::install();
+    for panic in [false, true] {
+        let fixture = Fixture::new();
+        let driver = fixture.driver();
+        let mut worker = WorkerControl::new();
+        let mut handle = driver
+            .start_checked(
+                snapshot(),
+                "hello".into(),
+                worker.worker.clone(),
+                Arc::new(move |_: &Ticket, _: &TurnSnapshot| {
+                    if panic {
+                        panic!("PRIVATE gate failure must not leak");
+                    }
+                    DispatchDecision::Restrict(Approval::Full)
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            bounded(handle.accepted()).await,
+            Err(DriverError::AccessDenied)
+        );
+        bounded(handle.wait()).await.unwrap();
+        assert!(worker.starts.try_recv().is_err());
+        assert!(worker.closes.try_recv().is_err());
+        assert!(
+            !serde_json::to_string(&fixture.rows())
+                .unwrap()
+                .contains("PRIVATE")
+        );
+        assert_eq!(fixture.rows()[1]["data"]["errorCode"], "access_denied");
+        // A callback panic must not poison driver state or retain the slot.
+        assert_eq!(driver.active_count(), 0);
+    }
+}
+
+#[tokio::test]
+async fn checked_dispatch_cancel_during_user_append_skips_gate_and_worker() {
+    let fixture = Fixture::new();
+    let (gate_tx, mut gate_rx) = mpsc::unbounded_channel();
+    let driver = fixture.with_sink(Arc::new(GateSink {
+        inner: fixture.sink.clone(),
+        gate: Mutex::new(Some(gate_tx)),
+    }));
+    let mut worker = WorkerControl::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let gate_calls = calls.clone();
+    let mut handle = driver
+        .start_checked(
+            snapshot(),
+            "hello".into(),
+            worker.worker.clone(),
+            Arc::new(move |_: &Ticket, _: &TurnSnapshot| {
+                gate_calls.fetch_add(1, Ordering::SeqCst);
+                DispatchDecision::Allow
+            }),
+        )
+        .unwrap();
+    let pending = next(&mut gate_rx).await;
+    driver.cancel(handle.ticket());
+    pending.release.send(()).unwrap();
+    assert_eq!(
+        bounded(handle.accepted()).await,
+        Err(DriverError::Cancelled)
+    );
+    assert_eq!(
+        bounded(handle.wait()).await.unwrap().turn.outcome,
+        Outcome::Interrupted
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(worker.starts.try_recv().is_err());
+    assert!(worker.closes.try_recv().is_err());
 }
