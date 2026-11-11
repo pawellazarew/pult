@@ -391,22 +391,12 @@ async fn cancelling_a_pending_send_poison_closes_input_before_any_retry() {
 
 #[tokio::test]
 async fn cancelling_spawn_before_holder_ready_keeps_the_term_drop_guard() {
-    use std::os::unix::fs::PermissionsExt;
     let home = tempfile::tempdir().unwrap();
-    let holder = home.path().join("stall-holder.sh");
+    let holder = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/stall_holder.sh");
     let pidfile = home.path().join("stall-holder.pid");
-    let temporary = home.path().join("stall-holder.pid.tmp");
-    let quote = |path: &Path| format!("'{}'", path.to_str().unwrap().replace('\'', "'\\''"));
-    // The stub has no provider. EOF alone intentionally does not exit it: the
-    // cancelled startup future must drop its owned Process and send TERM.
-    let script = format!(
-        "#!/bin/sh\ntrap 'exit 0' TERM INT\nprintf '%s\\n' \"$$\" > {}\n/bin/mv {} {}\nwhile :; do IFS= read -r ignored || :; done\n",
-        quote(&temporary),
-        quote(&temporary),
-        quote(&pidfile)
-    );
-    std::fs::write(&holder, script).unwrap();
-    std::fs::set_permissions(&holder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // The checked-in stub has no provider. EOF alone intentionally does not
+    // exit it: cancellation must drop the owned Process and send TERM. Avoid
+    // creating an executable while other tests can fork and inherit its writer.
     let provider_marker = home.path().join("provider-must-not-launch");
     let mut config = launch(home.path(), "touch");
     config.holder = holder;
@@ -414,10 +404,13 @@ async fn cancelling_spawn_before_holder_ready_keeps_the_term_drop_guard() {
     let task = tokio::spawn(Process::spawn(config));
     let deadline = tokio::time::Instant::now() + DEADLINE;
     while !pidfile.exists() {
-        assert!(
-            !task.is_finished(),
-            "stub startup finished without a ready acknowledgement"
-        );
+        if task.is_finished() {
+            match task.await {
+                Ok(Err(error)) => panic!("stub startup failed before cancellation: {error:#}"),
+                Ok(Ok(_)) => panic!("stub startup accepted without a ready acknowledgement"),
+                Err(error) => panic!("stub startup task failed: {error}"),
+            }
+        }
         assert!(
             tokio::time::Instant::now() < deadline,
             "stub startup watchdog"

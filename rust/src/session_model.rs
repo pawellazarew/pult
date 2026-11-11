@@ -26,14 +26,24 @@ const STATUSES: &[&str] = &[
     "done",
 ];
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Default, Serialize)]
 #[serde(transparent)]
 pub struct Record(pub BTreeMap<String, Raw>);
+impl std::fmt::Debug for Record {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Record")
+            .field("fields", &self.0.len())
+            .finish_non_exhaustive()
+    }
+}
 impl Record {
     pub fn name(&self) -> &str {
-        // parse() always writes a canonical ASCII session name.
-        let text = self.0["name"].get();
-        &text[1..text.len() - 1]
+        // Stored records have canonical ASCII names. A raw public Record may
+        // be malformed; never panic or present an escaped name as canonical.
+        self.get("name")
+            .and_then(|raw| raw.get().strip_prefix('"')?.strip_suffix('"'))
+            .filter(|name| is_name(name))
+            .unwrap_or("")
     }
     pub fn get(&self, key: &str) -> Option<&RawValue> {
         self.0.get(key).map(|raw| &**raw)
