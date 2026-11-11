@@ -78,10 +78,18 @@ pub enum GuardMode {
     Deny,
     Allow,
 }
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Eq, PartialEq, Hash)]
 pub struct GuardRule {
     pub mode: GuardMode,
     pub countries: Vec<String>,
+}
+impl std::fmt::Debug for GuardRule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GuardRule")
+            .field("mode", &self.mode)
+            .field("country_count", &self.countries.len())
+            .finish()
+    }
 }
 impl Default for GuardRule {
     fn default() -> Self {

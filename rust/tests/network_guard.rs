@@ -627,7 +627,7 @@ async fn worker_environment_uses_checked_proxy_and_deduplicated_no_proxy() {
         .await
         .unwrap();
     let parent = env(&[
-        ("HOME", "/home/test"),
+        ("HOME", "/tmp/test-home"),
         ("PATH", "/usr/bin"),
         ("HTTPS_PROXY", "http://ambient"),
         ("ANTHROPIC_API_KEY", "SECRET"),
@@ -801,4 +801,12 @@ async fn codex_proxy_sets_both_proxy_variables_while_other_providers_only_use_ht
         assert!(!actual.contains_key(std::ffi::OsStr::new("ALL_PROXY")));
         assert!(!actual.contains_key(std::ffi::OsStr::new("HTTPS_PROXY")));
     }
+}
+
+#[test]
+fn guard_debug_hides_unvalidated_legacy_country_strings() {
+    let guard = GuardRule { mode: GuardMode::Deny, countries: vec!["PRIVATE_CONFIG_SECRET".into()] };
+    let diagnostic = format!("{guard:?}");
+    assert!(!diagnostic.contains("PRIVATE"));
+    assert!(diagnostic.contains("country_count: 1"));
 }
