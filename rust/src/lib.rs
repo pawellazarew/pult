@@ -3,6 +3,9 @@
 mod history;
 pub mod journal;
 mod locale;
+mod memory;
+mod memory_api;
+mod memory_project;
 mod read_api;
 mod registry;
 mod session_api;
@@ -41,7 +44,7 @@ use tokio::task::JoinSet;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const PROTOCOL: u64 = 1;
 pub const MAX_LINE: usize = 1024 * 1024;
-pub const SUPPORTED: [&str; 15] = [
+pub const SUPPORTED: [&str; 22] = [
     "agent.archive",
     "agent.read",
     "agent.rename",
@@ -56,6 +59,13 @@ pub const SUPPORTED: [&str; 15] = [
     "events.subscribe",
     "events.tail",
     "events.unsubscribe",
+    "memory.add",
+    "memory.forget",
+    "memory.get",
+    "memory.history",
+    "memory.list",
+    "memory.search",
+    "memory.update",
     "protocol.catalog",
 ];
 const SCRATCH_MARKER: &str = "pult-rust-scratch-v1\n";
@@ -443,12 +453,24 @@ struct State {
     store: Mutex<journal::EventStore>,
     history: Mutex<history::HistoryCache>,
     registry: Mutex<registry::Registry>,
+    memory: Mutex<std::result::Result<memory::MemoryStore, String>>,
     last_event_id: AtomicU64,
     test_mode: bool,
     projection_degraded: AtomicBool,
     subscriptions: AtomicUsize,
     committed: watch::Sender<u64>,
     live_id: AtomicU64,
+}
+
+fn memory_status(state: &State) -> Value {
+    match state.memory.try_lock() {
+        Ok(memory) => match &*memory {
+            Ok(_) => json!({"available":true}),
+            Err(error) => json!({"available":false,"error":error}),
+        },
+        Err(std::sync::TryLockError::WouldBlock) => json!({"busy":true}),
+        Err(_) => json!({"available":false,"error":"memory lock poisoned"}),
+    }
 }
 
 #[derive(Serialize)]
@@ -660,6 +682,40 @@ async fn connection(
             }
             continue;
         }
+        if let Some((id, command)) = memory_api::parse(&bytes) {
+            let mut mutation = false;
+            let response = match command {
+                Ok((method, params)) => {
+                    let is_mutation = matches!(
+                        method.as_str(),
+                        "memory.add" | "memory.update" | "memory.forget"
+                    );
+                    match memory_api::execute(state.clone(), method, params).await {
+                        Ok(result) => {
+                            mutation = is_mutation;
+                            json!({"id":id,"result":result})
+                        }
+                        Err(error) => {
+                            json!({"id":id,"error":{"code":error.code,"message":error.message}})
+                        }
+                    }
+                }
+                Err(error) => json!({"id":id,"error":{"code":error.code,"message":error.message}}),
+            };
+            if serde_json::to_vec(&response)?.len() < MAX_LINE {
+                writer.response(&response).await?;
+            } else {
+                let message = if mutation {
+                    "operation committed but response exceeds frame budget; retry the same commandId"
+                } else {
+                    "response exceeds frame budget; reduce limit or advance offset"
+                };
+                writer
+                    .response(&json!({"id":id,"error":{"code":"internal","message":message}}))
+                    .await?;
+            }
+            continue;
+        }
         let request: Value = match serde_json::from_slice(&bytes) {
             Ok(request) => request,
             Err(_) => {
@@ -686,7 +742,7 @@ async fn connection(
         let method = request["method"].as_str().unwrap();
         let result = match method {
             "daemon.status" => {
-                json!({"version":VERSION,"protocol":PROTOCOL,"pid":std::process::id(),"startedAt":state.started_at,"uptimeMs":state.started.elapsed().as_millis(),"home":state.home,"sock":state.home.join("run/pultd.sock"),"clients":state.clients.load(Ordering::Relaxed),"subscriptions":state.subscriptions.load(Ordering::Relaxed),"lastEventId":state.last_event_id.load(Ordering::Acquire),"mode":"on-demand","journal":{"projectionDegraded":state.projection_degraded.load(Ordering::Relaxed)},"registry":state.registry.try_lock().ok().map(|r|r.status()),"capabilities":{"experimental":true,"supportedMethods":SUPPORTED}})
+                json!({"version":VERSION,"protocol":PROTOCOL,"pid":std::process::id(),"startedAt":state.started_at,"uptimeMs":state.started.elapsed().as_millis(),"home":state.home,"sock":state.home.join("run/pultd.sock"),"clients":state.clients.load(Ordering::Relaxed),"subscriptions":state.subscriptions.load(Ordering::Relaxed),"lastEventId":state.last_event_id.load(Ordering::Acquire),"mode":"on-demand","journal":{"projectionDegraded":state.projection_degraded.load(Ordering::Relaxed)},"registry":state.registry.try_lock().ok().map(|r|r.status()),"memory":memory_status(&state),"capabilities":{"experimental":true,"supportedMethods":SUPPORTED}})
             }
             "daemon.stop" => json!({"stopping":true}),
             "protocol.catalog" => catalog(),
@@ -820,10 +876,11 @@ pub async fn serve(home: PathBuf) -> Result<()> {
     initialize_scratch(&home)?;
     let events = home.join("events");
     let registry_home = home.clone();
-    let (store, registry) = tokio::task::spawn_blocking(move || -> Result<_> {
+    let (store, registry, memory) = tokio::task::spawn_blocking(move || -> Result<_> {
         let mut store = journal::EventStore::open(&events)?;
         let registry = registry::Registry::open(&registry_home, &mut store)?;
-        Ok((store, registry))
+        let memory = memory::MemoryStore::open(&registry_home).map_err(|error| error.to_string());
+        Ok((store, registry, memory))
     })
     .await??;
     let last_event_id = AtomicU64::new(store.last_id());
@@ -848,6 +905,7 @@ pub async fn serve(home: PathBuf) -> Result<()> {
         store: Mutex::new(store),
         history: Mutex::new(history::HistoryCache::default()),
         registry: Mutex::new(registry),
+        memory: Mutex::new(memory),
         last_event_id,
         test_mode: std::env::var("PULT_TEST").as_deref() == Ok("1"),
         projection_degraded: AtomicBool::new(false),

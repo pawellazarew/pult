@@ -20,6 +20,10 @@ enum Action {
         action: DaemonAction,
     },
     Catalog,
+    Memory {
+        #[command(subcommand)]
+        action: MemoryAction,
+    },
     Agent {
         #[command(subcommand)]
         action: AgentAction,
@@ -27,6 +31,39 @@ enum Action {
     Events {
         #[command(subcommand)]
         action: EventsAction,
+    },
+}
+
+/// Owner administration of the experimental shared-memory service.
+#[derive(Subcommand)]
+enum MemoryAction {
+    Add {
+        #[arg(long)]
+        params: String,
+    },
+    Update {
+        #[arg(long)]
+        params: String,
+    },
+    Forget {
+        #[arg(long)]
+        params: String,
+    },
+    Get {
+        #[arg(long)]
+        params: String,
+    },
+    List {
+        #[arg(long, default_value = "{}")]
+        params: String,
+    },
+    Search {
+        #[arg(long)]
+        params: String,
+    },
+    History {
+        #[arg(long)]
+        params: String,
     },
 }
 
@@ -100,7 +137,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     if args.skill {
         println!(
-            "Rust core protocol 1. Use an explicit private scratch --home.\nCommands: daemon serve, daemon status, daemon stop, catalog, events tail, events snapshot, events history --session NAME [--before ID] [--budget BYTES], events get ID..., agent read NAME [--since N] [--format text|json], agent tree NAME [--json], agent rename NAME [TITLE] [--title TEXT], agent archive|unarchive NAME, agent seen NAME [--unread]\nOwner-token connections support agent.read, agent.tree, agent.rename, agent.archive, agent.seen, daemon.status, daemon.stop, events.tail, events.subscribe, events.unsubscribe, events.snapshot, events.history, events.get and protocol.catalog.\nHistory reads per-session files, snapshots and get use the global journal.\nSubscriptions replay committed events with bounded output. live=true sends an empty-session reset.\nevents.emit requires PULT_TEST=1 and is for deterministic verification.\nJournal append is acknowledged after sync. A failed append has an unknown outcome until replay.\nOther catalogued methods return not_implemented. Scoped credentials are rejected.\nPrivate sessions/config are allowed only in a marked Rust scratch home. Startup recovers sessions cold and pauses queues; no provider is started. Production migration and session execution follow later compatibility steps."
+            "Rust core protocol 1. Use an explicit private scratch --home.\nCommands: memory add|update|forget|get|list|search|history --params JSON (owner only; no turn injection yet), daemon serve, daemon status, daemon stop, catalog, events tail, events snapshot, events history --session NAME [--before ID] [--budget BYTES], events get ID..., agent read NAME [--since N] [--format text|json], agent tree NAME [--json], agent rename NAME [TITLE] [--title TEXT], agent archive|unarchive NAME, agent seen NAME [--unread]\nOwner-token connections support memory.add, memory.update, memory.forget, memory.get, memory.list, memory.search, memory.history, agent.read, agent.tree, agent.rename, agent.archive, agent.seen, daemon.status, daemon.stop, events.tail, events.subscribe, events.unsubscribe, events.snapshot, events.history, events.get and protocol.catalog.\nHistory reads per-session files, snapshots and get use the global journal.\nSubscriptions replay committed events with bounded output. live=true sends an empty-session reset.\nevents.emit requires PULT_TEST=1 and is for deterministic verification.\nJournal append is acknowledged after sync. A failed append has an unknown outcome until replay.\nOther catalogued methods return not_implemented. Scoped credentials are rejected.\nPrivate sessions/config are allowed only in a marked Rust scratch home. Startup recovers sessions cold and pauses queues; no provider is started. Production migration and session execution follow later compatibility steps."
         );
         return Ok(());
     }
@@ -118,6 +155,20 @@ async fn main() -> Result<()> {
             action: DaemonAction::Stop,
         } => cli_request(&home, "daemon.stop", serde_json::json!({})).await?,
         Action::Catalog => cli_request(&home, "protocol.catalog", serde_json::json!({})).await?,
+        Action::Memory { action } => {
+            let (method, params) = match action {
+                MemoryAction::Add { params } => ("memory.add", params),
+                MemoryAction::Update { params } => ("memory.update", params),
+                MemoryAction::Forget { params } => ("memory.forget", params),
+                MemoryAction::Get { params } => ("memory.get", params),
+                MemoryAction::List { params } => ("memory.list", params),
+                MemoryAction::Search { params } => ("memory.search", params),
+                MemoryAction::History { params } => ("memory.history", params),
+            };
+            let params: serde_json::Value = serde_json::from_str(&params)?;
+            anyhow::ensure!(params.is_object(), "memory --params must be a JSON object");
+            cli_request(&home, method, params).await?
+        }
         Action::Agent { action } => {
             let (method, params) = match action {
                 AgentAction::Read {

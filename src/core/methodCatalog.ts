@@ -1267,6 +1267,790 @@ export const RPC_CATALOG = {
       "resultSchema": null
     },
     {
+      "name": "memory.add",
+      "node": "extension",
+      "rust": "implemented",
+      "access": "owner",
+      "testOnly": false,
+      "description": "Owner-only shared memory add; experimental Rust scratch service, agent turn integration follows separately.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "session": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "project",
+              "global"
+            ]
+          },
+          "commandId": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "details": {
+            "type": "string"
+          },
+          "pinned": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "commandId",
+          "name",
+          "summary",
+          "details",
+          "reason"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "project",
+              "global"
+            ]
+          },
+          "projectId": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "details": {
+            "type": "string"
+          },
+          "pinned": {
+            "type": "boolean"
+          },
+          "version": {
+            "type": "integer"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string"
+          },
+          "deleted": {
+            "type": "boolean"
+          },
+          "author": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "sourceSession": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "scope",
+          "name",
+          "summary",
+          "details",
+          "pinned",
+          "version",
+          "createdAt",
+          "updatedAt",
+          "deleted",
+          "author",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "memory.forget",
+      "node": "extension",
+      "rust": "implemented",
+      "access": "owner",
+      "testOnly": false,
+      "description": "Owner-only shared memory forget; experimental Rust scratch service, agent turn integration follows separately.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "session": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "project",
+              "global"
+            ]
+          },
+          "commandId": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "expectedVersion": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "commandId",
+          "id",
+          "expectedVersion",
+          "reason"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "project",
+              "global"
+            ]
+          },
+          "projectId": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "details": {
+            "type": "string"
+          },
+          "pinned": {
+            "type": "boolean"
+          },
+          "version": {
+            "type": "integer"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string"
+          },
+          "deleted": {
+            "type": "boolean"
+          },
+          "author": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "sourceSession": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "scope",
+          "name",
+          "summary",
+          "details",
+          "pinned",
+          "version",
+          "createdAt",
+          "updatedAt",
+          "deleted",
+          "author",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "memory.get",
+      "node": "extension",
+      "rust": "implemented",
+      "access": "owner",
+      "testOnly": false,
+      "description": "Owner-only shared memory get; experimental Rust scratch service, agent turn integration follows separately.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "session": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "project",
+              "global",
+              "visible"
+            ]
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "project",
+              "global"
+            ]
+          },
+          "projectId": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "details": {
+            "type": "string"
+          },
+          "pinned": {
+            "type": "boolean"
+          },
+          "version": {
+            "type": "integer"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string"
+          },
+          "deleted": {
+            "type": "boolean"
+          },
+          "author": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "sourceSession": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "scope",
+          "name",
+          "summary",
+          "details",
+          "pinned",
+          "version",
+          "createdAt",
+          "updatedAt",
+          "deleted",
+          "author",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "memory.history",
+      "node": "extension",
+      "rust": "implemented",
+      "access": "owner",
+      "testOnly": false,
+      "description": "Owner-only shared memory history; experimental Rust scratch service, agent turn integration follows separately.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "session": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "project",
+              "global",
+              "visible"
+            ]
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "versions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "scope": {
+                  "type": "string",
+                  "enum": [
+                    "project",
+                    "global"
+                  ]
+                },
+                "projectId": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "summary": {
+                  "type": "string"
+                },
+                "details": {
+                  "type": "string"
+                },
+                "pinned": {
+                  "type": "boolean"
+                },
+                "version": {
+                  "type": "integer"
+                },
+                "createdAt": {
+                  "type": "string"
+                },
+                "updatedAt": {
+                  "type": "string"
+                },
+                "deleted": {
+                  "type": "boolean"
+                },
+                "author": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "sourceSession": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "scope",
+                "name",
+                "summary",
+                "details",
+                "pinned",
+                "version",
+                "createdAt",
+                "updatedAt",
+                "deleted",
+                "author",
+                "reason"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "hasMore": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "versions",
+          "hasMore"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "memory.list",
+      "node": "extension",
+      "rust": "implemented",
+      "access": "owner",
+      "testOnly": false,
+      "description": "Owner-only shared memory list; experimental Rust scratch service, agent turn integration follows separately.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "session": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "project",
+              "global",
+              "visible"
+            ]
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "offset": {
+            "type": "integer"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "memories": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "scope": {
+                  "type": "string",
+                  "enum": [
+                    "project",
+                    "global"
+                  ]
+                },
+                "projectId": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "summary": {
+                  "type": "string"
+                },
+                "pinned": {
+                  "type": "boolean"
+                },
+                "version": {
+                  "type": "integer"
+                },
+                "createdAt": {
+                  "type": "string"
+                },
+                "updatedAt": {
+                  "type": "string"
+                },
+                "deleted": {
+                  "type": "boolean"
+                },
+                "author": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "sourceSession": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "scope",
+                "name",
+                "summary",
+                "pinned",
+                "version",
+                "createdAt",
+                "updatedAt",
+                "deleted",
+                "author",
+                "reason"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "hasMore": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "memories",
+          "hasMore"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "memory.search",
+      "node": "extension",
+      "rust": "implemented",
+      "access": "owner",
+      "testOnly": false,
+      "description": "Owner-only shared memory search; experimental Rust scratch service, agent turn integration follows separately.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "session": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "project",
+              "global",
+              "visible"
+            ]
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "memories": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "scope": {
+                  "type": "string",
+                  "enum": [
+                    "project",
+                    "global"
+                  ]
+                },
+                "projectId": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "summary": {
+                  "type": "string"
+                },
+                "pinned": {
+                  "type": "boolean"
+                },
+                "version": {
+                  "type": "integer"
+                },
+                "createdAt": {
+                  "type": "string"
+                },
+                "updatedAt": {
+                  "type": "string"
+                },
+                "deleted": {
+                  "type": "boolean"
+                },
+                "author": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "sourceSession": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "scope",
+                "name",
+                "summary",
+                "pinned",
+                "version",
+                "createdAt",
+                "updatedAt",
+                "deleted",
+                "author",
+                "reason"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "hasMore": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "memories",
+          "hasMore"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "memory.update",
+      "node": "extension",
+      "rust": "implemented",
+      "access": "owner",
+      "testOnly": false,
+      "description": "Owner-only shared memory update; experimental Rust scratch service, agent turn integration follows separately.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "session": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "project",
+              "global"
+            ]
+          },
+          "commandId": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "expectedVersion": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "details": {
+            "type": "string"
+          },
+          "pinned": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "commandId",
+          "id",
+          "expectedVersion",
+          "reason"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "project",
+              "global"
+            ]
+          },
+          "projectId": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "details": {
+            "type": "string"
+          },
+          "pinned": {
+            "type": "boolean"
+          },
+          "version": {
+            "type": "integer"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string"
+          },
+          "deleted": {
+            "type": "boolean"
+          },
+          "author": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "sourceSession": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "scope",
+          "name",
+          "summary",
+          "details",
+          "pinned",
+          "version",
+          "createdAt",
+          "updatedAt",
+          "deleted",
+          "author",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "perm.list",
       "node": "implemented",
       "rust": "unported",
@@ -1732,7 +2516,7 @@ export const RPC_CATALOG = {
 } as const
 
 export type RpcMethodName = typeof RPC_CATALOG.methods[number]['name']
-export type RustFoundationMethod = "agent.archive" | "agent.read" | "agent.rename" | "agent.seen" | "agent.tree" | "daemon.status" | "daemon.stop" | "events.emit" | "events.get" | "events.history" | "events.snapshot" | "events.subscribe" | "events.tail" | "events.unsubscribe" | "protocol.catalog"
+export type RustFoundationMethod = "agent.archive" | "agent.read" | "agent.rename" | "agent.seen" | "agent.tree" | "daemon.status" | "daemon.stop" | "events.emit" | "events.get" | "events.history" | "events.snapshot" | "events.subscribe" | "events.tail" | "events.unsubscribe" | "memory.add" | "memory.forget" | "memory.get" | "memory.history" | "memory.list" | "memory.search" | "memory.update" | "protocol.catalog"
 
 export interface RustFoundationParams {
   "agent.archive": { "name": string; "archived": boolean; [key: string]: unknown }
@@ -1749,6 +2533,13 @@ export interface RustFoundationParams {
   "events.subscribe": { "since"?: number; "sessionId"?: string; "live"?: boolean; [key: string]: unknown }
   "events.tail": { "since"?: number; "sessionId"?: string; "limit"?: number; [key: string]: unknown }
   "events.unsubscribe": { "sub": number; [key: string]: unknown }
+  "memory.add": { "session"?: string; "scope"?: "project" | "global"; "commandId": string; "reason": string; "name": string; "summary": string; "details": string; "pinned"?: boolean }
+  "memory.forget": { "session"?: string; "scope"?: "project" | "global"; "commandId": string; "reason": string; "id": string; "expectedVersion": number }
+  "memory.get": { "session"?: string; "scope"?: "project" | "global" | "visible"; "id": string }
+  "memory.history": { "session"?: string; "scope"?: "project" | "global" | "visible"; "limit"?: number; "offset"?: number; "id": string }
+  "memory.list": { "session"?: string; "scope"?: "project" | "global" | "visible"; "limit"?: number; "offset"?: number }
+  "memory.search": { "session"?: string; "scope"?: "project" | "global" | "visible"; "limit"?: number; "offset"?: number; "query": string }
+  "memory.update": { "session"?: string; "scope"?: "project" | "global"; "commandId": string; "reason": string; "id": string; "expectedVersion": number; "name"?: string; "summary"?: string; "details"?: string; "pinned"?: boolean }
   "protocol.catalog": { [key: string]: unknown }
 }
 
@@ -1767,5 +2558,12 @@ export interface RustFoundationResults {
   "events.subscribe": { "sub": number; "cursor": number; [key: string]: unknown }
   "events.tail": { "events": Array<{ "id": number; "ts": string; "sessionId": string; "parentId"?: string; "provider": string; "kind": string; "data": { [key: string]: unknown }; [key: string]: unknown }>; "cursor": number; [key: string]: unknown }
   "events.unsubscribe": { "removed": boolean; [key: string]: unknown }
+  "memory.add": { "id": string; "scope": "project" | "global"; "projectId"?: string; "name": string; "summary": string; "details": string; "pinned": boolean; "version": number; "createdAt": string; "updatedAt": string; "deleted": boolean; "author": string; "reason": string; "sourceSession"?: string }
+  "memory.forget": { "id": string; "scope": "project" | "global"; "projectId"?: string; "name": string; "summary": string; "details": string; "pinned": boolean; "version": number; "createdAt": string; "updatedAt": string; "deleted": boolean; "author": string; "reason": string; "sourceSession"?: string }
+  "memory.get": { "id": string; "scope": "project" | "global"; "projectId"?: string; "name": string; "summary": string; "details": string; "pinned": boolean; "version": number; "createdAt": string; "updatedAt": string; "deleted": boolean; "author": string; "reason": string; "sourceSession"?: string }
+  "memory.history": { "versions": Array<{ "id": string; "scope": "project" | "global"; "projectId"?: string; "name": string; "summary": string; "details": string; "pinned": boolean; "version": number; "createdAt": string; "updatedAt": string; "deleted": boolean; "author": string; "reason": string; "sourceSession"?: string }>; "hasMore": boolean }
+  "memory.list": { "memories": Array<{ "id": string; "scope": "project" | "global"; "projectId"?: string; "name": string; "summary": string; "pinned": boolean; "version": number; "createdAt": string; "updatedAt": string; "deleted": boolean; "author": string; "reason": string; "sourceSession"?: string }>; "hasMore": boolean }
+  "memory.search": { "memories": Array<{ "id": string; "scope": "project" | "global"; "projectId"?: string; "name": string; "summary": string; "pinned": boolean; "version": number; "createdAt": string; "updatedAt": string; "deleted": boolean; "author": string; "reason": string; "sourceSession"?: string }>; "hasMore": boolean }
+  "memory.update": { "id": string; "scope": "project" | "global"; "projectId"?: string; "name": string; "summary": string; "details": string; "pinned": boolean; "version": number; "createdAt": string; "updatedAt": string; "deleted": boolean; "author": string; "reason": string; "sourceSession"?: string }
   "protocol.catalog": { "catalogVersion": 1; "protocolVersion": 1; "methods": Array<{ "name": string; "node": "implemented" | "reserved" | "extension"; "rust": "implemented" | "unported"; "access": "owner" | "ask" | "owner-or-runtime" | "owner-shell"; "testOnly": boolean; "description": string; "paramsSchema": { [key: string]: unknown } | null; "resultSchema": { [key: string]: unknown } | null }> }
 }

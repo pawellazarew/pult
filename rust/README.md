@@ -1,10 +1,12 @@
-# Rust-ядро Пульта, начало R2
+# Rust-ядро Пульта — R2/R3 и M1
 
 В этом crate находятся сервер Unix socket и CLI для протокола Пульта версии 1.
 Текущий TypeScript-клиент проходит интеграционный тест с настоящим Rust-сервером.
 Перенесены `daemon.status`, `daemon.stop`, `events.tail`, тестовый `events.emit`,
 `events.subscribe`, `events.unsubscribe`, `events.snapshot`, `events.history`, `events.get`,
-`agent.rename`, `agent.archive`, `agent.seen`, `agent.read`, `agent.tree` и `protocol.catalog`. Журнал использует нынешний формат `events/journal.jsonl`.
+`agent.rename`, `agent.archive`, `agent.seen`, `agent.read`, `agent.tree` и `protocol.catalog`. Также добавлены семь owner-only методов `memory.*` и одноимённые команды CLI;
+их договор — [M1-MEMORY](../docs/rust/M1-MEMORY.md). Всего Rust поддерживает 22 метода
+из 93 (15 перенесённых и 7 новых). Журнал использует нынешний формат `events/journal.jsonl`.
 
 Полный список методов берётся из `../protocol/methods.json`. В `hello_ok` и статусе
 публикуются `capabilities.experimental` и `supportedMethods`. Каталог отмечает остальные
