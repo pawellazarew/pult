@@ -155,6 +155,12 @@ impl Backend {
                 || context.session != snapshot.key
                 || snapshot.provider != Provider::Claude
                 || context.generation == 0
+                || context.public_turn.is_empty()
+                || context.public_turn.len() > 512
+                || context.public_turn.chars().any(char::is_control)
+                || driver
+                    .public_turn_id(&context.ticket)
+                    .is_some_and(|id| id != context.public_turn)
             {
                 return Err(denied());
             }
@@ -414,7 +420,12 @@ impl Backend {
             }
             Self::live(&state, &control)?;
             match progress.borrow_and_update().clone() {
-                Progress::Running(accepted) if accepted.user_event_id > 0 => break accepted,
+                Progress::Running(accepted)
+                    if accepted.user_event_id > 0
+                        && accepted.turn_id == control.context.public_turn =>
+                {
+                    break accepted;
+                }
                 Progress::Starting => {}
                 _ => return Ok(deny()),
             }

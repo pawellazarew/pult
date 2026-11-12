@@ -44,6 +44,7 @@ impl Worker for FixtureWorker {
                         session: snapshot.key,
                         ticket,
                         generation: 1,
+                        public_turn: "actual-ask-input".into(),
                         approval: Approval::Ask,
                     },
                     gate,
@@ -520,6 +521,7 @@ async fn pending_preparation(drop_caller: bool) {
             session: snapshot.key,
             ticket: ticket.clone(),
             generation: 2,
+            public_turn: "actual-ask-input".into(),
             approval: Approval::Ask,
         },
         barrier.gate.clone(),
@@ -657,5 +659,28 @@ async fn ask_auth_never_falls_back_across_other_purposes_or_protocols() {
     drop(writer);
     drop(reader);
     bounded(task).await.unwrap().unwrap();
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn host_context_cannot_relabel_the_actual_accepted_input() {
+    let mut fixture = Fixture::new().await;
+    let ticket = fixture.handle.ticket().clone();
+    fixture.backend.drain(ticket.clone(), 1).await.unwrap();
+    let result = fixture
+        .backend
+        .prepare(
+            McpContext {
+                session: ticket.session().clone(),
+                ticket: ticket.clone(),
+                generation: 2,
+                public_turn: "foreign-input".into(),
+                approval: Approval::Ask,
+            },
+            Arc::new(|_: &Ticket, _: &TurnSnapshot| DispatchDecision::Allow),
+        )
+        .await;
+    assert!(result.is_err());
+    assert!(fixture.backend.control(&ticket, 2).is_none());
     fixture.close().await;
 }

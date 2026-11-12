@@ -12,6 +12,9 @@ An existing connection rechecks its lease on every call. The bound session is
 host-selected and a foreign `sessionId` is rejected. An arbitrary `client` label
 cannot grant authority. Each question uses the actual Driver Running receipt,
 with no invented accepted event; a pre-ack callback waits or fails closed.
+The worker passes its public input ID in McpContext before native dispatch;
+the accepted receipt must match it. Memory integration can use this same host
+identity without guessing one from Ticket or the latest session turn.
 
 Issuance reserves a bounded Control and tracked preparation Job synchronously
 before the first offloaded gate. Pending keys are not usable. Revocation sees

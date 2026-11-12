@@ -118,6 +118,9 @@ pub struct McpContext {
     pub session: SessionKey,
     pub ticket: Ticket,
     pub generation: u64,
+    /// Host-selected Pult input identity, before Driver acceptance. Consumers
+    /// still wait for the actual accepted user receipt before using provenance.
+    pub public_turn: String,
     pub approval: Approval,
 }
 pub trait ScopedMcp: Send + Sync + 'static {
@@ -794,6 +797,7 @@ async fn turn(
             session: inner.config.session.clone(),
             ticket: job.ticket.clone(),
             generation: job.generation,
+            public_turn: job.public_id.clone(),
             approval,
         };
         Some(
