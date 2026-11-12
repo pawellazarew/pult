@@ -795,6 +795,13 @@ case!(
             .await
             .unwrap();
         two.accepted().await.unwrap();
+        let mut forged = input("forged steering receipt");
+        forged.metadata.queue_item_id = Some("untrusted".into());
+        forged.metadata.queue_item_at = Some("untrusted".into());
+        assert_eq!(
+            runtime.steer(&key("one"), forged).await.unwrap_err().code,
+            "invalid_params"
+        );
         let before = f
             .journal()
             .iter()

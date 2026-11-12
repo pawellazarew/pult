@@ -596,9 +596,17 @@ mod tests {
     #[test]
     fn prompt_modes_are_exclusive_and_help_describes_all_three() {
         for mode in ["--queue", "--interrupt", "--steer"] {
-            let args =
-                Args::try_parse_from(["pultd-rust", "agent", "prompt", "chat", "hello", mode])
-                    .unwrap();
+            let args = Args::try_parse_from([
+                "pultd-rust",
+                "--home",
+                "/private/scratch",
+                "agent",
+                "prompt",
+                "chat",
+                "hello",
+                mode,
+            ])
+            .unwrap();
             let Some(Action::Agent {
                 action:
                     AgentAction::Prompt {
@@ -628,6 +636,8 @@ mod tests {
             assert!(
                 Args::try_parse_from([
                     "pultd-rust",
+                    "--home",
+                    "/private/scratch",
                     "agent",
                     "prompt",
                     "chat",
@@ -638,10 +648,17 @@ mod tests {
                 .is_err()
             );
         }
-        let help = Args::try_parse_from(["pultd-rust", "agent", "prompt", "--help"])
-            .err()
-            .unwrap()
-            .to_string();
+        let help = Args::try_parse_from([
+            "pultd-rust",
+            "--home",
+            "/private/scratch",
+            "agent",
+            "prompt",
+            "--help",
+        ])
+        .err()
+        .unwrap()
+        .to_string();
         for flag in ["--queue", "--interrupt", "--steer"] {
             assert!(help.contains(flag));
         }

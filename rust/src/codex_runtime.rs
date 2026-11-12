@@ -323,6 +323,17 @@ impl CodexRuntime {
         key: &SessionKey,
         input: Input,
     ) -> Task<Result<String, crate::turn_driver::WorkerError>> {
+        if input.metadata.question_id.is_some()
+            || input.metadata.queue_item_id.is_some()
+            || input.metadata.queue_item_at.is_some()
+        {
+            return Box::pin(async {
+                Err(crate::turn_driver::WorkerError {
+                    code: "invalid_params".into(),
+                    message: "steering receipt identities must be owner-derived".into(),
+                })
+            });
+        }
         self.steer_guarded(key, input, None)
     }
     pub(crate) fn steer_guarded(
@@ -331,6 +342,14 @@ impl CodexRuntime {
         input: Input,
         cancel: Option<watch::Receiver<bool>>,
     ) -> Task<Result<String, crate::turn_driver::WorkerError>> {
+        if input.metadata.question_id.is_some() {
+            return Box::pin(async {
+                Err(crate::turn_driver::WorkerError {
+                    code: "unsupported".into(),
+                    message: "question-answer protocol is not ported".into(),
+                })
+            });
+        }
         let inner = &self.inner;
         let ticket = inner.deps.driver.active_ticket(key);
         let selection = ticket.and_then(|ticket| {
