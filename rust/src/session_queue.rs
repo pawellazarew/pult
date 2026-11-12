@@ -1632,16 +1632,17 @@ mod tests {
                 let (_home, state, key) = fixture();
                 {
                     let mut reg = state.registry.lock().unwrap();
-                    reg.update_checked(&key, |rec| {
-                        rec.set_string("provider", provider);
-                        rec.remove("queuePaused");
-                        rec.set_raw(
-                            marker,
-                            serde_json::value::RawValue::from_string(raw.into())?,
-                        );
-                        Ok(())
-                    })
-                    .unwrap();
+                    // Provider is part of immutable session identity. Build the
+                    // synthetic incarnation through remove/insert, not an update
+                    // which production correctly refuses.
+                    let mut rec = reg.remove_checked(&key).unwrap();
+                    rec.set_string("provider", provider);
+                    rec.remove("queuePaused");
+                    rec.set_raw(
+                        marker,
+                        serde_json::value::RawValue::from_string(raw.into()).unwrap(),
+                    );
+                    reg.insert(rec).unwrap();
                 }
                 schedule(state.clone(), key);
                 tokio::time::timeout(Duration::from_secs(5), state.host_jobs.wait())
