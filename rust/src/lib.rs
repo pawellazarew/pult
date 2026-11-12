@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 pub mod claude_events;
+pub mod claude_launch;
 pub mod codex_events;
 pub mod codex_host_services;
 pub mod codex_permissions;
