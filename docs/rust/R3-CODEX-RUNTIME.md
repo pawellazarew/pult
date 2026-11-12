@@ -29,7 +29,7 @@ process and Job/IO proofs, drains broker receipts and owned curl operations.
 Successful terminal publication is monotonic even during concurrent repeated
 shutdown. Stale public turn IDs return false and cannot interrupt a reused turn.
 
-Validation: 14 runtime and 35 Driver tests use real private registry/journal
+Validation: 14 runtime and 38 Driver tests use real private registry/journal
 files, supervised Python fixtures and scripted probes. Tests cover shared hosts,
 blocked routes, image replacement, durable grants, late cancellation/faults,
 lease generations, folder pins, dropped callers, concurrent shutdown and IO.

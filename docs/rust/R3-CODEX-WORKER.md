@@ -24,6 +24,10 @@ checks even if their async preparation or approval waiter is aborted. Revocation
 interrupt and process stop happen before the final wait for these checks; an OS
 stop alone does not prove that host policy IO has finished. Blocking threads are
 not retained while waiting for network responses or human permission decisions.
+Regressions cover two blocked gates with a responsive two-worker Tokio runtime,
+revoked late dispatch, cleanup after OS stop while a check remains blocked, and
+an aborted approval waiter retaining its policy IO. A channel test verifies that
+Client request/response first polls really enqueue before their async wait.
 
 Permission handlers receive a single-use scoped responder. Cancellation and
 native terminal notifications revoke it; its private client and response permit
