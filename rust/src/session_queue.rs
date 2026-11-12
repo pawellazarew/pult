@@ -1651,6 +1651,10 @@ mod tests {
                 let rec = state.registry.lock().unwrap().find("chat").unwrap().clone();
                 assert_eq!(rec.get(marker).unwrap().get(), raw);
                 assert_eq!(items(&rec).unwrap().len(), 2);
+                // A rejected attempted dispatch would pause/rewrite the queue;
+                // this case must not even select a head or create a marker.
+                assert!(!paused(&rec));
+                assert!(rec.get("queueDispatch").is_none());
                 assert!(state.native_runtime.get().is_none());
                 assert!(state.claude_runtime.get().is_none());
                 assert!(state.zcode_runtime.get().is_none());
