@@ -24,6 +24,7 @@ pub mod prompt_attachments;
 mod read_api;
 pub mod redaction;
 pub mod registry;
+pub mod runtime_bootstrap;
 pub mod runtime_config;
 mod runtime_journal;
 mod session_api;
