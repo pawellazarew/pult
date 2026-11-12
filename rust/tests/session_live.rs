@@ -232,7 +232,10 @@ fn unknown_sessions_do_not_allocate_slots_or_retain_payloads() {
         c.seed(key("third", "created"), Status::Cold, 0),
         Err(Error::Capacity)
     );
-    assert!(c.seed(key("second", "replacement"), Status::Idle, 0).is_ok());
+    assert!(
+        c.seed(key("second", "replacement"), Status::Idle, 0)
+            .is_ok()
+    );
     assert!(!c.can_register());
     assert!(c.remove(&key("second", "replacement")));
     assert!(c.can_register());
