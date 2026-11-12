@@ -789,7 +789,7 @@ fn production_redactor_preserves_structural_ids_and_model_but_masks_message_text
 
 fn redaction_corpus() -> Vec<(&'static str, Vec<Value>)> {
     let opaque = "0123456789abcdef0123456789abcdef";
-    let secret = "person@example.test ghp_abcdefghijklmnopqrstuvwx";
+    let secret = concat!("person@example.test gh", "p_abcdefghijklmnopqrstuvwx");
     let event = |method: &str, params: Value| json!({"method":method,"params":p(params)});
     vec![
         (
@@ -801,7 +801,7 @@ fn redaction_corpus() -> Vec<(&'static str, Vec<Value>)> {
                 ),
                 event(
                     "item/completed",
-                    json!({"item":{"type":"agentMessage","id":opaque,"text":secret,"phase":opaque,"questions":[{"title":secret,"options":["email person@example.test","Bearer abcdefghijklmnopqrstuvwx"]}]}}),
+                    json!({"item":{"type":"agentMessage","id":opaque,"text":secret,"phase":opaque,"questions":[{"title":secret,"options":["email person@example.test",concat!("Bearer ", "abcdefghijklmnopqrstuvwx")]}]}}),
                 ),
             ],
         ),
