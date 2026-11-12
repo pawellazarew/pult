@@ -135,18 +135,18 @@ describe('брокер разрешений', () => {
     }
   })
 
-  it('РЕДАКЦИЯ: почта из входа инструмента не уезжает в событие, но решение отдаёт ОРИГИНАЛ', async () => {
+  it('почта из входа инструмента видна в карточке и не меняется в решении', async () => {
     const drafts: EventDraft[] = []
     const broker = createBroker({ emit: (d) => drafts.push(d) })
     const input = { file_path: '/tmp/x', new_string: 'напиши boss@example.org' }
     const answer = broker.request({ sessionId: 'w', toolName: 'Edit', input })
     const req = drafts.find((d) => d.kind === 'permission.requested')!
     const shown = JSON.stringify((req.data as { input: unknown }).input)
-    assert.ok(!shown.includes('boss@example.org'), shown)
-    assert.match(shown, /<email>/)
+    assert.ok(shown.includes('boss@example.org'), shown)
+    assert.equal((req.data as Record<string, unknown>)['concealed'], undefined)
     broker.resolve(broker.list()[0]!.id, { behavior: 'allow' })
     const decision = await answer
-    // Правка обязана примениться дословно: подставить `<email>` — значит сломать её.
+    // Правка обязана примениться дословно.
     assert.deepEqual(decision.updatedInput, input)
   })
 
@@ -154,9 +154,10 @@ describe('брокер разрешений', () => {
     const drafts: EventDraft[] = []
     const broker = createBroker({ emit: (d) => drafts.push(d) })
     const requested = (): Record<string, unknown> => drafts.filter((d) => d.kind === 'permission.requested').at(-1)!.data as Record<string, unknown>
-    // Адресат команды выглядит как почта: человек видит `ssh <email>`, исполнится `ssh root@prod.example.com`.
-    const hidden = broker.request({ sessionId: 'w', toolName: 'Bash', input: { command: 'ssh root@prod.example.com uptime' } })
-    assert.match(JSON.stringify(requested()['input']), /<email>/)
+    // Токен скрыт в карточке, исходный вход не изменён.
+    const command = 'echo ' + 'a'.repeat(64)
+    const hidden = broker.request({ sessionId: 'w', toolName: 'Bash', input: { command } })
+    assert.match(JSON.stringify(requested()['input']), /<token>/)
     assert.equal(requested()['concealed'], true)
     assert.equal(broker.list()[0]?.concealed, true)
     // Адаптер сам подрезал вход (Codex) — брокер верит его флагу.
@@ -167,7 +168,7 @@ describe('брокер разрешений', () => {
     assert.equal('concealed' in requested(), false)
     assert.equal('concealed' in broker.list().at(-1)!, false)
     broker.resolve(broker.list()[0]!.id, { behavior: 'allow' })
-    assert.deepEqual((await hidden).updatedInput, { command: 'ssh root@prod.example.com uptime' })
+    assert.deepEqual((await hidden).updatedInput, { command })
     broker.shutdown()
   })
 

@@ -400,7 +400,7 @@ describe('store', () => {
 })
 
 describe('журнал демона', () => {
-  it('почта и токены не попадают в файл', () => {
+  it('почта остаётся в журнале, а токены и ключи скрываются', () => {
     const home = tempHome()
     try {
       const log = createLogger(home.paths.logFile)
@@ -414,12 +414,12 @@ describe('журнал демона', () => {
       })
       log.close()
       const text = readFileSync(home.paths.logFile, 'utf8')
-      assert.ok(!text.includes('ivan' + '@example.org'), 'адрес почты утёк в журнал')
-      assert.ok(!text.includes('someone@example.org'), 'адрес почты утёк в журнал')
+      assert.ok(text.includes('ivan' + '@example.org'), 'адрес почты должен оставаться читаемым')
+      assert.ok(text.includes('someone@example.org'), 'вложенный адрес почты должен оставаться читаемым')
       assert.ok(!text.includes('sk-ant-api03'), 'ключ утёк в журнал')
       assert.ok(!text.includes('abcdefghijklmnopqrstuvwxyz'), 'Bearer утёк в журнал')
       assert.ok(!text.includes('a'.repeat(64)), 'длинный hex утёк в журнал')
-      assert.ok(text.includes('<email>') && text.includes('<token>') && text.includes('<redacted>'))
+      assert.ok(!text.includes('<email>') && text.includes('<token>') && text.includes('<redacted>'))
     } finally {
       home.remove()
     }

@@ -454,7 +454,7 @@ describe('доктор', () => {
     }
   })
 
-  it('учётка из `codex login status` в отчёт не попадает', async () => {
+  it('почта из `codex login status` читаема, ключ скрыт', async () => {
     const home = tempHome()
     try {
       const report = await runDoctor(deps(home, {
@@ -464,9 +464,9 @@ describe('доктор', () => {
       }))
       const item = find(report.items, 'login.codex')
       const whole = JSON.stringify(report)
-      assert.ok(!whole.includes('ivan' + '@example.org'), 'почта утекла в отчёт доктора')
+      assert.ok(whole.includes('ivan' + '@example.org'), 'почта должна оставаться читаемой')
       assert.ok(!whole.includes('sk-ant-api03'), 'ключ утёк в отчёт доктора')
-      assert.match(item.detail, /<email>/)
+      assert.ok(item.detail.includes('ivan' + '@example.org'))
     } finally {
       home.remove()
     }
@@ -653,9 +653,9 @@ describe('доктор', () => {
       }))
       const item = find(report.items, 'subscription.codex')
       assert.equal(item.status, 'ok')
-      assert.match(item.detail, /^Logged in using ChatGPT \(<email>\) — ходы агентов Пульта тратят/)
+      assert.ok(item.detail.startsWith(`Logged in using ChatGPT (${MAIL}) — ходы агентов Пульта тратят`))
       assert.match(find(report.items, 'login.codex').detail, /код выхода 0: Logged in using ChatGPT/)
-      assert.ok(!JSON.stringify(report).includes(MAIL), 'почта из codex login status утекла в отчёт')
+      assert.ok(JSON.stringify(report).includes(MAIL), 'почта из codex login status должна оставаться читаемой')
 
       const loggedOut = await runDoctor(deps(home, {
         run: (file, args) => (file.endsWith('codex') && args[0] === 'login'

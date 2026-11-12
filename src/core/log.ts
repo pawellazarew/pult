@@ -1,5 +1,6 @@
 // Журнал демона: JSONL в PULT_HOME/logs/pultd.log.
-// Инвариант 7: в журнал не попадают адреса почты и токены. Фильтр стоит НА ЗАПИСИ, а не
+// Инвариант 7: в журнал не попадают токены, ключи и пароли. Почта остаётся читаемой.
+// Фильтр стоит НА ЗАПИСИ, а не
 // на вызывающем коде — иначе один забытый `log.info(err)` в адаптере сливает ключ.
 
 import { closeSync, fstatSync, openSync, renameSync, unlinkSync, writeSync } from 'node:fs'
@@ -10,7 +11,6 @@ export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 const SECRET_NAME_RE = /(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|COOKIE)/i
 
 const VALUE_RULES: Array<{ re: RegExp; to: string }> = [
-  { re: /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g, to: '<email>' },
   { re: /sk-ant-[A-Za-z0-9_-]{8,}/g, to: '<token>' },
   { re: /\bsk-[A-Za-z0-9]{16,}/g, to: '<token>' },
   // Ключи OpenAI нового вида: `sk-proj-…`, `sk-svcacct-…`, `sk-admin-…`. Правило выше их НЕ ловит —

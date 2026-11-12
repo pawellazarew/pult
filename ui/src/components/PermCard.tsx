@@ -196,7 +196,7 @@ function Concealed({ kind }: { kind: PermKind | 'question' }): ReactElement {
   const n = concealedNote(kind)
   return (
     <div className="perm-concealed" data-testid="perm-concealed">
-      {t("Показано не всё: фильтр секретов скрыл ")}{n.what} (<code>&lt;email&gt;</code>, <code>&lt;token&gt;</code>, <code>&lt;redacted&gt;</code>{t(") или длинное поле обрезано. ")}{n.then}
+      {t("Показано не всё: фильтр секретов скрыл ")}{n.what} (<code>&lt;token&gt;</code>, <code>&lt;redacted&gt;</code>{t(") или длинное поле обрезано. ")}{n.then}
     </div>
   )
 }

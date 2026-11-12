@@ -1582,7 +1582,7 @@ haiku/medium + `--permission-mode manual --disallowedTools Write Edit MultiEdit 
 видел, и только там, где смотрит.
 
 - **Показано не всё (`concealed`).** Брокер редактирует вход до публикации (инвариант 7), а решение возвращает
-  ИСХОДНЫЙ вход: `ssh root@prod.example.com` в карточке — `ssh <email>`. Поэтому `concealed: true` в
+  ИСХОДНЫЙ вход. Почта остаётся читаемой; токены и пароли скрываются. Поэтому `concealed: true` в
   `permission.requested` и `perm.list`, если редакция что-то заменила (`JSON.stringify` до и после) или адаптер сам
   подрезал вход (Codex: `redact` + строки до 2000 знаков, массивы до 40 элементов с хвостом `…(ещё N)`); поле есть и в
   типе запроса адаптера (`AdapterDeps.askPermission`, src/adapters/types.ts). Карточка — строка «Показано не всё …»
