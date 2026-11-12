@@ -73,3 +73,15 @@ Such a candidate remains uncertain even if a native ID was observed. The owner
 supports retaining diagnostic identity before rejecting permission evidence;
 reordering that Worker callback is a separate Root-owned change. This does not
 claim that Full safety can erase work a provider performed before reporting init.
+
+## Acceptance scope
+
+The real-process owner fixtures use supervised Python protocol peers and the
+actual Driver, Registry, ConsentStore and JournalSink. Node rollback tests call
+the actual Registry/Manager; the cross-backend oracle mutates one metadata file
+Rust -> Node -> Rust, including a pretty future marker and lone UTF-16 escape.
+The explicit-import test calls the trusted `Manager.importSession` with an
+already selected known ID. It does **not** test public CLI history discovery or
+the server RPC's validation of that external-history selection. Those existing
+history/import tests remain required in combined/full acceptance. No installed
+native CLI, model call, account or live-network behavior is validated here.
