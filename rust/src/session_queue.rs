@@ -381,6 +381,20 @@ pub(crate) fn observe(
         }
     });
 }
+async fn preparation_failed(state: Arc<State>, key: SessionKey, code: &str) -> Result<()> {
+    if matches!(
+        code,
+        "network_denied"
+            | "runtime_unavailable"
+            | "invalid_session"
+            | "internal"
+            | "storage_unavailable"
+            | "forbidden"
+    ) {
+        pause(state, key).await?;
+    }
+    Ok(())
+}
 pub(crate) async fn prompt(
     state: Arc<State>,
     params: Value,
@@ -527,15 +541,26 @@ pub(crate) async fn prompt(
             }
         }
         revoked(&token)?;
-        api::ordinary(state.clone(), params, command, Default::default(), token).await
+        api::ordinary(
+            state.clone(),
+            params,
+            command.as_ref(),
+            Default::default(),
+            token,
+        )
+        .await
     }
     .await;
+    if let Err(error) = &result {
+        preparation_failed(state.clone(), key.clone(), error.code).await?;
+    }
     let copy = key.clone();
     let _ = io(state.clone(), move |_, c| {
         c.direct.remove(&copy);
         Ok(())
     })
     .await;
+    drop(command);
     schedule(state, key);
     result
 }
@@ -667,7 +692,9 @@ async fn selected(
                 "save or cancel this edit before sending",
             ));
         }
-        if !explicit && (paused(&rec) || uncertain(&rec) || busy(&checking, &key)) {
+        if !explicit
+            && (paused(&rec) || uncertain(&rec) || busy(&checking, &key) || c.direct.contains(&key))
+        {
             return Err(api::error("busy", "queue is paused or session is busy"));
         }
         if !q[at].native_safe() {
@@ -902,6 +929,7 @@ pub(crate) fn schedule(state: Arc<State>, key: SessionKey) {
                     return Ok(None);
                 }
                 if paused(rec)
+                    || c.direct.contains(&copy)
                     || uncertain(rec)
                     || busy(&checking, &copy)
                     || c.sending.contains_key(&copy)
@@ -942,6 +970,7 @@ pub(crate) fn schedule(state: Arc<State>, key: SessionKey) {
                         return Ok(false);
                     }
                     Ok(!busy(&checking, &copy)
+                        && !c.direct.contains(&copy)
                         && !paused(rec)
                         && !uncertain(rec)
                         && items(rec)?
@@ -1562,5 +1591,42 @@ mod tests {
             assert!(state.native_runtime.get().is_none());
             finish(state).await;
         }
+    }
+    #[tokio::test]
+    async fn pre_driver_network_failure_pauses_before_a_direct_reservation_is_released() {
+        let (_home, state, key) = fixture();
+        state
+            .registry
+            .lock()
+            .unwrap()
+            .update_checked(&key, |r| {
+                r.remove("queuePaused");
+                Ok(())
+            })
+            .unwrap();
+        {
+            let mut c = state.session_commands.queue.control.lock().unwrap();
+            c.direct.insert(key.clone());
+            c.holds.insert(
+                (key.clone(), "a".into()),
+                ("fixture".into(), Instant::now() + HOLD),
+            );
+        }
+        preparation_failed(state.clone(), key.clone(), "network_denied")
+            .await
+            .unwrap();
+        assert!(paused(state.registry.lock().unwrap().find("chat").unwrap()));
+        assert!(
+            state
+                .session_commands
+                .queue
+                .control
+                .lock()
+                .unwrap()
+                .direct
+                .contains(&key)
+        );
+        assert!(state.native_runtime.get().is_none());
+        finish(state).await;
     }
 }

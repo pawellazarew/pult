@@ -839,6 +839,13 @@ case!(
                 .count(),
             2
         );
+        let outside = runtime.clone();
+        let response = std::thread::spawn(move || {
+            outside.steer(&key("one"), input("outside runtime context"))
+        })
+        .join()
+        .unwrap();
+        assert_eq!(response.await.unwrap(), accepted.turn_id);
         runtime.stop(&key("one"), None).unwrap();
         one.wait().await.unwrap();
         assert!(runtime.steer(&key("one"), input("late")).await.is_err());

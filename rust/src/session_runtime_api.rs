@@ -419,7 +419,7 @@ async fn list(state: Arc<State>, params: Value) -> Result<Box<RawValue>> {
 pub(crate) async fn ordinary(
     state: Arc<State>,
     params: Value,
-    command: Option<CommandGuard>,
+    command: Option<&CommandGuard>,
     metadata: crate::turn_driver::InputMetadata,
     revoked: Arc<tokio::sync::watch::Sender<bool>>,
 ) -> Result<Box<RawValue>> {

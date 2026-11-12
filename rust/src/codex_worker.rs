@@ -555,7 +555,7 @@ impl CodexHost {
     /// Adds input to one confirmed active ticket. Native identities never leave
     /// this host. Authorization and the first RPC poll share a blocking step;
     /// dropping the waiter cannot abandon a send or its durable receipt.
-    pub fn steer(
+    pub(crate) fn steer(
         &self,
         ticket: Ticket,
         snapshot: TurnSnapshot,

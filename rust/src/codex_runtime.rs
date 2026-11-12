@@ -363,6 +363,7 @@ impl CodexRuntime {
             && !*inner.shared.closed.borrow()
             && let Some((ticket, snapshot, host)) = selection
         {
+            let _context = inner.runtime.enter();
             return host.steer(ticket, snapshot, inner.deps.home.clone(), input, cancel);
         }
         Box::pin(async {
