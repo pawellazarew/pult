@@ -16,6 +16,58 @@ const CHILD_MODE: &str = "PULT_WORKER_PROCESS_TEST_MODE";
 const CHILD_HOME: &str = "PULT_WORKER_PROCESS_TEST_HOME";
 const DEADLINE: Duration = Duration::from_secs(12);
 
+#[tokio::test]
+async fn claude_large_native_input_uses_stdin_with_independent_output_budget() {
+    use pult_core::worker_process::Framing;
+    let home = tempfile::tempdir().unwrap();
+    let mut process =
+        Process::spawn_with_framing(launch(home.path(), "sized-input"), Framing::claude())
+            .await
+            .unwrap();
+    assert_eq!(receive(&mut process).await["ready"], true);
+    let payload = format!("PRIVATE_STDIN_FIXTURE{}", "x".repeat(18 * 1024 * 1024));
+    process.send(&json!({"payload":payload})).await.unwrap();
+    assert_eq!(receive(&mut process).await["bytes"], payload.len());
+    assert!(!command_line(process.pid().unwrap()).contains("PRIVATE_STDIN_FIXTURE"));
+    stop(&mut process).await;
+}
+
+#[tokio::test]
+async fn strict_profile_rejects_large_input_without_poisoning_the_next_frame() {
+    let home = tempfile::tempdir().unwrap();
+    let mut process = spawn(home.path(), "echo").await;
+    assert_eq!(receive(&mut process).await["ready"], true);
+    assert!(
+        process
+            .send(&json!({"payload":"x".repeat(2 * 1024 * 1024)}))
+            .await
+            .is_err()
+    );
+    process.send(&json!({"payload":"small"})).await.unwrap();
+    assert_eq!(receive(&mut process).await["echo"]["payload"], "small");
+    stop(&mut process).await;
+}
+
+#[tokio::test]
+async fn claude_input_expansion_does_not_expand_output_or_drop_valid_tail() {
+    use pult_core::worker_process::Framing;
+    let home = tempfile::tempdir().unwrap();
+    let mut process = Process::spawn_with_framing(
+        launch(home.path(), "claude-oversize-tail"),
+        Framing::claude(),
+    )
+    .await
+    .unwrap();
+    let frame = receive(&mut process).await;
+    assert!(
+        frame.get("tail") == Some(&Value::Bool(true))
+            && frame.as_object().is_some_and(|v| v.len() == 1),
+        "expanded input budget admitted an oversized output or lost its valid tail"
+    );
+    assert_eq!(process.discarded_frames(), 1);
+    stop(&mut process).await;
+}
+
 fn python() -> PathBuf {
     let primary = PathBuf::from("/usr/bin/python3");
     if primary.is_file() {

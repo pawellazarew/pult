@@ -23,18 +23,28 @@ const CODEX_FRAME: usize = 16 * 1024 * 1024;
 #[derive(Clone, Copy, Debug)]
 pub struct Framing {
     max_wire_bytes: usize,
+    max_input_bytes: usize,
     recover: bool,
 }
 impl Framing {
     pub fn strict() -> Self {
         Self {
             max_wire_bytes: MAX_FRAME,
+            max_input_bytes: MAX_FRAME,
             recover: false,
         }
     }
     pub fn codex() -> Self {
         Self {
             max_wire_bytes: CODEX_FRAME + 1,
+            max_input_bytes: CODEX_FRAME + 1,
+            recover: true,
+        }
+    }
+    pub fn claude() -> Self {
+        Self {
+            max_wire_bytes: CODEX_FRAME + 1,
+            max_input_bytes: crate::claude_launch::MAX_INPUT_BYTES + 1,
             recover: true,
         }
     }
@@ -337,7 +347,7 @@ impl Process {
         );
         let mut bytes = serde_json::to_vec(value).context("worker request serialization failed")?;
         ensure!(
-            bytes.len() < self.framing.max_wire_bytes,
+            bytes.len() < self.framing.max_input_bytes,
             "worker request exceeds framing limit"
         );
         bytes.push(b'\n');

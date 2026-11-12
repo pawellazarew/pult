@@ -11,8 +11,11 @@ User input is serialized separately as native stdin blocks with an input UUID,
 images and optional runtime data. Slash-command recognition preserves JavaScript
 whitespace and path boundaries, so an absolute path is not treated as a command.
 The input budget accounts for base64 expansion of the existing 25 MiB attachment
-budget. The future process transport must accept this budget separately from its
-bounded output framing; merely building the frame does not prove transmission.
+budget. `Framing::claude()` accepts that input budget independently from its 16 MiB
+output recovery bound. Supervised local Python fixtures receive an 18 MiB stdin
+payload, preserve the strict profile's smaller input bound, and discard a 17 MiB
+output frame while delivering its valid tail. These are transport checks, not
+Claude execution acceptance.
 
 Seven local tests include 53 cases compared with the actual built Node24 helpers
 (argv, slash commands, directory boundaries and native user input), plus private

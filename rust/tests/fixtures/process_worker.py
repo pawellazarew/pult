@@ -59,6 +59,16 @@ elif MODE == "stderr":
     emit({"ready": True})
     for _ in sys.stdin:
         pass
+elif MODE == "claude-oversize-tail":
+    emit({"payload": "x" * (17 * 1024 * 1024)})
+    emit({"tail": True})
+    for _ in sys.stdin:
+        pass
+elif MODE == "sized-input":
+    emit({"ready": True})
+    for line in sys.stdin:
+        request = json.loads(line)
+        emit({"bytes": len(request.get("payload", ""))})
 elif MODE == "touch":
     with open(MARKER, "w", encoding="utf-8") as output:
         output.write("unexpected launch")
