@@ -247,16 +247,17 @@ export function RenameDialog({ name, title, onSave, onClose }: {
   )
 }
 
-export function Confirm({ title, text, action, danger, onOk, onCancel, testId }: {
-  title: string; text: ReactNode; action: string; danger?: boolean; onOk(): void; onCancel(): void; testId: string
+export function Confirm({ title, text, action, danger, onOk, onCancel, testId, cancelFirst }: {
+  title: string; text: ReactNode; action: string; danger?: boolean; cancelFirst?: boolean; onOk(): void; onCancel(): void; testId: string
 }): ReactElement {
   const ok = useRef<HTMLButtonElement>(null)
-  useEffect(() => { ok.current?.focus() }, [])
+  const cancel = useRef<HTMLButtonElement>(null)
+  useEffect(() => { (cancelFirst ? cancel : ok).current?.focus() }, [cancelFirst])
   return (
     <Dialog title={title} onClose={onCancel} size="narrow" testId={testId}
       footer={<>
         <span className="grow" />
-        <button type="button" className="btn" onClick={onCancel}>{t("Отмена ")}<Kbd>Esc</Kbd></button>
+        <button type="button" className="btn" ref={cancel} onClick={onCancel}>{t("Отмена ")}<Kbd>Esc</Kbd></button>
         <button ref={ok} type="button" className={`btn ${danger ? 'btn-danger' : 'btn-primary'}`} onClick={onOk} data-testid="confirm-ok">{action} <Kbd>↵</Kbd></button>
       </>}>
       <div>{text}</div>

@@ -80,7 +80,7 @@
 .dtoggle.on::after { left: 14px; }
 
 /* Строка черновика в сайдбаре: курсив, «черновик» справа. */
-.draft-list { margin: 4px 8px 6px; padding: 0; }
+.draft-list { flex: 0 1 auto; min-height: 0; max-height: 28%; margin: 4px 8px 6px; padding: 0; }
 .draft-row .draft-name { color: var(--mut); font-style: italic; font-weight: 400; }
 
 
@@ -100,3 +100,6 @@
 }
 /* A deep link keeps its destination visible before sending, even when the folder chip is truncated. */
 .draft-link-location { white-space: normal; overflow-wrap: anywhere; font-size: 11px; color: var(--mut); }
+
+.draft-box > .slash-anchor { --slash-pad-top: 13px; margin-bottom: -10px; }
+@media (max-width: 760px) { .draft-box > .slash-anchor { --slash-pad-x: 10px; --slash-pad-top: 10px; } }

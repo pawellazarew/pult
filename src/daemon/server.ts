@@ -1,3 +1,4 @@
+import { generalWorkspaceRoot } from '../sessions/generalWorkspace.js'
 import { GB, parseDiskSettings, createDiskMonitor } from '../core/disk.js'
 import { fileURLToPath } from 'node:url'
 import { createRuntimeService, RuntimeError } from '../runtimes/service.js'
@@ -1742,15 +1743,17 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
         return withBrowser(publicRecord(rec))
       }
       case 'agent.commands': {
-        // «/» в поле ввода (docs/19): `{name}` — чат; `{provider, cwd}` — черновик нового чата. `force` — снять заново.
+        // «/» в поле ввода: `{name}` — чат; `{provider, cwd}` — проект; `{provider, scope: general}` — общий черновик.
         const name = typeof p['name'] === 'string' ? p['name'] : ''
         const rec = name ? manager.list().find((r) => r.name === name) : undefined
         if (name && !rec) throw new ManagerError(ERROR_CODES.notFound, `agent.commands: сессии ${name.slice(0, 80)} нет`)
         const provider = rec?.provider ?? p['provider']
-        const cwd = rec?.cwd ?? p['cwd']
+        if (!rec && p['scope'] !== undefined && p['scope'] !== 'general' && p['scope'] !== 'project') throw new ManagerError(ERROR_CODES.invalidParams, 'agent.commands: scope — general|project')
+        if (!rec && p['scope'] === 'general' && p['cwd'] !== undefined) throw new ManagerError(ERROR_CODES.invalidParams, 'agent.commands: общий чат не принимает cwd')
         if (provider !== 'claude' && provider !== 'codex' && provider !== 'zcode') {
           throw new ManagerError(ERROR_CODES.invalidParams, 'agent.commands: нужен name сессии или provider claude|codex|zcode')
         }
+        const cwd = rec?.cwd ?? (p['scope'] === 'general' ? generalWorkspaceRoot(paths.home) : p['cwd'])
         if (typeof cwd !== 'string' || !isAbsolute(cwd) || cwd.includes('\0')) {
           throw new ManagerError(ERROR_CODES.invalidParams, 'agent.commands: cwd — абсолютный путь')
         }

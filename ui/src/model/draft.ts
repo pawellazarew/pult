@@ -424,11 +424,11 @@ export function submitDecision(s: SubmitState): 'send' | 'folder' | null {
   return 'send'
 }
 
-/** Esc по порядку (§3.5): меню → диалог → убрать ПУСТОЙ черновик. Черновик с текстом Esc не трогает. */
-export function escDecision(s: { menuOpen: boolean; dialogOpen: boolean; empty: boolean }): 'menu' | 'dialog' | 'discard' | null {
+/** Esc по порядку (§3.5): меню → диалог → убрать пустой черновик или подтвердить закрытие непустого. */
+export function escDecision(s: { menuOpen: boolean; dialogOpen: boolean; empty: boolean }): 'menu' | 'dialog' | 'discard' | 'confirm' {
   if (s.menuOpen) return 'menu'
   if (s.dialogOpen) return 'dialog'
-  return s.empty ? 'discard' : null
+  return s.empty ? 'discard' : 'confirm'
 }
 
 /** Черновик пуст: ни текста, ни вложений. Пустой при уходе исчезает, с текстом — остаётся у демона. */

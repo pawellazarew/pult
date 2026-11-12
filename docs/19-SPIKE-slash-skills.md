@@ -97,7 +97,7 @@ app-server (`codex app-server generate-ts`) отдаёт скиллы метод
   текстом. Codex `skills/changed` сбрасывает кэш Codex.
 - `src/commands/claudeProbe.ts` — короткий процесс `claude` с `initialize`, через страж сети (как автоназвание).
 - Codex — `listSkills` адаптера: живой общий app-server, иначе страж сети и подъём процесса, как перед ходом.
-- Метод демона `agent.commands {name}` (чат) или `{provider, cwd}` (черновик), `force` — снять заново. В белом
+- Метод демона `agent.commands {name}` (чат) или `{provider, cwd}` (черновик проекта) или `{provider, scope: "general"}` (общий черновик без проекта; каталог из нейтральной папки разговоров, сессия не создаётся), `force` — снять заново. В белом
   списке моста (`shell/src/contract.ts`). Старая оболочка отвечает `method_not_allowed` — список говорит «после
   обновления Pult».
 - Окно: `ui/src/model/slash.ts` (где набирается команда, отбор, подстановка), `ui/src/components/SlashMenu.tsx`

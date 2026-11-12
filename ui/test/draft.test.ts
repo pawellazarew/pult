@@ -77,11 +77,11 @@ describe('шаг B: клавиатура (§3.5)', () => {
     assert.equal(submitDecision({ ...base, hasText: false }), null)
     assert.equal(submitDecision({ ...base, blocked: true }), null)
   })
-  it('Esc по порядку: меню → диалог → пустой черновик; с текстом — ничего', () => {
+  it('Esc по порядку: меню → диалог → пустой черновик; с текстом — подтверждение', () => {
     assert.equal(escDecision({ menuOpen: true, dialogOpen: true, empty: true }), 'menu')
     assert.equal(escDecision({ menuOpen: false, dialogOpen: true, empty: true }), 'dialog')
     assert.equal(escDecision({ menuOpen: false, dialogOpen: false, empty: true }), 'discard')
-    assert.equal(escDecision({ menuOpen: false, dialogOpen: false, empty: false }), null)
+    assert.equal(escDecision({ menuOpen: false, dialogOpen: false, empty: false }), 'confirm')
   })
 })
 
