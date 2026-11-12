@@ -165,6 +165,7 @@ struct Identity {
 struct State {
     active: Option<Arc<Job>>,
     closed: bool,
+    retired: bool,
     generation: u64,
     identity: Identity,
 }
@@ -231,10 +232,17 @@ impl ClaudeWorker {
             state: Mutex::new(State {
                 active: None,
                 closed: false,
+                retired: false,
                 generation: 0,
                 identity,
             }),
         }))))
+    }
+    /// Admission hint only: this facade must never send another turn. Recreate
+    /// from fresh checked owner state only after Driver cleanup is confirmed;
+    /// false is not readiness, and true is never process/IO cleanup proof.
+    pub fn is_retired(&self) -> bool {
+        self.0.state.lock().expect("Claude state").retired
     }
     pub fn begin_shutdown(&self) {
         let job = {
@@ -271,6 +279,9 @@ impl Worker for ClaudeWorker {
         {
             return Box::pin(async { Err(error("invalid_params", "invalid Claude turn scope")) });
         }
+        if self.is_retired() {
+            return Box::pin(async { Err(retired_error()) });
+        }
         let progress = match self
             .0
             .services
@@ -282,6 +293,9 @@ impl Worker for ClaudeWorker {
             None => return Box::pin(async { Err(unavailable()) }),
         };
         let mut state = self.0.state.lock().expect("Claude state");
+        if state.retired {
+            return Box::pin(async { Err(retired_error()) });
+        }
         if state.closed || state.active.is_some() {
             return Box::pin(async { Err(error("busy", "Claude worker already owns a turn")) });
         }
@@ -359,6 +373,17 @@ impl Worker for ClaudeWorker {
     }
 }
 
+fn retired_error() -> WorkerError {
+    error(
+        "worker_retired",
+        "Claude worker requires recreation from checked owner state",
+    )
+}
+fn retire(inner: &Inner) {
+    // Never clear the active job/closed watch: retirement revokes new admission,
+    // while the existing owner still joins persistence, process and MCP cleanup.
+    inner.state.lock().expect("Claude state").retired = true;
+}
 fn fatal(inner: &Inner) {
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         (inner.services.fatal_storage)()
@@ -877,19 +902,18 @@ async fn turn(
                     Some(value.clone())
                 }
                 Some(_) => {
+                    retire(inner);
                     return Err(error(
                         "protocol_error",
                         "Claude reported an invalid permission mode",
                     ));
                 }
             };
-            if !reported_mode_allowed(approval, reported.as_deref()) {
-                return Err(error(
-                    "access_denied",
-                    "Claude reported an unexpected permission mode",
-                ));
-            }
-            persist(
+            // Native identity is diagnostic evidence, not permission to keep
+            // running. The owner retains a valid matching ID/sticky report even
+            // when it durably rejects the launch/current policy afterwards.
+            let launch_allows = reported_mode_allowed(approval, reported.as_deref());
+            if let Err(error) = persist(
                 inner,
                 job,
                 id,
@@ -897,7 +921,18 @@ async fn turn(
                 SessionStage::Initialized,
                 reported,
             )
-            .await?;
+            .await
+            {
+                retire(inner);
+                return Err(error);
+            }
+            if !launch_allows {
+                retire(inner);
+                return Err(error(
+                    "access_denied",
+                    "Claude reported an unexpected permission mode",
+                ));
+            }
             if id != identity.native_id {
                 identity.native_id = id.into();
                 mapper = normalizer(inner, job, id)?;

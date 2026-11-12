@@ -194,7 +194,25 @@ async fn scenario(mode: &str, panic_final_gate: bool) {
             "provider evidence must precede Driver terminal"
         );
     }
+    if matches!(
+        mode,
+        "wide-mode" | "malformed-mode" | "control-mode" | "null-mode"
+    ) {
+        assert!(worker.is_retired());
+    }
     let stages = stages.lock().unwrap();
+    if mode == "wide-mode" {
+        assert!(
+            stages.contains(&SessionStage::Initialized),
+            "valid wider init must reach the trusted store before denial"
+        );
+    }
+    if matches!(mode, "malformed-mode" | "control-mode" | "null-mode") {
+        assert!(
+            !stages.contains(&SessionStage::Initialized),
+            "malformed presence cannot be persisted as legacy omission"
+        );
+    }
     if panic_final_gate || mode == "missing-program" {
         assert!(stages.contains(&SessionStage::Reserved));
         assert!(stages.contains(&SessionStage::AbortedBeforeInput));
@@ -279,4 +297,329 @@ case!(
     explicit_null_init_mode_is_not_legacy_absence,
     "null-mode",
     false
+);
+
+// Exercise Worker retirement against the real owner rather than an ACK-only store.
+struct OwnerRig {
+    _temp: tempfile::TempDir,
+    home: PathBuf,
+    cwd: PathBuf,
+    registry: Arc<Mutex<pult_core::registry::Registry>>,
+    driver: Arc<Driver>,
+    sink: Arc<pult_core::turn_journal::JournalSink>,
+    owner: Arc<pult_core::claude_host_services::ClaudeOwner>,
+    key: SessionKey,
+}
+const NATIVE_PARENT: &str = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+const NATIVE_CHILD: &str = "11111111-2222-4333-8444-555555555555";
+impl OwnerRig {
+    fn new(approval: &str, fork: bool) -> Self {
+        use pult_core::{
+            claude_host_services::ClaudeOwner,
+            claude_settings::Settings,
+            consent_store::ConsentStore,
+            journal::EventStore,
+            registry::{Record, Registry},
+            turn_journal::JournalSink,
+        };
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let cwd = home.join("project");
+        std::fs::create_dir(&cwd).unwrap();
+        let key = SessionKey {
+            name: "chat".into(),
+            created_at: "2026-11-12T00:00:00Z".into(),
+        };
+        let mut journal = EventStore::open(&home.join("events")).unwrap();
+        let mut registry = Registry::open(&home, &mut journal).unwrap();
+        let mut record = Record::default();
+        for (k, v) in [
+            ("name", "chat"),
+            ("createdAt", key.created_at.as_str()),
+            ("provider", "claude"),
+            ("cwd", cwd.to_str().unwrap()),
+            ("approval", approval),
+        ] {
+            record.set_string(k, v);
+        }
+        if fork {
+            record.set_string("providerSessionId", NATIVE_PARENT);
+            record.set_bool("forkOnResume", true);
+        }
+        registry.insert(record).unwrap();
+        let registry = Arc::new(Mutex::new(registry));
+        let consent = Arc::new(Mutex::new(ConsentStore::open(&home).unwrap()));
+        if approval == "full" {
+            consent
+                .lock()
+                .unwrap()
+                .grant(&[Provider::Claude], chrono::Utc::now())
+                .unwrap();
+        }
+        let sink = Arc::new(JournalSink::new(Arc::new(Mutex::new(journal))).unwrap());
+        let driver = Arc::new(
+            Driver::new(
+                sink.clone(),
+                Arc::new(pult_core::redaction::redact_string),
+                Options::default(),
+            )
+            .unwrap(),
+        );
+        let settings = Settings::new(&home, home.join("managed")).unwrap();
+        let owner = ClaudeOwner::new(
+            home.clone(),
+            registry.clone(),
+            Arc::downgrade(&driver),
+            consent,
+            Arc::new(|_, _| true),
+            Arc::new(move |ctx| {
+                settings
+                    .effective_mode(&ctx.cwd, ctx.setting_sources.as_deref())
+                    .map_err(|_| pult_core::claude_host_services::OwnerError::Unavailable)
+            }),
+            Arc::new(|| {}),
+        )
+        .unwrap();
+        Self {
+            _temp: temp,
+            home,
+            cwd,
+            registry,
+            driver,
+            sink,
+            owner,
+            key,
+        }
+    }
+    fn record(&self) -> pult_core::registry::Record {
+        self.registry.lock().unwrap().find("chat").unwrap().clone()
+    }
+    fn config(&self, mode: &str) -> Config {
+        let record = self.record();
+        let id = record.scalar("providerSessionId");
+        Config {
+            session: self.key.clone(),
+            home: self.home.clone(),
+            launch: Launch {
+                holder: env!("CARGO_BIN_EXE_pult-worker-holder").into(),
+                program: python(),
+                args: vec![
+                    "-B".into(),
+                    Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("tests/fixtures/claude_worker_identity.py")
+                        .into_os_string(),
+                    self.home.clone().into_os_string(),
+                    mode.into(),
+                ],
+                cwd: self.cwd.clone(),
+                env: BTreeMap::from([
+                    ("PATH".into(), "/usr/bin:/bin".into()),
+                    ("HOME".into(), self.home.clone().into_os_string()),
+                ]),
+            },
+            provider_session_id: id.clone(),
+            initialized: id.is_some(),
+            fork_on_resume: record.get("forkOnResume").is_some(),
+            broker: false,
+            setting_sources: None,
+            protect_dirs: vec![],
+            add_dirs: vec![],
+            add_dir_roots: vec![],
+            start_timeout: Duration::from_secs(5),
+            attachments: vec![],
+        }
+    }
+    fn inputs(&self) -> usize {
+        std::fs::read_to_string(self.home.join("inputs.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .count()
+    }
+    fn stopped(&self) {
+        let pid: i32 = std::fs::read_to_string(self.home.join("provider.pid"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_err(),
+            "provider outlived cleanup"
+        );
+    }
+    async fn reject_stale_then_rebuild(&self, old: Arc<ClaudeWorker>) {
+        assert!(old.is_retired(), "denied init must revoke facade reuse");
+        let mut refused = self
+            .driver
+            .start(
+                self.owner.snapshot(&self.key).unwrap(),
+                "must not reuse old identity".into(),
+                old,
+            )
+            .unwrap();
+        let failure = refused.wait().await.unwrap().turn.outcome;
+        assert!(matches!(failure,Outcome::Failure{code,..}if code=="worker_retired"));
+        assert_eq!(self.inputs(), 1);
+        assert!(self.record().get("claudeReservedSessionId").is_none());
+        let rebuilt = ClaudeWorker::new(
+            self.config("normal"),
+            self.owner.services(self.sink.clone(), None),
+        )
+        .unwrap();
+        let mut next = self
+            .driver
+            .start(
+                self.owner.snapshot(&self.key).unwrap(),
+                "explicit next input".into(),
+                rebuilt,
+            )
+            .unwrap();
+        next.accepted().await.unwrap();
+        assert_eq!(next.wait().await.unwrap().turn.outcome, Outcome::Success);
+        assert_eq!(self.inputs(), 2);
+        self.stopped();
+        let launch: Vec<String> = serde_json::from_str(
+            std::fs::read_to_string(self.home.join("launches.jsonl"))
+                .unwrap()
+                .lines()
+                .last()
+                .unwrap(),
+        )
+        .unwrap();
+        let id = self.record().scalar("providerSessionId").unwrap();
+        assert!(launch.windows(2).any(|v| v == ["--resume", id.as_str()]));
+        assert!(!launch.iter().any(|v| v == "--fork-session"));
+    }
+}
+struct InitBarrier {
+    inner: Arc<dyn SessionStore>,
+    entered: tokio::sync::Notify,
+    release: Arc<tokio::sync::Semaphore>,
+}
+impl SessionStore for InitBarrier {
+    fn persist(&self, request: SessionWrite) -> Task<Result<SessionReceipt, StoreError>> {
+        let init = matches!(request.stage(), SessionStage::Initialized);
+        let inner = self.inner.clone();
+        let release = self.release.clone();
+        if init {
+            self.entered.notify_one();
+        }
+        Box::pin(async move {
+            if init {
+                release.acquire_owned().await.unwrap().forget();
+            }
+            inner.persist(request).await
+        })
+    }
+}
+struct InitRelease(Arc<tokio::sync::Semaphore>);
+impl Drop for InitRelease {
+    fn drop(&mut self) {
+        self.0.add_permits(1);
+    }
+}
+async fn denied_init_keeps_evidence(approval: &str, fork: bool) {
+    pult_core::panic_guard::install();
+    let f = OwnerRig::new(approval, fork);
+    let worker =
+        ClaudeWorker::new(f.config("bypass"), f.owner.services(f.sink.clone(), None)).unwrap();
+    let mut turn = f
+        .driver
+        .start(
+            f.owner.snapshot(&f.key).unwrap(),
+            "first input".into(),
+            worker.clone(),
+        )
+        .unwrap();
+    assert!(turn.accepted().await.is_err());
+    assert!(matches!(
+        turn.wait().await.unwrap().turn.outcome,
+        Outcome::Failure { .. }
+    ));
+    f.stopped();
+    let record = f.record();
+    if fork {
+        assert_eq!(
+            record.scalar("providerSessionId").as_deref(),
+            Some(NATIVE_CHILD)
+        );
+    } else {
+        assert!(record.get("providerSessionId").is_some());
+    }
+    assert!(record.get("claudeReservedSessionId").is_none());
+    assert!(record.get("forkOnResume").is_none());
+    if approval == "inherit" {
+        assert_eq!(
+            record.scalar("inheritSeen").as_deref(),
+            Some("bypassPermissions")
+        );
+    }
+    f.reject_stale_then_rebuild(worker).await;
+}
+macro_rules! owner_case{($name:ident,$body:block)=>{#[tokio::test]async fn $name(){tokio::time::timeout(Duration::from_secs(20),async $body).await.unwrap();}};}
+owner_case!(
+    valid_wider_init_is_durable_before_the_worker_denies_continuation,
+    {
+        denied_init_keeps_evidence("ask", false).await;
+    }
+);
+owner_case!(
+    denied_fork_child_is_durable_and_old_private_parent_cannot_be_reused,
+    {
+        denied_init_keeps_evidence("ask", true).await;
+    }
+);
+owner_case!(
+    owner_rejected_inherited_bypass_retires_after_sticky_evidence,
+    {
+        denied_init_keeps_evidence("inherit", true).await;
+    }
+);
+owner_case!(
+    current_policy_downgrade_retains_known_id_then_requires_recreation,
+    {
+        pult_core::panic_guard::install();
+        for approval in ["ask", "read-only"] {
+            let f = OwnerRig::new("full", true);
+            let mut services = f.owner.services(f.sink.clone(), None);
+            let barrier = Arc::new(InitBarrier {
+                inner: services.store.clone(),
+                entered: tokio::sync::Notify::new(),
+                release: Arc::new(tokio::sync::Semaphore::new(0)),
+            });
+            services.store = barrier.clone();
+            let release = InitRelease(barrier.release.clone());
+            let worker = ClaudeWorker::new(f.config("bypass"), services).unwrap();
+            let mut turn = f
+                .driver
+                .start(
+                    f.owner.snapshot(&f.key).unwrap(),
+                    "first input".into(),
+                    worker.clone(),
+                )
+                .unwrap();
+            barrier.entered.notified().await;
+            f.registry
+                .lock()
+                .unwrap()
+                .update_checked(&f.key, |r| {
+                    r.set_string("approval", approval);
+                    Ok(())
+                })
+                .unwrap();
+            drop(release);
+            assert!(turn.accepted().await.is_err());
+            assert!(matches!(
+                turn.wait().await.unwrap().turn.outcome,
+                Outcome::Failure { .. }
+            ));
+            f.stopped();
+            assert_eq!(
+                f.record().scalar("providerSessionId").as_deref(),
+                Some(NATIVE_CHILD)
+            );
+            assert!(f.record().get("claudeReservedSessionId").is_none());
+            f.reject_stale_then_rebuild(worker).await;
+        }
+    }
 );

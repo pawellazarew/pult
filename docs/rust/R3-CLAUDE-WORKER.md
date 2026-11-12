@@ -6,7 +6,7 @@ call Claude, a model, an account or a private API.
 
 The worker reserves exact Ticket/generation ownership synchronously, retains its
 run task if the caller disappears, persists session identity through sealed
-host-store receipts and accepts native input only after matching UUID evidence
+host-store receipts and acknowledges a turn only after matching UUID evidence
 and an owned init. Public mapped output waits for the Driver's actual accepted
 user-event receipt. Cancellation stops the registered process, and terminal
 release follows process and scoped MCP cleanup proof. Failed cleanup retains the
@@ -149,3 +149,29 @@ Remaining client proofs include decision timeout, bad protocol/unrelated-frame
 budget and invalid session/argument non-connection. The Rust server ask-role,
 per-Ticket key issuance/revocation, scoped MCP factory and host permission evidence
 are separate required work; the client alone does not connect Claude to Inbox.
+
+## Known init evidence and retired facades
+
+A valid matching `system/init` reaches the checked Owner store before the Worker
+rejects its reported permission mode. The store can retain confirmed identity
+and sticky inherited-mode evidence, then reject continuation under current
+policy. Public start acceptance is not manufactured from that diagnostic write.
+
+An init persistence error, a local reported-mode denial, or malformed present
+permission mode permanently retires this Worker facade. Subsequent `start`
+returns static `worker_retired` without a new reservation, process or native
+input. Retirement never removes the active job, resets a quarantined cleanup or
+claims that owned persistence/process/MCP cleanup finished.
+
+`is_retired()` is only an admission/recreation hint. A controller must first await
+Driver cleanup proof, then construct a new Worker from the fresh checked Owner
+snapshot and confirmed native ID/fork state, for an explicit next input. It must
+not retry the refused input or reuse the old private parent/candidate identity.
+False is not a readiness or cleanup guarantee.
+
+Real Worker + Registry/Consent/Journal/Owner fixtures cover valid wider init,
+retained fork-child identity, inherited bypass evidence, and Full -> Ask/ReadOnly
+while init persistence is held. They prove the old facade cannot send again and
+an explicitly rebuilt facade resumes the confirmed child instead of the parent.
+Malformed mode presence still returns protocol error and is never persisted as
+legacy omission. No installed native version, live model or account is exercised.
