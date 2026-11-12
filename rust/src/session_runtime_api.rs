@@ -421,6 +421,7 @@ pub(crate) async fn ordinary(
     params: Value,
     command: Option<&CommandGuard>,
     metadata: crate::turn_driver::InputMetadata,
+    expected: SessionKey,
     revoked: Arc<tokio::sync::watch::Sender<bool>>,
 ) -> Result<Box<RawValue>> {
     fields(
@@ -430,6 +431,12 @@ pub(crate) async fn ordinary(
     let name = name(&params)?;
     let text = params["text"].as_str().ok_or_else(invalid)?.to_owned();
     let (session, provider) = lookup(state.clone(), name.clone()).await?;
+    if session != expected {
+        return Err(error(
+            "not_found",
+            "session incarnation changed before dispatch",
+        ));
+    }
     if provider != "codex" {
         return Err(error(
             "unsupported",

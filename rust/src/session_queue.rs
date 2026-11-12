@@ -546,6 +546,7 @@ pub(crate) async fn prompt(
             params,
             command.as_ref(),
             Default::default(),
+            key.clone(),
             token,
         )
         .await
@@ -765,6 +766,7 @@ async fn selected(
                     queue_item_at: Some(item.at.clone()),
                     ..Default::default()
                 },
+                key.clone(),
                 token.clone(),
             )
             .await
@@ -1627,6 +1629,30 @@ mod tests {
                 .contains(&key)
         );
         assert!(state.native_runtime.get().is_none());
+        finish(state).await;
+    }
+    #[tokio::test]
+    async fn stale_incarnation_is_rejected_before_runtime_bootstrap_or_receipt() {
+        let (_home, state, mut old) = fixture();
+        old.created_at = "2020-01-01T00:00:00Z".into();
+        let error = api::ordinary(
+            state.clone(),
+            json!({"name":"chat","text":"must not retarget"}),
+            None,
+            Default::default(),
+            old,
+            Arc::new(watch::channel(false).0),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "not_found");
+        assert!(state.native_runtime.get().is_none());
+        assert_eq!(
+            state
+                .last_event_id
+                .load(std::sync::atomic::Ordering::Acquire),
+            0
+        );
         finish(state).await;
     }
 }
