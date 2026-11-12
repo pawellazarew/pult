@@ -28,6 +28,7 @@ mod runtime_journal;
 mod session_api;
 mod session_memory;
 mod session_memory_api;
+pub mod session_live;
 mod session_model;
 mod session_read;
 mod session_tree;
