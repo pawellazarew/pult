@@ -612,6 +612,14 @@ pub fn parse(raw: &RawValue) -> Result<Vec<Record>> {
         for key in ["model", "effort", "settingSources", "providerSessionId"] {
             string_field(&mut rec, &fields, key);
         }
+        // Preserve opaque future policy semantics and UTF-16, without treating
+        // malformed values as permission. Compact only outside-string whitespace
+        // so pretty registry values cannot split a public NDJSON frame.
+        for key in ["memory", "private", "temporary"] {
+            if let Some(value) = fields.get(key) {
+                rec.set_raw(key, crate::history::compact_raw(value)?);
+            }
+        }
         if provider == "codex"
             && let Some(tier) = fields
                 .get("serviceTier")
@@ -1014,6 +1022,73 @@ mod tests {
         }
     }
 
+    #[test]
+    fn pretty_opaque_metadata_remains_one_ndjson_frame_without_interpreting_values() {
+        let memory = r#"{
+  "read":true,
+  "write":"ask",
+  "future":{"raw":"\ud800","text":"inside space \"quote\" \\ tail","number":1.0000e+20}
+}"#;
+        let got = records(&format!(
+            r#"{{"sessions":[{{"name":"chat","provider":"codex","cwd":"/project","memory":{memory},"private":{{
+  "future":"\ud800"
+}},"temporary":false}}]}}"#
+        ));
+        let frame = public_record(&got[0]).unwrap();
+        assert!(
+            !frame.get().contains('\n'),
+            "opaque pretty JSON split an NDJSON response"
+        );
+        assert!(!frame.get().contains('\r'));
+        assert!(frame.get().contains(r#""raw":"\ud800""#));
+        assert!(
+            frame.get().contains("1.0000e+20"),
+            "opaque numbers were interpreted"
+        );
+        assert!(frame.get().contains("inside space"));
+        let reparsed = records(&format!(r#"{{"sessions":[{}]}}"#, frame.get()));
+        assert_eq!(
+            got[0].get("memory").unwrap().get(),
+            reparsed[0].get("memory").unwrap().get()
+        );
+    }
+    #[test]
+    fn memory_policy_and_privacy_survive_recovery_as_opaque_raw_utf16() {
+        for memory in [
+            r#"{"read":true,"write":"ask"}"#,
+            r#"{"read":true,"write":"future","extra":"\ud800"}"#,
+            "null",
+            "17",
+            r#""invalid""#,
+        ] {
+            let input = format!(
+                r#"{{"sessions":[{{"name":"chat","provider":"codex","cwd":"/project","memory":{memory},"private":{{"future":"\ud800"}},"temporary":null}}]}}"#
+            );
+            let got = records(&input);
+            assert_eq!(got[0].get("memory").map(RawValue::get), Some(memory));
+            assert_eq!(
+                got[0].get("private").map(RawValue::get),
+                Some(r#"{"future":"\ud800"}"#)
+            );
+            assert_eq!(got[0].get("temporary").map(RawValue::get), Some("null"));
+            assert_eq!(
+                crate::memory_policy::Policy::record(&got[0]).unwrap(),
+                crate::memory_policy::Policy::default()
+            );
+            let canonical = got[0].raw().unwrap();
+            let reparsed = records(&format!(r#"{{"sessions":[{}]}}"#, canonical.get()));
+            for key in ["memory", "private", "temporary"] {
+                assert_eq!(
+                    reparsed[0].get(key).map(RawValue::get),
+                    got[0].get(key).map(RawValue::get)
+                );
+            }
+        }
+        let got = records(r#"{"sessions":[{"name":"chat","provider":"codex","cwd":"/project"}]}"#);
+        for key in ["memory", "private", "temporary"] {
+            assert!(got[0].get(key).is_none());
+        }
+    }
     #[test]
     fn parses_access_boundaries_and_keeps_raw_utf16() {
         let got = records(
