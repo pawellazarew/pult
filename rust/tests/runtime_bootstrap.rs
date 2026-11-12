@@ -340,3 +340,223 @@ fn non_unicode_path_entry_does_not_hide_later_unicode_executable() {
         fs::canonicalize(f.bin.join("codex")).unwrap()
     );
 }
+
+#[test]
+fn claude_bootstrap_never_requires_codex_and_never_invokes_selected_commands() {
+    let f = Fixture::new();
+    executable(&f.bin.join("claude"));
+    fs::remove_file(f.bin.join("codex")).unwrap();
+    let before: Vec<_> = fs::read_dir(&f.home)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    let b = runtime_bootstrap::load_claude(&f.home, &f.current, &f.parent).unwrap();
+    assert_eq!(b.claude, fs::canonicalize(f.bin.join("claude")).unwrap());
+    assert!(b.prefix_args.is_empty());
+    assert_eq!(
+        b.child_home,
+        PathBuf::from(f.parent.get(OsStr::new("HOME")).unwrap())
+    );
+    assert_eq!(
+        b.parent.get(OsStr::new("HOME")).unwrap(),
+        b.child_home.as_os_str()
+    );
+    assert_eq!(
+        b.config.to_file(),
+        runtime_config::RuntimeConfig::default().to_file()
+    );
+    assert_eq!(
+        before,
+        fs::read_dir(&f.home)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(f.load().err(), Some(StaticError::ExecutableUnavailable));
+}
+#[test]
+fn claude_missing_binary_refuses_even_with_codex_installed() {
+    let f = Fixture::new();
+    assert!(f.load().is_ok());
+    assert_eq!(
+        runtime_bootstrap::load_claude(&f.home, &f.current, &f.parent).err(),
+        Some(StaticError::ExecutableUnavailable)
+    );
+}
+#[test]
+fn claude_override_is_absolute_no_fallback_and_not_a_child_argument_or_environment() {
+    let mut f = Fixture::new();
+    executable(&f.bin.join("claude"));
+    let selected = f.bin.join("selected-claude");
+    executable(&selected);
+    f.parent
+        .insert("PULT_CLAUDE_BIN".into(), selected.clone().into_os_string());
+    let b = runtime_bootstrap::load_claude(&f.home, &f.current, &f.parent).unwrap();
+    assert_eq!(b.claude, fs::canonicalize(&selected).unwrap());
+    assert!(b.prefix_args.is_empty());
+    assert!(!b.parent.contains_key(OsStr::new("PULT_CLAUDE_BIN")));
+    for (path, error) in [
+        (OsString::from("claude"), StaticError::InvalidPath),
+        (OsString::from(""), StaticError::InvalidPath),
+        (
+            f.bin.join("missing").into_os_string(),
+            StaticError::ExecutableUnavailable,
+        ),
+        (
+            OsString::from_vec(b"/PRIVATE\0PATH".to_vec()),
+            StaticError::InvalidPath,
+        ),
+    ] {
+        f.parent.insert("PULT_CLAUDE_BIN".into(), path);
+        let result = runtime_bootstrap::load_claude(&f.home, &f.current, &f.parent)
+            .err()
+            .unwrap();
+        assert_eq!(result, error);
+        assert!(!format!("{result:?} {result}").contains("PRIVATE"));
+    }
+}
+#[test]
+fn claude_path_skips_relative_and_empty_entries_and_preserves_child_home_alias() {
+    let mut f = Fixture::new();
+    let real = f.bin.join("real-claude");
+    executable(&real);
+    symlink(&real, f.bin.join("claude")).unwrap();
+    let home_alias = f._temp.path().join("child-home-alias");
+    symlink(&f.home, &home_alias).unwrap();
+    f.parent
+        .insert("HOME".into(), home_alias.clone().into_os_string());
+    f.parent.insert(
+        "PATH".into(),
+        std::env::join_paths([Path::new(""), Path::new("relative"), &f.bin]).unwrap(),
+    );
+    let b = runtime_bootstrap::load_claude(&home_alias, &f.current, &f.parent).unwrap();
+    assert_eq!(b.claude, fs::canonicalize(real).unwrap());
+    assert_eq!(b.child_home, home_alias);
+    assert_eq!(
+        b.parent.get(OsStr::new("HOME")).unwrap(),
+        b.child_home.as_os_str()
+    );
+    f.parent.insert("PATH".into(), ":relative:".into());
+    assert_eq!(
+        runtime_bootstrap::load_claude(&f.home, &f.current, &f.parent).err(),
+        Some(StaticError::ExecutableUnavailable)
+    );
+}
+#[test]
+fn claude_child_home_is_required_absolute_and_native_auth_is_never_read() {
+    let mut f = Fixture::new();
+    executable(&f.bin.join("claude"));
+    // A native auth path that cannot be opened as a file must not affect bootstrap.
+    fs::create_dir(f.home.join(".claude.json")).unwrap();
+    fs::create_dir(f.home.join(".claude")).unwrap();
+    fs::create_dir(f.home.join(".claude/settings.json")).unwrap();
+    assert!(runtime_bootstrap::load_claude(&f.home, &f.current, &f.parent).is_ok());
+    f.parent.remove(OsStr::new("HOME"));
+    assert_eq!(
+        runtime_bootstrap::load_claude(&f.home, &f.current, &f.parent).err(),
+        Some(StaticError::Environment)
+    );
+    for home in ["relative", ""] {
+        f.parent.insert("HOME".into(), home.into());
+        assert!(runtime_bootstrap::load_claude(&f.home, &f.current, &f.parent).is_err());
+    }
+    f.parent.insert(
+        "HOME".into(),
+        OsString::from_vec(b"/PRIVATE\0HOME".to_vec()),
+    );
+    let error = runtime_bootstrap::load_claude(&f.home, &f.current, &f.parent)
+        .err()
+        .unwrap();
+    assert_eq!(error, StaticError::Environment);
+    assert!(!error.to_string().contains("PRIVATE"));
+}
+#[test]
+fn claude_drops_credentials_hooks_proxy_owner_ask_and_memory_authority() {
+    let mut f = Fixture::new();
+    executable(&f.bin.join("claude"));
+    for key in [
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "CLAUDE_CODE_MESSAGING_SOCKET",
+        "NODE_OPTIONS",
+        "DYLD_INSERT_LIBRARIES",
+        "LD_PRELOAD",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "PULT_MEMORY_KEY",
+        "PULT_MEMORY_TURN_KEY",
+        "PULT_OWNER_TOKEN",
+        "PULT_ASK_KEY",
+    ] {
+        f.parent.insert(key.into(), "PRIVATE_SENTINEL".into());
+    }
+    f.config(br#"{"notifyCommand":"PRIVATE_COMMAND"}"#);
+    let b = runtime_bootstrap::load_claude(&f.home, &f.current, &f.parent).unwrap();
+    assert!(b.parent.keys().all(|key| {
+        ["HOME", "USER", "PATH", "LANG", "TERM", "TMPDIR"].contains(&key.to_str().unwrap())
+    }));
+    let debug = format!("{b:?}");
+    for private in ["PRIVATE", f.home.to_str().unwrap(), f.bin.to_str().unwrap()] {
+        assert!(!debug.contains(private));
+    }
+}
+#[test]
+fn claude_uses_node_platform_managed_path_without_native_filesystem_reads() {
+    let f = Fixture::new();
+    executable(&f.bin.join("claude"));
+    let b = runtime_bootstrap::load_claude(&f.home, &f.current, &f.parent).unwrap();
+    let expected = if cfg!(target_os = "macos") {
+        "/Library/Application Support/ClaudeCode"
+    } else {
+        "/etc/claude-code"
+    };
+    assert_eq!(b.managed_directory, Path::new(expected));
+    // Existing Node testHome is a *file* seam, not a directory override. Test
+    // mode must not silently substitute a different native policy directory.
+    assert!(!b.managed_directory.starts_with(&f.home));
+}
+#[test]
+fn claude_reuses_checked_config_snapshot_and_test_only_holder_curl_overrides() {
+    let mut f = Fixture::new();
+    executable(&f.bin.join("claude"));
+    let selected = f.bin.join("selected-holder");
+    executable(&selected);
+    f.parent.insert(
+        "PULT_WORKER_HOLDER_BIN".into(),
+        selected.clone().into_os_string(),
+    );
+    assert_eq!(
+        runtime_bootstrap::load_claude(&f.home, &f.current, &f.parent)
+            .unwrap()
+            .holder,
+        fs::canonicalize(selected).unwrap()
+    );
+    f.parent.insert("PULT_TEST".into(), "true".into());
+    f.parent
+        .insert("PULT_WORKER_HOLDER_BIN".into(), "ignored-relative".into());
+    f.parent
+        .insert("PULT_CURL_BIN".into(), "ignored-relative".into());
+    let b = runtime_bootstrap::load_claude(&f.home, &f.current, &f.parent).unwrap();
+    assert_eq!(
+        b.holder,
+        fs::canonicalize(f.bin.join("pult-worker-holder")).unwrap()
+    );
+    assert_eq!(b.curl, fs::canonicalize("/usr/bin/curl").unwrap());
+    f.config(b"{");
+    assert_eq!(
+        runtime_bootstrap::load_claude(&f.home, &f.current, &f.parent).err(),
+        Some(StaticError::ConfigInvalid)
+    );
+    f.config(b"{}");
+    fs::set_permissions(
+        f.home.join("config.json"),
+        fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    assert_eq!(
+        runtime_bootstrap::load_claude(&f.home, &f.current, &f.parent).err(),
+        Some(StaticError::UnsafeConfig)
+    );
+}
