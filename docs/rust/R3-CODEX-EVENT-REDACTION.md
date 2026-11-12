@@ -8,11 +8,11 @@ objects. Otherwise the production secret-key rule turns inputTokens into a
 string, and the token rule merges distinct hexadecimal tool IDs.
 
 The injected Redactor accepts arbitrary JSON roots and must preserve the root
-type. Panic/error discards the complete batch; final event/batch budgets and
-question-label validation remain enforced. Runtime reentry tests exercise the
-string boundary as well as the earlier object boundary.
+type. Panic/error discards the complete batch. Per-event and accumulated-text
+budgets and question-label validation remain enforced. Text/question and tool
+payload tests exercise the string and subtree callback boundaries.
 
 Both production-filter regressions were confirmed failing before the fix.
 Twenty-two normalizer tests include eight streams compared with the actual
-built Node mapper; worker tests verify the changed callback contract composes
-with real process ownership and cancellation. No provider/account is contacted.
+built Node mapper. Provider-worker integration is tracked by the later runtime
+slice. This publication uses local fixtures without provider/account access.

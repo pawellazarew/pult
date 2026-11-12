@@ -38,7 +38,8 @@ Duplicate choices return false. Requested-write failure rejects the waiting
 resolution explicitly; cancellation, shutdown and deadlines deny immediately
 while retaining ownership of the outstanding write.
 
-23 tests cover real EventStore durability/redaction, blocked append deadlines,
+26 broker integration tests cover real EventStore durability/redaction, blocked
+append deadlines, Node-compatible timer normalization,
 shutdown/cancellation, scopes/answers, original versus public inputs, secret
 rule offers, owned resolutions, sink failure/panic/invalid receipts, cross-job
 storage failure and exactly-one resolution. No real provider is used.
