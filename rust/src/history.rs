@@ -107,6 +107,34 @@ fn js_number(text: &str) -> Result<String> {
     Ok(ryu_js::Buffer::new().format_finite(number).to_owned())
 }
 
+/// Compact validated JSON without decoding or interpreting any scalar. Opaque
+/// future metadata keeps UTF-16 escapes, number lexemes, key order and duplicates;
+/// only whitespace outside strings is removed, so RawValue fits one NDJSON frame.
+/// Unlike normalize(), this does not apply JavaScript numeric/object semantics.
+pub(crate) fn compact_raw(value: &RawValue) -> Result<Raw> {
+    let mut output = Vec::with_capacity(value.get().len());
+    let mut quoted = false;
+    let mut escaped = false;
+    for byte in value.get().bytes() {
+        if quoted {
+            output.push(byte);
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                quoted = false;
+            }
+        } else if byte == b'"' {
+            quoted = true;
+            output.push(byte);
+        } else if !byte.is_ascii_whitespace() {
+            output.push(byte);
+        }
+    }
+    Ok(RawValue::from_string(String::from_utf8(output)?)?)
+}
+
 pub(crate) fn normalize(value: &RawValue) -> Result<Raw> {
     Ok(transform(value, None)?.0)
 }
@@ -575,6 +603,29 @@ pub fn get(records: Vec<JournalRecord>) -> Result<Raw> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn opaque_compaction_keeps_scalar_lexemes_utf16_and_escaped_string_spaces() {
+        let input = serde_json::value::RawValue::from_string(
+            r#" {
+  "unknown": { "text": "inside space \"quote\" \\ tail", "lone":"\ud800" },
+  "number":1.0000e+20,
+  "duplicate":1, "duplicate":2
+} "#
+            .into(),
+        )
+        .unwrap();
+        let compact = super::compact_raw(&input).unwrap();
+        assert_eq!(
+            compact.get(),
+            r#"{"unknown":{"text":"inside space \"quote\" \\ tail","lone":"\ud800"},"number":1.0000e+20,"duplicate":1,"duplicate":2}"#
+        );
+        let deep = format!("{}\"\\ud800\"{}", "[\n".repeat(5000), "]\n".repeat(5000));
+        let deep = serde_json::value::RawValue::from_string(deep).unwrap();
+        let compact = super::compact_raw(&deep).unwrap();
+        assert!(!compact.get().contains('\n'));
+        assert_eq!(compact.get().bytes().filter(|b| *b == b'[').count(), 5000);
+    }
+
     use super::*;
     fn record(id: u64, kind: &str, data: &str, extra: &str) -> JournalRecord {
         JournalRecord {
