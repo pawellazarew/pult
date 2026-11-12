@@ -45,3 +45,5 @@ ECMAScript whitespace rather than Rust's default `trim`.
   switching the installed daemon.
 
 This library slice does not enable `agent.prompt` or switch the running Pult.
+The trusted host reports uncertain shared journal IO through
+`Driver::report_storage_failure`; this reuses the existing global failure latch.
