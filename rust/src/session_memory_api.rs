@@ -44,8 +44,22 @@ fn fields(params: &Value, allowed: &[&str]) -> Result<(), MemoryError> {
     }
     Ok(())
 }
+fn execution_available(state: &crate::State) -> Result<(), MemoryError> {
+    if crate::runtime_state::unavailable(state) {
+        return Err(err("forbidden", "memory execution context is unavailable"));
+    }
+    Ok(())
+}
+fn registry_available(registry: &crate::registry::Registry) -> Result<(), MemoryError> {
+    if registry.write_poisoned() {
+        return Err(err("forbidden", "session registry requires recovery"));
+    }
+    Ok(())
+}
 fn active_record(state: &crate::State, name: &str) -> Result<Record, MemoryError> {
+    execution_available(state)?;
     let registry = state.registry.lock().map_err(|e| err("internal", e))?;
+    registry_available(&registry)?;
     let record = registry
         .find(name)
         .ok_or_else(|| err("not_found", "session not found"))?;
@@ -115,6 +129,7 @@ pub(crate) async fn execute(
             let project = project(&record)?;
             // Filesystem discovery may be slow. Recheck the exact session before publishing.
             let registry = state.registry.lock().map_err(|e| err("internal", e))?;
+            registry_available(&registry)?;
             let current = registry
                 .find(name)
                 .ok_or_else(|| err("not_found", "session not found"))?;
@@ -133,6 +148,7 @@ pub(crate) async fn execute(
                 .bind(name, fingerprint, project, enabled)
         } else {
             let registry = state.registry.lock().map_err(|e| err("internal", e))?;
+            registry_available(&registry)?;
             let current = registry
                 .find(name)
                 .ok_or_else(|| err("not_found", "session not found"))?;
@@ -156,7 +172,9 @@ pub(crate) async fn execute(
 }
 
 fn registered(state: &crate::State, name: &str) -> Result<Arc<MemoryLease>, MemoryError> {
+    execution_available(state)?;
     let registry = state.registry.lock().map_err(|e| err("internal", e))?;
+    registry_available(&registry)?;
     let record = registry
         .find(name)
         .ok_or_else(|| err("not_found", "session not found"))?;
@@ -221,12 +239,20 @@ pub(crate) async fn read(
         let memory = memory
             .as_mut()
             .map_err(|e| err("internal", format!("memory unavailable: {e}")))?;
-        if method == "memory.catalog" {
+        let result = if method == "memory.catalog" {
             let page = memory.execute("memory.list", &json!({"limit":50}), &context)?;
-            crate::memory_catalog::build(page, bound.public_context())
+            crate::memory_catalog::build(page, bound.public_context())?
         } else {
-            memory.execute(&method, &params, &context)
+            memory.execute(&method, &params, &context)?
+        };
+        // A credential/source revoked while database IO ran cannot publish its
+        // result. Owner repair reads use the separate unscoped memory API.
+        let current = active_record(&state, &bound.session)?;
+        session_memory::validate_record(&current, &bound)?;
+        if !bound.is_valid() {
+            return Err(err("forbidden", "memory credential was revoked"));
         }
+        Ok(result)
     })
     .await
     .map_err(|e| err("internal", e))
@@ -238,4 +264,127 @@ pub(crate) async fn read(
             failure
         }
     })
+}
+
+#[cfg(test)]
+mod fault_tests {
+    use super::*;
+
+    async fn fixture() -> (tempfile::TempDir, Arc<crate::State>, Arc<MemoryLease>) {
+        let (home, state, _sink) = crate::runtime_journal::tests::fixture();
+        let mut record = Record::default();
+        for (field, value) in [
+            ("name", "chat"),
+            ("createdAt", "2026-11-12T00:00:00Z"),
+            ("provider", "codex"),
+            ("scope", "general"),
+            ("cwd", state.home.to_str().unwrap()),
+        ] {
+            record.set_string(field, value);
+        }
+        state.registry.lock().unwrap().insert(record).unwrap();
+        *state.memory.lock().unwrap() = Ok(crate::memory::MemoryStore::open(&state.home).unwrap());
+        execute(
+            state.clone(),
+            "memory.context.bind".into(),
+            json!({"session":"chat","enabled":true}),
+        )
+        .await
+        .unwrap();
+        let issued = execute(
+            state.clone(),
+            "memory.context.issue".into(),
+            json!({"session":"chat"}),
+        )
+        .await
+        .unwrap();
+        let lease = state
+            .session_memory
+            .lock()
+            .unwrap()
+            .lookup(issued["key"].as_str().unwrap())
+            .unwrap();
+        read(
+            state.clone(),
+            "memory.list".into(),
+            json!({}),
+            Some(lease.clone()),
+        )
+        .await
+        .unwrap();
+        (home, state, lease)
+    }
+
+    #[tokio::test]
+    async fn uncertain_archive_cannot_authorize_memory_with_stale_registration() {
+        let (_home, state, lease) = fixture().await;
+        state
+            .registry
+            .lock()
+            .unwrap()
+            .fail_next_commit_for_test(true);
+        assert!(
+            crate::session_api::execute(
+                state.clone(),
+                crate::session_api::Command::Archive {
+                    name: "chat".into(),
+                    archived: true,
+                }
+            )
+            .await
+            .is_err()
+        );
+        assert!(state.registry.lock().unwrap().write_poisoned());
+        assert!(
+            read(state.clone(), "memory.list".into(), json!({}), Some(lease))
+                .await
+                .is_err(),
+            "uncertain archived metadata still authorized an agent memory credential"
+        );
+        assert!(
+            execute(
+                state,
+                "memory.context.issue".into(),
+                json!({"session":"chat"})
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn global_execution_fault_blocks_agent_memory_but_preserves_owner_repair_access() {
+        let (_home, state, lease) = fixture().await;
+        state.execution_storage_failed();
+        assert!(!state.registry.lock().unwrap().write_poisoned());
+        assert!(
+            read(state.clone(), "memory.list".into(), json!({}), Some(lease))
+                .await
+                .is_err(),
+            "agent memory read survived global execution fault"
+        );
+        assert!(
+            execute(
+                state.clone(),
+                "memory.context.issue".into(),
+                json!({"session":"chat"})
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            execute(
+                state.clone(),
+                "memory.context.revoke".into(),
+                json!({"session":"chat"})
+            )
+            .await
+            .is_ok()
+        );
+        assert!(
+            crate::memory_api::execute(state, "memory.list".into(), json!({}))
+                .await
+                .is_ok()
+        );
+    }
 }
