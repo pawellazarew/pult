@@ -7,7 +7,8 @@
 `agent.rename`, `agent.archive`, `agent.seen`, `agent.read`, `agent.tree` и `protocol.catalog`. Также добавлены M1-хранилище памяти и read-only ключи доверенных сессий с каталогом;
 договоры — [M1-MEMORY](../docs/rust/M1-MEMORY.md) и
 [M2-READ-CONTEXT](../docs/rust/M2-READ-CONTEXT.md). Всего Rust поддерживает 27 методов
-из 98 (15 перенесённых и 12 новых). Журнал использует нынешний формат `events/journal.jsonl`.
+из 98 (15 перенесённых и 12 новых); ещё 10 экспериментальных partial RPC
+включают обычные Codex turns и [полную очередь/steering](../docs/rust/R3-SESSION-QUEUE.md). Журнал использует нынешний формат `events/journal.jsonl`.
 
 Полный список методов берётся из `../protocol/methods.json`. В `hello_ok` и статусе
 публикуются `capabilities.experimental` и `supportedMethods`. Каталог отмечает остальные
@@ -97,13 +98,13 @@ JSON lock содержит PID и время старта процесса, со
 
 
 Внутреннее ядро управления ходом и снимки настроек описаны в
-[R3-TURN-COORDINATOR](../docs/rust/R3-TURN-COORDINATOR.md). Это пока не исполнение
-агентов через RPC: настоящий driver, очередь, доступ и адаптеры остаются следующими срезами.
+[R3-TURN-COORDINATOR](../docs/rust/R3-TURN-COORDINATOR.md). Это чистое ядро; его связь с исполнением через RPC описана в
+[R3-SESSION-COMMANDS](../docs/rust/R3-SESSION-COMMANDS.md).
 
 
 Owned driver обычной реплики и его соединение с настоящим журналом описаны в
-[R3-TURN-DRIVER](../docs/rust/R3-TURN-DRIVER.md). Worker пока контролируемый;
-RPC и реальные CLI-процессы будут подключены после host guards и supervision.
+[R3-TURN-DRIVER](../docs/rust/R3-TURN-DRIVER.md). Обычные Codex turns используют shared native Worker, host guards и supervision;
+очередь и steering описаны в [R3-SESSION-QUEUE](../docs/rust/R3-SESSION-QUEUE.md).
 
 
 Native transport и lifecycle process group описаны в

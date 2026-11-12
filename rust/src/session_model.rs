@@ -714,7 +714,17 @@ pub fn parse(raw: &RawValue) -> Result<Vec<Record>> {
                 .and_then(units)
                 .is_some_and(|v| v.len() <= 1024)
         {
-            rec.set_raw("queueDispatch", marker.to_owned());
+            let mut clean = Record::default();
+            for field in ["id", "at"] {
+                clean.set_raw(
+                    field,
+                    marker_fields
+                        .get(field)
+                        .expect("validated marker field")
+                        .to_owned(),
+                );
+            }
+            rec.set_raw("queueDispatch", clean.raw()?);
             rec.set_bool("queuePaused", true);
         }
         if let Some(approval) = fields.get("approval")
@@ -846,6 +856,9 @@ fn recover_in_place(
             stats.seeded_seen += 1;
         }
         let has_queue = rec.get("queue").is_some();
+        if !has_queue {
+            rec.remove("queueDispatch");
+        }
         let needs_turn = rec.get("lastTurnAt").is_none();
         let events = if needs_turn || has_queue {
             match lookup(rec.name()) {

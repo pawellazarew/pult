@@ -15,17 +15,31 @@
 - Правка сохраняет ID, timestamp, attachments и порядок. В журнал идёт только
   `queue.updated {id}`. Hold действует 10 минут; disconnect освобождает только
   holds своего соединения. Held head не обходится следующими репликами.
-- Успешный Driver Finished после cleanup будит очередь. Failure/interrupt/stop
-  приостанавливают её; административный status не является сигналом dispatch.
+- Успешный Driver Finished после cleanup будит очередь. Typed
+  `EventSink.before_release(Completion)` сохраняет failure/interrupted pause после
+  terminal commit, до освобождения exact Ticket; error/panic закрывает admission.
+  Stop также приостанавливает очередь; административный status не является сигналом dispatch.
 - Interrupt-and-send ждёт cleanup предыдущего Ticket до 10 секунд. При timeout
   новая реплика не отправляется. Selected send удаляет только принятый элемент,
   сохраняя конкурентные изменения остальных элементов.
 - Steering использует только подтверждённый private native turn ID и
   `turn/steer {threadId, expectedTurnId, input}`. Нет fallback в turn/start или
   interrupt. Fresh gate и first-poll enqueue составляют один blocking шаг.
-  Отзыв scope сериализован с enqueue. Caller drop не бросает native IO/receipt.
+  Отзыв scope сериализован с enqueue. Host берётся из exact `Lease.host`
+  (Weak), без поиска другого процесса по совпадению network key. Caller drop не бросает native IO/receipt.
 - `message.user` steering и queue receipt пишутся после native acknowledgement;
   Driver остаётся единственным владельцем terminal status.
+
+## CLI
+
+```sh
+pultd-rust --home /private/pult-scratch agent prompt chat "Следующая задача" --queue
+pultd-rust --home /private/pult-scratch agent prompt chat "Уточнение текущего хода" --steer
+pultd-rust --home /private/pult-scratch agent prompt chat "Замена задачи" --interrupt
+```
+
+Флаги взаимоисключающие; без них остаётся обычная отправка. Queue management
+использует прежние RPC/UI. Memory-only credentials не получают owner authority.
 
 ## Crash/restart и rollback
 

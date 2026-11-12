@@ -115,6 +115,7 @@ impl PoolKey {
     }
 }
 struct Lease {
+    host: Weak<CodexHost>,
     nonce: Arc<()>,
     check: Check,
     key: PoolKey,
@@ -336,12 +337,7 @@ impl CodexRuntime {
             let snapshot = inner.deps.driver.snapshot_for_dispatch(&ticket)?;
             let state = inner.shared.state.lock().expect("Codex runtime");
             let lease = state.leases.get(key)?;
-            let host = state
-                .pool
-                .iter()
-                .find(|entry| entry.key == lease.key)?
-                .host
-                .clone();
+            let host = lease.host.upgrade()?;
             Some((ticket, snapshot, host))
         });
         if inner.broker.list(Some(&key.name)).is_empty()
@@ -691,6 +687,7 @@ async fn execute(
         state.leases.insert(
             key.clone(),
             Lease {
+                host: Arc::downgrade(&host),
                 nonce: nonce.clone(),
                 check,
                 key: pool_key,

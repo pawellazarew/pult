@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdtempSync, mkdirSync, chmodSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, chmodSync, writeFileSync, readFileSync, existsSync, rmSync, realpathSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import net from 'node:net'
@@ -34,6 +34,15 @@ async function until(check, label) {
 }
 const journal = () => existsSync(join(home, 'events/journal.jsonl')) ? readFileSync(join(home, 'events/journal.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : []
 async function check(label, run) { await run(); checks++; console.log(`pass ${label}`) }
+async function nativeCli(args, extra = {}) {
+  const process = spawn(binary, ['--home', home, ...args], { env: { ...env, ...extra }, stdio: ['ignore', 'pipe', 'pipe'] })
+  let stdout = '', stderr = ''
+  process.stdout.on('data', bytes => { stdout += bytes })
+  process.stderr.on('data', bytes => { stderr += bytes })
+  const timer = setTimeout(() => process.kill('SIGKILL'), 6000)
+  try { const code = await new Promise(resolve => process.once('exit', resolve)); return { code, stdout, stderr } }
+  finally { clearTimeout(timer) }
+}
 async function rawClient(memory) {
   const socket = net.createConnection(paths.sock)
   const frames = [], pending = []
@@ -113,6 +122,8 @@ try {
   await check('selected queue send steers only that item; edit/move/remove preserve remaining order', async () => {
     const a = await queue('🦀'.repeat(240)), b = await queue('selected second')
     assert.equal(a.queued, true); assert.equal(b.queued, true)
+    assert.equal((await client.request('agent.stop', { name: 'one', turnId: 'stale-queue-turn' })).stopped, false)
+    assert.notEqual((await row('one')).queuePaused, true)
     const selected = await client.request('agent.queue.send', { name: 'one', id: b.id })
     assert.match(selected.turnId, /^pult-/)
     await assert.rejects(client.request('agent.queue.send', { name: 'one', id: b.id }), e => e.code === 'queue_item_sent')
@@ -164,6 +175,88 @@ try {
     const texts = journal().filter(e => e.kind === 'message.user').map(e => e.data.text)
     assert.ok(texts.indexOf('after disconnect') < texts.indexOf('behind held head'))
   })
+  await check('image-only queued input survives hold/edit and steers native image blocks', async () => {
+    const turn = await client.request('agent.prompt', { name: 'one', text: 'hold image' })
+    const directory = join(home, 'attachments', 'one', '2026-11-12')
+    mkdirSync(directory, { recursive: true, mode: 0o700 })
+    const imagePath = join(directory, 'fixture.png')
+    const bytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a0f8AAAAASUVORK5CYII=', 'base64')
+    writeFileSync(imagePath, bytes, { mode: 0o600 })
+    const path = realpathSync(imagePath)
+    const attachment = { path, name: 'fixture.png', bytes: bytes.length, mime: 'image/png', kind: 'file' }
+    const queued = await client.request('agent.prompt', { name: 'one', text: '', attachments: [attachment], queue: true })
+    const held = await client.request('agent.queue.move', { name: 'one', id: queued.id, hold: true })
+    assert.equal(held.edit.text, ''); assert.deepEqual(held.edit.attachments, [attachment])
+    await client.request('agent.queue.move', { name: 'one', id: queued.id, text: '' })
+    const accepted = await client.request('agent.queue.send', { name: 'one', id: queued.id })
+    assert.equal(accepted.turnId, turn.turnId)
+    const wire = readFileSync(join(native, 'messages.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).findLast(e => e.method === 'turn/steer')
+    assert.deepEqual(wire.params.input, [{ type: 'localImage', path }])
+    const receipt = journal().find(e => e.kind === 'message.user' && e.data.queueItemId === queued.id)
+    assert.equal(receipt.data.text, ''); assert.deepEqual(receipt.data.attachments, [attachment])
+    await assert.rejects(client.request('agent.prompt', { name: 'one', text: '', attachments: [{ ...attachment, path: join(home, 'foreign.png') }], queue: true }), e => e.code === 'invalid_params')
+    await client.request('agent.stop', { name: 'one' }); await done('one')
+  })
+  await check('queue capacity and Unicode byte budgets reject atomically', async () => {
+    await client.request('agent.prompt', { name: 'one', text: 'hold limits' })
+    await assert.rejects(queue('x'.repeat(50001)), e => e.code === 'invalid_params')
+    const large = await queue('🦀'.repeat(50000))
+    await assert.rejects(queue('🦀'.repeat(20000)), e => e.code === 'invalid_params')
+    assert.equal((await row('one')).queue.length, 1)
+    await client.request('agent.queue.send', { name: 'one', id: large.id })
+    const delivered = journal().find(e => e.kind === 'message.user' && e.data.queueItemId === large.id)
+    assert.equal([...delivered.data.text].length, 50000)
+    for (let i = 0; i < 20; i++) assert.equal((await queue(`cap-${i}`)).queued, true)
+    await assert.rejects(queue('overflow'), e => e.code === 'invalid_params')
+    const queued = (await row('one')).queue
+    assert.equal(queued.length, 20)
+    for (const item of queued) await client.request('agent.queue.remove', { name: 'one', id: item.id })
+    await client.request('agent.stop', { name: 'one' }); await done('one')
+  })
+  await check('real Rust CLI queue, steer and interrupt flags reach the daemon', async () => {
+    const first = await nativeCli(['agent', 'prompt', 'one', 'hold cli'])
+    assert.equal(first.code, 0, first.stderr); const active = JSON.parse(first.stdout)
+    const waiting = await nativeCli(['agent', 'prompt', 'one', 'queued cli', '--queue'])
+    assert.equal(waiting.code, 0, waiting.stderr); const queued = JSON.parse(waiting.stdout); assert.equal(queued.queued, true)
+    const steered = await nativeCli(['agent', 'prompt', 'one', 'clarify cli', '--steer'])
+    assert.equal(steered.code, 0, steered.stderr); assert.equal(JSON.parse(steered.stdout).turnId, active.turnId)
+    const interrupted = await nativeCli(['agent', 'prompt', 'one', 'replace cli', '--interrupt'])
+    assert.equal(interrupted.code, 0, interrupted.stderr); assert.notEqual(JSON.parse(interrupted.stdout).turnId, active.turnId)
+    await done('one'); assert.equal((await row('one')).queuePaused, true)
+    const invalid = await nativeCli(['agent', 'prompt', 'one', 'invalid mode', '--queue', '--steer'])
+    assert.notEqual(invalid.code, 0)
+    assert.ok(!journal().some(e => e.kind === 'message.user' && e.data.text === 'invalid mode'))
+    await client.request('agent.queue.remove', { name: 'one', id: queued.id })
+  })
+  await check('an edit hold in one Codex session does not delay another session FIFO', async () => {
+    await client.request('agent.prompt', { name: 'one', text: 'hold independent one' })
+    await client.request('agent.prompt', { name: 'ask', text: 'hold independent ask' })
+    const held = await queue('held independent')
+    const other = await queue('independent FIFO', 'ask')
+    await client.request('agent.queue.move', { name: 'one', id: held.id, hold: true })
+    await client.request('agent.prompt', { name: 'ask', text: 'complete-steer', steer: true })
+    await until(async () => !(await row('ask')).queue?.length && (await row('ask')).status === 'done', 'sibling FIFO delayed by another hold')
+    assert.equal((await row('one')).queue[0].id, held.id)
+    assert.ok(journal().some(e => e.sessionId === 'ask' && e.kind === 'message.user' && e.data.queueItemId === other.id))
+    await client.request('agent.stop', { name: 'one' }); await done('one')
+    await client.request('agent.queue.remove', { name: 'one', id: held.id })
+  })
+  await check('interrupt timeout never dispatches replacement or kills an unrelated turn', async () => {
+    await client.request('agent.prompt', { name: 'one', text: 'never-interrupt' })
+    await client.request('agent.prompt', { name: 'ask', text: 'hold timeout sibling' })
+    const waiting = await queue('after timed out interruption')
+    const before = journal().filter(e => e.kind === 'message.user').length
+    await assert.rejects(client.request('agent.prompt', { name: 'one', text: 'must never be sent after timeout', interrupt: true }, { timeoutMs: 15000 }), e => e.code === 'timeout')
+    assert.equal(journal().filter(e => e.kind === 'message.user').length, before)
+    assert.equal((await row('ask')).status, 'working')
+    assert.equal((await row('one')).queuePaused, true)
+    assert.equal((await row('one')).queue[0].id, waiting.id)
+    await client.request('agent.stop', { name: 'ask' })
+    await until(async () => (await client.request('daemon.status')).nativeRuntime.activeTurns === 1, 'sibling cleanup before retrying quarantined turn')
+    await client.request('agent.stop', { name: 'one' })
+    await done('one')
+    await client.request('agent.queue.remove', { name: 'one', id: waiting.id })
+  })
   await check('unknown native delivery remains actionable and cannot Resume automatically', async () => {
     await client.request('agent.prompt', { name: 'one', text: 'hold before lost ack' })
     const uncertain = await queue('lost-ack')
@@ -186,6 +279,9 @@ try {
   await check('scoped memory credentials cannot execute owner session commands', async () => {
     await client.request('memory.context.bind', { session: 'one', enabled: true })
     const issued = await client.request('memory.context.issue', { session: 'one' })
+    const forbiddenCli = await nativeCli(['agent', 'prompt', 'one', 'forbidden cli', '--queue'], { PULT_MEMORY_KEY: issued.key })
+    assert.notEqual(forbiddenCli.code, 0); assert.match(forbiddenCli.stderr, /forbidden/)
+    assert.ok(!journal().some(e => e.kind === 'message.user' && e.data.text === 'forbidden cli'))
     const scoped = await rawClient(issued.key)
     try {
       assert.deepEqual(scoped.hello.capabilities.partialMethods, [])

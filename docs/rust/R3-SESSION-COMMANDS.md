@@ -1,7 +1,7 @@
 # R3 session commands — partial ordinary Codex staging
 
-The owner daemon exposes six experimental partial methods alongside the 27 fully
-implemented Rust foundation methods. `protocol.catalog` marks these six entries
+The owner daemon exposes ten experimental partial methods alongside the 27 fully
+implemented Rust foundation methods. `protocol.catalog` marks these ten entries
 `rust: "partial"` and includes their parameter/result schemas. Owner hello and
 `daemon.status` advertise them in `capabilities.partialMethods`. They stay separate
 from `supportedMethods`. Memory-scoped connections advertise an empty partial list.
@@ -13,7 +13,8 @@ migration continues.
 | --- | --- |
 | `agent.start` | Create cold metadata with explicit settings and fresh consent/cwd checks. Returns a public record. |
 | `agent.list` | Return `{sessions}` with public records, reduced `status`, integer `pendingPermissions` and nullable `liveApproval`. |
-| `agent.prompt` | Send `{name,text,attachments?}` to an ordinary Codex turn and return `{turnId}`. |
+| `agent.prompt` | Send ordinary input, queue it, interrupt-and-send, or steer an active Codex turn. Returns `{turnId}` or `{queued:true,id}`. |
+| `agent.queue.send/resume/remove/move` | Full queue lifecycle, selected sending, reordering, connection-owned edit holds and edits. |
 | `agent.stop` | Stop `{name,turnId?}` and return `{stopped}`. A cold stop records interruption. |
 | `perm.list` | Return redacted `{pending}` cards, optionally filtered by `{name}`. |
 | `perm.resolve` | Durably resolve an offered decision and return `{resolved:true,id,decision,scope?}`. Scope appears for allow. |
@@ -31,9 +32,10 @@ existing confirmation/consent policy. Shell clients cannot request `cli-once`.
 Inherited defaults, active browsers, worktrees, request IDs, drafts and start prompts
 require later stages. Unsupported feature parameters fail before creation.
 
-Ordinary prompting currently requires Codex. Queue, interrupt and steer requests
-with `true` require later stages and fail before a user journal receipt. Explicit
-`false` flags preserve ordinary prompting. Full Claude/ZCode,
+Native prompting currently requires Codex. Queue, interrupt-and-send and steering
+are described in [R3-SESSION-QUEUE](R3-SESSION-QUEUE.md), including durable unknown
+send markers and rollback behavior. Explicit `false` flags preserve ordinary
+prompting. Full Claude/ZCode,
 background/subagent, attention, context, phase and detailed access projections are
 still in progress. Persistent permission-rule management also requires later work.
 The permission bridge accepts offered once/session/rule scope and structured
@@ -50,7 +52,7 @@ and `--attachments` requires a JSON array.
 ```text
 pultd-rust --home /private/pult-scratch agent start --params JSON
 pultd-rust --home /private/pult-scratch agent list
-pultd-rust --home /private/pult-scratch agent prompt NAME TEXT [--attachments JSON]
+pultd-rust --home /private/pult-scratch agent prompt NAME TEXT [--attachments JSON] [--queue|--interrupt|--steer]
 pultd-rust --home /private/pult-scratch agent stop NAME [--turn-id ID]
 pultd-rust --home /private/pult-scratch perm list [--name NAME]
 pultd-rust --home /private/pult-scratch perm resolve ID allow|deny [--scope once|session|rule] [--answers JSON] [--message TEXT]
@@ -76,7 +78,7 @@ through completion, including when clients disconnect; per-socket pending replie
 are limited to 16. Blocking IO and whole subscription replay tasks remain tracked
 until daemon shutdown can safely release its owner lock.
 
-The actual built TypeScript client and Rust daemon pass seven fake-provider cases:
+The preceding ordinary-input baseline used seven built TypeScript client/Rust daemon cases:
 cold metadata/list without model or receipt; rejected advanced forms without side
 effects; an ordinary Codex turn with a durable thread record and working status
 before native dispatch; durable permission resolution with input-rewrite rejection;
@@ -86,13 +88,15 @@ or user receipt. The fixtures use an isolated private account and local programs
 not installed providers or real network requests. A pending permission remains
 `blocked_permission`, rather than being overwritten by a late working status.
 
-The full local all-targets run passed 577 tests across 40 binaries; the explicitly
+For that preceding baseline, the local all-targets run passed 577 tests across 40 binaries; the explicitly
 opt-in installed-Codex smoke test remains ignored in the default run. A separate
 installed-binary initialize/shutdown smoke also passed with an isolated HOME; it
 performed no model turn or authentication operation. Clippy all-targets with warnings
 as errors and the repository's 13-rule leak guard also pass. These checks establish
 this experimental slice; they do not prove real-account compatibility, production
-cutover, queue/steering parity, or the completed Rust migration.
+cutover or the completed Rust migration. The subsequent queue/steering acceptance
+and remaining Unicode/background boundaries are documented separately in
+[R3-SESSION-QUEUE](R3-SESSION-QUEUE.md).
 
 ## Blocking IO and uncertain storage
 

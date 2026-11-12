@@ -64,6 +64,20 @@ impl Item {
                 .is_ok_and(|v| serde_json::from_str::<Value>(v.get()).is_ok())
         })
     }
+    fn identity_eq(&self, other: &Self) -> bool {
+        ["id", "at"].iter().all(|field| {
+            let units = |item: &Self| {
+                item.raw
+                    .as_ref()
+                    .and_then(|r| r.string(field))
+                    .unwrap_or_else(|| match *field {
+                        "id" => item.id.encode_utf16().collect(),
+                        _ => item.at.encode_utf16().collect(),
+                    })
+            };
+            units(self) == units(other)
+        })
+    }
     fn same_id(&self, id: &str) -> bool {
         self.raw
             .as_ref()
@@ -97,6 +111,7 @@ pub(crate) struct Queue {
 #[derive(Default)]
 struct Control {
     sending: HashMap<SessionKey, String>,
+    pauses: HashMap<SessionKey, Arc<()>>,
     direct: HashSet<SessionKey>,
     draining: HashSet<SessionKey>,
     holds: HashMap<(SessionKey, String), (String, Instant)>,
@@ -203,11 +218,20 @@ async fn io<T: Send + 'static>(
     state: Arc<State>,
     f: impl FnOnce(&mut Registry, &mut Control) -> Result<T> + Send + 'static,
 ) -> Result<T> {
+    io_closing(state, false, f).await
+}
+async fn io_closing<T: Send + 'static>(
+    state: Arc<State>,
+    allow_closing: bool,
+    f: impl FnOnce(&mut Registry, &mut Control) -> Result<T> + Send + 'static,
+) -> Result<T> {
     let tracked = state.host_jobs.track();
     let failed = state.clone();
     let result = tokio::task::spawn_blocking(move || {
         let _tracked = tracked;
-        api::available(&state)?;
+        if !allow_closing {
+            api::available(&state)?;
+        }
         let _store = state.store.lock().map_err(|_| api::storage())?;
         let mut reg = state.registry.lock().map_err(|_| api::storage())?;
         let mut c = state
@@ -293,7 +317,7 @@ fn input(state: &State, key: &SessionKey, item: &Item) -> Result<crate::turn_dri
     })
 }
 pub(crate) async fn pause(state: Arc<State>, key: SessionKey) -> Result<()> {
-    io(state, move |reg, _| {
+    io(state, move |reg, c| {
         if let Ok(rec) = current(reg, &key)
             && !items(rec)?.is_empty()
         {
@@ -301,10 +325,36 @@ pub(crate) async fn pause(state: Arc<State>, key: SessionKey) -> Result<()> {
                 r.set_bool("queuePaused", true);
                 Ok(())
             })?;
+            c.pauses.insert(key.clone(), Arc::new(()));
         }
         Ok(())
     })
     .await
+}
+pub(crate) async fn before_release(
+    state: Arc<State>,
+    completion: crate::turn_driver::Completion,
+) -> std::result::Result<(), crate::turn_driver::SinkError> {
+    if completion.outcome() == &crate::turn_coordinator::Outcome::Success {
+        return Ok(());
+    }
+    let key = completion.ticket().session().clone();
+    io_closing(state, true, move |reg, c| {
+        if let Ok(rec) = current(reg, &key)
+            && !items(rec)?.is_empty()
+        {
+            update(reg, &key, |r| {
+                r.set_bool("queuePaused", true);
+                Ok(())
+            })?;
+            c.pauses.insert(key.clone(), Arc::new(()));
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|_| crate::turn_driver::SinkError {
+        message: "queue pause result is unconfirmed".into(),
+    })
 }
 pub(crate) fn observe(
     state: Arc<State>,
@@ -319,15 +369,10 @@ pub(crate) fn observe(
                 crate::turn_driver::Progress::Finished(done) => Some(done),
                 _ => None,
             };
-            if let Some(done) = done {
-                if done
-                    .as_ref()
-                    .is_ok_and(|v| v.turn.outcome == crate::turn_coordinator::Outcome::Success)
-                {
-                    schedule(state, key);
-                } else {
-                    let _ = pause(state, key).await;
-                }
+            if done.is_some() {
+                // Failure has already durably paused in before_release. A
+                // subsequent explicit Resume must not lose this final wakeup.
+                schedule(state, key);
                 return;
             }
             if progress.changed().await.is_err() {
@@ -363,7 +408,34 @@ pub(crate) async fn prompt(
         return Err(api::invalid());
     }
     let (key, provider) = api::lookup(state.clone(), name).await?;
+    let checking_key = key.clone();
+    let home = state.home.clone();
+    io(state.clone(), move |reg, _| {
+        let rec = current(reg, &checking_key)?;
+        if rec.scalar("scope").as_deref() == Some("general") {
+            let cwd = rec.scalar("cwd").ok_or_else(api::invalid)?;
+            crate::host_paths::validate_general(
+                &home,
+                &checking_key.name,
+                std::path::Path::new(&cwd),
+            )
+            .map_err(|_| {
+                api::error(
+                    "invalid_params",
+                    "general workspace is invalid or unavailable",
+                )
+            })?;
+        }
+        Ok(())
+    })
+    .await?;
     revoked(&token)?;
+    if provider != "codex" && params["steer"] != true {
+        return Err(api::error(
+            "unsupported",
+            "native queue execution currently requires Codex",
+        ));
+    }
     if params["steer"] == true {
         if provider != "codex" {
             return Err(api::error(
@@ -496,13 +568,23 @@ pub(crate) async fn request(
     let owner = owner.to_owned();
     let payload = params.clone();
     let (reply,key,provider)=io(state.clone(),move|reg,c|{
-        let params=payload;let rec=record(reg,&name)?;let key=api::key(&rec)?;let provider=rec.scalar("provider").ok_or_else(api::invalid)?;let mut q=items(&rec)?;
+        let params=payload;
+        let rich=method=="agent.queue.move"&&(params.get("text").is_some()||params["hold"]==true);
+        let rec=record(reg,&name).map_err(|e|if rich&&e.code=="not_found"{api::error("queue_item_removed","queued message or session was removed")}else{e})?;
+        let key=api::key(&rec)?;let provider=rec.scalar("provider").ok_or_else(api::invalid)?;let mut q=items(&rec)?;
+        if method=="agent.queue.move"&&params["hold"]==false {
+            if ["to","hold","text"].iter().filter(|v|params.get(**v).is_some()).count()!=1{return Err(api::invalid());}
+            let id=params["id"].as_str().ok_or_else(api::invalid)?;c.holds.remove(&(key.clone(),id.into()));
+            return Ok((queue_state(&rec)?,key,provider));
+        }
         if c.sending.get(&key).is_some_and(|id|params["id"]==*id){return Err(api::error("busy","queued message is being sent"));}
         if method=="agent.queue.resume" {
+            if provider!="codex"{return Err(api::error("unsupported","native queue execution currently requires Codex"));}
             if uncertain(&rec){return Err(api::error("send_unknown","previous delivery is unknown; Send now may duplicate it — explicitly Send now after cleanup, edit or remove the message"));}
+            if q.first().is_some_and(|v|!v.native_safe()){return Err(api::error("invalid_params","legacy head contains unsupported Unicode; edit before resuming"));}
             let rec=update(reg,&key,|r|{r.remove("queuePaused");Ok(())})?;return Ok((queue_state(&rec)?,key,provider));
         }
-        let id=params["id"].as_str().ok_or_else(api::invalid)?.to_owned();let at=find(&q,c,&key,&id)?;
+        let id=params["id"].as_str().ok_or_else(api::invalid)?.to_owned();let at=find(&q,c,&key,&id).map_err(|e|if !rich{api::error("not_found","queued message was not found")}else{e})?;
         if method=="agent.queue.remove"{q.remove(at);c.holds.remove(&(key.clone(),id.clone()));}
         else {
             if ["to","hold","text"].iter().filter(|v|params.get(**v).is_some()).count()!=1{return Err(api::invalid());}
@@ -518,7 +600,7 @@ pub(crate) async fn request(
                 let text=text.as_str().ok_or_else(api::invalid)?;if text.chars().all(crate::runtime_config::js_space)&&!q[at].has_attachments(){return Err(api::invalid());}
                 q[at].set_text(text);limits(&q)?;c.holds.remove(&(key.clone(),id.clone()));
             }else{
-                let to=params["to"].as_i64().filter(|v|v.unsigned_abs()<=9_007_199_254_740_991).ok_or_else(api::invalid)?;let item=q.remove(at);q.insert((to.max(0) as usize).min(q.len()),item);
+                let to=params["to"].as_f64().filter(|v|v.is_finite()&&v.fract()==0.0&&v.abs()<=9_007_199_254_740_991.0).ok_or_else(api::invalid)? as i64;let item=q.remove(at);q.insert((to.max(0) as usize).min(q.len()),item);
             }
         }
         let rec=update(reg,&key,|r|{
@@ -546,9 +628,18 @@ async fn selected(
     let checking = state.clone();
     let requested = id;
     let cancellation = token.clone();
-    let (key, item, was_paused) = io(state.clone(), move |reg, c| {
+    let (key, item, was_paused, pause_epoch) = io(state.clone(), move |reg, c| {
         revoked(&cancellation)?;
-        let rec = record(reg, &name)?;
+        let rec = record(reg, &name).map_err(|e| {
+            if e.code == "not_found" {
+                api::error(
+                    "queue_item_removed",
+                    "queued message or session was removed",
+                )
+            } else {
+                e
+            }
+        })?;
         let key = api::key(&rec)?;
         if rec.scalar("provider").as_deref() != Some("codex") {
             return Err(api::error(
@@ -567,6 +658,9 @@ async fn selected(
         }
         let q = items(&rec)?;
         let at = find(&q, c, &key, &requested)?;
+        if !explicit && at != 0 {
+            return Err(api::error("busy", "queue head changed before dispatch"));
+        }
         if c.holds.contains_key(&(key.clone(), requested.clone())) {
             return Err(api::error(
                 "invalid_params",
@@ -595,7 +689,8 @@ async fn selected(
             Ok(())
         })?;
         c.sending.insert(key.clone(), requested);
-        Ok((key, q[at].clone(), paused(&rec)))
+        let epoch = c.pauses.entry(key.clone()).or_default().clone();
+        Ok((key, q[at].clone(), paused(&rec), epoch))
     })
     .await?;
     let operation = async {
@@ -659,41 +754,81 @@ async fn selected(
                 | "network_denied"
                 | "forbidden"
                 | "runtime_unavailable"
-               
         )
     });
     let session = key.clone();
-    let accepted = item.clone();
-    io(state, move |reg, c| {
-        c.sending.remove(&session);
-        if current(reg, &session).is_err() {
-            return Ok(());
+    let settlement = if succeeded {
+        Settlement::Accepted {
+            item,
+            was_paused,
+            pause_epoch,
         }
-        if succeeded {
-            let q = items(current(reg, &session)?)?
+    } else if definite {
+        Settlement::DefiniteFailure
+    } else {
+        Settlement::Unknown
+    };
+    io(state.clone(), move |reg, c| {
+        settle(reg, c, &session, settlement)
+    })
+    .await?;
+    schedule(state, key);
+    operation
+}
+
+enum Settlement {
+    Accepted {
+        item: Item,
+        was_paused: bool,
+        pause_epoch: Arc<()>,
+    },
+    DefiniteFailure,
+    Unknown,
+}
+fn settle(
+    reg: &mut Registry,
+    c: &mut Control,
+    key: &SessionKey,
+    settlement: Settlement,
+) -> Result<()> {
+    c.sending.remove(key);
+    if current(reg, key).is_err() {
+        return Ok(());
+    }
+    match settlement {
+        Settlement::Accepted {
+            item,
+            was_paused,
+            pause_epoch,
+        } => {
+            let q = items(current(reg, key)?)?
                 .into_iter()
-                .filter(|v| v.id != accepted.id || v.at != accepted.at)
+                .filter(|v| !v.identity_eq(&item))
                 .collect::<Vec<_>>();
-            update(reg, &session, |r| {
+            let may_resume = !was_paused
+                && c.pauses
+                    .get(key)
+                    .is_some_and(|epoch| Arc::ptr_eq(epoch, &pause_epoch));
+            update(reg, key, |r| {
                 r.remove("queueDispatch");
                 save(r, &q)?;
-                if !was_paused {
+                if may_resume {
                     r.remove("queuePaused");
                 }
                 Ok(())
             })?;
-            remember(c, &session, accepted.id);
-        } else if definite {
-            update(reg, &session, |r| {
+            remember(c, key, item.id);
+        }
+        Settlement::DefiniteFailure => {
+            update(reg, key, |r| {
                 r.remove("queueDispatch");
                 r.set_bool("queuePaused", true);
                 Ok(())
             })?;
         }
-        Ok(())
-    })
-    .await?;
-    operation
+        Settlement::Unknown => {}
+    }
+    Ok(())
 }
 
 pub(crate) fn schedule(state: Arc<State>, key: SessionKey) {
@@ -754,6 +889,18 @@ pub(crate) fn schedule(state: Arc<State>, key: SessionKey) {
                     return Ok(None);
                 };
                 let q = items(rec)?;
+                if rec.get("archived").is_some_and(|v| v.get() == "true")
+                    || rec.scalar("provider").as_deref() != Some("codex")
+                {
+                    if !q.is_empty() {
+                        update(reg, &copy, |r| {
+                            r.set_bool("queuePaused", true);
+                            Ok(())
+                        })?;
+                    }
+                    c.draining.remove(&copy);
+                    return Ok(None);
+                }
                 if paused(rec)
                     || uncertain(rec)
                     || busy(&checking, &copy)
@@ -783,6 +930,17 @@ pub(crate) fn schedule(state: Arc<State>, key: SessionKey) {
                     let Ok(rec) = current(reg, &copy) else {
                         return Ok(false);
                     };
+                    if rec.get("archived").is_some_and(|v| v.get() == "true")
+                        || rec.scalar("provider").as_deref() != Some("codex")
+                    {
+                        update(reg, &copy, |r| {
+                            if r.get("queue").is_some() {
+                                r.set_bool("queuePaused", true);
+                            }
+                            Ok(())
+                        })?;
+                        return Ok(false);
+                    }
                     Ok(!busy(&checking, &copy)
                         && !paused(rec)
                         && !uncertain(rec)
@@ -921,8 +1079,8 @@ mod tests {
         )
         .await
     }
-    fn value(raw: Box<RawValue>) -> Value {
-        serde_json::from_str(raw.get()).unwrap()
+    fn value(raw: impl AsRef<RawValue>) -> Value {
+        serde_json::from_str(raw.as_ref().get()).unwrap()
     }
     async fn finish(state: Arc<State>) {
         state.stop.send_replace(true);
@@ -1207,5 +1365,202 @@ mod tests {
         ));
         assert!(*token.borrow());
         finish(state).await;
+    }
+    #[tokio::test]
+    async fn driver_terminal_pause_is_durable_before_release_without_async_observer() {
+        use crate::turn_coordinator::{Outcome, Ticket};
+        use crate::turn_driver::{Started, Task, Worker, WorkerError};
+        use crate::turn_snapshot::{Provider, TurnSettings, TurnSnapshot};
+        struct Fake {
+            pre_ack: bool,
+            done: Mutex<Option<tokio::sync::oneshot::Receiver<Outcome>>>,
+        }
+        impl Worker for Fake {
+            fn start(
+                &self,
+                _: Ticket,
+                _: TurnSnapshot,
+                _: String,
+            ) -> Task<std::result::Result<Started, WorkerError>> {
+                let done = self.done.lock().unwrap().take().unwrap();
+                let fail = self.pre_ack;
+                Box::pin(async move {
+                    if fail {
+                        return Err(WorkerError {
+                            code: "fixture".into(),
+                            message: "failed before ack".into(),
+                        });
+                    }
+                    Ok(Started {
+                        turn_id: "pult-fixture".into(),
+                        done: Box::pin(async move { done.await.unwrap() }),
+                    })
+                })
+            }
+            fn close(&self, _: Ticket) -> Task<std::result::Result<(), WorkerError>> {
+                Box::pin(async { Ok(()) })
+            }
+        }
+        for pre_ack in [false, true] {
+            let (_home, state, key) = fixture();
+            state
+                .registry
+                .lock()
+                .unwrap()
+                .update_checked(&key, |r| {
+                    r.remove("queuePaused");
+                    Ok(())
+                })
+                .unwrap();
+            let (complete, done) = tokio::sync::oneshot::channel();
+            let driver = state.driver.get().unwrap();
+            let mut handle = driver
+                .start(
+                    TurnSnapshot {
+                        key,
+                        provider: Provider::Codex,
+                        cwd: state.home.clone(),
+                        settings: TurnSettings::default(),
+                    },
+                    "direct".into(),
+                    Arc::new(Fake {
+                        pre_ack,
+                        done: Mutex::new(Some(done)),
+                    }),
+                )
+                .unwrap();
+            if !pre_ack {
+                handle.accepted().await.unwrap();
+                complete
+                    .send(Outcome::Failure {
+                        code: "fixture".into(),
+                        message: "failed".into(),
+                    })
+                    .unwrap();
+            }
+            tokio::time::timeout(Duration::from_secs(5), handle.wait())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(paused(state.registry.lock().unwrap().find("chat").unwrap()));
+            assert_eq!(driver.active_count(), 0);
+            finish(state).await;
+        }
+    }
+    #[test]
+    fn receipt_pair_identity_never_collapses_lone_surrogate_to_replacement() {
+        let mut rec = Record::default();
+        rec.set_raw("queue",RawValue::from_string(r#"[{"id":"\ud800","text":"opaque","at":"same"},{"id":"�","text":"valid","at":"same"}]"#.into()).unwrap());
+        let q = items(&rec).unwrap();
+        assert!(!q[0].identity_eq(&q[1]));
+        assert!(!q[0].same_id("�"));
+        assert!(q[1].same_id("�"));
+        let rest = q
+            .iter()
+            .filter(|v| !v.identity_eq(&q[1]))
+            .cloned()
+            .collect::<Vec<_>>();
+        save(&mut rec, &rest).unwrap();
+        assert!(rec.get("queue").unwrap().get().contains(r"\ud800"));
+    }
+    #[tokio::test]
+    async fn accepted_settlement_never_erases_a_newer_terminal_or_stop_pause() {
+        for newer in [false, true] {
+            let (_home, state, key) = fixture();
+            let captured = Arc::new(());
+            let initial = captured.clone();
+            let copy = key.clone();
+            io(state.clone(), move |reg, c| {
+                c.pauses
+                    .insert(copy.clone(), if newer { Arc::new(()) } else { initial });
+                update(reg, &copy, |r| {
+                    r.set_bool("queuePaused", true);
+                    r.set_raw(
+                        "queueDispatch",
+                        to_raw_value(&json!({"id":"a","at":"time-a"}))?,
+                    );
+                    Ok(())
+                })?;
+                settle(
+                    reg,
+                    c,
+                    &copy,
+                    Settlement::Accepted {
+                        item: item("a", "first", "time-a"),
+                        was_paused: false,
+                        pause_epoch: captured,
+                    },
+                )
+            })
+            .await
+            .unwrap();
+            let rec = state.registry.lock().unwrap().find("chat").unwrap().clone();
+            assert_eq!(paused(&rec), newer);
+            assert_eq!(items(&rec).unwrap()[0].id, "b");
+            assert!(rec.get("queueDispatch").is_none());
+            finish(state).await;
+        }
+    }
+    #[tokio::test]
+    async fn invalid_general_workspace_rejects_before_enqueue_or_runtime() {
+        let (_home, state, key) = fixture();
+        state
+            .registry
+            .lock()
+            .unwrap()
+            .update_checked(&key, |r| {
+                r.set_string("scope", "general");
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            call(
+                &state,
+                "agent.prompt",
+                json!({"name":"chat","text":"must not enqueue","queue":true})
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "invalid_params"
+        );
+        assert_eq!(
+            items(state.registry.lock().unwrap().find("chat").unwrap())
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(state.native_runtime.get().is_none());
+        assert_eq!(
+            state
+                .last_event_id
+                .load(std::sync::atomic::Ordering::Acquire),
+            0
+        );
+        finish(state).await;
+    }
+    #[tokio::test]
+    async fn archived_or_unsupported_provider_queue_pauses_without_spin_or_spawn() {
+        for archived in [false, true] {
+            let (_home, state, key) = fixture();
+            {
+                let mut reg = state.registry.lock().unwrap();
+                let mut rec = reg.remove_checked(&key).unwrap();
+                rec.remove("queuePaused");
+                if archived {
+                    rec.set_bool("archived", true);
+                } else {
+                    rec.set_string("provider", "claude");
+                }
+                reg.insert(rec).unwrap();
+            }
+            schedule(state.clone(), key);
+            tokio::time::timeout(Duration::from_secs(5), state.host_jobs.wait())
+                .await
+                .unwrap();
+            assert!(paused(state.registry.lock().unwrap().find("chat").unwrap()));
+            assert!(state.native_runtime.get().is_none());
+            finish(state).await;
+        }
     }
 }

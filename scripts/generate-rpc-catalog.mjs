@@ -30,6 +30,7 @@ function sourceInventory(file) {
 }
 
 function schemaType(schema) {
+  if (Array.isArray(schema.oneOf) && schema.oneOf.length) return schema.oneOf.map(schemaType).join(' | ')
   if (Array.isArray(schema.enum)) return schema.enum.map((value) => JSON.stringify(value)).join(' | ')
   if (Array.isArray(schema.type)) return schema.type.map((type) => schemaType({ ...schema, type })).join(' | ')
   if (schema.type === 'object') {

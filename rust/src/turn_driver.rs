@@ -58,8 +58,28 @@ pub struct Receipt {
 pub struct SinkError {
     pub message: String,
 }
+/// Typed completion authority supplied only by Driver after native cleanup and
+/// durable terminal append, before the exact ticket's slot can be released.
+/// A sink may consume it for checked metadata IO; JSON events are not authority.
+pub struct Completion {
+    ticket: Ticket,
+    outcome: Outcome,
+}
+impl Completion {
+    pub fn ticket(&self) -> &Ticket {
+        &self.ticket
+    }
+    pub fn outcome(&self) -> &Outcome {
+        &self.outcome
+    }
+}
 pub trait EventSink: Send + Sync + 'static {
     fn append(&self, draft: Value) -> Task<Result<Receipt, SinkError>>;
+    /// Once polled, owned IO must finish even if a caller stops waiting.
+    /// Runs outside Driver locks. Error or panic closes execution admission.
+    fn before_release(&self, _completion: Completion) -> Task<Result<(), SinkError>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerError {
@@ -453,7 +473,14 @@ impl Driver {
             let changed = self.inner.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            if !self.inner.state.lock().expect("driver state mutex").jobs.contains_key(ticket) {
+            if !self
+                .inner
+                .state
+                .lock()
+                .expect("driver state mutex")
+                .jobs
+                .contains_key(ticket)
+            {
                 return;
             }
             changed.await;
@@ -1179,6 +1206,20 @@ async fn finish(
             }
         }
     };
+    if terminal_event_id.is_some() && end.error != Some(DriverError::StorageUnavailable) {
+        let sink = inner.sink.clone();
+        let completion = Completion {
+            ticket: ticket.clone(),
+            outcome: end.outcome.clone(),
+        };
+        if !matches!(
+            tokio::spawn(async move { sink.before_release(completion).await }).await,
+            Ok(Ok(()))
+        ) {
+            latch_storage(inner);
+            end.error = Some(DriverError::StorageUnavailable);
+        }
+    }
     if end.error == Some(DriverError::StorageUnavailable) {
         end.outcome = failure(
             "journal_unknown",

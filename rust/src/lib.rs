@@ -31,12 +31,12 @@ pub mod runtime_config;
 mod runtime_journal;
 mod runtime_state;
 mod session_api;
-mod session_queue;
 pub mod session_create;
 pub mod session_live;
 mod session_memory;
 mod session_memory_api;
 mod session_model;
+mod session_queue;
 mod session_read;
 mod session_runtime_api;
 mod session_tree;
@@ -746,7 +746,7 @@ async fn connection(
         client_label,
         state.connection_id.fetch_add(1, Ordering::Relaxed)
     );
-    let _queue_connection= session_queue::ConnectionLease(state.clone(),by.clone());
+    let _queue_connection = session_queue::ConnectionLease(state.clone(), by.clone());
     write_value(&mut output, &json!({"type":"hello_ok","protocol":PROTOCOL,"daemon":{"version":VERSION,"pid":std::process::id(),"startedAt":state.started_at},"capabilities":{"experimental":true,"supportedMethods":supported,"partialMethods":partial}})).await?;
     let (writer, _writer_task) = stream::Writer::start(output);
     let mut writer_closed = writer.closed();

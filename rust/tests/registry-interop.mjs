@@ -227,7 +227,31 @@ try {
     await stop()
     const raw = { version: 2, sessions: sessions().map((r) => r.name === 'alpha' ? { ...r, queue: [{ id: 'long', text: long, at: epoch }], queuePaused: true } : r) }
     seed(paths, raw, events)
-    await oracle.close()
+    await check('unknown queue marker survives Rust/Node rollback and receipt identity is structural', async () => {
+    for (const exact of [false, true]) {
+      const p = await prepare()
+      const item = { id: 'a:b', text: 'delivery may already have happened', at: 'c' }
+      const raw = { version: 2, sessions: [record('uncertain', { provider: 'codex', queue: [item], queuePaused: true, queueDispatch: { id: item.id, at: item.at } })] }
+      const receipts = [event(1, 'uncertain', 'message.user', { queueItemId: exact ? 'a:b' : 'a', queueItemAt: exact ? 'c' : 'b:c' })]
+      seed(p, raw, receipts)
+      const world = makeOracle(raw, receipts)
+      const live = await start(p)
+      if (exact) {
+        assert.equal(sessions(p)[0].queue, undefined)
+        assert.equal(sessions(p)[0].queueDispatch, undefined)
+        assert.equal(world.registry.get('uncertain').queueDispatch, undefined)
+      } else {
+        assert.deepEqual(sessions(p)[0].queueDispatch, { id: 'a:b', at: 'c' })
+        assert.throws(() => world.manager.queueResume('uncertain'), e => e.code === 'send_unknown')
+        await assert.rejects(live.client.request('agent.queue.resume', { name: 'uncertain' }), e => e.code === 'send_unknown')
+        const shown = await live.client.request('agent.rename', { name: 'uncertain', title: 'still uncertain' })
+        assert.match(shown.queue[0].text, /Delivery unknown/)
+        assert.match(publicRecord(world.registry.get('uncertain')).queue[0].text, /Delivery unknown/)
+      }
+      await stop(live.client, live.daemon); await world.close()
+    }
+  })
+  await oracle.close()
     oracle = makeOracle(raw, events)
     ;({ daemon, client } = await start())
     for (const title of ['  Новый\nзаголовок 🌊  ', '', `Legacy ${lonely}`, '\u200B\u202E']) {

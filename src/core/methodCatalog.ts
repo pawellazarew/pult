@@ -293,22 +293,13 @@ export const RPC_CATALOG = {
             }
           },
           "queue": {
-            "type": "boolean",
-            "enum": [
-              false
-            ]
+            "type": "boolean"
           },
           "interrupt": {
-            "type": "boolean",
-            "enum": [
-              false
-            ]
+            "type": "boolean"
           },
           "steer": {
-            "type": "boolean",
-            "enum": [
-              false
-            ]
+            "type": "boolean"
           }
         },
         "required": [
@@ -318,16 +309,39 @@ export const RPC_CATALOG = {
         "additionalProperties": false
       },
       "resultSchema": {
-        "type": "object",
-        "properties": {
-          "turnId": {
-            "type": "string"
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "turnId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "turnId"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "queued": {
+                "type": "boolean",
+                "enum": [
+                  true
+                ]
+              },
+              "id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "queued",
+              "id"
+            ],
+            "additionalProperties": false
           }
-        },
-        "required": [
-          "turnId"
-        ],
-        "additionalProperties": false
+        ]
       }
     },
     {
@@ -374,7 +388,133 @@ export const RPC_CATALOG = {
       },
       "resultSchema": {
         "type": "object",
-        "additionalProperties": true
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "queue": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                },
+                "at": {
+                  "type": "string"
+                },
+                "attachments": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "mime": {
+                        "type": "string"
+                      },
+                      "bytes": {
+                        "type": "integer"
+                      },
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "file",
+                          "directory"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "path",
+                      "name",
+                      "mime",
+                      "bytes",
+                      "kind"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "id",
+                "text",
+                "at"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "queuePaused": {
+            "type": "boolean"
+          },
+          "edit": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "holdMs": {
+                "type": "integer"
+              },
+              "attachments": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "mime": {
+                      "type": "string"
+                    },
+                    "bytes": {
+                      "type": "integer"
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "file",
+                        "directory"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "name",
+                    "mime",
+                    "bytes",
+                    "kind"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "id",
+              "text",
+              "holdMs"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "name",
+          "queue",
+          "queuePaused"
+        ],
+        "additionalProperties": false
       }
     },
     {
@@ -402,7 +542,78 @@ export const RPC_CATALOG = {
       },
       "resultSchema": {
         "type": "object",
-        "additionalProperties": true
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "queue": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                },
+                "at": {
+                  "type": "string"
+                },
+                "attachments": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "mime": {
+                        "type": "string"
+                      },
+                      "bytes": {
+                        "type": "integer"
+                      },
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "file",
+                          "directory"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "path",
+                      "name",
+                      "mime",
+                      "bytes",
+                      "kind"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "id",
+                "text",
+                "at"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "queuePaused": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "queue",
+          "queuePaused"
+        ],
+        "additionalProperties": false
       }
     },
     {
@@ -426,7 +637,78 @@ export const RPC_CATALOG = {
       },
       "resultSchema": {
         "type": "object",
-        "additionalProperties": true
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "queue": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                },
+                "at": {
+                  "type": "string"
+                },
+                "attachments": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "mime": {
+                        "type": "string"
+                      },
+                      "bytes": {
+                        "type": "integer"
+                      },
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "file",
+                          "directory"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "path",
+                      "name",
+                      "mime",
+                      "bytes",
+                      "kind"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "id",
+                "text",
+                "at"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "queuePaused": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "queue",
+          "queuePaused"
+        ],
+        "additionalProperties": false
       }
     },
     {
@@ -454,7 +736,15 @@ export const RPC_CATALOG = {
       },
       "resultSchema": {
         "type": "object",
-        "additionalProperties": true
+        "properties": {
+          "turnId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "turnId"
+        ],
+        "additionalProperties": false
       }
     },
     {
@@ -3380,7 +3670,7 @@ export type RustPartialMethod = "agent.list" | "agent.prompt" | "agent.queue.mov
 
 export interface RustPartialParams {
   "agent.list": Record<string, never>
-  "agent.prompt": { "name": string; "text": string; "attachments"?: Array<{ "path": string; "name": string; "mime": string; "bytes": number; "kind": "file" | "directory" }>; "queue"?: false; "interrupt"?: false; "steer"?: false }
+  "agent.prompt": { "name": string; "text": string; "attachments"?: Array<{ "path": string; "name": string; "mime": string; "bytes": number; "kind": "file" | "directory" }>; "queue"?: boolean; "interrupt"?: boolean; "steer"?: boolean }
   "agent.queue.move": { "name": string; "id": string; "to"?: number; "hold"?: boolean; "text"?: string }
   "agent.queue.remove": { "name": string; "id": string }
   "agent.queue.resume": { "name": string }
@@ -3393,11 +3683,11 @@ export interface RustPartialParams {
 
 export interface RustPartialResults {
   "agent.list": { "sessions": Array<{ "name": string; "provider": string; "cwd": string; "mode": string; "createdAt": string; "lastStatus": string; "lastEventId": number; "status": "cold" | "idle" | "working" | "blocked_permission" | "blocked_question" | "limited" | "interrupted" | "failed" | "done"; "pendingPermissions": number; "liveApproval": "read-only" | "ask" | "workspace" | "full" | "inherit" | null; [key: string]: unknown }> }
-  "agent.prompt": { "turnId": string }
-  "agent.queue.move": { [key: string]: unknown }
-  "agent.queue.remove": { [key: string]: unknown }
-  "agent.queue.resume": { [key: string]: unknown }
-  "agent.queue.send": { [key: string]: unknown }
+  "agent.prompt": { "turnId": string } | { "queued": true; "id": string }
+  "agent.queue.move": { "name": string; "queue": Array<{ "id": string; "text": string; "at": string; "attachments"?: Array<{ "path": string; "name": string; "mime": string; "bytes": number; "kind": "file" | "directory" }> }>; "queuePaused": boolean; "edit"?: { "id": string; "text": string; "holdMs": number; "attachments"?: Array<{ "path": string; "name": string; "mime": string; "bytes": number; "kind": "file" | "directory" }> } }
+  "agent.queue.remove": { "name": string; "queue": Array<{ "id": string; "text": string; "at": string; "attachments"?: Array<{ "path": string; "name": string; "mime": string; "bytes": number; "kind": "file" | "directory" }> }>; "queuePaused": boolean }
+  "agent.queue.resume": { "name": string; "queue": Array<{ "id": string; "text": string; "at": string; "attachments"?: Array<{ "path": string; "name": string; "mime": string; "bytes": number; "kind": "file" | "directory" }> }>; "queuePaused": boolean }
+  "agent.queue.send": { "turnId": string }
   "agent.start": { "name": string; "provider": string; "cwd": string; "mode": string; "createdAt": string; "lastStatus": string; "lastEventId": number; [key: string]: unknown }
   "agent.stop": { "stopped": boolean }
   "perm.list": { "pending": Array<{ [key: string]: unknown }> }
