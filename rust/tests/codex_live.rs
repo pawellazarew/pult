@@ -10,16 +10,18 @@ async fn installed_codex_initializes_and_confirms_process_cleanup() {
         PathBuf::from(std::env::var_os("PULT_REAL_CODEX_BIN").expect("set PULT_REAL_CODEX_BIN"));
     assert!(program.is_absolute());
     let scratch = tempfile::tempdir().unwrap();
-    let env = worker_env::from_parent(
+    let mut env = worker_env::from_parent(
         &std::env::vars_os().collect(),
         &worker_env::Environment::new(),
     )
     .unwrap();
+    // Never load the user's profile/auth/settings during this opt-in handshake.
+    env.insert("HOME".into(), scratch.path().as_os_str().to_os_string());
     let mut connection = codex_process::start(
         Launch {
             holder: env!("CARGO_BIN_EXE_pult-worker-holder").into(),
             program,
-            args: vec!["app-server".into(), "--stdio".into()],
+            args: vec!["app-server".into()],
             cwd: scratch.path().into(),
             env,
         },
