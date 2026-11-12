@@ -232,7 +232,8 @@ export function publicQueue(q: readonly QueueItem[] | undefined): QueueItem[] {
 
 /** Запись реестра наружу: очередь — превью (rename, archive, seen и прочие отдают запись целиком). */
 export function publicRecord<T extends SessionRecord>(rec: T): T {
-  return rec.queue ? { ...rec, queue: publicQueue(rec.queue) } : rec
+  return rec.queue ? { ...rec, queue: publicQueue(rec.queue.map(item => rec.queueDispatch?.id === item.id && rec.queueDispatch.at === item.at
+    ? { ...item, text: `[Delivery unknown; Send now may duplicate] ${item.text}` } : item)) } : rec
 }
 
 export interface UsageRow {
@@ -506,9 +507,12 @@ export function createManager(opts: ManagerOptions): SessionManager {
   for (let rec of registry.list()) {
     if (rec.queue?.length) {
       // Crash между receipt и записью sessions.json: уже принятая реплика повторно не уйдёт.
-      const accepted = new Set(opts.store.readSession(rec.name).filter(e => e.kind === 'message.user' && typeof e.data['queueItemId'] === 'string').map(e => `${e.data['queueItemId']}:${e.data['queueItemAt']}`))
-      const remaining = rec.queue.filter(item => !accepted.has(`${item.id}:${item.at}`))
-      if (remaining.length !== rec.queue.length) rec = registry.update(rec.name, { queue: remaining.length ? remaining : undefined, ...(remaining.length ? {} : { queuePaused: undefined }) }) as SessionRecord
+      const accepted = new Set(opts.store.readSession(rec.name).filter(e => e.kind === 'message.user' && typeof e.data['queueItemId'] === 'string').map(e => JSON.stringify([e.data['queueItemId'],e.data['queueItemAt']])))
+      const remaining = rec.queue.filter(item => !accepted.has(JSON.stringify([item.id,item.at])))
+      if (remaining.length !== rec.queue.length) rec = registry.update(rec.name, { queue: remaining.length ? remaining : undefined, ...(remaining.length ? {} : { queuePaused: undefined, queueDispatch: undefined }) }) as SessionRecord
+    }
+    if (rec.queueDispatch && !rec.queue?.some(item => item.id === rec.queueDispatch!.id && item.at === rec.queueDispatch!.at)) {
+      rec = registry.update(rec.name, { queueDispatch: undefined }) as SessionRecord
     }
     statuses.set(rec.name, rec.lastStatus)
     if (rec.context) contexts.set(rec.name, rec.context)
@@ -772,7 +776,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
   const attachmentBytes = (attachments: readonly PromptAttachment[] = []): number => attachments.length ? Buffer.byteLength(JSON.stringify(attachments)) : 0
   const queueBytes = (q: readonly QueueItem[]): number => q.reduce((n, it) => n + Buffer.byteLength(it.text) + attachmentBytes(it.attachments), 0)
   const queueState = (rec: SessionRecord): QueueState =>
-    ({ name: rec.name, queue: publicQueue(rec.queue), queuePaused: rec.queuePaused === true })
+    ({ name: rec.name, queue: publicRecord(rec).queue ?? [], queuePaused: rec.queuePaused === true })
   const pauseQueue = (name: string, why: string): void => {
     const rec = registry.get(name)
     if (!rec?.queue?.length || rec.queuePaused) return
@@ -789,7 +793,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
    */
   async function drain(name: string): Promise<void> {
     const rec = registry.get(name)
-    if (!rec?.queue?.length || rec.queuePaused || holdDrain.has(name) || queueSending.has(name) || removing.has(name) || busyNow(name)) return
+    if (!rec?.queue?.length || rec.queuePaused || rec.queueDispatch || holdDrain.has(name) || queueSending.has(name) || removing.has(name) || busyNow(name)) return
     if (Object.hasOwn(rec, 'claudeReservedSessionId')) { pauseQueue(name, 'native_send_unknown'); return }
     if (opts.holdTurns?.()) return
     const [item, ...rest] = rec.queue as [QueueItem, ...QueueItem[]]
@@ -1497,6 +1501,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
     queueResume(name) {
       const rec = needRec(name)
       requireResolvedNativeInput(rec)
+      if (rec.queueDispatch) throw new ManagerError('send_unknown', 'previous delivery is unknown; Send now may duplicate it — edit or remove the message instead, or explicitly Send now after cleanup')
       const next = rec.queuePaused ? registry.update(name, { queuePaused: undefined }) as SessionRecord : rec
       if (next.queue?.length) scheduleDrain(name)
       return queueState(next)
@@ -1511,7 +1516,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
       const item = rec.queue![at]!
       if (opts.store.readSession(name).some(e => e.kind === 'message.user' && e.data['queueItemId'] === id && e.data['queueItemAt'] === item.at)) {
         const rest = (rec.queue ?? []).filter(it => it.id !== id)
-        registry.update(name, { queue: rest.length ? rest : undefined, ...(rest.length ? {} : { queuePaused: undefined }) })
+        registry.update(name, { queue: rest.length ? rest : undefined, queueDispatch: undefined, ...(rest.length ? {} : { queuePaused: undefined }) })
         rememberSent(name, id)
         throw goneItem(name, id)
       }
@@ -1522,7 +1527,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
         const current = registry.get(name)
         if (current?.createdAt === rec.createdAt) {
           const rest = (current.queue ?? []).filter(it => it.id !== id)
-          registry.update(name, { queue: rest.length ? rest : undefined, ...(rest.length ? {} : { queuePaused: undefined }) })
+          registry.update(name, { queue: rest.length ? rest : undefined, queueDispatch: undefined, ...(rest.length ? {} : { queuePaused: undefined }) })
           rememberSent(name, id)
         }
         return result
@@ -1542,7 +1547,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
       // Убрали реплику, которую правят, — правка держать больше нечего (сохранение получит «удалена»).
       dropHold(name, id, false)
       // Пустая очередь паузы не держит: следующая неудача поставит её заново.
-      return queueState(registry.update(name, { queue: q.length ? q : undefined, ...(q.length ? {} : { queuePaused: undefined }) }) as SessionRecord)
+      return queueState(registry.update(name, { queue: q.length ? q : undefined, ...(rec.queueDispatch?.id === id ? { queueDispatch: undefined } : {}), ...(q.length ? {} : { queuePaused: undefined, queueDispatch: undefined }) }) as SessionRecord)
     },
 
     queueMove(name, id, to) {
@@ -1589,7 +1594,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
         throw new ManagerError('invalid_params', `очередь ${name} больше ${QUEUE_TOTAL_BYTES / 1024} КБ — сократи реплику или убери лишние`)
       }
       q[at] = { ...old, text }
-      const next = registry.update(name, { queue: q }) as SessionRecord
+      const next = registry.update(name, { queue: q, ...(rec.queueDispatch?.id === id ? { queueDispatch: undefined } : {}) }) as SessionRecord
       // В журнал — только факт правки и id: текст реплики попадёт туда, как и прямая, отредактированным
       // `message.user` в момент отправки. Мимо `emit`: правка не активность хода (сторож тишины её не видит).
       opts.publish({ sessionId: name, provider: rec.provider, kind: 'queue.updated', data: { id } })

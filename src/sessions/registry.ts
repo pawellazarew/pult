@@ -111,6 +111,10 @@ export interface SessionRecord {
   model?: string
   effort?: string
   serviceTier?: ServiceTier
+  /** Rust-owned policy/markers: preserve opaque data on rollback, never execute it here. */
+  memory?: unknown
+  private?: unknown
+  temporary?: unknown
   mode: SessionMode
   /**
    * `--setting-sources` хода: какие наборы настроек CLI вообще разрешено читать.
@@ -180,6 +184,8 @@ export interface SessionRecord {
    * не тронется — только `agent.queue.resume`: следующая реплика могла держаться на результате упавшего хода.
    */
   queuePaused?: boolean
+  /** Rust/Node rollback guard: native delivery has not been confirmed. */
+  queueDispatch?: { id: string; at: string }
   /**
    * О3, браузер для агента (src/mcp/browser.ts): Playwright MCP в MCP-конфиге сессии, свой профиль и
    * скачивания в `PULT_HOME/browser/<имя>`. `headed` — окно браузера видно (по умолчанию без окна).
@@ -364,6 +370,9 @@ export function parseSessions(raw: unknown): SessionRecord[] {
       ...(typeof o['effort'] === 'string' ? { effort: o['effort'] } : {}),
       ...(o['provider'] === 'codex' && isServiceTier(o['serviceTier']) ? { serviceTier: o['serviceTier'] } : {}),
       mode,
+      ...(Object.hasOwn(o, 'memory') ? { memory: o['memory'] } : {}),
+      ...(Object.hasOwn(o, 'private') ? { private: o['private'] } : {}),
+      ...(Object.hasOwn(o, 'temporary') ? { temporary: o['temporary'] } : {}),
       ...(typeof o['settingSources'] === 'string' ? { settingSources: o['settingSources'] } : {}),
       ...(Object.hasOwn(o, 'claudeReservedSessionId') ? { claudeReservedSessionId: o['claudeReservedSessionId'] } : {}),
       ...(typeof o['providerSessionId'] === 'string' ? { providerSessionId: o['providerSessionId'] } : {}),
@@ -382,6 +391,11 @@ export function parseSessions(raw: unknown): SessionRecord[] {
       ...(o['markedUnread'] === true ? { markedUnread: true } : {}),
       ...((): { queue?: QueueItem[] } => { const q = parseQueue(o['queue']); return q.length ? { queue: q } : {} })(),
       ...(o['queuePaused'] === true || Object.hasOwn(o, 'claudeReservedSessionId') ? { queuePaused: true } : {}),
+      ...((): { queueDispatch?: { id: string; at: string }; queuePaused?: boolean } => {
+        const m = o['queueDispatch'] as Record<string, unknown> | undefined
+        return m && typeof m['id'] === 'string' && typeof m['at'] === 'string'
+          ? { queueDispatch: { id: m['id'], at: m['at'] }, queuePaused: true } : {}
+      })(),
       ...((): { browser?: SessionBrowser } => { const b = parseBrowser(o['browser']); return b ? { browser: b } : {} })(),
       ...((): { browserSuspended?: SessionBrowser } => { const b = parseBrowser(o['browserSuspended']); return b ? { browserSuspended: b } : {} })(),
       // Неизвестный режим из файла (правили руками, файл от демона новее) — САМЫЙ строгий, `read-only` (ревью M8d):

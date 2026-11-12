@@ -13,11 +13,15 @@ use std::sync::{
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-pub(crate) const METHODS: [&str; 6] = [
+pub(crate) const METHODS: [&str; 10] = [
     "agent.start",
     "agent.list",
     "agent.prompt",
     "agent.stop",
+    "agent.queue.send",
+    "agent.queue.resume",
+    "agent.queue.remove",
+    "agent.queue.move",
     "perm.list",
     "perm.resolve",
 ];
@@ -26,6 +30,8 @@ pub(crate) const METHODS: [&str; 6] = [
 pub(crate) struct Gate {
     entries: Mutex<HashMap<String, Arc<Token>>>,
     slots: Arc<Semaphore>,
+    pub(crate) queue: Arc<crate::session_queue::Queue>,
+    advanced: Mutex<Vec<(String, Weak<tokio::sync::watch::Sender<bool>>)>>,
 }
 const MAX_COMMANDS: usize = 128;
 impl Default for Gate {
@@ -33,18 +39,21 @@ impl Default for Gate {
         Self {
             entries: Mutex::new(HashMap::new()),
             slots: Arc::new(Semaphore::new(MAX_COMMANDS)),
+            queue: Arc::default(),
+            advanced: Mutex::new(Vec::new()),
         }
     }
 }
 struct Admission {
     _slot: OwnedSemaphorePermit,
     command: Option<CommandGuard>,
+    revoked: Arc<tokio::sync::watch::Sender<bool>>,
 }
 struct Token {
     cancelled: AtomicBool,
     stopping: bool,
 }
-struct CommandGuard {
+pub(crate) struct CommandGuard {
     name: String,
     token: Arc<Token>,
     gate: Weak<Gate>,
@@ -62,16 +71,13 @@ impl Gate {
                     params,
                     &["name", "text", "attachments", "queue", "interrupt", "steer"],
                 )?;
-                for flag in ["queue", "interrupt", "steer"] {
-                    if params.get(flag).is_some_and(|value| value != false) {
-                        return Err(error(
-                            "unsupported",
-                            "queue, interrupt-and-send and steering are not ported yet",
-                        ));
-                    }
-                }
+                modes(params)?;
                 params["text"].as_str().ok_or_else(invalid)?;
-                Some(self.reserve(&name(params)?, false)?)
+                if params["queue"] == true || params["steer"] == true {
+                    None
+                } else {
+                    Some(self.reserve(&name(params)?, params["interrupt"] == true)?)
+                }
             }
             "agent.stop" => {
                 fields(params, &["name", "turnId"])?;
@@ -86,10 +92,72 @@ impl Gate {
             }
             _ => None,
         };
+        let revoked = Arc::new(tokio::sync::watch::channel(false).0);
+        if method == "agent.stop" && params.get("turnId").is_none()
+            || method == "agent.prompt" && params["interrupt"] == true
+        {
+            let mut advanced = self.advanced.lock().map_err(|_| storage())?;
+            advanced.retain(|(_, token)| token.strong_count() > 0);
+            for (session, token) in advanced.iter() {
+                if Some(session.as_str()) == params["name"].as_str()
+                    && let Some(token) = token.upgrade()
+                {
+                    token.send_replace(true);
+                }
+            }
+        }
+        if method == "agent.prompt" || method == "agent.queue.send" {
+            let mut advanced = self.advanced.lock().map_err(|_| storage())?;
+            advanced.retain(|(_, token)| token.strong_count() > 0);
+            advanced.push((name(params)?, Arc::downgrade(&revoked)));
+        }
         Ok(Admission {
             _slot: slot,
             command,
+            revoked,
         })
+    }
+    pub(crate) fn register_advanced(
+        &self,
+        name: &str,
+        token: &Arc<tokio::sync::watch::Sender<bool>>,
+    ) {
+        let mut entries = self.advanced.lock().expect("command admission");
+        entries.retain(|(_, v)| v.strong_count() > 0);
+        entries.push((name.into(), Arc::downgrade(token)));
+    }
+    fn submit_advanced(
+        &self,
+        token: &tokio::sync::watch::Sender<bool>,
+        runtime: &crate::codex_runtime::CodexRuntime,
+        key: SessionKey,
+        input: crate::turn_driver::Input,
+    ) -> Result<
+        crate::turn_driver::Task<
+            std::result::Result<crate::turn_driver::Handle, crate::codex_runtime::RuntimeError>,
+        >,
+    > {
+        let _admission = self.advanced.lock().map_err(|_| storage())?;
+        if *token.borrow()
+            || self
+                .entries
+                .lock()
+                .map_err(|_| storage())?
+                .get(&key.name)
+                .is_some_and(|v| v.stopping)
+        {
+            return Err(error("cancelled", "queued command was stopped"));
+        }
+        Ok(if input.metadata.queue_item_id.is_some() {
+            runtime.execute_queued(key, input)
+        } else {
+            runtime.execute(key, input)
+        })
+    }
+    pub(crate) fn pending(&self, name: &str) -> bool {
+        self.entries
+            .lock()
+            .is_ok_and(|entries| entries.contains_key(name))
     }
     fn reserve(self: &Arc<Self>, name: &str, stopping: bool) -> Result<CommandGuard> {
         let mut entries = self.entries.lock().map_err(|_| storage())?;
@@ -157,24 +225,41 @@ impl Drop for CommandGuard {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct Error {
     pub code: &'static str,
     pub message: &'static str,
 }
-type Result<T> = std::result::Result<T, Error>;
-fn error(code: &'static str, message: &'static str) -> Error {
+pub(crate) type Result<T> = std::result::Result<T, Error>;
+pub(crate) fn error(code: &'static str, message: &'static str) -> Error {
     Error { code, message }
 }
-fn invalid() -> Error {
+fn modes(params: &Value) -> Result<()> {
+    if ["queue", "interrupt", "steer"]
+        .iter()
+        .filter(|key| params[**key] == true)
+        .count()
+        > 1
+    {
+        return Err(invalid());
+    }
+    for key in ["queue", "interrupt", "steer"] {
+        if params.get(key).is_some_and(|v| !v.is_boolean()) {
+            return Err(invalid());
+        }
+    }
+    Ok(())
+}
+pub(crate) fn invalid() -> Error {
     error("invalid_params", "invalid session command parameters")
 }
-fn storage() -> Error {
+pub(crate) fn storage() -> Error {
     error("storage_unavailable", "session storage is unavailable")
 }
-fn raw(value: Value) -> Result<Box<RawValue>> {
+pub(crate) fn raw(value: Value) -> Result<Box<RawValue>> {
     to_raw_value(&value).map_err(|_| storage())
 }
-fn fields(params: &Value, allowed: &[&str]) -> Result<()> {
+pub(crate) fn fields(params: &Value, allowed: &[&str]) -> Result<()> {
     let object = params.as_object().ok_or_else(invalid)?;
     if object.keys().any(|key| !allowed.contains(&key.as_str())) {
         return Err(error(
@@ -184,14 +269,14 @@ fn fields(params: &Value, allowed: &[&str]) -> Result<()> {
     }
     Ok(())
 }
-fn name(params: &Value) -> Result<String> {
+pub(crate) fn name(params: &Value) -> Result<String> {
     let name = params["name"]
         .as_str()
         .filter(|name| session_model::is_name(name))
         .ok_or_else(invalid)?;
     Ok(name.into())
 }
-fn key(record: &crate::registry::Record) -> Result<SessionKey> {
+pub(crate) fn key(record: &crate::registry::Record) -> Result<SessionKey> {
     let key = SessionKey {
         name: record.name().into(),
         created_at: record.scalar("createdAt").ok_or_else(storage)?,
@@ -199,7 +284,7 @@ fn key(record: &crate::registry::Record) -> Result<SessionKey> {
     key.validate().map_err(|_| storage())?;
     Ok(key)
 }
-async fn lookup(state: Arc<State>, name: String) -> Result<(SessionKey, String)> {
+pub(crate) async fn lookup(state: Arc<State>, name: String) -> Result<(SessionKey, String)> {
     let job = state.host_jobs.track();
     tokio::task::spawn_blocking(move || {
         let _job = job;
@@ -212,7 +297,7 @@ async fn lookup(state: Arc<State>, name: String) -> Result<(SessionKey, String)>
     .await
     .map_err(|_| storage())?
 }
-fn available(state: &State) -> Result<()> {
+pub(crate) fn available(state: &State) -> Result<()> {
     if *state.stop.borrow() {
         return Err(error("closed", "daemon is stopping"));
     }
@@ -240,26 +325,31 @@ async fn create(state: Arc<State>, params: Value, client: ClientKind) -> Result<
         {
             return Err(error("capacity", "session status cache is full"));
         }
-        let mut record = crate::session_create::create(
+        let record = crate::session_create::create(
             &state.home,
             &state.registry,
             &consent,
             &params,
             client,
             store.last_id(),
-        )
-        .map_err(|e| {
-            if e == crate::session_create::CreateError::Storage {
-                state.execution_storage_failed();
+        );
+        let mut record = match record {
+            Ok(record) => record,
+            Err(e) => {
+                drop(store);
+                if e == crate::session_create::CreateError::Storage {
+                    state.execution_storage_failed();
+                }
+                return Err(error(e.code(), "session could not be created"));
             }
-            error(e.code(), "session could not be created")
-        })?;
+        };
         let registered = state.live_sessions.lock().map_err(|_| storage())?.seed(
             key(&record)?,
             crate::session_live::Status::Cold,
             0,
         );
         if registered.is_err() {
+            drop(store);
             state.execution_storage_failed();
             return Err(storage());
         }
@@ -331,23 +421,27 @@ async fn list(state: Arc<State>, params: Value) -> Result<Box<RawValue>> {
     .map_err(|_| storage())?
 }
 
-async fn prompt(state: Arc<State>, params: Value, command: CommandGuard) -> Result<Box<RawValue>> {
+pub(crate) async fn ordinary(
+    state: Arc<State>,
+    params: Value,
+    command: Option<&CommandGuard>,
+    metadata: crate::turn_driver::InputMetadata,
+    expected: SessionKey,
+    revoked: Arc<tokio::sync::watch::Sender<bool>>,
+) -> Result<Box<RawValue>> {
     fields(
         &params,
         &["name", "text", "attachments", "queue", "interrupt", "steer"],
     )?;
-    // Advanced forms must not leave a user receipt or start a provider.
-    for flag in ["queue", "interrupt", "steer"] {
-        if params.get(flag).is_some_and(|value| value != false) {
-            return Err(error(
-                "unsupported",
-                "queue, interrupt-and-send and steering are not ported yet",
-            ));
-        }
-    }
     let name = name(&params)?;
     let text = params["text"].as_str().ok_or_else(invalid)?.to_owned();
     let (session, provider) = lookup(state.clone(), name.clone()).await?;
+    if session != expected {
+        return Err(error(
+            "not_found",
+            "session incarnation changed before dispatch",
+        ));
+    }
     if provider != "codex" {
         return Err(error(
             "unsupported",
@@ -368,7 +462,9 @@ async fn prompt(state: Arc<State>, params: Value, command: CommandGuard) -> Resu
     .map_err(|_| storage())?
     .map_err(|_| invalid())?;
     available(&state)?;
-    command.check()?;
+    if let Some(command) = &command {
+        command.check()?;
+    }
     let runtime = runtime_state::instance(&state)
         .await
         .map_err(|_| error("runtime_unavailable", "native runtime is unavailable"))?;
@@ -376,13 +472,21 @@ async fn prompt(state: Arc<State>, params: Value, command: CommandGuard) -> Resu
         text,
         metadata: crate::turn_driver::InputMetadata {
             attachments,
-            ..Default::default()
+            ..metadata
         },
     };
-    let mut handle = command
-        .submit(&runtime, session, input)?
+    let pending = if let Some(command) = command {
+        command.submit(&runtime, session.clone(), input)?
+    } else {
+        state
+            .session_commands
+            .submit_advanced(&revoked, &runtime, session.clone(), input)?
+    };
+    let mut handle = pending
         .await
         .map_err(|e| error(e.code(), "turn was not accepted"))?;
+    let progress = handle.subscribe_progress();
+    crate::session_queue::observe(state.clone(), session, progress);
     let accepted = handle.accepted().await.map_err(|e| {
         use crate::turn_driver::DriverError;
         let code = match e {
@@ -432,6 +536,7 @@ async fn stop(
         .map_err(|e| error(e.code(), "stop request failed"))?;
     }
     if turn_id.is_none() || stopped {
+        crate::session_queue::pause(state.clone(), key.clone()).await?;
         // Interrupted describes the user's stop intent. Native close proof and
         // its Full diagnostic snapshot remain owned until actual cleanup.
         let sink = state.execution_sink();
@@ -513,12 +618,16 @@ async fn execute_owned(
     client: ClientKind,
     by: &str,
     command: Option<CommandGuard>,
+    revoked: Arc<tokio::sync::watch::Sender<bool>>,
 ) -> Result<Box<RawValue>> {
     available(&state)?;
     match method {
         "agent.start" => create(state, params, client).await,
         "agent.list" => list(state, params).await,
-        "agent.prompt" => prompt(state, params, command.ok_or_else(storage)?).await,
+        "agent.prompt" => crate::session_queue::prompt(state, params, command, revoked).await,
+        "agent.queue.send" | "agent.queue.resume" | "agent.queue.remove" | "agent.queue.move" => {
+            crate::session_queue::request(state, method, params, by, revoked).await
+        }
         "agent.stop" => stop(state, params, command).await,
         "perm.list" => {
             fields(&params, &["name"])?;
@@ -558,15 +667,19 @@ pub(crate) fn execute(
     let (send, receive) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         let _job = job;
-        let Admission { _slot, command } = admission;
-        let result = execute_owned(state, &method, params, client, &by, command).await;
+        let Admission {
+            _slot,
+            command,
+            revoked,
+        } = admission;
+        let result = execute_owned(state, &method, params, client, &by, command, revoked).await;
         let _ = send.send(result);
     });
     Box::pin(async move { receive.await.unwrap_or_else(|_| Err(storage())) })
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     use std::sync::{
@@ -577,7 +690,7 @@ mod tests {
     use std::time::{Duration, Instant};
     use tokio::sync::watch;
 
-    fn fixture() -> (tempfile::TempDir, Arc<State>) {
+    pub(crate) fn fixture() -> (tempfile::TempDir, Arc<State>) {
         let home = tempfile::tempdir().unwrap();
         std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let mut store = crate::journal::EventStore::open(&home.path().join("events")).unwrap();
@@ -605,9 +718,11 @@ mod tests {
             connection_id: AtomicU64::new(1),
             driver: OnceLock::new(),
             execution_storage_failed: AtomicBool::new(false),
+            execution_admission: Mutex::new(()),
             host_jobs: Arc::default(),
             session_commands: Arc::default(),
             native_runtime: OnceLock::new(),
+            memory_turns: OnceLock::new(),
             runtime_init: Mutex::new(()),
             consent: Mutex::new(None),
             live_sessions: Mutex::new(crate::session_live::Cache::new(65536).unwrap()),

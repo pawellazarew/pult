@@ -22,9 +22,27 @@ use std::sync::{
 use std::time::Duration;
 const WAIT: Duration = Duration::from_secs(20);
 
+// Keep payloads/backtraces secret while making CI assertion locations useful.
+// This hook exists only in this isolated synthetic integration-test process.
+fn test_panic_guard() {
+    pult_core::panic_guard::install();
+    static LOCATION_HOOK: std::sync::Once = std::sync::Once::new();
+    LOCATION_HOOK.call_once(|| {
+        std::panic::set_hook(Box::new(|info| {
+            if let Some(location) = info.location() {
+                eprintln!(
+                    "runtime fixture panic at {}:{}",
+                    location.file(),
+                    location.line()
+                );
+            }
+        }));
+    });
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_stops_warm_process_before_waiting_for_owned_registry_check() {
-    pult_core::panic_guard::install();
+    test_panic_guard();
     let mut f = Fixture::new();
     let entered = Arc::new(tokio::sync::Notify::new());
     let arriving = entered.clone();
@@ -115,7 +133,7 @@ async fn shutdown_stops_warm_process_before_waiting_for_owned_registry_check() {
         1
     );
 }
-macro_rules! case {($name:ident,$body:block)=>{#[tokio::test]async fn $name(){pult_core::panic_guard::install();tokio::time::timeout(WAIT,async $body).await.expect("runtime watchdog");}};}
+macro_rules! case {($name:ident,$body:block)=>{#[tokio::test]async fn $name(){test_panic_guard();tokio::time::timeout(WAIT,async $body).await.expect("runtime watchdog");}};}
 struct ScriptProbe {
     loc: &'static str,
     calls: AtomicUsize,
@@ -149,6 +167,12 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        // Ordinary integration uses the production cleanup contract, not a
+        // 200 ms Driver deadline below the host's 300 ms interrupt + IO drain.
+        // A shorter deadline belongs only in an explicit quarantine/retry case.
+        Self::with_options(Options::default())
+    }
+    fn with_options(options: Options) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().canonicalize().unwrap();
         std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -175,10 +199,7 @@ impl Fixture {
             Driver::new(
                 sink.clone(),
                 Arc::new(pult_core::redaction::redact_string),
-                Options {
-                    close_timeout: Duration::from_millis(200),
-                    ..Default::default()
-                },
+                options,
             )
             .unwrap(),
         );
@@ -325,7 +346,22 @@ case!(
         }
         assert!(!rt.stop(&key("one"), Some("native-turn-2")).unwrap());
         assert!(rt.stop(&key("one"), Some(&aa.turn_id)).unwrap());
-        assert_eq!(a.wait().await.unwrap().turn.outcome, Outcome::Interrupted);
+        let stopped = a.wait().await;
+        if let Err(error) = &stopped {
+            eprintln!("exact public stop wait error: {error:?}");
+        }
+        let outcome = stopped.unwrap().turn.outcome;
+        if outcome != Outcome::Interrupted {
+            eprintln!(
+                "exact public stop outcome kind: {}",
+                match &outcome {
+                    Outcome::Success => "success",
+                    Outcome::Failure { .. } => "failure",
+                    Outcome::Interrupted => "interrupted",
+                }
+            );
+        }
+        assert_eq!(outcome, Outcome::Interrupted);
         assert_eq!(f.driver.active_count(), 1);
         std::fs::write(f.home.join("release"), "yes").unwrap();
         assert_eq!(b.wait().await.unwrap().turn.outcome, Outcome::Success);
@@ -700,7 +736,7 @@ case!(stale_stop_is_a_noop_for_finished_missing_or_reused_turns, {
 });
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_shutdown_callers_cannot_erase_terminal_success() {
-    pult_core::panic_guard::install();
+    test_panic_guard();
     tokio::time::timeout(WAIT, async {
         let f = Fixture::new();
         let probe = Arc::new(ScriptProbe {
@@ -776,6 +812,295 @@ case!(
             Outcome::Interrupted
         );
         assert!(f.logs().iter().all(|v| v["method"] != "turn/start"));
+        rt.shutdown().await.unwrap();
+    }
+);
+
+case!(
+    steering_is_exact_active_ticket_no_fallback_or_fake_receipt,
+    {
+        let f = Fixture::new();
+        let (runtime, _) = f.runtime(probe("US"), RuntimeConfig::default());
+        let mut one = runtime
+            .execute(key("one"), input("hold one"))
+            .await
+            .unwrap();
+        let accepted = one.accepted().await.unwrap();
+        let mut two = runtime
+            .execute(key("two"), input("hold two"))
+            .await
+            .unwrap();
+        two.accepted().await.unwrap();
+        let mut forged = input("forged steering receipt");
+        forged.metadata.queue_item_id = Some("untrusted".into());
+        forged.metadata.queue_item_at = Some("untrusted".into());
+        assert_eq!(
+            runtime.steer(&key("one"), forged).await.unwrap_err().code,
+            "invalid_params"
+        );
+        let before = f
+            .journal()
+            .iter()
+            .filter(|e| e["kind"] == "message.user")
+            .count();
+        assert_eq!(
+            runtime
+                .steer(&key("one"), input("reject-steer"))
+                .await
+                .unwrap_err()
+                .code,
+            "invalid_params"
+        );
+        assert_eq!(
+            f.journal()
+                .iter()
+                .filter(|e| e["kind"] == "message.user")
+                .count(),
+            before
+        );
+        assert_eq!(
+            runtime.steer(&key("one"), input("clarify")).await.unwrap(),
+            accepted.turn_id
+        );
+        let sent = f
+            .logs()
+            .into_iter()
+            .find(|e| e["method"] == "turn/steer")
+            .unwrap();
+        assert_eq!(sent["params"]["expectedTurnId"], "native-turn-2");
+        assert_eq!(
+            f.logs()
+                .iter()
+                .filter(|e| e["method"] == "turn/start")
+                .count(),
+            2
+        );
+        let outside = runtime.clone();
+        let response = std::thread::spawn(move || {
+            outside.steer(&key("one"), input("outside runtime context"))
+        })
+        .join()
+        .unwrap();
+        assert_eq!(response.await.unwrap(), accepted.turn_id);
+        runtime.stop(&key("one"), None).unwrap();
+        one.wait().await.unwrap();
+        assert!(runtime.steer(&key("one"), input("late")).await.is_err());
+        assert!(f.driver.active_ticket(&key("two")).is_some());
+        runtime.stop(&key("two"), None).unwrap();
+        two.wait().await.unwrap();
+        runtime.shutdown().await.unwrap();
+    }
+);
+
+case!(
+    unknown_steer_is_not_receipted_or_replayed_and_other_session_survives,
+    {
+        let f = Fixture::new();
+        let (runtime, _) = f.runtime(probe("US"), RuntimeConfig::default());
+        let mut one = runtime
+            .execute(key("one"), input("hold one"))
+            .await
+            .unwrap();
+        one.accepted().await.unwrap();
+        let mut two = runtime
+            .execute(key("two"), input("hold two"))
+            .await
+            .unwrap();
+        two.accepted().await.unwrap();
+        assert_eq!(
+            runtime
+                .steer(&key("one"), input("unknown-steer"))
+                .await
+                .unwrap_err()
+                .code,
+            "send_unknown"
+        );
+        assert_eq!(
+            f.logs()
+                .iter()
+                .filter(|e| e["method"] == "turn/steer")
+                .count(),
+            1
+        );
+        assert!(
+            !f.journal()
+                .iter()
+                .any(|e| e["kind"] == "message.user" && e["data"]["text"] == "unknown-steer")
+        );
+        assert!(f.driver.active_ticket(&key("two")).is_some());
+        runtime.stop(&key("one"), None).unwrap();
+        one.wait().await.unwrap();
+        runtime.stop(&key("two"), None).unwrap();
+        two.wait().await.unwrap();
+        runtime.shutdown().await.unwrap();
+    }
+);
+
+case!(
+    steer_uses_exact_lease_host_after_same_route_host_replacement,
+    {
+        let f = Fixture::new();
+        let (runtime, _) = f.runtime(probe("US"), RuntimeConfig::default());
+        let mut first = runtime.execute(key("one"), input("normal")).await.unwrap();
+        first.wait().await.unwrap();
+        let thread = f
+            .registry
+            .lock()
+            .unwrap()
+            .find("one")
+            .unwrap()
+            .scalar("providerSessionId")
+            .unwrap();
+        let pids: Vec<i32> =
+            serde_json::from_slice(&std::fs::read(f.home.join("pids.json")).unwrap()).unwrap();
+        std::fs::write(f.home.join("autoturn"), thread).unwrap();
+        until(|| {
+            pids.iter()
+                .all(|pid| nix::sys::signal::kill(nix::unistd::Pid::from_raw(*pid), None).is_err())
+        })
+        .await;
+        std::fs::remove_file(f.home.join("autoturn")).unwrap();
+        let mut second = runtime
+            .execute(key("one"), input("hold replacement"))
+            .await
+            .unwrap();
+        let accepted = second.accepted().await.unwrap();
+        assert_eq!(runtime.host_count(), 2);
+        assert_eq!(
+            runtime
+                .steer(&key("one"), input("clarify replacement"))
+                .await
+                .unwrap(),
+            accepted.turn_id
+        );
+        assert_eq!(
+            f.logs()
+                .iter()
+                .filter(|r| r["method"] == "turn/steer")
+                .count(),
+            1
+        );
+        runtime.stop(&key("one"), None).unwrap();
+        second.wait().await.unwrap();
+        runtime.shutdown().await.unwrap();
+    }
+);
+
+struct BlockInterruptTail {
+    sink: Arc<JournalSink>,
+    entered: tokio::sync::Notify,
+    committed: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Semaphore>,
+}
+impl pult_core::turn_driver::EventSink for BlockInterruptTail {
+    fn append(
+        &self,
+        draft: Value,
+    ) -> pult_core::turn_driver::Task<
+        Result<pult_core::turn_driver::Receipt, pult_core::turn_driver::SinkError>,
+    > {
+        let blocked = draft["sessionId"] == "one" && draft["kind"] == "message.done";
+        let sink = self.sink.clone();
+        let release = self.release.clone();
+        let committed = self.committed.clone();
+        if blocked {
+            self.entered.notify_one();
+        }
+        Box::pin(async move {
+            if blocked {
+                release.acquire_owned().await.unwrap().forget();
+            }
+            let result = sink.append(draft).await;
+            if blocked {
+                committed.notify_one();
+            }
+            result
+        })
+    }
+}
+case!(
+    short_close_budget_quarantines_owned_tail_then_explicit_retry_finishes,
+    {
+        let f = Fixture::with_options(Options {
+            close_timeout: Duration::from_millis(200),
+            ..Default::default()
+        });
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        // A failed assertion must not leave the deliberately held append alive.
+        struct Release(Arc<tokio::sync::Semaphore>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                self.0.add_permits(1);
+            }
+        }
+        let unblock = Release(release.clone());
+        let sink = Arc::new(BlockInterruptTail {
+            sink: f.sink.clone(),
+            entered: tokio::sync::Notify::new(),
+            committed: Arc::new(tokio::sync::Notify::new()),
+            release,
+        });
+        let (rt, _) = f.runtime_with_sink(probe("US"), RuntimeConfig::default(), sink.clone());
+        // A native terminal does not finish ownership while an earlier event's
+        // durable append is still pending. Inject a real routed tail frame.
+        let script = f.home.join("app_server.py");
+        let source = std::fs::read_to_string(&script).unwrap();
+        let source = source.replace("        if item and item['turn'] == params['turnId'] and item['mode'] != 'never-interrupt':\n            finish(thread, status='interrupted')", "        if item and item['turn'] == params['turnId'] and item['mode'] != 'never-interrupt':\n            notification('item/completed', thread, params['turnId'], item={'type':'agentMessage','id':'interrupt-tail','text':'owned interrupt tail','phase':'final_answer'})\n            finish(thread, status='interrupted')");
+        assert!(source.contains("owned interrupt tail"));
+        std::fs::write(&script, source).unwrap();
+        let mut a = rt.execute(key("one"), input("hold")).await.unwrap();
+        let aa = a.accepted().await.unwrap();
+        let mut b = rt.execute(key("two"), input("hold")).await.unwrap();
+        b.accepted().await.unwrap();
+        assert!(rt.stop(&key("one"), Some(&aa.turn_id)).unwrap());
+        sink.entered.notified().await;
+        let result = a.wait().await;
+        if let Err(error) = &result {
+            eprintln!("controlled owned tail wait error: {error:?}");
+        }
+        // A timeout is not a terminal outcome or proof that the owned append ended.
+        assert!(matches!(
+            result,
+            Err(pult_core::turn_driver::DriverError::CleanupUnconfirmed)
+        ));
+        assert!(
+            matches!(a.progress(), pult_core::turn_driver::Progress::Quarantined(Outcome::Failure { code, .. }) if code == "cleanup_timeout")
+        );
+        assert!(matches!(
+            b.progress(),
+            pult_core::turn_driver::Progress::Running(_)
+        ));
+        assert_eq!(f.driver.active_count(), 2);
+        assert!(!f.journal().iter().any(|row| row["sessionId"] == "one"
+            && row["kind"] == "status.changed"
+            && row["data"]["status"] == "done"));
+        assert_eq!(
+            f.logs()
+                .iter()
+                .filter(|row| row["method"] == "turn/interrupt")
+                .count(),
+            1
+        );
+        drop(unblock);
+        sink.committed.notified().await;
+        // The same public turn identity explicitly retries cleanup, never model IO.
+        assert!(rt.stop(&key("one"), Some(&aa.turn_id)).unwrap());
+        assert_eq!(a.wait().await.unwrap().turn.outcome, Outcome::Interrupted);
+        assert_eq!(f.driver.active_count(), 1);
+        assert!(matches!(
+            b.progress(),
+            pult_core::turn_driver::Progress::Running(_)
+        ));
+        assert_eq!(
+            f.logs()
+                .iter()
+                .filter(|row| row["method"] == "turn/start")
+                .count(),
+            2
+        );
+        assert_eq!(rt.host_count(), 1);
+        std::fs::write(f.home.join("release"), "yes").unwrap();
+        assert_eq!(b.wait().await.unwrap().turn.outcome, Outcome::Success);
         rt.shutdown().await.unwrap();
     }
 );

@@ -19,6 +19,9 @@ it('visualize HTML runs CSS and JavaScript in an isolated site beside the chat',
   writeFileSync(html, `<!doctype html><meta charset="utf-8"><style>button { color: rgb(12, 34, 56); }</style>
     <button id="counter" onclick="this.textContent = 'Clicked'">Click me</button>
     <script>document.body.dataset.bridge = typeof window.pult;
+    for (const type of ['pointerdown', 'pointerup', 'click']) document.addEventListener(type, (e) => {
+      document.body.dataset[type] = e.target.id + ':' + e.isTrusted;
+    });
     try { parent.document.body.dataset.compromised = 'yes' } catch { document.body.dataset.isolated = 'yes' }</script>`)
   const c = await h.client()
   await c.request('agent.start', { name: 'html', kind: 'codex', cwd: h.workDir('project') })
@@ -34,9 +37,22 @@ it('visualize HTML runs CSS and JavaScript in an isolated site beside the chat',
   // The child locator checks its own layout; also wait for the embedding frame
   // to settle before routing a native pointer event across the frame boundary.
   await h.win.getByTestId('file-html').click({ trial: true })
+  // An actionable child box alone does not prove Chromium's cross-site hit target
+  // is ready. Observe a real pointer move in the child before sending its click.
+  await button.hover()
+  assert.ok(await waitFor(() => button.evaluate((el) => el.matches(':hover'))),
+    'the isolated button receives the native pointer before clicking')
   await button.click()
-  assert.ok(await waitFor(async () => await button.textContent() === 'Clicked'),
-    'the isolated frame handles the click before its result is inspected')
+  const clicked = await waitFor(async () => await button.textContent() === 'Clicked')
+  assert.ok(clicked, `the isolated frame handles the click before its result is inspected: ${JSON.stringify(
+    await button.evaluate((el) => ({
+      hovered: el.matches(':hover'),
+      pointerdown: document.body.dataset.pointerdown ?? null,
+      pointerup: document.body.dataset.pointerup ?? null,
+      click: document.body.dataset.click ?? null,
+      ready: document.readyState,
+    })),
+  )}`)
   assert.equal(await frame.locator('body').getAttribute('data-bridge'), 'undefined')
   assert.equal(await frame.locator('body').getAttribute('data-isolated'), 'yes')
   assert.equal(await h.win.locator('body').getAttribute('data-compromised'), null)

@@ -425,6 +425,17 @@ describe('журнал демона', () => {
     }
   })
 
+  it('ключ хода памяти скрыт в тексте и именах полей, включая upper-case и embedded prefix', () => {
+    const key = 'mt_' + 'a'.repeat(64)
+    const upper = key.toUpperCase()
+    assert.equal(redactString(`owner@example.com prefix_${upper}_tail`), 'owner@example.com prefix_<token>_tail')
+    assert.equal(redactString('mt_' + 'a'.repeat(63)), 'mt_' + 'a'.repeat(63))
+    assert.deepEqual(redact({ nested: [{ commandId: key, message: upper }], [key]: { safe: 'also hidden' }, email: 'owner@example.com' }), {
+      nested: [{ commandId: '<token>', message: '<token>' }], '<token>': '<redacted>', email: 'owner@example.com',
+    })
+    assert.deepEqual(redact(new Error(`provider echoed ${key}`)), { name: 'Error', message: 'provider echoed <token>' })
+  })
+
   it('redact не ломает обычные значения', () => {
     assert.equal(redactString('всё хорошо'), 'всё хорошо')
     assert.deepEqual(redact({ n: 1, s: 'ok', arr: [1, 'two'] }), { n: 1, s: 'ok', arr: [1, 'two'] })

@@ -620,6 +620,14 @@ pub fn parse(raw: &RawValue) -> Result<Vec<Record>> {
         for key in ["model", "effort", "settingSources", "providerSessionId"] {
             string_field(&mut rec, &fields, key);
         }
+        // Preserve opaque future policy semantics and UTF-16, without treating
+        // malformed values as permission. Compact only outside-string whitespace
+        // so pretty registry values cannot split a public NDJSON frame.
+        for key in ["memory", "private", "temporary"] {
+            if let Some(value) = fields.get(key) {
+                rec.set_raw(key, crate::history::compact_raw(value)?);
+            }
+        }
         if provider == "codex"
             && let Some(tier) = fields
                 .get("serviceTier")
@@ -710,6 +718,30 @@ pub fn parse(raw: &RawValue) -> Result<Vec<Record>> {
             if !queue.is_empty() {
                 rec.set_raw("queue", to_raw_value(&queue)?);
             }
+        }
+        if let Some(marker) = fields.get("queueDispatch")
+            && let Some(marker_fields) = object(marker)?
+            && marker_fields
+                .get("id")
+                .and_then(units)
+                .is_some_and(|v| !v.is_empty() && v.len() <= 1024)
+            && marker_fields
+                .get("at")
+                .and_then(units)
+                .is_some_and(|v| v.len() <= 1024)
+        {
+            let mut clean = Record::default();
+            for field in ["id", "at"] {
+                clean.set_raw(
+                    field,
+                    marker_fields
+                        .get(field)
+                        .expect("validated marker field")
+                        .to_owned(),
+                );
+            }
+            rec.set_raw("queueDispatch", clean.raw()?);
+            rec.set_bool("queuePaused", true);
         }
         if let Some(approval) = fields.get("approval")
             && !eq(Some(approval), "ask")
@@ -844,6 +876,9 @@ fn recover_in_place(
             stats.seeded_seen += 1;
         }
         let has_queue = rec.get("queue").is_some();
+        if !has_queue {
+            rec.remove("queueDispatch");
+        }
         let needs_turn = rec.get("lastTurnAt").is_none();
         let events = if needs_turn || has_queue {
             match lookup(rec.name()) {
@@ -919,7 +954,20 @@ fn recover_in_place(
             if remaining.is_empty() {
                 rec.remove("queue");
                 rec.remove("queuePaused");
+                rec.remove("queueDispatch");
             } else {
+                if let Some(marker) = rec.get("queueDispatch") {
+                    let marker = Fields::parse(marker)?;
+                    let survives = remaining.iter().any(|v| {
+                        Fields::parse(v).is_ok_and(|f| {
+                            f.get("id").and_then(units) == marker.get("id").and_then(units)
+                                && f.get("at").and_then(units) == marker.get("at").and_then(units)
+                        })
+                    });
+                    if !survives {
+                        rec.remove("queueDispatch");
+                    }
+                }
                 rec.set_raw("queue", to_raw_value(&remaining)?);
                 if !yes(rec.get("queuePaused")) {
                     rec.set_bool("queuePaused", true);
@@ -934,13 +982,25 @@ fn recover_in_place(
 pub fn public_record(record: &Record) -> Result<Raw> {
     let mut record = record.clone();
     if let Some(queue) = record.get("queue") {
+        let marker = record.get("queueDispatch").map(Fields::parse).transpose()?;
         let mut previews = Vec::new();
         for item in array_values(queue)? {
             let mut fields = Fields::parse(&item)?;
-            let text = fields
+            let mut text = fields
                 .get("text")
                 .and_then(units)
                 .context("normalized queue text")?;
+            if marker.as_ref().is_some_and(|marker| {
+                marker.get("id").and_then(units) == fields.get("id").and_then(units)
+                    && marker.get("at").and_then(units) == fields.get("at").and_then(units)
+            }) {
+                let mut warning = "[Delivery unknown; Send now may duplicate] "
+                    .encode_utf16()
+                    .collect::<Vec<_>>();
+                warning.extend(text);
+                text = warning;
+                fields.set("text", RawValue::from_string(encode_string(&text))?);
+            }
             if title_length(&text) > 200 {
                 let mut preview = first_points(&text, 199);
                 preview.push(0x2026);
@@ -974,6 +1034,73 @@ mod tests {
         }
     }
 
+    #[test]
+    fn pretty_opaque_metadata_remains_one_ndjson_frame_without_interpreting_values() {
+        let memory = r#"{
+  "read":true,
+  "write":"ask",
+  "future":{"raw":"\ud800","text":"inside space \"quote\" \\ tail","number":1.0000e+20}
+}"#;
+        let got = records(&format!(
+            r#"{{"sessions":[{{"name":"chat","provider":"codex","cwd":"/project","memory":{memory},"private":{{
+  "future":"\ud800"
+}},"temporary":false}}]}}"#
+        ));
+        let frame = public_record(&got[0]).unwrap();
+        assert!(
+            !frame.get().contains('\n'),
+            "opaque pretty JSON split an NDJSON response"
+        );
+        assert!(!frame.get().contains('\r'));
+        assert!(frame.get().contains(r#""raw":"\ud800""#));
+        assert!(
+            frame.get().contains("1.0000e+20"),
+            "opaque numbers were interpreted"
+        );
+        assert!(frame.get().contains("inside space"));
+        let reparsed = records(&format!(r#"{{"sessions":[{}]}}"#, frame.get()));
+        assert_eq!(
+            got[0].get("memory").unwrap().get(),
+            reparsed[0].get("memory").unwrap().get()
+        );
+    }
+    #[test]
+    fn memory_policy_and_privacy_survive_recovery_as_opaque_raw_utf16() {
+        for memory in [
+            r#"{"read":true,"write":"ask"}"#,
+            r#"{"read":true,"write":"future","extra":"\ud800"}"#,
+            "null",
+            "17",
+            r#""invalid""#,
+        ] {
+            let input = format!(
+                r#"{{"sessions":[{{"name":"chat","provider":"codex","cwd":"/project","memory":{memory},"private":{{"future":"\ud800"}},"temporary":null}}]}}"#
+            );
+            let got = records(&input);
+            assert_eq!(got[0].get("memory").map(RawValue::get), Some(memory));
+            assert_eq!(
+                got[0].get("private").map(RawValue::get),
+                Some(r#"{"future":"\ud800"}"#)
+            );
+            assert_eq!(got[0].get("temporary").map(RawValue::get), Some("null"));
+            assert_eq!(
+                crate::memory_policy::Policy::record(&got[0]).unwrap(),
+                crate::memory_policy::Policy::default()
+            );
+            let canonical = got[0].raw().unwrap();
+            let reparsed = records(&format!(r#"{{"sessions":[{}]}}"#, canonical.get()));
+            for key in ["memory", "private", "temporary"] {
+                assert_eq!(
+                    reparsed[0].get(key).map(RawValue::get),
+                    got[0].get(key).map(RawValue::get)
+                );
+            }
+        }
+        let got = records(r#"{"sessions":[{"name":"chat","provider":"codex","cwd":"/project"}]}"#);
+        for key in ["memory", "private", "temporary"] {
+            assert!(got[0].get(key).is_none());
+        }
+    }
     #[test]
     fn parses_access_boundaries_and_keeps_raw_utf16() {
         let got = records(

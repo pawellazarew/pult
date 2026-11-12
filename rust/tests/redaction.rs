@@ -337,3 +337,35 @@ fn visible_email_does_not_disable_token_password_or_url_credential_filters() {
     check_strings(vec![text]);
     check_values(vec![input]);
 }
+
+#[test]
+fn turn_memory_capabilities_match_real_node_in_embedded_text_and_nested_property_names() {
+    let mut cases = Vec::new();
+    for prefix in ["mt_", "MT_", "mT_"] {
+        for length in [63, 64, 65] {
+            for hex in ["a", "F"] {
+                let key = format!("{prefix}{}", hex.repeat(length));
+                for (before, after) in [("", ""), ("word_", "_tail"), ("é", "𐀀"), ("[", "]")] {
+                    cases.push(format!("{before}{key}{after}"));
+                }
+            }
+        }
+    }
+    check_strings(cases);
+    let key = format!("mt_{}", "a".repeat(64));
+    let upper = key.to_ascii_uppercase();
+    assert_eq!(
+        redact_string(&format!("owner@example.com word_{upper}_tail")),
+        "owner@example.com word_<token>_tail"
+    );
+    let values = vec![
+        json!({"nested":[{"commandId":key,"message":upper,"email":"owner@example.com"}]}),
+        json!({key.clone():"must hide entire value",upper.clone():{"value":"also hidden"},"ordinary":"visible"}),
+        json!({"metadata":{"prefix-mt_":true},format!("embedded-{key}-suffix"):"concealed"}),
+    ];
+    assert_eq!(
+        redact(&values[1]),
+        json!({"<token>":"<redacted>","ordinary":"visible"})
+    );
+    check_values(values);
+}

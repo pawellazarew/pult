@@ -227,7 +227,31 @@ try {
     await stop()
     const raw = { version: 2, sessions: sessions().map((r) => r.name === 'alpha' ? { ...r, queue: [{ id: 'long', text: long, at: epoch }], queuePaused: true } : r) }
     seed(paths, raw, events)
-    await oracle.close()
+    await check('unknown queue marker survives Rust/Node rollback and receipt identity is structural', async () => {
+    for (const exact of [false, true]) {
+      const p = await prepare()
+      const item = { id: 'a:b', text: 'delivery may already have happened', at: 'c' }
+      const raw = { version: 2, sessions: [record('uncertain', { provider: 'codex', queue: [item], queuePaused: true, queueDispatch: { id: item.id, at: item.at } })] }
+      const receipts = [event(1, 'uncertain', 'message.user', { queueItemId: exact ? 'a:b' : 'a', queueItemAt: exact ? 'c' : 'b:c' })]
+      seed(p, raw, receipts)
+      const world = makeOracle(raw, receipts)
+      const live = await start(p)
+      if (exact) {
+        assert.equal(sessions(p)[0].queue, undefined)
+        assert.equal(sessions(p)[0].queueDispatch, undefined)
+        assert.equal(world.registry.get('uncertain').queueDispatch, undefined)
+      } else {
+        assert.deepEqual(sessions(p)[0].queueDispatch, { id: 'a:b', at: 'c' })
+        assert.throws(() => world.manager.queueResume('uncertain'), e => e.code === 'send_unknown')
+        await assert.rejects(live.client.request('agent.queue.resume', { name: 'uncertain' }), e => e.code === 'send_unknown')
+        const shown = await live.client.request('agent.rename', { name: 'uncertain', title: 'still uncertain' })
+        assert.match(shown.queue[0].text, /Delivery unknown/)
+        assert.match(publicRecord(world.registry.get('uncertain')).queue[0].text, /Delivery unknown/)
+      }
+      await stop(live.client, live.daemon); await world.close()
+    }
+  })
+  await oracle.close()
     oracle = makeOracle(raw, events)
     ;({ daemon, client } = await start())
     for (const title of ['  Новый\nзаголовок 🌊  ', '', `Legacy ${lonely}`, '\u200B\u202E']) {
@@ -420,6 +444,53 @@ try {
     const restarted = await start(p)
     assert.deepEqual(readFileSync(p.sessions), saved)
     await stop(restarted.client, restarted.daemon)
+  })
+  await check('Rust and Node canonical recovery preserve opaque memory/privacy before explicit policy repair', async () => {
+    const memory = { read: true, write: 'future', nested: [null, lonely] }
+    const privacy = { future: lonely }
+    const raw = { version: 2, sessions: [
+      record('opaque', { provider: 'codex', memory, private: privacy, temporary: null }),
+      record('memoryonly', { provider: 'codex', memory }),
+    ] }
+    const expected = parseSessions(raw)
+    const p = await prepare()
+    seed(p, raw)
+    let live = await start(p)
+    const verify = () => {
+      for (const entry of expected) {
+        const actual = sessions(p).find(row => row.name === entry.name)
+        for (const key of ['memory', 'private', 'temporary']) {
+          assert.equal(Object.hasOwn(actual, key), Object.hasOwn(entry, key))
+          if (Object.hasOwn(entry, key)) assert.deepEqual(actual[key], entry[key])
+        }
+      }
+    }
+    verify()
+    const listed = (await live.client.request('agent.list')).sessions
+    assert.deepEqual(listed.find(row => row.name === 'opaque').memory, memory)
+    await assert.rejects(live.client.request('memory.context.bind', { session: 'opaque', enabled: true }), error => error.code === 'forbidden')
+    await assert.rejects(live.client.request('memory.configure', { session: 'opaque', memory: { read: true, write: 'ask' } }), error => error.code === 'forbidden')
+    assert.deepEqual((await live.client.request('memory.configure', { session: 'opaque' })).memory, { read: false, write: 'off' })
+    await assert.rejects(live.client.request('memory.configure', { session: 'memoryonly' }), error => error.code === 'storage_unavailable')
+    await live.client.request('agent.rename', { name: 'opaque', title: 'Rust canonical merge' })
+    verify()
+    await stop(live.client, live.daemon)
+    const rollback = createRegistry(p)
+    rollback.coolDown()
+    rollback.update('memoryonly', { title: 'Node canonical merge' })
+    verify()
+    live = await start(p)
+    verify()
+    await assert.rejects(live.client.request('memory.context.bind', { session: 'opaque', enabled: true }), error => error.code === 'forbidden')
+    await assert.rejects(live.client.request('memory.configure', { session: 'memoryonly' }), error => error.code === 'storage_unavailable')
+    assert.equal((await live.client.request('daemon.status')).journal.executionUnavailable, false)
+    await live.client.request('memory.configure', { session: 'memoryonly', memory: { read: true, write: 'ask' } })
+    await stop(live.client, live.daemon)
+    live = await start(p)
+    assert.deepEqual((await live.client.request('memory.configure', { session: 'memoryonly' })).memory, { read: true, write: 'ask' })
+    assert.deepEqual(sessions(p).find(row => row.name === 'opaque').memory, memory)
+    assert.equal((await live.client.request('daemon.status')).nativeRuntime.initialized, false)
+    await stop(live.client, live.daemon)
   })
   await oracle.close()
   console.log(`registry interop passed ${passed}`)

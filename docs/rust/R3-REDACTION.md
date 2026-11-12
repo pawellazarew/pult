@@ -11,9 +11,13 @@ Email addresses remain visible in ordinary text and nested values. Known tokens,
 secret-named field values and URL credentials continue to be filtered. Repository
 privacy checks keep their existing email and credential rules.
 
-Eleven interoperability tests compare roughly 900 synthetic adversarial inputs
+Twelve interoperability tests compare a bounded synthetic adversarial corpus
 against the actual Node source functions and regex rules, including lengths,
 Unicode adjacency, URL credentials, ordering, nested keys and prototype fields.
+The turn-memory `mt_` plus 64-hex format is also hidden with embedded prefixes
+and ASCII upper-case representations; credential-shaped object property names
+conceal their values. Typed journal metadata uses the same explicit-format
+filter without hiding ordinary opaque IDs.
 The oracle has a ten-second watchdog and bounded input/output; no live secrets,
 provider login or network calls are involved.
 

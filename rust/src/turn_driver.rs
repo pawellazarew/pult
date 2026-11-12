@@ -58,8 +58,28 @@ pub struct Receipt {
 pub struct SinkError {
     pub message: String,
 }
+/// Typed completion authority supplied only by Driver after native cleanup and
+/// durable terminal append, before the exact ticket's slot can be released.
+/// A sink may consume it for checked metadata IO; JSON events are not authority.
+pub struct Completion {
+    ticket: Ticket,
+    outcome: Outcome,
+}
+impl Completion {
+    pub fn ticket(&self) -> &Ticket {
+        &self.ticket
+    }
+    pub fn outcome(&self) -> &Outcome {
+        &self.outcome
+    }
+}
 pub trait EventSink: Send + Sync + 'static {
     fn append(&self, draft: Value) -> Task<Result<Receipt, SinkError>>;
+    /// Once polled, owned IO must finish even if a caller stops waiting.
+    /// Runs outside Driver locks. Error or panic closes execution admission.
+    fn before_release(&self, _completion: Completion) -> Task<Result<(), SinkError>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerError {
@@ -217,6 +237,42 @@ struct Inner {
     options: Options,
     changed: Notify,
 }
+/// Opaque admission state for one trusted memory mutation. Cancellation before
+/// seal wins; a sealed operation owns its subsequent commit outcome.
+pub(crate) struct MemoryAction {
+    state: std::sync::atomic::AtomicU8,
+    deadline: std::time::Instant,
+}
+impl MemoryAction {
+    pub(crate) fn new(deadline: std::time::Instant) -> Self {
+        Self {
+            state: std::sync::atomic::AtomicU8::new(0),
+            deadline,
+        }
+    }
+    pub(crate) fn cancel(&self) {
+        let _ = self.state.compare_exchange(
+            0,
+            2,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        );
+    }
+    fn seal(&self) -> bool {
+        if std::time::Instant::now() >= self.deadline {
+            return false;
+        }
+        self.state
+            .compare_exchange(
+                0,
+                1,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    }
+}
+
 pub struct Driver {
     inner: Arc<Inner>,
 }
@@ -395,7 +451,8 @@ impl Driver {
             .active(ticket)
             .map(|turn| turn.snapshot().clone())
     }
-    /// Host-only receipt observation for the exact reserved execution.
+    /// Trusted host observation for lazy provenance. Starting has no accepted
+    /// user receipt; only Progress::Running carries a durable accepted event.
     /// This does not grant dispatch or memory authority.
     pub(crate) fn progress_for_ticket(&self, ticket: &Ticket) -> Option<watch::Receiver<Progress>> {
         self.inner
@@ -405,6 +462,36 @@ impl Driver {
             .jobs
             .get(ticket)
             .map(|control| control.progress.subscribe())
+    }
+    /// Trusted host-only linearization. This contains no callback or IO and
+    /// must be invoked only after source policy/capability checks under their
+    /// own gates. It never invents acceptance for a pending/unknown native send.
+    pub(crate) fn seal_memory_action(
+        &self,
+        ticket: &Ticket,
+        action: &MemoryAction,
+        expected: &Accepted,
+    ) -> Option<Accepted> {
+        let state = self.inner.state.lock().expect("driver state mutex");
+        if state.closed || state.storage_failed {
+            return None;
+        }
+        let active = state.core.active(ticket)?;
+        if active.cancel_requested() || active.provider_turn_id().is_none() {
+            return None;
+        }
+        let control = state.jobs.get(ticket)?;
+        let Progress::Running(accepted) = control.progress.borrow().clone() else {
+            return None;
+        };
+        if &accepted != expected
+            || accepted.user_event_id == 0
+            || accepted.user_event_id > 9_007_199_254_740_991
+            || !action.seal()
+        {
+            return None;
+        }
+        Some(accepted)
     }
     pub async fn wait_for_storage_failure(&self) {
         loop {
@@ -457,6 +544,25 @@ impl Driver {
             .lock()
             .expect("driver state mutex")
             .storage_failed
+    }
+    /// Waits for this exact ticket's final cleanup proof, never a status event.
+    pub async fn wait_ticket(&self, ticket: &Ticket) {
+        loop {
+            let changed = self.inner.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if !self
+                .inner
+                .state
+                .lock()
+                .expect("driver state mutex")
+                .jobs
+                .contains_key(ticket)
+            {
+                return;
+            }
+            changed.await;
+        }
     }
     pub fn result(&self, ticket: &Ticket) -> Option<FinishedTurn> {
         self.inner
@@ -576,7 +682,12 @@ fn input_draft(
     input: &Input,
 ) -> Result<Value, DriverError> {
     let metadata = &input.metadata;
-    if input.text.len() > 65536
+    if input.text.len()
+        > if input.metadata.queue_item_id.is_some() {
+            200_000
+        } else {
+            65536
+        }
         || (input.text.trim_matches(js_whitespace).is_empty() && metadata.attachments.is_empty())
         || metadata.attachments.len() > MAX_PROMPT_ATTACHMENTS
         || metadata
@@ -611,7 +722,14 @@ fn input_draft(
         }
     }
     let public_text = redact(inner, &input.text)
-        .filter(|s| s.len() <= 65536)
+        .filter(|s| {
+            s.len()
+                <= if metadata.queue_item_id.is_some() {
+                    200_000
+                } else {
+                    65536
+                }
+        })
         .ok_or(DriverError::Invalid)?;
     let mut data = json!({"text":public_text});
     if !metadata.attachments.is_empty() {
@@ -1166,6 +1284,20 @@ async fn finish(
             }
         }
     };
+    if terminal_event_id.is_some() && end.error != Some(DriverError::StorageUnavailable) {
+        let sink = inner.sink.clone();
+        let completion = Completion {
+            ticket: ticket.clone(),
+            outcome: end.outcome.clone(),
+        };
+        if !matches!(
+            tokio::spawn(async move { sink.before_release(completion).await }).await,
+            Ok(Ok(()))
+        ) {
+            latch_storage(inner);
+            end.error = Some(DriverError::StorageUnavailable);
+        }
+    }
     if end.error == Some(DriverError::StorageUnavailable) {
         end.outcome = failure(
             "journal_unknown",

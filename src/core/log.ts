@@ -10,7 +10,12 @@ export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 /** Имена полей, чьи значения вырезаются целиком, чем бы они ни были. */
 const SECRET_NAME_RE = /(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|COOKIE)/i
 
+// Purpose keys can be embedded in text or spelled with upper-case hex/prefix.
+// A boundary after '_' would miss them because '_' is an ASCII word character.
+const MEMORY_TURN_RE = /mt_[0-9a-f]{64}/gi
+
 const VALUE_RULES: Array<{ re: RegExp; to: string }> = [
+  { re: MEMORY_TURN_RE, to: '<token>' },
   { re: /sk-ant-[A-Za-z0-9_-]{8,}/g, to: '<token>' },
   { re: /\bsk-[A-Za-z0-9]{16,}/g, to: '<token>' },
   // Ключи OpenAI нового вида: `sk-proj-…`, `sk-svcacct-…`, `sk-admin-…`. Правило выше их НЕ ловит —
@@ -45,7 +50,8 @@ export function redact(value: unknown, depth = 0): unknown {
   }
   const out: Record<string, unknown> = {}
   for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-    out[k] = SECRET_NAME_RE.test(k) ? '<redacted>' : redact(v, depth + 1)
+    const publicKey = k.replace(MEMORY_TURN_RE, '<token>')
+    out[publicKey] = publicKey !== k || SECRET_NAME_RE.test(k) ? '<redacted>' : redact(v, depth + 1)
   }
   return out
 }
