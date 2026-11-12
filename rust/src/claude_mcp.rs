@@ -192,6 +192,16 @@ impl Factory {
         fs::fsync(&files.run).map_err(|_| failure())?;
         #[cfg(test)]
         self.hooks.before_publish();
+        let leaf =
+            fs::statat(scope, "config.json", AtFlags::SYMLINK_NOFOLLOW).map_err(|_| failure())?;
+        if FileType::from_raw_mode(leaf.st_mode) != FileType::RegularFile
+            || !identity(
+                &leaf,
+                &fs::fstat(files.file.as_ref().ok_or_else(failure)?).map_err(|_| failure())?,
+            )
+        {
+            return Err(failure());
+        }
         // Pinning FD traversal protects cleanup; also refuse static pathname
         // replacement before handing a filename to the native process.
         let current_home = fs::open(&self.home, flags, Mode::empty()).map_err(|_| failure())?;

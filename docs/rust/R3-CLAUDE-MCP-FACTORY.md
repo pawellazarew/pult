@@ -19,7 +19,12 @@ random per-scope directory is exclusively created and pinned by an open FD;
 `config.json` is exclusively created with NOFOLLOW and mode 0600. Owned newly
 created modes are set through FDs, without chmod of an existing home/run.
 Writes and both directory entries are synced before returning the path.
-Home/run/scope pathname identities are rechecked before publication.
+Home/run/scope pathname identities are rechecked before publication. The config
+leaf is also inspected with statat(SYMLINK_NOFOLLOW) after the last publication
+barrier: it must remain a regular file with the retained file FD identity. An
+already-replaced regular file or symlink is rejected, the key revoked, and
+foreign contents retained with cleanup_unconfirmed. This static replacement
+check does not create an atomic compare/unlink guarantee.
 
 Revocation is synchronous in-memory work. Dropping an unpolled prepare waiter
 also revokes. Neither cancellation nor timeout abandons the owned authorization

@@ -434,3 +434,116 @@ async fn foreign_extra_file_causes_unconfirmed_cleanup_until_explicit_fixture_re
     std::fs::remove_file(foreign).unwrap();
     f.close(&mut h).await;
 }
+
+async fn replaced_leaf_before_publication(symlink: bool) {
+    let f = Fixture::new(Map::new());
+    let mut h = f.start();
+    bounded(h.accepted()).await.unwrap();
+    bounded(f.factory.cleanup(h.ticket().clone(), 1))
+        .await
+        .unwrap();
+    let snapshot = f
+        .state
+        .driver
+        .get()
+        .unwrap()
+        .snapshot_for_dispatch(h.ticket())
+        .unwrap();
+    let barrier = Barrier::new(&f.factory.hooks.publish);
+    let pending = f.factory.prepare(McpContext {
+        session: snapshot.key,
+        ticket: h.ticket().clone(),
+        generation: 2,
+        approval: Approval::Ask,
+    });
+    bounded(barrier.entered.notified()).await;
+    let entry = f
+        .factory
+        .entries
+        .lock()
+        .unwrap()
+        .get(&(h.ticket().clone(), 2))
+        .unwrap()
+        .clone();
+    // The preparation barrier intentionally holds the private files mutex.
+    // Discover our synthetic directory without contending with that IO lock.
+    let scope = std::fs::read_dir(f.state.home.join("run"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let path = scope.join("config.json");
+    let inode = std::fs::metadata(&path).unwrap().ino();
+    let saved = path.with_file_name("owned-original");
+    std::fs::rename(&path, &saved).unwrap();
+    let original = std::fs::read(&saved).unwrap();
+    let config: Value = serde_json::from_slice(&original).unwrap();
+    let key = config["mcpServers"]["pult"]["env"]["PULT_ASK_KEY"]
+        .as_str()
+        .unwrap();
+    let outside = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(outside.path(), b"foreign contents").unwrap();
+    if symlink {
+        std::os::unix::fs::symlink(outside.path(), &path).unwrap();
+    } else {
+        std::fs::write(&path, b"foreign contents").unwrap();
+    }
+    barrier.release();
+    assert!(
+        bounded(pending).await.is_err(),
+        "must not publish an already-replaced config leaf"
+    );
+    assert!(f.factory.backend.lookup(key).is_none());
+    assert_eq!(
+        fs::fstat(
+            entry
+                .files
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .file
+                .as_ref()
+                .unwrap()
+        )
+        .unwrap()
+        .st_ino,
+        inode
+    );
+    assert_eq!(std::fs::read(&saved).unwrap(), original);
+    assert!(
+        bounded(f.factory.cleanup(h.ticket().clone(), 2))
+            .await
+            .is_err()
+    );
+    let retired = {
+        let files = entry.files.lock().unwrap();
+        path.with_file_name(files.as_ref().unwrap().retired.as_ref().unwrap())
+    };
+    assert_eq!(
+        std::fs::symlink_metadata(&retired)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        symlink
+    );
+    assert_eq!(std::fs::read(&retired).unwrap(), b"foreign contents");
+    assert_eq!(std::fs::read(outside.path()).unwrap(), b"foreign contents");
+    assert_eq!(std::fs::read(&saved).unwrap(), original);
+    // Repair only the synthetic fixture: production keeps foreign quarantine.
+    std::fs::remove_file(&retired).unwrap();
+    std::fs::rename(&saved, &retired).unwrap();
+    bounded(f.factory.cleanup(h.ticket().clone(), 2))
+        .await
+        .unwrap();
+    f.close(&mut h).await;
+}
+#[tokio::test]
+async fn replaced_regular_leaf_before_publication_never_returns_a_path() {
+    replaced_leaf_before_publication(false).await;
+}
+#[tokio::test]
+async fn replaced_symlink_leaf_before_publication_never_returns_a_path() {
+    replaced_leaf_before_publication(true).await;
+}
