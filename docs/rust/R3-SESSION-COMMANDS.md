@@ -86,7 +86,7 @@ or user receipt. The fixtures use an isolated private account and local programs
 not installed providers or real network requests. A pending permission remains
 `blocked_permission`, rather than being overwritten by a late working status.
 
-The full local all-targets run passed 577 tests across 40 binaries; the explicitly
+The full local all-targets run passed 579 tests across 40 binaries; the explicitly
 opt-in installed-Codex smoke test remains ignored in the default run. A separate
 installed-binary initialize/shutdown smoke also passed with an isolated HOME; it
 performed no model turn or authentication operation. Clippy all-targets with warnings
