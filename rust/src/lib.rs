@@ -19,6 +19,7 @@ pub mod memory_client;
 mod memory_project;
 pub mod panic_guard;
 mod read_api;
+pub mod redaction;
 pub mod registry;
 pub mod runtime_config;
 mod session_api;

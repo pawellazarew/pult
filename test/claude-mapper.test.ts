@@ -314,15 +314,14 @@ describe('переводчик claude: эталоны по фикстурам', 
     assert.deepEqual(d, [{ toolName: null, toolUseId: null, input: null }, { toolName: null, toolUseId: null, input: null }])
   })
 
-  it('РЕДАКЦИЯ: адрес почты из потока не попадает ни в одно событие', () => {
+  it('адрес почты из потока остаётся читаемым в событии', () => {
     const mapper = createClaudeMapper({ sessionId: 'w' })
     const r = mapper.push({
       type: 'assistant',
       message: { role: 'assistant', model: 'haiku', content: [{ type: 'text', text: 'пиши на vasya.pupkin@example.com сегодня' }] },
     })
     const text = (r.drafts[0]?.data as { text: string }).text
-    assert.ok(!text.includes('@example.com'), text)
-    assert.match(text, /<email>/)
+    assert.equal(text, 'пиши на vasya.pupkin@example.com сегодня')
   })
 })
 

@@ -241,13 +241,13 @@ describe('переводчик codex: незнакомое не роняет н�
     assert.deepEqual(unknown, ['item/quantumThing'])
   })
 
-  it('редакция работает и здесь: почта из текста модели в событие не уезжает', () => {
+  it('почта из текста модели остаётся читаемой в событии', () => {
     const mapper = createCodexMapper({ sessionId: 'w' })
     const res = mapper.push('item/completed', {
       threadId: 't', turnId: 'u',
       item: { type: 'agentMessage', id: 'm1', text: 'пиши на ' + 'vasya' + '@example.org', phase: 'final_answer' },
     })
-    assert.equal((res.drafts[0]?.data as { text: string }).text, 'пиши на <email>')
+    assert.equal((res.drafts[0]?.data as { text: string }).text, 'пиши на vasya@example.org')
   })
 })
 
@@ -323,10 +323,10 @@ describe('Codex async input questions on completed agent messages', () => {
     assert.deepEqual(done([{ title: 'A free-form question' }])['questions'], [{ title: 'A free-form question', options: null }])
   })
 
-  it('redacts both the question title and option labels before emitting or journalling', () => {
+  it('keeps email addresses in question titles and option labels', () => {
     const serialized = JSON.stringify(done([{ title: 'Contact person@example.com?', options: ['person@example.com', 'No'] }]))
-    assert.ok(!serialized.includes('person@example.com'))
-    assert.ok(serialized.includes('<email>'))
+    assert.ok(serialized.includes('person@example.com'))
+    assert.ok(!serialized.includes('<email>'))
   })
 
   it('keeps ordinary messages unchanged and rejects malformed or excessive question forms as a whole', () => {
