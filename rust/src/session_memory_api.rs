@@ -56,10 +56,34 @@ fn registry_available(registry: &crate::registry::Registry) -> Result<(), Memory
     }
     Ok(())
 }
-fn active_record(state: &crate::State, name: &str) -> Result<Record, MemoryError> {
+fn lock_registry(
+    state: &crate::State,
+) -> Result<std::sync::MutexGuard<'_, crate::registry::Registry>, MemoryError> {
     execution_available(state)?;
+    #[cfg(test)]
+    fault_tests::before_registry_lock();
     let registry = state.registry.lock().map_err(|e| err("internal", e))?;
     registry_available(&registry)?;
+    // Registry acquisition may wait while a journal/Driver fault is latched.
+    execution_available(state)?;
+    Ok(registry)
+}
+fn lock_credentials(
+    state: &crate::State,
+) -> Result<std::sync::MutexGuard<'_, session_memory::SessionMemory>, MemoryError> {
+    #[cfg(test)]
+    fault_tests::before_credentials_lock();
+    let credentials = state
+        .session_memory
+        .lock()
+        .map_err(|e| err("internal", e))?;
+    // Registry -> credentials -> Driver is the final authority check. Driver
+    // never calls Registry or credentials while holding its own mutex.
+    execution_available(state)?;
+    Ok(credentials)
+}
+fn active_record(state: &crate::State, name: &str) -> Result<Record, MemoryError> {
+    let registry = lock_registry(state)?;
     let record = registry
         .find(name)
         .ok_or_else(|| err("not_found", "session not found"))?;
@@ -128,8 +152,7 @@ pub(crate) async fn execute(
             };
             let project = project(&record)?;
             // Filesystem discovery may be slow. Recheck the exact session before publishing.
-            let registry = state.registry.lock().map_err(|e| err("internal", e))?;
-            registry_available(&registry)?;
+            let registry = lock_registry(&state)?;
             let current = registry
                 .find(name)
                 .ok_or_else(|| err("not_found", "session not found"))?;
@@ -141,14 +164,9 @@ pub(crate) async fn execute(
                     "session changed during registration; retry bind",
                 ));
             }
-            state
-                .session_memory
-                .lock()
-                .map_err(|e| err("internal", e))?
-                .bind(name, fingerprint, project, enabled)
+            lock_credentials(&state)?.bind(name, fingerprint, project, enabled)
         } else {
-            let registry = state.registry.lock().map_err(|e| err("internal", e))?;
-            registry_available(&registry)?;
+            let registry = lock_registry(&state)?;
             let current = registry
                 .find(name)
                 .ok_or_else(|| err("not_found", "session not found"))?;
@@ -160,11 +178,7 @@ pub(crate) async fn execute(
                     "session changed during credential issuance",
                 ));
             }
-            state
-                .session_memory
-                .lock()
-                .map_err(|e| err("internal", e))?
-                .issue(name, &fingerprint)
+            lock_credentials(&state)?.issue(name, &fingerprint)
         }
     })
     .await
@@ -172,20 +186,14 @@ pub(crate) async fn execute(
 }
 
 fn registered(state: &crate::State, name: &str) -> Result<Arc<MemoryLease>, MemoryError> {
-    execution_available(state)?;
-    let registry = state.registry.lock().map_err(|e| err("internal", e))?;
-    registry_available(&registry)?;
+    let registry = lock_registry(state)?;
     let record = registry
         .find(name)
         .ok_or_else(|| err("not_found", "session not found"))?;
     if record.get("archived").is_some_and(|v| v.get() == "true") {
         return Err(err("forbidden", "session is archived"));
     }
-    state
-        .session_memory
-        .lock()
-        .map_err(|e| err("internal", e))?
-        .registration(name, &session_memory::fingerprint(record)?)
+    lock_credentials(state)?.registration(name, &session_memory::fingerprint(record)?)
 }
 
 pub(crate) async fn read(
@@ -269,6 +277,92 @@ pub(crate) async fn read(
 #[cfg(test)]
 mod fault_tests {
     use super::*;
+
+    thread_local! {
+        static BEFORE_REGISTRY: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = Default::default();
+        static BEFORE_CREDENTIALS: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = Default::default();
+    }
+    pub(super) fn before_registry_lock() {
+        let hook = BEFORE_REGISTRY.with(|slot| slot.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    pub(super) fn before_credentials_lock() {
+        let hook = BEFORE_CREDENTIALS.with(|slot| slot.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    #[tokio::test]
+    async fn execution_fault_during_credential_wait_cannot_publish_authority() {
+        for direct_driver in [false, true] {
+            let (_home, state, _lease) = fixture().await;
+            let credentials = state.session_memory.lock().unwrap();
+            let waiting = state.clone();
+            let (entered, passed_precheck) = std::sync::mpsc::channel();
+            let task = std::thread::spawn(move || {
+                BEFORE_CREDENTIALS.with(|slot| {
+                    *slot.borrow_mut() = Some(Box::new(move || {
+                        entered.send(()).unwrap();
+                    }))
+                });
+                registered(&waiting, "chat").map(|_| ())
+            });
+            passed_precheck
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            if direct_driver {
+                state.driver.get().unwrap().report_storage_failure();
+            } else {
+                state.execution_storage_failed();
+            }
+            drop(credentials);
+            assert!(
+                task.join().unwrap().is_err(),
+                "credential wait ignored execution fault: driver={direct_driver}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn execution_fault_during_registry_wait_cannot_publish_authority() {
+        for direct_driver in [false, true] {
+            for registration in [false, true] {
+                let (_home, state, _lease) = fixture().await;
+                let registry = state.registry.lock().unwrap();
+                let waiting = state.clone();
+                let (entered, passed_precheck) = std::sync::mpsc::channel();
+                let task = std::thread::spawn(move || {
+                    BEFORE_REGISTRY.with(|slot| {
+                        *slot.borrow_mut() = Some(Box::new(move || {
+                            entered.send(()).unwrap();
+                        }))
+                    });
+                    if registration {
+                        registered(&waiting, "chat").map(|_| ())
+                    } else {
+                        active_record(&waiting, "chat").map(|_| ())
+                    }
+                });
+                passed_precheck
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                if direct_driver {
+                    state.driver.get().unwrap().report_storage_failure();
+                } else {
+                    state.execution_storage_failed();
+                }
+                drop(registry);
+                assert!(
+                    task.join().unwrap().is_err(),
+                    "fault after initial check still authorized memory: driver={direct_driver}, registration={registration}"
+                );
+            }
+        }
+    }
 
     async fn fixture() -> (tempfile::TempDir, Arc<crate::State>, Arc<MemoryLease>) {
         let (home, state, _sink) = crate::runtime_journal::tests::fixture();
