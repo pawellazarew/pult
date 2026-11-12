@@ -101,3 +101,24 @@ queue/question receipts, registry decorations и broker. Только затем
 Claude/ZCode, передача memory credential и приёмка RPC. Общий Codex app-server не должен
 получать session key в глобальном окружении; уже загруженный MCP также требует
 отдельного проверенного контракта обновления credentials.
+
+
+## Fresh pre-dispatch gate
+
+`Driver::start_checked` accepts a synchronous `DispatchGate` that runs after
+the durable user append and before dispatch seals, with no intervening await.
+It can allow, narrow approval using Coordinator rules, or deny. An attempted
+expansion or callback panic fails closed as static `AccessDenied`. Denial
+does not start or close a worker that was never touched. Cancellation before
+the check skips it; cancellation during the check is observed again at seal.
+The old `start` remains a trusted-host library entry point for compatibility.
+
+The callback must be fast and nonblocking. The host must still refresh access
+after asynchronous provider preparation and retire already running Full
+processes when consent changes. This seam does not itself supply those facts
+or make provider reuse safe. Hosts install the silent panic policy before
+calling external callbacks.
+
+Four additional scenarios cover durable consent revocation/hold during a
+blocked journal append, exact narrowed worker settings, denied expansion or
+panic, and cancellation before dispatch. There are now 20 driver scenarios.
