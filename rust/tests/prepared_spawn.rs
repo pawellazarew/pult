@@ -355,15 +355,74 @@ async fn prepared_holder_ack_failure_retains_process_and_denies_stderr_receipt()
         .err()
         .unwrap();
     let mut process = *failure.process.expect("ACK failure lost OS child owner");
-    assert!(process.pid().is_some());
+    if let Some(pid) = process.pid() {
+        // The failed ACK alone does not mean the fixture reached `exit 125`.
+        // Observe its exit without reaping: otherwise stop's TERM may win the
+        // printf -> exit race and legitimately produce a confirmed SIGTERM.
+        tokio::time::timeout(WATCHDOG, async {
+            loop {
+                let state = tokio::process::Command::new("ps")
+                    .args(["-o", "stat=", "-p", &pid.to_string()])
+                    .kill_on_drop(true)
+                    .output()
+                    .await
+                    .unwrap();
+                if String::from_utf8_lossy(&state.stdout)
+                    .trim_start()
+                    .starts_with('Z')
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("bad holder did not exit before the cleanup assertion");
+    }
+    let error = process.stop().await.unwrap_err();
     assert!(
-        process.stop().await.is_err(),
-        "unconfirmed holder cleanup was accepted"
+        error.to_string().contains("could not confirm cleanup"),
+        "exit 125 did not retain uncertain cleanup"
     );
     assert_eq!(
         process.take_private_stderr().err(),
         Some(StderrUnavailable::Incomplete)
     );
+}
+
+#[tokio::test]
+async fn invalid_ack_with_term_before_exit_has_confirmed_cleanup() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let mut config = launch(home.path(), "echo");
+    let holder = home.path().join("held-bad-holder");
+    // No child is spawned. Holding after the invalid ACK deterministically
+    // gives stop's TERM the other side of the fixture's printf -> exit race.
+    std::fs::write(&holder,
+        "#!/usr/bin/python3\nimport signal\nprint('invalid acknowledgement', flush=True)\nwhile True: signal.pause()\n"
+    ).unwrap();
+    std::fs::set_permissions(&holder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    config.holder = holder;
+    let prepared = Process::prepare_launch(
+        config,
+        Framing::strict(),
+        StderrPolicy::PrivateTail { max_bytes: 16 },
+    )
+    .await
+    .unwrap();
+    let failure = Process::spawn_prepared_owned(prepared, &Gate(Mutex::new(Flags::default())))
+        .await
+        .err()
+        .unwrap();
+    let mut process = *failure.process.expect("invalid ACK lost its process owner");
+    let signal = process.stop_signal();
+    let exit = tokio::time::timeout(WATCHDOG, process.stop())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(exit.code, None);
+    assert!(!signal.request_stop());
+    assert!(process.take_private_stderr().unwrap().as_bytes().is_empty());
 }
 
 #[tokio::test]
