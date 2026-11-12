@@ -315,21 +315,43 @@ impl Fixture {
 }
 #[tokio::test]
 async fn daemon_shutdown_preserves_neighbor_ticket_broker_and_driver_admission() {
+    crate::panic_guard::install();
+    static HOOK: std::sync::Once = std::sync::Once::new();
+    HOOK.call_once(|| {
+        std::panic::set_hook(Box::new(|info| {
+            if let Some(location) = info.location() {
+                eprintln!("[fixture-lifecycle] panic {}:{}", location.file(), location.line());
+            }
+        }))
+    });
+    eprintln!("[fixture-lifecycle] daemon phase=start");
     let f = Fixture::new(false);
     let runtime = f.runtime(false);
     let mut own = bounded(runtime.execute(key("one"), input("hold")))
         .await
         .unwrap();
+    eprintln!("[fixture-lifecycle] daemon phase=own-accept-before");
     accept(&f, &mut own).await;
+    eprintln!("[fixture-lifecycle] daemon phase=own-accept-after");
+    eprintln!("[fixture-lifecycle] daemon phase=neighbor-before");
     let neighbor = f.neighbor("two").await;
+    eprintln!("[fixture-lifecycle] daemon phase=neighbor-after");
+    eprintln!("[fixture-lifecycle] daemon phase=question-before");
     let question = f.question().await;
+    eprintln!("[fixture-lifecycle] daemon phase=question-after");
     assert!(runtime.permission_broker().reserved_count() > 0);
+    eprintln!("[fixture-lifecycle] daemon phase=shutdown-before");
     bounded(runtime.shutdown()).await.unwrap();
+    eprintln!("[fixture-lifecycle] daemon phase=shutdown-after");
+    eprintln!("[fixture-lifecycle] daemon phase=own-wait-before");
     bounded(own.wait()).await.unwrap();
+    eprintln!("[fixture-lifecycle] daemon phase=own-wait-after");
     assert!(matches!(neighbor.progress(), Progress::Running(_)));
     assert_eq!(f.broker.pending_count(), 1);
     assert!(!f.driver.storage_failed());
+    eprintln!("[fixture-lifecycle] daemon phase=next-neighbor-before");
     let next = f.neighbor("three").await;
+    eprintln!("[fixture-lifecycle] daemon phase=next-neighbor-after");
     let extra = f
         .broker
         .request(permission_broker::PermissionRequest {
@@ -342,21 +364,35 @@ async fn daemon_shutdown_preserves_neighbor_ticket_broker_and_driver_admission()
         })
         .unwrap();
     extra.cancel();
+    eprintln!("[fixture-lifecycle] daemon phase=extra-drained-before");
     bounded(extra.drained()).await;
+    eprintln!("[fixture-lifecycle] daemon phase=extra-drained-after");
     assert!(matches!(
         runtime.execute(key("one"), input("normal")).await,
         Err(RuntimeError::Closed)
     ));
     let replacement = f.runtime(false);
-    let mut fresh = bounded(replacement.execute(key("one"), input("normal")))
-        .await
-        .unwrap();
+    eprintln!("[fixture-lifecycle] daemon phase=fresh-execute-before");
+    let fresh_result = bounded(replacement.execute(key("one"), input("normal"))).await;
+    eprintln!(
+        "[fixture-lifecycle] daemon phase=fresh-execute-after error={:?}",
+        fresh_result.as_ref().err()
+    );
+    let mut fresh = fresh_result.unwrap();
+    eprintln!("[fixture-lifecycle] daemon phase=fresh-accept-before");
     bounded(fresh.accepted()).await.unwrap();
+    eprintln!("[fixture-lifecycle] daemon phase=fresh-accept-after");
+    eprintln!("[fixture-lifecycle] daemon phase=fresh-wait-before");
     bounded(fresh.wait()).await.unwrap();
+    eprintln!("[fixture-lifecycle] daemon phase=fresh-wait-after");
+    eprintln!("[fixture-lifecycle] daemon phase=replacement-shutdown-before");
     bounded(replacement.shutdown()).await.unwrap();
+    eprintln!("[fixture-lifecycle] daemon phase=replacement-shutdown-after");
     assert!(matches!(neighbor.progress(), Progress::Running(_)));
     assert_eq!(f.broker.pending_count(), 1);
+    eprintln!("[fixture-lifecycle] daemon phase=finish-before");
     f.finish(vec![neighbor, next], Some(question)).await;
+    eprintln!("[fixture-lifecycle] daemon phase=finish-after");
 }
 #[tokio::test]
 async fn daemon_drop_does_not_close_shared_lifecycle() {
