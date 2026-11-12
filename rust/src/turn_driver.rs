@@ -1,4 +1,7 @@
 //! Owned asynchronous execution. Host authorization and real adapters are separate.
+use crate::prompt_attachments::{
+    AttachmentKind, MAX_PROMPT_ATTACHMENT_BYTES, MAX_PROMPT_ATTACHMENTS, PromptAttachment,
+};
 use crate::turn_coordinator::{
     Coordinator, DispatchAction, FinishedTurn, Limits, Outcome, StartAction, Ticket,
 };
@@ -14,6 +17,38 @@ use std::{
 use tokio::sync::{Notify, oneshot, watch};
 
 pub type Task<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
+
+/// Trusted host metadata. Queue identity strings are opaque UTF-8, retained
+/// exactly (including an empty `queue_item_at`), each bounded to 1024 bytes.
+#[derive(Clone, Default)]
+pub struct InputMetadata {
+    pub attachments: Vec<PromptAttachment>,
+    pub question_id: Option<u64>,
+    pub queue_item_id: Option<String>,
+    pub queue_item_at: Option<String>,
+}
+impl std::fmt::Debug for InputMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InputMetadata")
+            .field("attachments", &self.attachments.len())
+            .field("has_question", &self.question_id.is_some())
+            .field("has_queue", &self.queue_item_id.is_some())
+            .finish()
+    }
+}
+#[derive(Clone)]
+pub struct Input {
+    pub text: String,
+    pub metadata: InputMetadata,
+}
+impl std::fmt::Debug for Input {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Input")
+            .field("text_bytes", &self.text.len())
+            .field("metadata", &self.metadata)
+            .finish()
+    }
+}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Receipt {
     pub id: u64,
@@ -32,6 +67,8 @@ pub struct WorkerError {
     pub message: String,
 }
 pub struct Started {
+    /// Public Pult turn identity used by CLI/journal; adapters keep the native
+    /// provider turn identity separately for interrupt and callback routing.
     pub turn_id: String,
     pub done: Task<Outcome>,
 }
@@ -53,7 +90,8 @@ pub enum DispatchDecision {
     Restrict(Approval),
     Deny,
 }
-/// Fresh, synchronous host check after durable input and before dispatch seals.
+/// Fresh, synchronous host check immediately before dispatch seals. Ordinary
+/// input is already durable; queue/question receipts follow the start checkpoint.
 /// Must return promptly; provider preparation belongs outside this callback.
 /// The initial snapshot is immutable;
 /// only Coordinator's permitted approval restrictions can change dispatched data.
@@ -208,7 +246,15 @@ impl Driver {
         text: String,
         worker: Arc<dyn Worker>,
     ) -> Result<Handle, DriverError> {
-        self.start_inner(snapshot, text, worker, None)
+        self.start_inner(
+            snapshot,
+            Input {
+                text,
+                metadata: InputMetadata::default(),
+            },
+            worker,
+            None,
+        )
     }
     /// Recheck current host facts once after the durable user append. Denial,
     /// expansion, or callback panic publishes only a static AccessDenied error.
@@ -223,23 +269,40 @@ impl Driver {
         worker: Arc<dyn Worker>,
         gate: Arc<dyn DispatchGate>,
     ) -> Result<Handle, DriverError> {
-        self.start_inner(snapshot, text, worker, Some(gate))
+        self.start_inner(
+            snapshot,
+            Input {
+                text,
+                metadata: InputMetadata::default(),
+            },
+            worker,
+            Some(gate),
+        )
+    }
+    /// The host must filesystem-validate attachments and give the exact same
+    /// metadata to its Worker facade. The Worker trait remains text-only.
+    /// Queue/question receipts are deferred until the initial completion poll.
+    pub fn start_input(
+        &self,
+        snapshot: TurnSnapshot,
+        input: Input,
+        worker: Arc<dyn Worker>,
+        gate: Arc<dyn DispatchGate>,
+    ) -> Result<Handle, DriverError> {
+        self.start_inner(snapshot, input, worker, Some(gate))
     }
     fn start_inner(
         &self,
         snapshot: TurnSnapshot,
-        text: String,
+        input: Input,
         worker: Arc<dyn Worker>,
         gate: Option<Arc<dyn DispatchGate>>,
     ) -> Result<Handle, DriverError> {
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| DriverError::Internal)?;
-        if text.len() > 65536 || text.trim().is_empty() {
-            return Err(DriverError::Invalid);
-        }
-        let public_text = redact(&self.inner, &text).ok_or(DriverError::Invalid)?;
-        if public_text.len() > 65536 {
-            return Err(DriverError::Invalid);
-        }
+        let deferred =
+            input.metadata.question_id.is_some() || input.metadata.queue_item_id.is_some();
+        let draft = input_draft(&self.inner, &snapshot, &input)?;
+        let text = input.text;
         let mut state = self.inner.state.lock().expect("driver state mutex");
         if state.closed {
             return Err(DriverError::Closed);
@@ -270,7 +333,8 @@ impl Driver {
                 run_ticket,
                 snapshot,
                 text,
-                public_text,
+                draft,
+                deferred,
                 worker,
                 gate,
                 Some(accepted),
@@ -412,6 +476,81 @@ fn normalized(inner: &Inner, outcome: Outcome) -> Outcome {
         other => other,
     }
 }
+fn js_whitespace(c: char) -> bool {
+    c == '\u{feff}' || (c.is_whitespace() && c != '\u{85}')
+}
+fn input_draft(
+    inner: &Inner,
+    snapshot: &TurnSnapshot,
+    input: &Input,
+) -> Result<Value, DriverError> {
+    let metadata = &input.metadata;
+    if input.text.len() > 65536
+        || (input.text.trim_matches(js_whitespace).is_empty() && metadata.attachments.is_empty())
+        || metadata.attachments.len() > MAX_PROMPT_ATTACHMENTS
+        || metadata
+            .question_id
+            .is_some_and(|id| id == 0 || id > 9_007_199_254_740_991)
+        || metadata.queue_item_id.is_some() != metadata.queue_item_at.is_some()
+        || metadata
+            .queue_item_id
+            .as_ref()
+            .is_some_and(|id| id.is_empty() || id.len() > 1024)
+        || metadata
+            .queue_item_at
+            .as_ref()
+            .is_some_and(|at| at.len() > 1024)
+    {
+        return Err(DriverError::Invalid);
+    }
+    for a in &metadata.attachments {
+        if !std::path::Path::new(&a.path).is_absolute()
+            || a.path.contains(['\0', '\r', '\n'])
+            || a.path.encode_utf16().count() > 16_384
+            || a.name.trim_matches(js_whitespace).is_empty()
+            || a.name.contains(['\0', '\r', '\n'])
+            || a.name.encode_utf16().count() > 512
+            || a.mime.is_empty()
+            || a.mime.encode_utf16().count() > 128
+            || a.bytes > MAX_PROMPT_ATTACHMENT_BYTES
+            || (a.kind == AttachmentKind::Directory
+                && (a.bytes != 0 || a.mime != "inode/directory"))
+        {
+            return Err(DriverError::Invalid);
+        }
+    }
+    let public_text = redact(inner, &input.text)
+        .filter(|s| s.len() <= 65536)
+        .ok_or(DriverError::Invalid)?;
+    let mut data = json!({"text":public_text});
+    if !metadata.attachments.is_empty() {
+        data["attachments"] = Value::Array(
+            metadata
+                .attachments
+                .iter()
+                .map(PromptAttachment::value)
+                .collect(),
+        );
+    }
+    if let Some(id) = metadata.question_id {
+        data["questionId"] = json!(id);
+    }
+    if let (Some(id), Some(at)) = (&metadata.queue_item_id, &metadata.queue_item_at) {
+        data["queueItemId"] = json!(id);
+        data["queueItemAt"] = json!(at);
+    }
+    let draft = json!({"sessionId":snapshot.key.name,"provider":snapshot.provider.as_str(),"kind":"message.user","data":data});
+    // Reserve enough bytes for the journal's safe integer id, timestamp and
+    // framing fields before any provider can begin an external send.
+    if serde_json::to_vec(&draft)
+        .map_err(|_| DriverError::Invalid)?
+        .len()
+        > crate::MAX_LINE - 512
+    {
+        return Err(DriverError::Invalid);
+    }
+    Ok(draft)
+}
 async fn append(inner: &Arc<Inner>, draft: Value) -> Result<Receipt, DriverError> {
     let sink = inner.sink.clone();
     // Isolate trait panic; an unknown journal result must never grant permission
@@ -464,37 +603,43 @@ async fn run(
     ticket: Ticket,
     snapshot: TurnSnapshot,
     text: String,
-    public_text: String,
+    draft: Value,
+    deferred: bool,
     worker: Arc<dyn Worker>,
     gate: Option<Arc<dyn DispatchGate>>,
     mut accepted: Option<oneshot::Sender<Result<Accepted, DriverError>>>,
 ) {
     let mut cancel = control.cancel.subscribe();
-    let draft = json!({"sessionId":snapshot.key.name,"provider":snapshot.provider.as_str(),"kind":"message.user","data":{"text":public_text}});
-    let receipt = match append(&inner, draft).await {
-        Ok(receipt) => receipt,
-        Err(error) => {
-            finish(
-                &inner,
-                &control,
-                &ticket,
-                &snapshot,
-                &worker,
-                &mut cancel,
-                &mut accepted,
-                None,
-                End {
-                    outcome: failure(
-                        "journal_unknown",
-                        "journal result is unknown; execution paused",
-                    ),
-                    error: Some(error),
-                    touched: false,
-                },
-            )
-            .await;
-            return;
+    let mut user_event_id = None;
+    let deferred_draft = if deferred {
+        Some(draft)
+    } else {
+        match append(&inner, draft).await {
+            Ok(receipt) => user_event_id = Some(receipt.id),
+            Err(error) => {
+                finish(
+                    &inner,
+                    &control,
+                    &ticket,
+                    &snapshot,
+                    &worker,
+                    &mut cancel,
+                    &mut accepted,
+                    None,
+                    End {
+                        outcome: failure(
+                            "journal_unknown",
+                            "journal result is unknown; execution paused",
+                        ),
+                        error: Some(error),
+                        touched: false,
+                    },
+                )
+                .await;
+                return;
+            }
         }
+        None
     };
     let end = execute(
         &inner,
@@ -503,10 +648,11 @@ async fn run(
         &worker,
         &mut cancel,
         &mut accepted,
-        receipt.id,
+        &mut user_event_id,
         text,
         gate.as_deref(),
         &snapshot,
+        deferred_draft,
     )
     .await;
     finish(
@@ -517,7 +663,7 @@ async fn run(
         &worker,
         &mut cancel,
         &mut accepted,
-        Some(receipt.id),
+        user_event_id,
         end,
     )
     .await;
@@ -530,10 +676,11 @@ async fn execute(
     worker: &Arc<dyn Worker>,
     cancel: &mut watch::Receiver<bool>,
     accepted: &mut Option<oneshot::Sender<Result<Accepted, DriverError>>>,
-    user_event_id: u64,
+    user_event_id: &mut Option<u64>,
     text: String,
     gate: Option<&dyn DispatchGate>,
     initial: &TurnSnapshot,
+    deferred_draft: Option<Value>,
 ) -> End {
     if *cancel.borrow_and_update() {
         return End {
@@ -618,7 +765,11 @@ async fn execute(
             Err(_)=>{start.abort();let _=start.await;return End{outcome:failure("provider_timeout","worker start timed out"),error:Some(DriverError::WorkerFailed),touched:true};}
         }
     };
-    if redact(inner, &started.turn_id).as_deref() != Some(started.turn_id.as_str()) {
+    if started.turn_id.is_empty()
+        || started.turn_id.len() > 256
+        || started.turn_id.chars().any(char::is_control)
+        || redact(inner, &started.turn_id).as_deref() != Some(started.turn_id.as_str())
+    {
         return End {
             outcome: failure(
                 "invalid_start_reply",
@@ -628,44 +779,139 @@ async fn execute(
             touched: true,
         };
     }
+    let Started { turn_id, done } = started;
+    let mut pending_done = Some(done);
+    let deferred = deferred_draft.is_some();
+    let mut completion = if deferred {
+        let (checkpoint, checkpoint_rx) = oneshot::channel();
+        let mut handle = tokio::spawn(checkpoint_done(
+            pending_done.take().expect("unpolled completion"),
+            checkpoint,
+        ));
+        let first = tokio::select! {
+            biased;
+            _=cancel.changed()=>{
+                stop_completion(&mut handle).await;
+                return End { outcome: Outcome::Interrupted, error: Some(DriverError::Cancelled), touched: true };
+            }
+            result=checkpoint_rx=>result,
+        };
+        match first {
+            Ok(InitialPoll::Pending) | Ok(InitialPoll::Ready(Outcome::Success)) => {}
+            Ok(InitialPoll::Ready(outcome)) => {
+                stop_completion(&mut handle).await;
+                return End {
+                    outcome: normalized(inner, outcome),
+                    error: Some(DriverError::WorkerFailed),
+                    touched: true,
+                };
+            }
+            Err(_) => {
+                stop_completion(&mut handle).await;
+                return End {
+                    outcome: failure("worker_panic", "worker completion failed"),
+                    error: Some(DriverError::WorkerFailed),
+                    touched: true,
+                };
+            }
+        }
+        Some(handle)
+    } else {
+        None
+    };
     let action = inner
         .state
         .lock()
         .expect("driver state mutex")
         .core
-        .provider_started(ticket, &started.turn_id);
+        .provider_started(ticket, &turn_id);
     match action {
         Ok(StartAction::Proceed) => {}
-        Ok(StartAction::CancelProvider) => {
+        action => {
+            stop_owned_completion(&mut completion).await;
+            let cancelled = matches!(action, Ok(StartAction::CancelProvider));
+            return End {
+                outcome: if cancelled {
+                    Outcome::Interrupted
+                } else {
+                    failure(
+                        "invalid_start_reply",
+                        "worker returned an invalid start reply",
+                    )
+                },
+                error: Some(if cancelled {
+                    DriverError::Cancelled
+                } else {
+                    DriverError::WorkerFailed
+                }),
+                touched: true,
+            };
+        }
+    }
+    if let Some(draft) = deferred_draft {
+        if *cancel.borrow_and_update() {
+            stop_owned_completion(&mut completion).await;
             return End {
                 outcome: Outcome::Interrupted,
                 error: Some(DriverError::Cancelled),
                 touched: true,
             };
         }
-        _ => {
-            return End {
-                outcome: failure(
-                    "invalid_start_reply",
-                    "worker returned an invalid start reply",
-                ),
-                error: Some(DriverError::WorkerFailed),
-                touched: true,
-            };
+        match append(inner, draft).await {
+            Ok(receipt) => *user_event_id = Some(receipt.id),
+            Err(error) => {
+                stop_owned_completion(&mut completion).await;
+                return End {
+                    outcome: failure(
+                        "journal_unknown",
+                        "journal result is unknown; execution paused",
+                    ),
+                    error: Some(error),
+                    touched: true,
+                };
+            }
         }
     }
-    let reply = Accepted {
-        turn_id: started.turn_id,
-        user_event_id,
+    // Serialize the fresh deferred cancellation check and Accepted publication
+    // with cancel()/the global journal latch. No await while holding the lock.
+    let refused = {
+        let state = inner.state.lock().expect("driver state mutex");
+        if deferred && state.storage_failed {
+            Some(DriverError::StorageUnavailable)
+        } else if deferred && *cancel.borrow_and_update() {
+            Some(DriverError::Cancelled)
+        } else {
+            let reply = Accepted {
+                turn_id,
+                user_event_id: user_event_id.expect("durable input receipt"),
+            };
+            control
+                .progress
+                .send_replace(Progress::Running(reply.clone()));
+            answer(accepted, Ok(reply));
+            None
+        }
     };
-    control
-        .progress
-        .send_replace(Progress::Running(reply.clone()));
-    answer(accepted, Ok(reply));
-    let mut done = tokio::spawn(started.done);
+    if let Some(error) = refused {
+        stop_owned_completion(&mut completion).await;
+        return End {
+            outcome: if error == DriverError::Cancelled {
+                Outcome::Interrupted
+            } else {
+                failure("journal_unknown", "execution paused")
+            },
+            error: Some(error),
+            touched: true,
+        };
+    }
+    // Ordinary input preserves the original ordering: start polling completion
+    // only after Accepted. Deferred input already owns its checkpoint task.
+    let mut done = completion.take().unwrap_or_else(|| {
+        tokio::spawn(pending_done.take().expect("unpolled ordinary completion"))
+    });
     let outcome = tokio::select! {
         biased;
-        _=cancel.changed()=>{done.abort();let _=done.await;Outcome::Interrupted},
+        _=cancel.changed()=>{stop_completion(&mut done).await;Outcome::Interrupted},
         result=&mut done=>match result {Ok(outcome)=>normalized(inner,outcome),Err(_)=>failure("worker_panic","worker completion failed")},
     };
     End {
@@ -674,6 +920,39 @@ async fn execute(
         touched: true,
     }
 }
+
+enum InitialPoll {
+    Ready(Outcome),
+    Pending,
+}
+async fn checkpoint_done(
+    mut done: Task<Outcome>,
+    checkpoint: oneshot::Sender<InitialPoll>,
+) -> Outcome {
+    let mut checkpoint = Some(checkpoint);
+    std::future::poll_fn(move |cx| {
+        let result = done.as_mut().poll(cx);
+        if let Some(sender) = checkpoint.take() {
+            let initial = match &result {
+                std::task::Poll::Ready(outcome) => InitialPoll::Ready(outcome.clone()),
+                std::task::Poll::Pending => InitialPoll::Pending,
+            };
+            let _ = sender.send(initial);
+        }
+        result
+    })
+    .await
+}
+async fn stop_completion(done: &mut tokio::task::JoinHandle<Outcome>) {
+    done.abort();
+    let _ = done.await;
+}
+async fn stop_owned_completion(done: &mut Option<tokio::task::JoinHandle<Outcome>>) {
+    if let Some(done) = done.as_mut() {
+        stop_completion(done).await;
+    }
+}
+
 async fn close_worker(
     inner: &Arc<Inner>,
     worker: &Arc<dyn Worker>,

@@ -122,3 +122,36 @@ calling external callbacks.
 Four additional scenarios cover durable consent revocation/hold during a
 blocked journal append, exact narrowed worker settings, denied expansion or
 panic, and cancellation before dispatch. There are now 20 driver scenarios.
+
+
+## Input metadata and deferred acceptance
+
+`start_input` freezes typed Input/InputMetadata before awaiting. The trusted
+host must validate attachment ownership and pass the same frozen metadata to
+the worker facade. The journal receives only text and attachment metadata,
+not provider image blocks. Attachment-only input is allowed. Admission bounds
+the complete serialized draft before external send.
+
+Ordinary input retains append-before-start. Queue/question input delays the
+message.user receipt until Started validation and an owned first-poll
+completion checkpoint. Immediate failure, interruption or panic leaves no
+receipt, so the item/question can be retried. Pending or successful completion
+permits append; Accepted still requires the durable receipt and a fresh
+cancellation/storage check. Unknown sends are never automatically repeated.
+
+Cancellation and append failure abort and join the completion task before
+Worker::close. The append itself is owned through its known/unknown outcome.
+A storage fault latches admission and cancels siblings. Queue ID/timestamp
+strings are paired and bounded to 1024 UTF-8 bytes; timestamp is opaque and
+kept exactly, including legacy empty strings. Question IDs are positive
+JavaScript-safe event IDs. The host validates that the referenced question
+or queue item actually belongs to this session.
+
+There are now 35 driver scenarios, including metadata-only input, blocked
+start/append, first-poll failure/panic/interruption, storage uncertainty,
+dropped callers, no resend, and exact JavaScript whitespace behavior.
+
+This is a bounded library input seam, not an RPC migration. Queue ownership,
+question routing and their protocol handlers remain unported; the trusted host
+must validate these identities before calling it. The public method catalogue
+remains 27 implemented methods out of 98.
