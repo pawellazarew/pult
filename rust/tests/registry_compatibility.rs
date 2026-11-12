@@ -19,5 +19,5 @@ async fn registry_recovery_and_mutations_interoperate_with_node() {
         String::from_utf8_lossy(&result.stdout),
         String::from_utf8_lossy(&result.stderr)
     );
-    assert!(String::from_utf8_lossy(&result.stdout).contains("registry interop passed 19"));
+    assert!(String::from_utf8_lossy(&result.stdout).contains("registry interop passed 21"));
 }

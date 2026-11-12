@@ -138,7 +138,7 @@
       "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Partial Rust registered-session projection with reduced live status and pending permission counts. Full attention, phase, context and access details remain unported.",
+      "description": "Partial Rust registered-session projection with reduced live status and pending permission counts. Raw recovered metadata, including future memory policy, stays opaque; full attention, phase, context and access details remain unported.",
       "paramsSchema": {
         "type": "object",
         "properties": {},
@@ -244,7 +244,7 @@
       "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Partial Rust ordinary Codex prompt dispatch with durable user receipts. Queue, interrupt, steer, Claude, ZCode and background flows remain unsupported.",
+      "description": "Owner ordinary Codex input, queue/FIFO lifecycle, interrupt-and-send and same-turn steering. Queue identity metadata stays host-owned; asynchronous question-answer protocol remains unsupported.",
       "paramsSchema": {
         "type": "object",
         "properties": {
@@ -290,22 +290,13 @@
             }
           },
           "queue": {
-            "type": "boolean",
-            "enum": [
-              false
-            ]
+            "type": "boolean"
           },
           "interrupt": {
-            "type": "boolean",
-            "enum": [
-              false
-            ]
+            "type": "boolean"
           },
           "steer": {
-            "type": "boolean",
-            "enum": [
-              false
-            ]
+            "type": "boolean"
           }
         },
         "required": [
@@ -315,16 +306,39 @@
         "additionalProperties": false
       },
       "resultSchema": {
-        "type": "object",
-        "properties": {
-          "turnId": {
-            "type": "string"
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "turnId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "turnId"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "queued": {
+                "type": "boolean",
+                "enum": [
+                  true
+                ]
+              },
+              "id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "queued",
+              "id"
+            ],
+            "additionalProperties": false
           }
-        },
-        "required": [
-          "turnId"
-        ],
-        "additionalProperties": false
+        ]
       }
     },
     {
@@ -340,42 +354,395 @@
     {
       "name": "agent.queue.move",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.queue.move.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Durable ordinary-message queue lifecycle; selected mid-turn sending uses Codex steering. Unknown delivery remains paused and requires explicit resolution.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "to": {
+            "type": "integer"
+          },
+          "hold": {
+            "type": "boolean"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "queue": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                },
+                "at": {
+                  "type": "string"
+                },
+                "attachments": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "mime": {
+                        "type": "string"
+                      },
+                      "bytes": {
+                        "type": "integer"
+                      },
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "file",
+                          "directory"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "path",
+                      "name",
+                      "mime",
+                      "bytes",
+                      "kind"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "id",
+                "text",
+                "at"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "queuePaused": {
+            "type": "boolean"
+          },
+          "edit": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "holdMs": {
+                "type": "integer"
+              },
+              "attachments": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "mime": {
+                      "type": "string"
+                    },
+                    "bytes": {
+                      "type": "integer"
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "file",
+                        "directory"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "name",
+                    "mime",
+                    "bytes",
+                    "kind"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "id",
+              "text",
+              "holdMs"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "name",
+          "queue",
+          "queuePaused"
+        ],
+        "additionalProperties": false
+      }
     },
     {
       "name": "agent.queue.remove",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.queue.remove.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Durable ordinary-message queue lifecycle; selected mid-turn sending uses Codex steering. Unknown delivery remains paused and requires explicit resolution.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "queue": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                },
+                "at": {
+                  "type": "string"
+                },
+                "attachments": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "mime": {
+                        "type": "string"
+                      },
+                      "bytes": {
+                        "type": "integer"
+                      },
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "file",
+                          "directory"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "path",
+                      "name",
+                      "mime",
+                      "bytes",
+                      "kind"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "id",
+                "text",
+                "at"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "queuePaused": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "queue",
+          "queuePaused"
+        ],
+        "additionalProperties": false
+      }
     },
     {
       "name": "agent.queue.resume",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.queue.resume.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Durable ordinary-message queue lifecycle; selected mid-turn sending uses Codex steering. Unknown delivery remains paused and requires explicit resolution.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "queue": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                },
+                "at": {
+                  "type": "string"
+                },
+                "attachments": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "mime": {
+                        "type": "string"
+                      },
+                      "bytes": {
+                        "type": "integer"
+                      },
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "file",
+                          "directory"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "path",
+                      "name",
+                      "mime",
+                      "bytes",
+                      "kind"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "id",
+                "text",
+                "at"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "queuePaused": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "queue",
+          "queuePaused"
+        ],
+        "additionalProperties": false
+      }
     },
     {
       "name": "agent.queue.send",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.queue.send.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Durable ordinary-message queue lifecycle; selected mid-turn sending uses Codex steering. Unknown delivery remains paused and requires explicit resolution.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "turnId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "turnId"
+        ],
+        "additionalProperties": false
+      }
     },
     {
       "name": "agent.read",
@@ -634,7 +1001,7 @@
       "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Partial Rust metadata creation with explicit settings and fresh access checks. Start prompts, drafts, inherited defaults, worktrees and active browser execution remain unsupported.",
+      "description": "Partial Rust metadata creation with explicit settings, optional memory policy, and fresh access checks. Start prompts, drafts, inherited defaults, worktrees and active browser execution remain unsupported.",
       "paramsSchema": {
         "type": "object",
         "properties": {
@@ -712,6 +1079,23 @@
               false,
               null
             ]
+          },
+          "memory": {
+            "type": "object",
+            "properties": {
+              "read": {
+                "type": "boolean"
+              },
+              "write": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "ask"
+                ]
+              }
+            },
+            "required": [],
+            "additionalProperties": false
           }
         },
         "required": [],
@@ -740,6 +1124,26 @@
           },
           "lastEventId": {
             "type": "integer"
+          },
+          "memory": {
+            "type": "object",
+            "properties": {
+              "read": {
+                "type": "boolean"
+              },
+              "write": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "ask"
+                ]
+              }
+            },
+            "required": [
+              "read",
+              "write"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [
@@ -1597,9 +2001,9 @@
       "name": "memory.add",
       "node": "extension",
       "rust": "implemented",
-      "access": "owner",
+      "access": "owner-or-turn-memory",
       "testOnly": false,
-      "description": "Owner-only shared memory add; experimental Rust scratch service, agent turn integration follows separately.",
+      "description": "Shared memory add: owner CRUD or a distinct exact-turn memory capability with mandatory human approval. Legacy read-only memory credentials cannot mutate records.",
       "paramsSchema": {
         "type": "object",
         "properties": {
@@ -1682,12 +2086,30 @@
             "type": "boolean"
           },
           "author": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "owner",
+              "claude",
+              "codex",
+              "zcode"
+            ]
           },
           "reason": {
             "type": "string"
           },
           "sourceSession": {
+            "type": "string"
+          },
+          "sourceEventId": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "sourceTurnId": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "sourceCreatedAt": {
             "type": "string"
           }
         },
@@ -1714,7 +2136,7 @@
       "rust": "implemented",
       "access": "owner-or-memory",
       "testOnly": false,
-      "description": "Bounded JSON-lines catalog of visible memory summaries. Owner must select session; memory credentials must omit it.",
+      "description": "Bounded JSON-lines catalog of visible memory summaries. Owner must select session; legacy read-only and authorized turn memory credentials must omit it.",
       "paramsSchema": {
         "type": "object",
         "properties": {
@@ -1789,6 +2211,76 @@
           "memories",
           "truncated",
           "context"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "memory.configure",
+      "node": "extension",
+      "rust": "implemented",
+      "access": "owner",
+      "testOnly": false,
+      "description": "Configure persisted session memory policy. Turn reads are optional; turn mutations in ask mode always require human approval. Provider delivery is partial and currently implemented for Codex only.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "session": {
+            "type": "string"
+          },
+          "memory": {
+            "type": "object",
+            "properties": {
+              "read": {
+                "type": "boolean"
+              },
+              "write": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "ask"
+                ]
+              }
+            },
+            "required": [],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "session"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "session": {
+            "type": "string"
+          },
+          "memory": {
+            "type": "object",
+            "properties": {
+              "read": {
+                "type": "boolean"
+              },
+              "write": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "ask"
+                ]
+              }
+            },
+            "required": [
+              "read",
+              "write"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "session",
+          "memory"
         ],
         "additionalProperties": false
       }
@@ -2005,9 +2497,9 @@
       "name": "memory.forget",
       "node": "extension",
       "rust": "implemented",
-      "access": "owner",
+      "access": "owner-or-turn-memory",
       "testOnly": false,
-      "description": "Owner-only shared memory forget; experimental Rust scratch service, agent turn integration follows separately.",
+      "description": "Shared memory forget: owner CRUD or a distinct exact-turn memory capability with mandatory human approval. Legacy read-only memory credentials cannot mutate records.",
       "paramsSchema": {
         "type": "object",
         "properties": {
@@ -2083,12 +2575,30 @@
             "type": "boolean"
           },
           "author": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "owner",
+              "claude",
+              "codex",
+              "zcode"
+            ]
           },
           "reason": {
             "type": "string"
           },
           "sourceSession": {
+            "type": "string"
+          },
+          "sourceEventId": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "sourceTurnId": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "sourceCreatedAt": {
             "type": "string"
           }
         },
@@ -2115,7 +2625,7 @@
       "rust": "implemented",
       "access": "owner-or-memory",
       "testOnly": false,
-      "description": "Owner-only shared memory get; experimental Rust scratch service, agent turn integration follows separately.",
+      "description": "Read visible shared memory through owner context, a legacy read-only memory credential, or an authorized turn memory capability. Scoped credentials must omit session.",
       "paramsSchema": {
         "type": "object",
         "properties": {
@@ -2180,12 +2690,30 @@
             "type": "boolean"
           },
           "author": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "owner",
+              "claude",
+              "codex",
+              "zcode"
+            ]
           },
           "reason": {
             "type": "string"
           },
           "sourceSession": {
+            "type": "string"
+          },
+          "sourceEventId": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "sourceTurnId": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "sourceCreatedAt": {
             "type": "string"
           }
         },
@@ -2212,7 +2740,7 @@
       "rust": "implemented",
       "access": "owner",
       "testOnly": false,
-      "description": "Owner-only shared memory history; experimental Rust scratch service, agent turn integration follows separately.",
+      "description": "Owner-only paginated shared memory version history.",
       "paramsSchema": {
         "type": "object",
         "properties": {
@@ -2288,12 +2816,30 @@
                   "type": "boolean"
                 },
                 "author": {
-                  "type": "string"
+                  "type": "string",
+                  "enum": [
+                    "owner",
+                    "claude",
+                    "codex",
+                    "zcode"
+                  ]
                 },
                 "reason": {
                   "type": "string"
                 },
                 "sourceSession": {
+                  "type": "string"
+                },
+                "sourceEventId": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                },
+                "sourceTurnId": {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "sourceCreatedAt": {
                   "type": "string"
                 }
               },
@@ -2331,7 +2877,7 @@
       "rust": "implemented",
       "access": "owner-or-memory",
       "testOnly": false,
-      "description": "Owner-only shared memory list; experimental Rust scratch service, agent turn integration follows separately.",
+      "description": "Read visible shared memory through owner context, a legacy read-only memory credential, or an authorized turn memory capability. Scoped credentials must omit session.",
       "paramsSchema": {
         "type": "object",
         "properties": {
@@ -2441,7 +2987,7 @@
       "rust": "implemented",
       "access": "owner-or-memory",
       "testOnly": false,
-      "description": "Owner-only shared memory search; experimental Rust scratch service, agent turn integration follows separately.",
+      "description": "Read visible shared memory through owner context, a legacy read-only memory credential, or an authorized turn memory capability. Scoped credentials must omit session.",
       "paramsSchema": {
         "type": "object",
         "properties": {
@@ -2554,9 +3100,9 @@
       "name": "memory.update",
       "node": "extension",
       "rust": "implemented",
-      "access": "owner",
+      "access": "owner-or-turn-memory",
       "testOnly": false,
-      "description": "Owner-only shared memory update; experimental Rust scratch service, agent turn integration follows separately.",
+      "description": "Shared memory update: owner CRUD or a distinct exact-turn memory capability with mandatory human approval. Legacy read-only memory credentials cannot mutate records.",
       "paramsSchema": {
         "type": "object",
         "properties": {
@@ -2644,12 +3190,30 @@
             "type": "boolean"
           },
           "author": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "owner",
+              "claude",
+              "codex",
+              "zcode"
+            ]
           },
           "reason": {
             "type": "string"
           },
           "sourceSession": {
+            "type": "string"
+          },
+          "sourceEventId": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "sourceTurnId": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "sourceCreatedAt": {
             "type": "string"
           }
         },
@@ -2919,7 +3483,8 @@
                     "ask",
                     "owner-or-runtime",
                     "owner-shell",
-                    "owner-or-memory"
+                    "owner-or-memory",
+                    "owner-or-turn-memory"
                   ]
                 },
                 "testOnly": {

@@ -14,11 +14,15 @@ pub mod host_paths;
 pub mod host_policy;
 pub mod journal;
 mod locale;
+pub mod mcp_stdio;
 mod memory;
 mod memory_api;
 mod memory_catalog;
 pub mod memory_client;
+pub mod memory_mcp;
+pub mod memory_policy;
 mod memory_project;
+pub(crate) mod memory_turn;
 pub mod network_guard;
 pub mod panic_guard;
 pub mod permission_broker;
@@ -36,6 +40,7 @@ pub mod session_live;
 mod session_memory;
 mod session_memory_api;
 mod session_model;
+mod session_queue;
 mod session_read;
 mod session_runtime_api;
 mod session_tree;
@@ -77,8 +82,8 @@ use tokio::task::JoinSet;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const PROTOCOL: u64 = 1;
 pub const MAX_LINE: usize = 1024 * 1024;
-pub const PARTIAL: [&str; 6] = session_runtime_api::METHODS;
-pub const SUPPORTED: [&str; 27] = [
+pub const PARTIAL: [&str; 10] = session_runtime_api::METHODS;
+pub const SUPPORTED: [&str; 28] = [
     "agent.archive",
     "agent.read",
     "agent.rename",
@@ -95,6 +100,7 @@ pub const SUPPORTED: [&str; 27] = [
     "events.unsubscribe",
     "memory.add",
     "memory.catalog",
+    "memory.configure",
     "memory.context.bind",
     "memory.context.issue",
     "memory.context.revoke",
@@ -516,7 +522,9 @@ struct State {
     live_id: AtomicU64,
     driver: OnceLock<Arc<turn_driver::Driver>>,
     execution_storage_failed: AtomicBool,
+    execution_admission: Mutex<()>,
     native_runtime: OnceLock<Arc<codex_runtime::CodexRuntime>>,
+    memory_turns: OnceLock<Arc<memory_turn::Backend>>,
     runtime_init: Mutex<()>,
     consent: Mutex<Option<runtime_state::Consent>>,
     live_sessions: Mutex<session_live::Cache>,
@@ -682,7 +690,21 @@ async fn connection(
         return Ok(());
     }
     let memory_given = hello.get("memory");
+    let memory_turn_given = hello.get("memoryTurn");
+    let memory_turn_lease = if memory_turn_given.is_some()
+        && memory_given.is_none()
+        && hello.get("token").is_none()
+        && hello.get("ask").is_none()
+        && hello.get("runtime").is_none()
+    {
+        memory_turn_given
+            .and_then(Value::as_str)
+            .and_then(|key| state.memory_turns.get()?.lookup(key))
+    } else {
+        None
+    };
     let memory_lease = if memory_given.is_some()
+        && memory_turn_given.is_none()
         && hello.get("token").is_none()
         && hello.get("ask").is_none()
         && hello.get("runtime").is_none()
@@ -698,11 +720,12 @@ async fn connection(
     } else {
         let given = hello["token"].as_str().unwrap_or("");
         let owner_valid = memory_given.is_none()
+            && memory_turn_given.is_none()
             && hello.get("ask").is_none()
             && hello.get("runtime").is_none()
             && given.len() == state.token.len()
             && bool::from(given.as_bytes().ct_eq(state.token.as_bytes()));
-        if !owner_valid && memory_lease.is_none() {
+        if !owner_valid && memory_lease.is_none() && memory_turn_lease.is_none() {
             Some("bad_token")
         } else if hello
             .get("protocol")
@@ -717,12 +740,14 @@ async fn connection(
         write_value(&mut output, &json!({"type":"error","code":code})).await?;
         return Ok(());
     }
-    let supported: &[&str] = if memory_lease.is_some() {
+    let supported: &[&str] = if memory_turn_lease.is_some() {
+        &memory_turn::METHODS
+    } else if memory_lease.is_some() {
         &session_memory_api::READ_METHODS
     } else {
         &SUPPORTED
     };
-    let partial: &[&str] = if memory_lease.is_some() {
+    let partial: &[&str] = if memory_lease.is_some() || memory_turn_lease.is_some() {
         &[]
     } else {
         &PARTIAL
@@ -745,7 +770,12 @@ async fn connection(
         client_label,
         state.connection_id.fetch_add(1, Ordering::Relaxed)
     );
-    write_value(&mut output, &json!({"type":"hello_ok","protocol":PROTOCOL,"daemon":{"version":VERSION,"pid":std::process::id(),"startedAt":state.started_at},"capabilities":{"experimental":true,"supportedMethods":supported,"partialMethods":partial}})).await?;
+    let _queue_connection = session_queue::ConnectionLease(state.clone(), by.clone());
+    let mut welcome = json!({"type":"hello_ok","protocol":PROTOCOL,"daemon":{"version":VERSION,"pid":std::process::id(),"startedAt":state.started_at},"capabilities":{"experimental":true,"supportedMethods":supported,"partialMethods":partial}});
+    if let Some(lease) = &memory_turn_lease {
+        welcome["capabilities"]["memoryWrite"] = json!(lease.writable());
+    }
+    write_value(&mut output, &welcome).await?;
     let (writer, _writer_task) = stream::Writer::start(output);
     let mut writer_closed = writer.closed();
     let mut subscriptions = subscriptions::Subscriptions::new();
@@ -767,6 +797,46 @@ async fn connection(
                 break;
             }
         };
+        if let Some(lease) = &memory_turn_lease {
+            // This purpose-specific role never falls through to owner/core RPC.
+            let response = if let Some((id, command)) = memory_api::parse(&bytes) {
+                match command {
+                    Ok((method, params)) if memory_turn::METHODS.contains(&method.as_str()) => {
+                        let result = match state.memory_turns.get() {
+                            Some(memory) => memory.call(lease.clone(), method, params).await,
+                            None => Err(memory::MemoryError {
+                                code: "forbidden",
+                                message: "memory turn is unavailable".into(),
+                            }),
+                        };
+                        match result {
+                            Ok(result) => json!({"id":id,"result":result}),
+                            Err(error) => {
+                                json!({"id":id,"error":{"code":error.code,"message":error.message}})
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        json!({"id":id,"error":{"code":error.code,"message":"invalid memory request"}})
+                    }
+                    _ => {
+                        json!({"id":id,"error":{"code":"forbidden","message":"memory turn credential cannot call this method"}})
+                    }
+                }
+            } else {
+                let id = serde_json::from_slice::<Value>(&bytes)
+                    .ok()
+                    .and_then(|request| request.get("id").cloned())
+                    .filter(|id| id.is_string() || id.is_number())
+                    .unwrap_or(Value::Null);
+                json!({"id":id,"error":{"code":"forbidden","message":"memory turn credential cannot call this method"}})
+            };
+            if serde_json::to_vec(&response)?.len() >= MAX_LINE {
+                break;
+            }
+            writer.response(&response).await?;
+            continue;
+        }
         if let Some(lease) = &memory_lease {
             // This role never reaches the owner dispatcher, including on malformed
             // or unknown methods. Re-authorize the lease for every permitted read.
@@ -1061,10 +1131,10 @@ async fn connection(
             if let Ok(mut contexts) = state.session_memory.lock() {
                 contexts.revoke_all();
             }
-            let _ = state.stop.send(true);
             break;
         }
     }
+
     if daemon_stopping {
         subscriptions.shutdown(&writer).await;
     }
@@ -1165,7 +1235,9 @@ async fn serve_owned(home: PathBuf, mut cancellation: watch::Receiver<bool>) -> 
         live_id: AtomicU64::new(subscriptions::LIVE_BASE),
         driver: OnceLock::new(),
         execution_storage_failed: AtomicBool::new(false),
+        execution_admission: Mutex::new(()),
         native_runtime: OnceLock::new(),
+        memory_turns: OnceLock::new(),
         runtime_init: Mutex::new(()),
         consent: Mutex::new(None),
         live_sessions: Mutex::new(live_sessions),
@@ -1183,7 +1255,7 @@ async fn serve_owned(home: PathBuf, mut cancellation: watch::Receiver<bool>) -> 
             _ = shutdown.changed() => break,
             _ = cancellation.changed() => break,
             _ = execution_driver.wait_for_storage_failure() => {
-                state.execution_storage_failed.store(true, Ordering::Release);
+                state.execution_storage_failed();
                 break;
             },
             connection_result = listener.accept() => {
@@ -1203,7 +1275,6 @@ async fn serve_owned(home: PathBuf, mut cancellation: watch::Receiver<bool>) -> 
             _ = tasks.join_next(), if !tasks.is_empty() => (),
         }
     }
-    let _ = state.stop.send(true);
     runtime_state::begin_shutdown(&state);
     if tokio::time::timeout(Duration::from_secs(2), async {
         while tasks.join_next().await.is_some() {}

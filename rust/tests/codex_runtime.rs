@@ -816,6 +816,176 @@ case!(
     }
 );
 
+case!(
+    steering_is_exact_active_ticket_no_fallback_or_fake_receipt,
+    {
+        let f = Fixture::new();
+        let (runtime, _) = f.runtime(probe("US"), RuntimeConfig::default());
+        let mut one = runtime
+            .execute(key("one"), input("hold one"))
+            .await
+            .unwrap();
+        let accepted = one.accepted().await.unwrap();
+        let mut two = runtime
+            .execute(key("two"), input("hold two"))
+            .await
+            .unwrap();
+        two.accepted().await.unwrap();
+        let mut forged = input("forged steering receipt");
+        forged.metadata.queue_item_id = Some("untrusted".into());
+        forged.metadata.queue_item_at = Some("untrusted".into());
+        assert_eq!(
+            runtime.steer(&key("one"), forged).await.unwrap_err().code,
+            "invalid_params"
+        );
+        let before = f
+            .journal()
+            .iter()
+            .filter(|e| e["kind"] == "message.user")
+            .count();
+        assert_eq!(
+            runtime
+                .steer(&key("one"), input("reject-steer"))
+                .await
+                .unwrap_err()
+                .code,
+            "invalid_params"
+        );
+        assert_eq!(
+            f.journal()
+                .iter()
+                .filter(|e| e["kind"] == "message.user")
+                .count(),
+            before
+        );
+        assert_eq!(
+            runtime.steer(&key("one"), input("clarify")).await.unwrap(),
+            accepted.turn_id
+        );
+        let sent = f
+            .logs()
+            .into_iter()
+            .find(|e| e["method"] == "turn/steer")
+            .unwrap();
+        assert_eq!(sent["params"]["expectedTurnId"], "native-turn-2");
+        assert_eq!(
+            f.logs()
+                .iter()
+                .filter(|e| e["method"] == "turn/start")
+                .count(),
+            2
+        );
+        let outside = runtime.clone();
+        let response = std::thread::spawn(move || {
+            outside.steer(&key("one"), input("outside runtime context"))
+        })
+        .join()
+        .unwrap();
+        assert_eq!(response.await.unwrap(), accepted.turn_id);
+        runtime.stop(&key("one"), None).unwrap();
+        one.wait().await.unwrap();
+        assert!(runtime.steer(&key("one"), input("late")).await.is_err());
+        assert!(f.driver.active_ticket(&key("two")).is_some());
+        runtime.stop(&key("two"), None).unwrap();
+        two.wait().await.unwrap();
+        runtime.shutdown().await.unwrap();
+    }
+);
+
+case!(
+    unknown_steer_is_not_receipted_or_replayed_and_other_session_survives,
+    {
+        let f = Fixture::new();
+        let (runtime, _) = f.runtime(probe("US"), RuntimeConfig::default());
+        let mut one = runtime
+            .execute(key("one"), input("hold one"))
+            .await
+            .unwrap();
+        one.accepted().await.unwrap();
+        let mut two = runtime
+            .execute(key("two"), input("hold two"))
+            .await
+            .unwrap();
+        two.accepted().await.unwrap();
+        assert_eq!(
+            runtime
+                .steer(&key("one"), input("unknown-steer"))
+                .await
+                .unwrap_err()
+                .code,
+            "send_unknown"
+        );
+        assert_eq!(
+            f.logs()
+                .iter()
+                .filter(|e| e["method"] == "turn/steer")
+                .count(),
+            1
+        );
+        assert!(
+            !f.journal()
+                .iter()
+                .any(|e| e["kind"] == "message.user" && e["data"]["text"] == "unknown-steer")
+        );
+        assert!(f.driver.active_ticket(&key("two")).is_some());
+        runtime.stop(&key("one"), None).unwrap();
+        one.wait().await.unwrap();
+        runtime.stop(&key("two"), None).unwrap();
+        two.wait().await.unwrap();
+        runtime.shutdown().await.unwrap();
+    }
+);
+
+case!(
+    steer_uses_exact_lease_host_after_same_route_host_replacement,
+    {
+        let f = Fixture::new();
+        let (runtime, _) = f.runtime(probe("US"), RuntimeConfig::default());
+        let mut first = runtime.execute(key("one"), input("normal")).await.unwrap();
+        first.wait().await.unwrap();
+        let thread = f
+            .registry
+            .lock()
+            .unwrap()
+            .find("one")
+            .unwrap()
+            .scalar("providerSessionId")
+            .unwrap();
+        let pids: Vec<i32> =
+            serde_json::from_slice(&std::fs::read(f.home.join("pids.json")).unwrap()).unwrap();
+        std::fs::write(f.home.join("autoturn"), thread).unwrap();
+        until(|| {
+            pids.iter()
+                .all(|pid| nix::sys::signal::kill(nix::unistd::Pid::from_raw(*pid), None).is_err())
+        })
+        .await;
+        std::fs::remove_file(f.home.join("autoturn")).unwrap();
+        let mut second = runtime
+            .execute(key("one"), input("hold replacement"))
+            .await
+            .unwrap();
+        let accepted = second.accepted().await.unwrap();
+        assert_eq!(runtime.host_count(), 2);
+        assert_eq!(
+            runtime
+                .steer(&key("one"), input("clarify replacement"))
+                .await
+                .unwrap(),
+            accepted.turn_id
+        );
+        assert_eq!(
+            f.logs()
+                .iter()
+                .filter(|r| r["method"] == "turn/steer")
+                .count(),
+            1
+        );
+        runtime.stop(&key("one"), None).unwrap();
+        second.wait().await.unwrap();
+        runtime.shutdown().await.unwrap();
+    }
+);
+
 struct BlockInterruptTail {
     sink: Arc<JournalSink>,
     entered: tokio::sync::Notify,

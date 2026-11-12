@@ -41,6 +41,10 @@ enum Action {
 /// Memory administration and read-only session access.
 #[derive(Subcommand)]
 enum MemoryAction {
+    Configure {
+        #[arg(long)]
+        params: String,
+    },
     Catalog {
         #[arg(long, default_value = "{}")]
         params: String,
@@ -113,6 +117,12 @@ enum AgentAction {
         text: String,
         #[arg(long)]
         attachments: Option<String>,
+        #[arg(long, conflicts_with_all=["interrupt","steer"], help="Queue behind existing work; send immediately when idle")]
+        queue: bool,
+        #[arg(long, conflicts_with_all=["queue","steer"], help="Interrupt, wait for cleanup, then send a new task")]
+        interrupt: bool,
+        #[arg(long, conflicts_with_all=["queue","interrupt"], help="Clarify the active Codex turn without interrupting it")]
+        steer: bool,
     },
     Stop {
         name: String,
@@ -211,7 +221,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     if args.skill {
         println!(
-            "Rust core protocol 1. Use an explicit private scratch --home.\nCommands: agent start --params JSON, agent list, agent prompt NAME TEXT [--attachments JSON], agent stop NAME [--turn-id ID], perm list [--name NAME], perm resolve ID allow|deny [--scope once|session|rule] [--answers JSON] [--message TEXT] (partial ordinary Codex staging), memory add|update|forget|get|list|search|history|catalog --params JSON, memory context bind|issue|revoke|status --params JSON (owner administration; no turn injection yet), daemon serve, daemon status, daemon stop, catalog, events tail, events snapshot, events history --session NAME [--before ID] [--budget BYTES], events get ID..., agent read NAME [--since N] [--format text|json], agent tree NAME [--json], agent rename NAME [TITLE] [--title TEXT], agent archive|unarchive NAME, agent seen NAME [--unread]\nPULT_MEMORY_KEY selects memory-only authentication for every RPC without reading the owner token or display config. Memory credentials allow only get/list/search/catalog; they never grant owner authority.\nOwner-token connections support memory.context.bind, memory.context.issue, memory.context.revoke, memory.context.status, memory.catalog, memory.add, memory.update, memory.forget, memory.get, memory.list, memory.search, memory.history, agent.read, agent.tree, agent.rename, agent.archive, agent.seen, daemon.status, daemon.stop, events.tail, events.subscribe, events.unsubscribe, events.snapshot, events.history, events.get and protocol.catalog.\nPartial owner methods: agent.start, agent.list, agent.prompt, agent.stop, perm.list, perm.resolve. Full queue, background and provider parity remains in progress.\nHistory reads per-session files, snapshots and get use the global journal.\nSubscriptions replay committed events with bounded output. live=true sends an empty-session reset.\nevents.emit requires PULT_TEST=1 and is for deterministic verification.\nJournal append is acknowledged after sync. A failed append has an unknown outcome until replay.\nOther catalogued methods return not_implemented. Legacy ask/runtime credentials remain rejected.\nPrivate sessions/config are allowed only in a marked Rust scratch home. Startup recovers sessions cold and pauses queues; no provider is started. Production migration and session execution follow later compatibility steps."
+            "Rust core protocol 1. Use an explicit private scratch --home.\nCommands: agent start --params JSON, agent list, agent prompt NAME TEXT [--attachments JSON] [--queue|--interrupt|--steer], agent stop NAME [--turn-id ID], perm list [--name NAME], perm resolve ID allow|deny [--scope once|session|rule] [--answers JSON] [--message TEXT] (partial ordinary Codex staging), memory add|update|forget|get|list|search|history|catalog|configure --params JSON, memory context bind|issue|revoke|status --params JSON (owner administration; ordinary Codex memory is opt-in), daemon serve, daemon status, daemon stop, catalog, events tail, events snapshot, events history --session NAME [--before ID] [--budget BYTES], events get ID..., agent read NAME [--since N] [--format text|json], agent tree NAME [--json], agent rename NAME [TITLE] [--title TEXT], agent archive|unarchive NAME, agent seen NAME [--unread]\nPULT_MEMORY_KEY selects memory-only authentication for every RPC without reading the owner token or display config. Memory credentials allow only get/list/search/catalog; they never grant owner authority.\nOwner-token connections support memory.configure, memory.context.bind, memory.context.issue, memory.context.revoke, memory.context.status, memory.catalog, memory.add, memory.update, memory.forget, memory.get, memory.list, memory.search, memory.history, agent.read, agent.tree, agent.rename, agent.archive, agent.seen, daemon.status, daemon.stop, events.tail, events.subscribe, events.unsubscribe, events.snapshot, events.history, events.get and protocol.catalog.\nPartial owner methods: agent.start, agent.list, agent.prompt, agent.stop, agent.queue.send/resume/remove/move, perm.list, perm.resolve. Queue and Codex steering are available; background and remaining provider parity continue.\nHistory reads per-session files, snapshots and get use the global journal.\nSubscriptions replay committed events with bounded output. live=true sends an empty-session reset.\nevents.emit requires PULT_TEST=1 and is for deterministic verification.\nJournal append is acknowledged after sync. A failed append has an unknown outcome until replay.\nOther catalogued methods return not_implemented. Legacy ask/runtime credentials remain rejected.\nPrivate sessions/config are allowed only in a marked Rust scratch home. Startup recovers sessions cold and pauses queues; no provider is started. Production cutover and remaining provider parity follow later compatibility steps."
         );
         return Ok(());
     }
@@ -225,7 +235,8 @@ async fn main() -> Result<()> {
             action: DaemonAction::Serve,
         } => {
             anyhow::ensure!(
-                std::env::var_os("PULT_MEMORY_KEY").is_none(),
+                std::env::var_os("PULT_MEMORY_KEY").is_none()
+                    && std::env::var_os("PULT_MEMORY_TURN_KEY").is_none(),
                 "memory credentials cannot start an owner daemon"
             );
             return pult_core::serve(home).await;
@@ -251,6 +262,7 @@ async fn main() -> Result<()> {
         Action::Memory { action } => {
             let (method, params) = match action {
                 MemoryAction::Catalog { params } => ("memory.catalog", params),
+                MemoryAction::Configure { params } => ("memory.configure", params),
                 MemoryAction::Context { action } => match action {
                     MemoryContextAction::Bind { params } => ("memory.context.bind", params),
                     MemoryContextAction::Issue { params } => ("memory.context.issue", params),
@@ -280,6 +292,9 @@ async fn main() -> Result<()> {
                     name,
                     text,
                     attachments,
+                    queue,
+                    interrupt,
+                    steer,
                 } => {
                     let mut params = serde_json::json!({"name":name,"text":text});
                     if let Some(attachments) = attachments {
@@ -290,6 +305,13 @@ async fn main() -> Result<()> {
                             "--attachments must be a JSON array"
                         );
                         params["attachments"] = attachments;
+                    }
+                    for (name, enabled) in
+                        [("queue", queue), ("interrupt", interrupt), ("steer", steer)]
+                    {
+                        if enabled {
+                            params[name] = serde_json::json!(true);
+                        }
                     }
                     ("agent.prompt", params)
                 }
@@ -469,7 +491,19 @@ async fn cli_request(
     method: &str,
     params: serde_json::Value,
 ) -> Result<Box<serde_json::value::RawValue>> {
-    if let Some(key) = std::env::var_os("PULT_MEMORY_KEY") {
+    let read_key = std::env::var_os("PULT_MEMORY_KEY");
+    let turn_key = std::env::var_os("PULT_MEMORY_TURN_KEY");
+    anyhow::ensure!(
+        read_key.is_none() || turn_key.is_none(),
+        "memory credential purposes cannot be mixed"
+    );
+    if let Some(key) = turn_key {
+        let key = key
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("memory turn credential must be valid UTF-8"))?;
+        return pult_core::memory_mcp::request_cli(home, &key, method, params).await;
+    }
+    if let Some(key) = read_key {
         let key = key
             .into_string()
             .map_err(|_| anyhow::anyhow!("PULT_MEMORY_KEY must be valid UTF-8"))?;
@@ -482,7 +516,9 @@ async fn cli_request(
 // Even a rejected or misbehaving scoped endpoint cannot make the CLI inspect
 // owner display configuration when formatting a response.
 fn cli_language(home: &std::path::Path) -> Result<&'static str> {
-    if std::env::var_os("PULT_MEMORY_KEY").is_some() {
+    if std::env::var_os("PULT_MEMORY_KEY").is_some()
+        || std::env::var_os("PULT_MEMORY_TURN_KEY").is_some()
+    {
         return Ok(if std::env::var("PULT_LANG").as_deref() == Ok("ru") {
             "ru"
         } else {
@@ -575,6 +611,76 @@ mod tests {
         for input in ["[]", "null", "false", "5", "invalid", "\"private text\""] {
             let error = parse_cli_object(input, "--params").unwrap_err().to_string();
             assert_eq!(error, "--params must be a JSON object");
+        }
+    }
+    #[test]
+    fn prompt_modes_are_exclusive_and_help_describes_all_three() {
+        for mode in ["--queue", "--interrupt", "--steer"] {
+            let args = Args::try_parse_from([
+                "pultd-rust",
+                "--home",
+                "/private/scratch",
+                "agent",
+                "prompt",
+                "chat",
+                "hello",
+                mode,
+            ])
+            .unwrap();
+            let Some(Action::Agent {
+                action:
+                    AgentAction::Prompt {
+                        queue,
+                        interrupt,
+                        steer,
+                        ..
+                    },
+            }) = args.command
+            else {
+                panic!("wrong command")
+            };
+            assert_eq!(
+                [queue, interrupt, steer].into_iter().filter(|v| *v).count(),
+                1
+            );
+            assert_eq!(
+                (queue, interrupt, steer),
+                (mode == "--queue", mode == "--interrupt", mode == "--steer")
+            );
+        }
+        for pair in [
+            ["--queue", "--interrupt"],
+            ["--queue", "--steer"],
+            ["--interrupt", "--steer"],
+        ] {
+            assert!(
+                Args::try_parse_from([
+                    "pultd-rust",
+                    "--home",
+                    "/private/scratch",
+                    "agent",
+                    "prompt",
+                    "chat",
+                    "hello",
+                    pair[0],
+                    pair[1]
+                ])
+                .is_err()
+            );
+        }
+        let help = Args::try_parse_from([
+            "pultd-rust",
+            "--home",
+            "/private/scratch",
+            "agent",
+            "prompt",
+            "--help",
+        ])
+        .err()
+        .unwrap()
+        .to_string();
+        for flag in ["--queue", "--interrupt", "--steer"] {
+            assert!(help.contains(flag));
         }
     }
     #[test]

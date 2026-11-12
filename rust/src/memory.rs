@@ -24,6 +24,35 @@ pub(crate) struct Context {
     pub session: Option<String>,
 }
 
+/// Host-derived revision provenance, never parsed from MCP tool arguments.
+#[derive(Clone)]
+pub(crate) struct Origin {
+    pub session: crate::turn_snapshot::SessionKey,
+    pub provider: crate::turn_snapshot::Provider,
+    pub user_event_id: u64,
+    pub turn_id: String,
+}
+impl Origin {
+    fn validate(&self, context: &Context) -> MemoryResult<()> {
+        self.session
+            .validate()
+            .map_err(|_| invalid("invalid memory origin"))?;
+        if context.session.as_deref() != Some(&self.session.name)
+            || self.user_event_id == 0
+            || self.user_event_id > MAX_VERSION as u64
+            || self.turn_id.is_empty()
+            || self.turn_id.len() > 256
+            || self.turn_id.chars().any(char::is_control)
+        {
+            return Err(invalid("invalid memory origin"));
+        }
+        Ok(())
+    }
+    fn value(&self) -> Value {
+        json!({"sessionCreatedAt":self.session.created_at,"provider":self.provider.as_str(),"sourceEventId":self.user_event_id,"sourceTurnId":self.turn_id})
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct MemoryError {
     pub code: &'static str,
@@ -68,16 +97,37 @@ struct Record {
     reason: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     source_session: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_event_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_created_at: Option<String>,
 }
 impl Record {
     fn validate(&self) -> MemoryResult<()> {
         identifier(&self.id, "stored id")?;
         if !(1..=MAX_VERSION).contains(&self.version)
-            || self.author != "owner"
+            || !matches!(self.author.as_str(), "owner" | "claude" | "codex" | "zcode")
             || !matches!(self.scope.as_str(), "global" | "project")
             || (self.scope == "project") != self.project_id.is_some()
         {
             return Err(internal("invalid stored memory metadata"));
+        }
+        if self.author != "owner"
+            && (self.source_session.is_none()
+                || self
+                    .source_event_id
+                    .is_none_or(|id| id == 0 || id > MAX_VERSION as u64)
+                || self.source_turn_id.as_ref().is_none_or(|id| {
+                    id.is_empty() || id.len() > 256 || id.chars().any(char::is_control)
+                })
+                || self
+                    .source_created_at
+                    .as_ref()
+                    .is_none_or(|at| at.is_empty() || at.len() > 128))
+        {
+            return Err(internal("invalid stored memory provenance"));
         }
         for (name, value, limit, nonempty) in [
             ("name", self.name.as_str(), 120, true),
@@ -100,6 +150,77 @@ impl Record {
             .remove("details");
         Ok(value)
     }
+}
+
+/// Proposal shape validation has no mutation/receipt side effects. The actual
+/// transaction repeats its authoritative validation after human approval.
+pub(crate) fn validate_proposal(
+    method: &str,
+    value: &Value,
+    context: &Context,
+) -> MemoryResult<()> {
+    if crate::redaction::contains_memory_capability(value) {
+        return Err(invalid("memory proposal contains a private capability"));
+    }
+    let p = value
+        .as_object()
+        .ok_or_else(|| invalid("memory params must be an object"))?;
+    let allowed: &[&str] = match method {
+        "memory.add" => &[
+            "commandId",
+            "name",
+            "summary",
+            "details",
+            "reason",
+            "scope",
+            "pinned",
+        ],
+        "memory.update" => &[
+            "commandId",
+            "id",
+            "expectedVersion",
+            "name",
+            "summary",
+            "details",
+            "reason",
+            "scope",
+            "pinned",
+        ],
+        "memory.forget" => &["commandId", "id", "expectedVersion", "reason", "scope"],
+        _ => return Err(invalid("unsupported memory proposal")),
+    };
+    keys(p, allowed)?;
+    required_identifier(p, "commandId")?;
+    let scope = Filter::new(p, context, true)?;
+    if !matches!(scope.mode, "global" | "project") {
+        return Err(invalid("memory mutation requires a single scope"));
+    }
+    text(p, "reason", 1000, true)?;
+    if method != "memory.add" {
+        required_identifier(p, "id")?;
+        integer(p, "expectedVersion", 1, MAX_VERSION)?
+            .ok_or_else(|| invalid("expectedVersion is required"))?;
+    }
+    for (name, limit, nonempty) in [
+        ("name", 120, true),
+        ("summary", 500, true),
+        ("details", 16000, false),
+    ] {
+        if method == "memory.add" || p.contains_key(name) {
+            let value = text(p, name, limit, nonempty)?;
+            if crate::redaction::redact_string(&value) != value {
+                return Err(invalid("memory proposal contains concealed secret text"));
+            }
+        }
+    }
+    let reason = p["reason"]
+        .as_str()
+        .ok_or_else(|| invalid("reason must be a string"))?;
+    if crate::redaction::redact_string(reason) != reason {
+        return Err(invalid("memory proposal contains concealed secret text"));
+    }
+    boolean(p, "pinned")?;
+    Ok(())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -328,7 +449,7 @@ impl MemoryStore {
         }
         let result = match method {
             "memory.add" | "memory.update" | "memory.forget" => {
-                self.mutate(method, params, context)
+                self.mutate(method, params, context, None, || Ok(()))
             }
             "memory.get" => {
                 keys(params, &["id", "scope", "session"])?;
@@ -347,11 +468,34 @@ impl MemoryStore {
         result
     }
 
+    pub(crate) fn execute_as_checked(
+        &mut self,
+        method: &str,
+        params: &Value,
+        context: &Context,
+        origin: &Origin,
+        before_commit: impl FnOnce() -> MemoryResult<()>,
+    ) -> MemoryResult<Value> {
+        origin.validate(context)?;
+        if !matches!(method, "memory.add" | "memory.update" | "memory.forget") {
+            return Err(invalid("invalid memory mutation"));
+        }
+        self.check_paths().map_err(internal)?;
+        let params = params
+            .as_object()
+            .ok_or_else(|| invalid("memory params must be an object"))?;
+        let result = self.mutate(method, params, context, Some(origin), before_commit);
+        self.check_paths().map_err(internal)?;
+        result
+    }
+
     fn mutate(
         &mut self,
         method: &str,
         params: &Map<String, Value>,
         context: &Context,
+        origin: Option<&Origin>,
+        before_commit: impl FnOnce() -> MemoryResult<()>,
     ) -> MemoryResult<Value> {
         let allowed: &[&str] = match method {
             "memory.add" => &[
@@ -387,7 +531,11 @@ impl MemoryStore {
         };
         keys(params, allowed)?;
         let command_id = required_identifier(params, "commandId")?;
-        let request = json!({"method":method,"params":params,"context":{"projectId":context.project_id,"session":context.session}}).to_string();
+        let mut request = json!({"method":method,"params":params,"context":{"projectId":context.project_id,"session":context.session}});
+        if let Some(origin) = origin {
+            request["origin"] = origin.value();
+        }
+        let request = request.to_string();
         let filter = Filter::new(params, context, true)?;
         let transaction = self
             .connection
@@ -410,7 +558,25 @@ impl MemoryStore {
             }
             let record: Record = serde_json::from_str(&response).map_err(internal)?;
             record.validate().map_err(internal)?;
-            if !filter.contains(&record) || record.source_session != context.session {
+            let origin_matches = match origin {
+                Some(origin) => {
+                    record.author == origin.provider.as_str()
+                        && record.source_event_id == Some(origin.user_event_id)
+                        && record.source_turn_id.as_deref() == Some(origin.turn_id.as_str())
+                        && record.source_created_at.as_deref()
+                            == Some(origin.session.created_at.as_str())
+                }
+                None => {
+                    record.author == "owner"
+                        && record.source_event_id.is_none()
+                        && record.source_turn_id.is_none()
+                        && record.source_created_at.is_none()
+                }
+            };
+            if !origin_matches
+                || !filter.contains(&record)
+                || record.source_session != context.session
+            {
                 return Err(internal("memory receipt scope or source is inconsistent"));
             }
             let valid_operation = if method == "memory.add" {
@@ -467,7 +633,7 @@ impl MemoryStore {
         }
         let now = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
         let reason = text(params, "reason", 1000, true)?;
-        let record = if method == "memory.add" {
+        let mut record = if method == "memory.add" {
             let (scope, project_id) = match filter.mode {
                 "global" => ("global".to_owned(), None),
                 "project" => ("project".to_owned(), filter.project.clone()),
@@ -490,6 +656,9 @@ impl MemoryStore {
                 author: "owner".into(),
                 reason,
                 source_session: context.session.clone(),
+                source_event_id: None,
+                source_turn_id: None,
+                source_created_at: None,
             }
         } else {
             let id = required_identifier(params, "id")?;
@@ -533,6 +702,13 @@ impl MemoryStore {
             }
             record
         };
+        record.author = origin
+            .map_or("owner", |origin| origin.provider.as_str())
+            .into();
+        record.source_event_id = origin.map(|origin| origin.user_event_id);
+        record.source_turn_id = origin.map(|origin| origin.turn_id.clone());
+        record.source_created_at = origin.map(|origin| origin.session.created_at.clone());
+        record.validate()?;
         let response = record.value()?;
         if method == "memory.add" {
             // A random ID collision must fail, never turn an add into an update.
@@ -569,6 +745,7 @@ impl MemoryStore {
                 params![command_id, request, response.to_string()],
             )
             .map_err(internal)?;
+        before_commit()?;
         transaction.commit().map_err(internal)?;
         Ok(response)
     }

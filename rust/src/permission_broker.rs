@@ -180,6 +180,7 @@ struct Control {
     sequence: u64,
     created: Instant,
     cancelled: AtomicU8,
+    drained: AtomicBool,
     public: Mutex<Option<Value>>,
 }
 struct Shared {
@@ -217,6 +218,27 @@ pub struct RequestHandle {
 impl RequestHandle {
     pub fn id(&self) -> &str {
         &self.id
+    }
+    /// Cancel only this request. Denial can be delivered before its journal IO
+    /// finishes; use drained() before releasing provider/Ticket ownership.
+    pub fn cancel(&self) {
+        cancel(&self.control, 1);
+        self.shared.notify.notify_one();
+    }
+    /// Proof that the actor removed this exact request after every owned
+    /// journal write reached a known outcome. Independent of decision delivery
+    /// and other requests. A hung write deliberately keeps this pending.
+    /// Dropping this waiter does not abort IO or cancel unrelated questions.
+    pub async fn drained(&self) {
+        loop {
+            let changed = self.shared.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.control.drained.load(Ordering::Acquire) {
+                return;
+            }
+            changed.await;
+        }
     }
     pub async fn decision(&mut self) -> Decision {
         let _cancel_on_drop = DecisionWait {
@@ -458,6 +480,7 @@ impl Broker {
             sequence: seq,
             created,
             cancelled: AtomicU8::new(0),
+            drained: AtomicBool::new(false),
             public: Mutex::new(None),
         });
         let (asker, receiver) = oneshot::channel();
@@ -631,12 +654,15 @@ fn storage_fault(shared: &Shared) {
     shared.notify.notify_one();
 }
 fn remove(shared: &Shared, entries: &mut HashMap<String, Entry>, id: &str) {
-    entries.remove(id);
+    let control = entries.remove(id).map(|entry| entry.control.clone());
     shared
         .controls
         .lock()
         .expect("permission controls")
         .remove(id);
+    if let Some(control) = control {
+        control.drained.store(true, Ordering::Release);
+    }
     shared.changed.notify_waiters();
 }
 fn hide(entry: &Entry) {
@@ -987,7 +1013,7 @@ async fn run(shared: Arc<Shared>, mut commands: mpsc::Receiver<Command>, sink: A
                 match command {
                     Command::Request(mut entry)=>{
                         if shared.failed.load(Ordering::SeqCst) || shared.closed.load(Ordering::SeqCst) {
-                            let decision=if shared.failed.load(Ordering::SeqCst) {storage_deny()} else {cancellation_deny(2)};answer(&mut entry,decision);shared.controls.lock().expect("permission controls").remove(&entry.id);shared.changed.notify_waiters();continue;
+                            let decision=if shared.failed.load(Ordering::SeqCst) {storage_deny()} else {cancellation_deny(2)};answer(&mut entry,decision);shared.controls.lock().expect("permission controls").remove(&entry.id);let control=entry.control.clone();drop(entry);control.drained.store(true,Ordering::Release);shared.changed.notify_waiters();continue;
                         }
                         let draft=requested(&entry);journal(&mut tasks,&sink,&shared,entry.id.clone(),Phase::Requested,draft);entries.insert(entry.id.clone(),*entry);
                     },

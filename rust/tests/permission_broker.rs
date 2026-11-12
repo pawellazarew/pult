@@ -977,3 +977,133 @@ async fn timers_longer_than_default_are_accepted_then_provider_gone_cleans_them_
         assert!(rig.calls.try_recv().is_err());
     }
 }
+
+async fn assert_drain_pending(handle: &RequestHandle) {
+    let drain = handle.drained();
+    tokio::pin!(drain);
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(drain.as_mut().poll(cx).is_pending()))
+            .await
+    );
+}
+#[tokio::test]
+async fn scoped_drain_cancel_during_requested_retains_both_owned_writes() {
+    let mut rig = rig(Options::default());
+    let mut handle = rig.broker.request(request("Bash", json!({}))).unwrap();
+    let requested = next(&mut rig).await;
+    handle.cancel();
+    assert!(matches!(
+        bounded(handle.decision()).await,
+        Decision::Deny { .. }
+    ));
+    assert_drain_pending(&handle).await;
+    requested.commit();
+    let resolved = next(&mut rig).await;
+    assert_eq!(resolved.draft["kind"], "permission.resolved");
+    assert_drain_pending(&handle).await;
+    resolved.commit();
+    bounded(handle.drained()).await;
+    assert_eq!(rig.broker.reserved_count(), 0);
+    rig.broker.shutdown();
+    bounded(rig.broker.drain()).await;
+}
+#[tokio::test]
+async fn scoped_drain_cancellation_during_resolved_cannot_grant_or_finish_early() {
+    let mut rig = rig(Options::default());
+    let mut handle = publish(&mut rig, request("Bash", json!({}))).await;
+    let resolution = rig
+        .broker
+        .resolve(handle.id(), Decision::allow(Scope::Once), "human")
+        .unwrap();
+    let resolved = next(&mut rig).await;
+    handle.cancel();
+    assert!(matches!(
+        bounded(handle.decision()).await,
+        Decision::Deny { .. }
+    ));
+    assert_drain_pending(&handle).await;
+    resolved.commit();
+    assert!(!bounded(resolution.wait()).await.unwrap());
+    bounded(handle.drained()).await;
+    rig.broker.shutdown();
+    bounded(rig.broker.drain()).await;
+}
+#[tokio::test]
+async fn scoped_drain_timeout_during_requested_waits_for_known_journal_outcome() {
+    let mut rig = rig(Options::from_timeout_ms(1.0).unwrap());
+    let mut handle = rig.broker.request(request("Bash", json!({}))).unwrap();
+    let requested = next(&mut rig).await;
+    assert!(matches!(
+        bounded(handle.decision()).await,
+        Decision::Deny { .. }
+    ));
+    assert_drain_pending(&handle).await;
+    requested.commit();
+    let resolved = next(&mut rig).await;
+    assert_eq!(resolved.draft["data"]["by"], "timeout");
+    assert_drain_pending(&handle).await;
+    resolved.commit();
+    bounded(handle.drained()).await;
+    rig.broker.shutdown();
+    bounded(rig.broker.drain()).await;
+}
+#[tokio::test]
+async fn scoped_drain_is_independent_and_dropping_waiter_does_not_abort_journal() {
+    let mut rig = rig(Options::default());
+    let mut first = publish(&mut rig, request("Bash", json!({}))).await;
+    first.cancel();
+    let held = next(&mut rig).await;
+    assert!(matches!(
+        bounded(first.decision()).await,
+        Decision::Deny { .. }
+    ));
+    // assert_drain_pending drops the join future. The owned write survives.
+    assert_drain_pending(&first).await;
+    let mut req = request("Read", json!({}));
+    req.session_id = "neighbor".into();
+    let second = publish(&mut rig, req).await;
+    let resolution = rig
+        .broker
+        .resolve(second.id(), Decision::allow(Scope::Once), "human")
+        .unwrap();
+    next(&mut rig).await.commit();
+    assert!(bounded(resolution.wait()).await.unwrap());
+    bounded(second.drained()).await;
+    assert_eq!(rig.broker.reserved_count(), 1);
+    assert_drain_pending(&first).await;
+    held.commit();
+    bounded(first.drained()).await;
+    rig.broker.shutdown();
+    bounded(rig.broker.drain()).await;
+}
+#[tokio::test]
+async fn scoped_drain_proves_failed_append_finished_without_grant() {
+    let mut rig = rig(Options::default());
+    let mut handle = rig.broker.request(request("Bash", json!({}))).unwrap();
+    let requested = next(&mut rig).await;
+    assert_drain_pending(&handle).await;
+    requested.fail();
+    assert!(matches!(
+        bounded(handle.decision()).await,
+        Decision::Deny { .. }
+    ));
+    bounded(handle.drained()).await;
+    assert!(rig.broker.storage_failed());
+    rig.broker.shutdown();
+    bounded(rig.broker.drain()).await;
+}
+
+#[tokio::test]
+async fn scoped_drain_closed_admission_before_actor_publication_needs_no_journal() {
+    let mut rig = rig(Options::default());
+    let mut handle = rig.broker.request(request("Bash", json!({}))).unwrap();
+    // No await: close before the actor can consume the queued admission.
+    rig.broker.shutdown();
+    assert!(matches!(
+        bounded(handle.decision()).await,
+        Decision::Deny { .. }
+    ));
+    bounded(handle.drained()).await;
+    assert_eq!(rig.broker.reserved_count(), 0);
+    assert!(rig.calls.try_recv().is_err());
+}

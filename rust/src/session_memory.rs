@@ -127,6 +127,10 @@ impl SessionMemory {
         Ok(context)
     }
 
+    pub(crate) fn has_registration(&self, session: &str) -> bool {
+        self.registrations.contains_key(session)
+    }
+
     /// Owner catalog access does not issue a key or rotate agent credentials.
     pub fn registration(
         &self,
@@ -288,6 +292,7 @@ pub(crate) fn fingerprint(record: &Record) -> Result<String, MemoryError> {
         "cwd",
         "worktree",
         "approval",
+        "memory",
     ] {
         if let Some(value) = record.get(field) {
             fields.set(
