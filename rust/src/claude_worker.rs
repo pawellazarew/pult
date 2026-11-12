@@ -188,6 +188,8 @@ struct State {
     identity: Identity,
 }
 struct Inner {
+    #[cfg(test)]
+    before_encode: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     config: Config,
     services: Services,
     state: Mutex<State>,
@@ -245,6 +247,8 @@ impl ClaudeWorker {
             fork: config.fork_on_resume,
         };
         Ok(Arc::new(Self(Arc::new(Inner {
+            #[cfg(test)]
+            before_encode: Mutex::new(None),
             config,
             services,
             state: Mutex::new(State {
@@ -512,8 +516,10 @@ fn simulate_poll_panic(
         Poll::Pending
     }))
 }
+#[allow(clippy::too_many_arguments)]
 async fn checked_send(
     gate: Arc<dyn DispatchGate>,
+    mcp: Option<Arc<dyn ScopedMcp>>,
     job: Arc<Job>,
     snapshot: TurnSnapshot,
     approval: Approval,
@@ -541,6 +547,18 @@ async fn checked_send(
             return Err(error(
                 "access_changed",
                 "Claude dispatch authority changed before input",
+            ));
+        }
+        let scope_current = mcp.as_ref().is_none_or(|mcp| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                mcp.check(&job.ticket, job.generation)
+            }))
+            .unwrap_or(false)
+        });
+        if !scope_current {
+            return Err(error(
+                "access_changed",
+                "Claude scoped resources were revoked before input",
             ));
         }
         if job.cancelled()
@@ -806,8 +824,13 @@ async fn turn(
     if job.cancelled() {
         return Err(interrupted());
     }
-    let mcp_path = if inner.config.broker {
-        let mcp = inner.services.mcp.clone().ok_or_else(unavailable)?;
+    let slash = claude_launch::is_slash_command_turn(&text, inner.config.attachments.len());
+    let scoped_mcp = if inner.config.broker {
+        Some(inner.services.mcp.clone().ok_or_else(unavailable)?)
+    } else {
+        None
+    };
+    let mcp_path = if let Some(mcp) = scoped_mcp.clone() {
         let context = McpContext {
             session: inner.config.session.clone(),
             ticket: job.ticket.clone(),
@@ -823,6 +846,31 @@ async fn turn(
     } else {
         None
     };
+    if job.cancelled() {
+        return Err(interrupted());
+    }
+    let catalog = if slash {
+        // Node's measured slash-command contract requires one text block. Even
+        // requesting a catalog is skipped; prepared resources remain checked.
+        None
+    } else if let Some(mcp) = scoped_mcp.clone() {
+        let ticket = job.ticket.clone();
+        let generation = job.generation;
+        tokio::spawn(async move { mcp.catalog(ticket, generation).await })
+            .await
+            .map_err(|_| unavailable())??
+    } else {
+        None
+    };
+    if catalog
+        .as_ref()
+        .is_some_and(|text| text.len() > claude_launch::MAX_INPUT_BYTES)
+    {
+        return Err(error(
+            "invalid_params",
+            "Claude data catalog exceeds the input budget",
+        ));
+    }
     if job.cancelled() {
         return Err(interrupted());
     }
@@ -860,7 +908,7 @@ async fn turn(
     }
     append(inner,json!({"sessionId":inner.config.session.name,"provider":"claude","kind":"status.changed","data":{"status":"working","turnId":job.public_id}})).await?;
     // Input is encoded on the blocking pool before the final policy check.
-    let context = if claude_launch::is_slash_command_turn(&text, inner.config.attachments.len()) {
+    let context = if slash {
         None
     } else {
         Some(format!(
@@ -872,14 +920,29 @@ async fn turn(
     let home = inner.config.home.clone();
     let session = inner.config.session.name.clone();
     let attachments = inner.config.attachments.clone();
+    #[cfg(test)]
+    let before_encode = inner
+        .before_encode
+        .lock()
+        .expect("Claude encode hook")
+        .clone();
     let frame = tokio::task::spawn_blocking(move || {
-        let blocks = prompt_attachments::claude_prompt_attachment_blocks(
+        #[cfg(test)]
+        if let Some(before_encode) = before_encode {
+            before_encode();
+        }
+        let mut blocks = prompt_attachments::claude_prompt_attachment_blocks(
             &prompt_attachments::PromptAttachmentScope {
                 home: &home,
                 session_id: &session,
             },
             &attachments,
         )?;
+        if let Some(catalog) = catalog.filter(|text| !text.is_empty()) {
+            // A native data text block only. Never alter the original text,
+            // message.user receipt, system instructions or MCP credentials.
+            blocks.push(json!({"type":"text", "text":catalog}));
+        }
         claude_launch::user_turn(&text, &input_id, context.as_deref(), &blocks)
             .and_then(|value| Framing::claude().encode(&value))
     })
@@ -888,6 +951,7 @@ async fn turn(
     .map_err(|_| error("invalid_params", "Claude native input is unavailable"))?;
     checked_send(
         inner.services.gate.clone(),
+        scoped_mcp,
         job.clone(),
         snapshot.clone(),
         approval,
@@ -1186,6 +1250,7 @@ mod vault_tests {
         let frame = Framing::claude().encode(&json!({"fixture":true})).unwrap();
         let result = checked_send(
             Arc::new(|_: &Ticket, _: &TurnSnapshot| DispatchDecision::Allow),
+            None,
             job.clone(),
             snapshot,
             Approval::Ask,
@@ -1234,3 +1299,7 @@ mod vault_tests {
             .unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/support/claude_memory_worker_unit.rs"]
+mod memory_worker_tests;
