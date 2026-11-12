@@ -112,9 +112,31 @@ impl CodexOwner {
         }
         Ok(())
     }
+    fn storage_fault(&self) -> OwnerError {
+        if let Some(driver) = self.driver.upgrade() {
+            driver.report_storage_failure();
+        }
+        OwnerError::Storage
+    }
+    fn source_available(&self) -> Result<(), OwnerError> {
+        let poisoned = self
+            .registry
+            .lock()
+            .map_err(|_| OwnerError::Storage)?
+            .write_poisoned();
+        // Never enter Driver while holding the registry transaction mutex.
+        if poisoned {
+            return Err(self.storage_fault());
+        }
+        Ok(())
+    }
     fn record(&self, key: &SessionKey) -> Result<Record, OwnerError> {
         key.validate().map_err(|_| OwnerError::InvalidSession)?;
         let registry = self.registry.lock().map_err(|_| OwnerError::Storage)?;
+        if registry.write_poisoned() {
+            drop(registry);
+            return Err(self.storage_fault());
+        }
         let record = registry.find(&key.name).ok_or(OwnerError::InvalidSession)?;
         Self::incarnation(record, key)?;
         Ok(record.clone())
@@ -132,6 +154,7 @@ impl CodexOwner {
         Ok(())
     }
     fn checked(&self, key: &SessionKey, record: &Record) -> Result<TurnSnapshot, OwnerError> {
+        self.source_available()?;
         self.home_ok()?;
         Self::incarnation(record, key)?;
         let mut snapshot =
