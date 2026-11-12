@@ -335,6 +335,21 @@ case!(
     }
 );
 
+case!(
+    missing_files_fail_owned_startup_without_synchronous_pool_io,
+    {
+        let home = tempfile::tempdir().unwrap();
+        let mut selected = launch(home.path(), "normal");
+        selected.program = home.path().join("missing-provider");
+        let mut connection = codex_process::start(selected, Timeouts::default())
+            .expect("structural admission must not perform filesystem metadata IO");
+        assert!(matches!(connection.ready().await, Err(Error::Launch)));
+        let mut cleanup = connection.cleanup();
+        assert_eq!(cleanup.finished().await, CleanupStatus::Stopped);
+        assert!(!home.path().join("pids.json").exists());
+    }
+);
+
 #[test]
 fn starting_without_runtime_is_fallible_and_never_launches() {
     let home = tempfile::tempdir().unwrap();

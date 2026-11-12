@@ -86,7 +86,7 @@ or user receipt. The fixtures use an isolated private account and local programs
 not installed providers or real network requests. A pending permission remains
 `blocked_permission`, rather than being overwritten by a late working status.
 
-The full local all-targets run passed 579 tests across 40 binaries; the explicitly
+The full local all-targets run passed 581 tests across 40 binaries; the explicitly
 opt-in installed-Codex smoke test remains ignored in the default run. A separate
 installed-binary initialize/shutdown smoke also passed with an isolated HOME; it
 performed no model turn or authentication operation. Clippy all-targets with warnings
@@ -112,3 +112,10 @@ The daemon explicitly unlocks its private owner guard only after metadata cleanu
 A duplicated open-file description must not extend ownership after that cleanup;
 a separate regression covers replacement ownership while the duplicate remains
 open.
+
+
+Startup also keeps filesystem validation out of synchronous pool admission.
+Only bounded structural checks run before creating a connection; the owned
+startup task validates files before spawning the supervised process. A missing
+binary fails asynchronous readiness without a child, and a blocked filesystem
+check cannot occupy a Tokio worker or hold the runtime pool mutex.
