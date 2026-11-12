@@ -29,6 +29,11 @@ if "auth-provider" in prompt:
 def emit(kind, payload=None, **extra):
     print(json.dumps(dict(type=kind, sessionId=sid, turnId=tid, payload=payload or {}, **extra)), flush=True)
 
+# A resumed queued turn may legally spend up to 30s starting. The interop
+# test controls this observable barrier without changing production deadlines.
+start_barrier = native / ("block-start-" + name)
+while start_barrier.exists():
+    threading.Event().wait(0.01)
 emit("session.titleUpdated", {"title": "synthetic " + name})
 if "session-only-provider" in prompt:
     sys.exit(0)

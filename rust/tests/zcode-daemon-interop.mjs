@@ -19,8 +19,11 @@ let client, stderr = '', checks = 0
 const child = spawn(resolve(process.argv[2]), ['--home', home, 'daemon', 'serve'], { env, stdio: ['ignore', 'ignore', 'pipe'] })
 child.stderr.on('data', bytes => { stderr = (stderr + bytes.toString()).slice(-4000) })
 const exited = new Promise(resolve => child.once('exit', (code, signal) => resolve({ code, signal })))
-async function until(check, label) {
-  const deadline = Date.now() + 10000
+// Queue drain includes native admission (30s default) and owned retirement;
+// post-acceptance terminal checks below keep their original 10s watchdog.
+const QUEUED_START_AND_CLEANUP_MS = 35000
+async function until(check, label, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs
   while (!await check()) {
     assert.equal(child.exitCode, null, `scratch daemon exited: ${stderr}`)
     assert.ok(Date.now() < deadline, label)
@@ -82,7 +85,7 @@ try {
     await assert.rejects(client.request('agent.queue.send', { name: 'plain', id: second.id }), e => e.code === 'unsupported')
     assert.equal(record('plain').queueDispatch, undefined)
     writeFileSync(join(native, 'release-plain'), '')
-    await until(async () => !(await row('plain')).queue?.length && (await row('plain')).status === 'done' && (await client.request('daemon.status')).nativeRuntime.activeTurns === 0, 'FIFO did not drain')
+    await until(async () => !(await row('plain')).queue?.length && (await row('plain')).status === 'done' && (await client.request('daemon.status')).nativeRuntime.activeTurns === 0, 'FIFO did not drain', 2 * QUEUED_START_AND_CLEANUP_MS)
     const receipts = journal().filter(e => e.sessionId === 'plain' && e.kind === 'message.user' && [first.id, second.id].includes(e.data.queueItemId))
     assert.deepEqual(receipts.map(e => e.data.queueItemId), [first.id, second.id])
     assert.deepEqual(receipts.map(e => e.data.text), ['fifo first', 'fifo second'])
@@ -96,17 +99,34 @@ try {
     assert.throws(() => process.kill(oldPID, 0), e => e.code === 'ESRCH')
     assert.equal((await row('plain')).queuePaused, true)
     assert.deepEqual(record('plain').queue.map(item => item.id), [queued.id])
-    await client.request('agent.queue.resume', { name: 'plain' })
-    await until(async () => !(await row('plain')).queue?.length && (await row('plain')).status === 'done', 'paused backlog did not resume')
+    const startBarrier = join(native, 'block-start-plain')
+    const beforeResume = launches().length
+    writeFileSync(startBarrier, '')
+    let releaseStart
+    try {
+      await client.request('agent.queue.resume', { name: 'plain' })
+      await until(() => launches().length > beforeResume, 'held queued process did not start')
+      assert.ok(record('plain').zcodePendingInput)
+      assert.equal(journal().filter(e => e.sessionId === 'plain' && e.kind === 'message.user' && e.data.queueItemId === queued.id).length, 0)
+      // This deliberate delay is below the production 30s acceptance deadline,
+      // but above the old terminal-only 10s helper. No early queued receipt.
+      releaseStart = setTimeout(() => rmSync(startBarrier, { force: true }), 11500)
+      await until(async () => !(await row('plain')).queue?.length && (await row('plain')).status === 'done', 'paused backlog did not resume', QUEUED_START_AND_CLEANUP_MS)
+      assert.equal(journal().filter(e => e.sessionId === 'plain' && e.kind === 'message.user' && e.data.queueItemId === queued.id).length, 1)
+    } finally {
+      clearTimeout(releaseStart)
+      rmSync(startBarrier, { force: true })
+    }
   })
   await check('session header alone retains unknown delivery and forbids replay', async () => {
     await assert.rejects(client.request('agent.prompt', { name: 'unknown', text: 'session-only-provider input' }))
     await until(async () => (await client.request('daemon.status')).nativeRuntime.activeTurns === 0, 'unknown process cleanup')
     const before = launches().length
     assert.ok(record('unknown').zcodePendingInput)
-    assert.equal(journal().filter(e => e.sessionId === 'unknown' && e.kind === 'message.user').length, 0)
+    assert.deepEqual(journal().filter(e => e.sessionId === 'unknown' && e.kind === 'message.user').map(e => e.data.text), ['session-only-provider input'])
     await assert.rejects(client.request('agent.prompt', { name: 'unknown', text: 'must not replay' }), e => e.code === 'start_unknown' && e.message.includes('ZCode') && !e.message.includes('Claude'))
     assert.equal(launches().length, before)
+    assert.equal(journal().filter(e => e.sessionId === 'unknown' && e.kind === 'message.user').length, 1)
   })
   await check('observed auth blocks ZCode admission without another CLI or login', async () => {
     await assert.rejects(client.request('agent.prompt', { name: 'auth', text: 'auth-provider input' }))
