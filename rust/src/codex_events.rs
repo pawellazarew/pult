@@ -7,8 +7,10 @@
 //! Session confirmation, subagent routing,
 //! account limits, image capture and capacity/network retry policy remain host
 //! responsibilities. Unknown methods are ignored; generic tool items use Node's
-//! bounded fallback. All exported content crosses an injected redaction boundary;
-//! this module does not claim that an arbitrary redactor makes secrets safe.
+//! bounded fallback. Text and tool payloads cross an injected redaction boundary.
+//! Typed counters and structural IDs/names/status/model metadata retain Node's
+//! provenance and are not generic secret-key objects. This module does not claim
+//! that an arbitrary redactor makes secrets safe.
 //! The host must install crate::panic_guard at startup: catch_unwind cannot
 //! prevent the default panic hook from printing a callback panic payload first.
 use crate::turn_coordinator::Ticket;
@@ -27,9 +29,11 @@ pub enum Error {
 }
 #[derive(Clone, Copy, Debug)]
 pub struct RedactionError;
-/// Mandatory, fallible boundary. Must preserve the shape of the object and
-/// string fields it receives. Stateful redaction is permitted; no implicit
-/// identity implementation or fallback to raw content exists.
+/// Mandatory, fallible content boundary. Inputs may have any JSON root: message
+/// and question strings, tool input objects, or stripped tool content subtrees.
+/// Preserve the root JSON type. Generic secret-key filtering belongs inside
+/// tool payloads; typed counters and structural metadata are never submitted.
+/// Stateful redaction is permitted; no implicit identity/fallback exists.
 pub trait Redactor: Send {
     fn redact(&mut self, value: &Value) -> Result<Value, RedactionError>;
 }
@@ -323,7 +327,7 @@ impl Normalizer {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.redactor.redact(value)))
                 .map_err(|_| Error::Redaction)?
                 .map_err(|_| Error::Redaction)?;
-        if !safe.is_object() {
+        if std::mem::discriminant(&safe) != std::mem::discriminant(value) {
             return Err(Error::Redaction);
         }
         if !fits(&safe, self.limits.event_bytes) {
@@ -332,20 +336,15 @@ impl Normalizer {
         Ok(safe)
     }
     fn safe_text(&mut self, text: &str) -> Result<String, Error> {
-        let safe = self.safe(&json!({"text":text}))?;
-        string(&safe, "text").ok_or(Error::Redaction)
+        let safe = self.safe(&Value::String(text.into()))?;
+        safe.as_str().map(str::to_owned).ok_or(Error::Redaction)
     }
     fn draft(&mut self, batch: &mut Batch, kind: Kind, data: Value) -> Result<Value, Error> {
-        let mut data = self.safe(&data)?;
-        // Node rejects the complete async form when redaction expands or
-        // empties any label beyond its public field contract.
-        if kind == Kind::MessageDone
-            && data.get("questions").is_some()
-            && questions(data.get("questions")).is_none()
-        {
-            data.as_object_mut()
-                .expect("safe object")
-                .remove("questions");
+        if !data.is_object() {
+            return Err(Error::Invalid);
+        }
+        if !fits(&data, self.limits.event_bytes) {
+            return Err(Error::Capacity);
         }
         batch.drafts.push(Draft {
             session_id: self.binding.session.name.clone(),
@@ -354,6 +353,23 @@ impl Normalizer {
             data: data.clone(),
         });
         Ok(data)
+    }
+    fn safe_questions(&mut self, raw: Option<&Value>) -> Result<Option<Value>, Error> {
+        let Some(mut form) = questions(raw) else {
+            return Ok(None);
+        };
+        for question in form.as_array_mut().expect("validated question list") {
+            question["title"] =
+                json!(self.safe_text(question["title"].as_str().expect("validated title"))?);
+            if let Some(options) = question["options"].as_array_mut() {
+                for option in options {
+                    *option = json!(self.safe_text(option.as_str().expect("validated option"))?);
+                }
+            }
+        }
+        // Node drops the whole form if any redacted label is empty or expands
+        // beyond its UTF-16 contract. Callback panic/error still faults a batch.
+        Ok(questions(Some(&form)))
     }
     fn fault(&mut self, error: Error) -> Batch {
         self.settled = true;
@@ -439,6 +455,7 @@ impl Normalizer {
                 if id.as_ref().is_some_and(|s| !short_id(s)) {
                     return Err(Error::Capacity);
                 }
+                let text = self.safe_text(&text)?;
                 self.draft(out, Kind::MessageDelta, json!({"text":text,"itemId":id}))?;
                 self.replay_safe = false;
             }
@@ -539,11 +556,13 @@ impl Normalizer {
                 return Ok(());
             }
             self.complete_id(&id)?;
-            let mut data = json!({"text":item["text"].as_str().unwrap_or(""),"itemId":id});
+            let form = self.safe_questions(item.get("questions"))?;
+            let text = self.safe_text(item["text"].as_str().unwrap_or(""))?;
+            let mut data = json!({"text":text,"itemId":id});
             if let Some(phase) = string(item, "phase").filter(|s| !s.is_empty()) {
                 data["phase"] = json!(phase);
             }
-            if let Some(questions) = questions(item.get("questions")) {
+            if let Some(questions) = form {
                 data["questions"] = questions;
             }
             let safe = self.draft(out, Kind::MessageDone, data)?;
@@ -587,7 +606,7 @@ impl Normalizer {
                 data["status"] = json!(status);
                 data["exitCode"] = optional_num(number(item, "exitCode"));
             } else {
-                data["input"] = selected(item, &["command", "cwd"]);
+                data["input"] = self.safe(&selected(item, &["command", "cwd"]))?;
             }
         } else if kind == "collabAgentToolCall" {
             data["name"] = json!(item["tool"].as_str().unwrap_or("collabAgentTool"));
@@ -595,7 +614,10 @@ impl Normalizer {
                 data["isError"] = json!(status == Some("failed"));
                 data["status"] = json!(status);
             } else {
-                data["input"] = selected(item, &["senderThreadId", "receiverThreadIds", "prompt"]);
+                data["input"] = self.safe(&selected(
+                    item,
+                    &["senderThreadId", "receiverThreadIds", "prompt"],
+                ))?;
             }
         } else if kind == "mcpToolCall" {
             data["name"] = json!(format!(
@@ -612,17 +634,19 @@ impl Normalizer {
                     .filter(|v| v.is_object())
                     .and_then(|v| v.get("content"))
                 {
-                    data["content"] = strip_blobs(content, 0)?;
+                    data["content"] = self.safe(&strip_blobs(content, 0)?)?;
                 }
                 if let Some(error) = error {
-                    data["content"] = json!(error["message"].as_str().unwrap_or("ошибка"));
+                    data["content"] =
+                        json!(self.safe_text(error["message"].as_str().unwrap_or("ошибка"))?);
                 }
             } else {
-                data["input"] = item
+                let input = item
                     .get("arguments")
                     .filter(|v| v.is_object())
                     .cloned()
                     .unwrap_or_else(|| json!({}));
+                data["input"] = self.safe(&input)?;
             }
         } else if done {
             if kind != "imageView" {
@@ -689,10 +713,11 @@ impl Normalizer {
         ) || message.to_lowercase().contains("hit your usage limit")
         {
             let info = info.unwrap_or_else(|| "usageLimitText".into());
+            let safe_message = self.safe_text(&message)?;
             self.draft(
                 out,
                 Kind::LimitHit,
-                json!({"source":"limit","reason":info,"message":message}),
+                json!({"source":"limit","reason":info,"message":safe_message}),
             )?;
             return self.finish(out, false, Some(OutcomeCode::Limited), Some(message), now);
         }

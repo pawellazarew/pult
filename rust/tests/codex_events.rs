@@ -731,3 +731,282 @@ fn structured_questions_use_javascript_whitespace_for_titles_and_options() {
         assert_eq!(batch.drafts[0].data.get("questions").is_some(), retained);
     }
 }
+
+struct ProductionRedactor;
+impl Redactor for ProductionRedactor {
+    fn redact(&mut self, value: &Value) -> Result<Value, RedactionError> {
+        Ok(pult_core::redaction::redact(value))
+    }
+}
+#[test]
+fn production_redactor_preserves_typed_usage_counters() {
+    let (mut normalizer, callback) = setup(Limits::default(), Box::new(ProductionRedactor));
+    push(
+        &mut normalizer,
+        &callback,
+        "thread/tokenUsage/updated",
+        json!({"tokenUsage":{"last":{"inputTokens":30,"outputTokens":4,"cachedInputTokens":12,"totalTokens":34,"reasoningOutputTokens":4},"modelContextWindow":100}}),
+    );
+    let terminal = push(
+        &mut normalizer,
+        &callback,
+        "turn/completed",
+        json!({"turn":{"id":"turn-provider","status":"completed"}}),
+    );
+    assert!(terminal.fault.is_none());
+    assert_eq!(
+        terminal.drafts[0].data["usage"],
+        json!({"input_tokens":30,"output_tokens":4,"cache_read_input_tokens":12})
+    );
+    assert_eq!(terminal.drafts[0].data["durationMs"], 100);
+}
+#[test]
+fn production_redactor_preserves_structural_ids_and_model_but_masks_message_text() {
+    let opaque = "0123456789abcdef0123456789abcdef";
+    let (mut normalizer, callback) = setup(Limits::default(), Box::new(ProductionRedactor));
+    let batch = push(
+        &mut normalizer,
+        &callback,
+        "item/agentMessage/delta",
+        json!({"itemId":opaque,"delta":"person@example.test sk-proj-abcdefghijklmnopqrstuvwx"}),
+    );
+    assert_eq!(batch.drafts[0].data["itemId"], opaque);
+    assert_eq!(batch.drafts[0].data["text"], "<email> <token>");
+    push(
+        &mut normalizer,
+        &callback,
+        "model/rerouted",
+        json!({"toModel":opaque}),
+    );
+    let batch = push(
+        &mut normalizer,
+        &callback,
+        "thread/tokenUsage/updated",
+        json!({"tokenUsage":{"last":{"totalTokens":4},"modelContextWindow":100}}),
+    );
+    assert_eq!(batch.drafts[0].data["model"], opaque);
+}
+
+fn redaction_corpus() -> Vec<(&'static str, Vec<Value>)> {
+    let opaque = "0123456789abcdef0123456789abcdef";
+    let secret = "person@example.test ghp_abcdefghijklmnopqrstuvwx";
+    let event = |method: &str, params: Value| json!({"method":method,"params":p(params)});
+    vec![
+        (
+            "message-ids-phase-and-questions",
+            vec![
+                event(
+                    "item/agentMessage/delta",
+                    json!({"itemId":opaque,"delta":secret}),
+                ),
+                event(
+                    "item/completed",
+                    json!({"item":{"type":"agentMessage","id":opaque,"text":secret,"phase":opaque,"questions":[{"title":secret,"options":["email person@example.test","Bearer abcdefghijklmnopqrstuvwx"]}]}}),
+                ),
+            ],
+        ),
+        (
+            "command-ids-input-and-finish-metadata",
+            vec![
+                event(
+                    "item/started",
+                    json!({"item":{"type":"commandExecution","id":opaque,"command":format!("echo {secret}"),"cwd":"https://user:password@proxy.test/path"}}),
+                ),
+                event(
+                    "item/completed",
+                    json!({"item":{"type":"commandExecution","id":opaque,"status":"completed","exitCode":0,"aggregatedOutput":secret}}),
+                ),
+            ],
+        ),
+        (
+            "collab-envelope-id-versus-untrusted-input-identifiers",
+            vec![
+                event(
+                    "item/started",
+                    json!({"item":{"type":"collabAgentToolCall","id":opaque,"tool":"spawnAgent","senderThreadId":opaque,"receiverThreadIds":[opaque],"prompt":secret}}),
+                ),
+                event(
+                    "item/completed",
+                    json!({"item":{"type":"collabAgentToolCall","id":opaque,"tool":"spawnAgent","status":"completed"}}),
+                ),
+            ],
+        ),
+        (
+            "mcp-secret-key-filtering-stays-in-input",
+            vec![event(
+                "item/started",
+                json!({"item":{"type":"mcpToolCall","id":opaque,"server":"srv","tool":"read","arguments":{"inputTokens":17,"token":"opaque credential","count":3,"nested":{"password":42,"text":secret}}}}),
+            )],
+        ),
+        (
+            "mcp-array-content-secret-fields-and-blob-strip",
+            vec![event(
+                "item/completed",
+                json!({"item":{"type":"mcpToolCall","id":opaque,"server":"srv","tool":"read","status":"completed","result":{"content":[{"type":"text","text":secret,"tokens":123,"count":3},{"type":"image","data":"aaaa"}]}}}),
+            )],
+        ),
+        (
+            "mcp-error-overrides-result-and-redacts-string-root",
+            vec![event(
+                "item/completed",
+                json!({"item":{"type":"mcpToolCall","id":opaque,"server":"srv","tool":"read","status":"completed","result":{"content":{"text":secret}},"error":{"message":secret}}}),
+            )],
+        ),
+        (
+            "context-model-and-counters-remain-typed",
+            vec![
+                event("model/rerouted", json!({"toModel":opaque})),
+                event(
+                    "thread/tokenUsage/updated",
+                    json!({"tokenUsage":{"last":{"inputTokens":30,"outputTokens":4,"cachedInputTokens":12,"totalTokens":34,"reasoningOutputTokens":4},"modelContextWindow":100}}),
+                ),
+            ],
+        ),
+        (
+            "generic-structural-name-and-image-metadata",
+            vec![
+                event("item/started", json!({"item":{"type":opaque,"id":opaque}})),
+                event(
+                    "item/completed",
+                    json!({"item":{"type":opaque,"id":opaque,"status":"completed"}}),
+                ),
+                event(
+                    "item/started",
+                    json!({"item":{"type":"imageView","id":"image-id"}}),
+                ),
+                event(
+                    "item/completed",
+                    json!({"item":{"type":"imageView","id":"image-id","path":secret}}),
+                ),
+            ],
+        ),
+    ]
+}
+#[tokio::test]
+async fn production_redaction_boundaries_match_actual_node_mapper() {
+    use std::{path::Path, process::Stdio, time::Duration};
+    use tokio::io::AsyncWriteExt;
+    let corpus = redaction_corpus();
+    let raw: Vec<_> = corpus.iter().map(|(_, events)| events.clone()).collect();
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/codex-event-redaction-interop.mjs");
+    let mut child = tokio::process::Command::new("node")
+        .arg(script)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("could not launch actual Node mapper oracle");
+    let output = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut input = child.stdin.take().expect("mapper oracle stdin");
+        input
+            .write_all(&serde_json::to_vec(&raw).unwrap())
+            .await
+            .unwrap();
+        input.shutdown().await.unwrap();
+        drop(input);
+        child.wait_with_output().await.unwrap()
+    })
+    .await
+    .expect("Node mapper oracle exceeded 10s watchdog");
+    assert!(
+        output.status.success(),
+        "Node mapper oracle failed; run npm ci && npm run build first"
+    );
+    let expected: Vec<Vec<Value>> =
+        serde_json::from_slice(&output.stdout).expect("invalid Node mapper oracle output");
+    assert_eq!(expected.len(), corpus.len());
+    for ((name, events), expected) in corpus.iter().zip(expected) {
+        let (mut normalizer, callback) = setup(Limits::default(), Box::new(ProductionRedactor));
+        let mut actual = vec![];
+        for event in events {
+            let batch = normalizer.push(
+                &callback,
+                event["method"].as_str().unwrap(),
+                &event["params"],
+                200,
+            );
+            assert!(batch.fault.is_none(), "normalizer fault in {name}");
+            actual.extend(
+                batch
+                    .drafts
+                    .into_iter()
+                    .map(|d| serde_json::to_value(d).unwrap()),
+            );
+        }
+        assert_eq!(actual, expected, "actual Node mapper parity case: {name}");
+    }
+}
+#[test]
+fn production_payload_filter_keeps_secret_keys_redacted_but_not_counter_metadata() {
+    let (mut normalizer, callback) = setup(Limits::default(), Box::new(ProductionRedactor));
+    let batch = push(
+        &mut normalizer,
+        &callback,
+        "item/started",
+        json!({"item":{"type":"mcpToolCall","id":"tool","arguments":{"inputTokens":17,"token":"unpatterned-private","count":3}}}),
+    );
+    assert_eq!(
+        batch.drafts[0].data["input"],
+        json!({"inputTokens":"<redacted>","token":"<redacted>","count":3})
+    );
+}
+#[test]
+fn individually_redacted_question_labels_are_revalidated_as_one_form() {
+    struct QuestionTransform;
+    impl Redactor for QuestionTransform {
+        fn redact(&mut self, value: &Value) -> Result<Value, RedactionError> {
+            Ok(match value.as_str() {
+                Some("expand") => json!("x".repeat(501)),
+                Some("empty") => json!(""),
+                _ => value.clone(),
+            })
+        }
+    }
+    for option in ["expand", "empty"] {
+        let (mut normalizer, callback) = setup(Limits::default(), Box::new(QuestionTransform));
+        let batch = push(
+            &mut normalizer,
+            &callback,
+            "item/completed",
+            json!({"item":{"type":"agentMessage","id":"message","text":"body","questions":[{"title":"valid","options":["valid",option]}]}}),
+        );
+        assert!(batch.fault.is_none());
+        assert_eq!(batch.drafts[0].data["text"], "body");
+        assert!(batch.drafts[0].data.get("questions").is_none());
+    }
+}
+#[test]
+fn panic_or_error_in_a_later_question_label_discards_the_entire_batch() {
+    pult_core::panic_guard::install();
+    struct RejectLabel(bool);
+    impl Redactor for RejectLabel {
+        fn redact(&mut self, value: &Value) -> Result<Value, RedactionError> {
+            if value == "bad" {
+                if self.0 {
+                    panic!("PRIVATE_LABEL_SECRET");
+                }
+                return Err(RedactionError);
+            }
+            Ok(value.clone())
+        }
+    }
+    for panic in [false, true] {
+        let (mut normalizer, callback) = setup(Limits::default(), Box::new(RejectLabel(panic)));
+        let batch = push(
+            &mut normalizer,
+            &callback,
+            "item/completed",
+            json!({"item":{"type":"agentMessage","id":"message","text":"private body","questions":[{"title":"valid","options":["valid","bad"]}]}}),
+        );
+        assert_eq!(batch.fault, Some(Error::Redaction));
+        assert!(batch.drafts.is_empty());
+        assert!(batch.live.is_empty());
+        assert!(batch.signals.is_empty());
+        assert_eq!(
+            batch.terminal.unwrap().message.as_deref(),
+            Some("Codex event redaction failed")
+        );
+    }
+}
