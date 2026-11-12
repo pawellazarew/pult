@@ -331,6 +331,12 @@ impl Registry {
         serde_json::json!({"sessions":self.records.len(),"writePoisoned":self.poisoned,"recovery":self.recovery})
     }
 
+    /// A prior replacement may have committed without a durability acknowledgement.
+    /// Hosts must revoke execution authority until this store is reopened.
+    pub fn write_poisoned(&self) -> bool {
+        self.poisoned
+    }
+
     pub fn find(&self, name: &str) -> Option<&Record> {
         self.records.iter().find(|record| record.name() == name)
     }
@@ -628,6 +634,8 @@ mod tests {
     #[test]
     fn uncertain_directory_sync_disables_even_noop_mutations_until_reopen() {
         let (home, mut registry) = fixture();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(home.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let mut next = registry.find("alpha").unwrap().clone();
         next.set_string("title", "committed");
         let error = registry
@@ -640,7 +648,44 @@ mod tests {
             })
             .unwrap_err();
         assert!(error.to_string().contains("outcome unknown"));
-        assert!(registry.poisoned);
+        assert!(registry.write_poisoned());
+        let driver = std::sync::Arc::new(
+            crate::turn_driver::Driver::new(
+                std::sync::Arc::new(
+                    crate::turn_journal::JournalSink::new(std::sync::Arc::new(
+                        std::sync::Mutex::new(
+                            crate::journal::EventStore::open(&home.path().join("owner-events"))
+                                .unwrap(),
+                        ),
+                    ))
+                    .unwrap(),
+                ),
+                std::sync::Arc::new(crate::redaction::redact_string),
+                crate::turn_driver::Options::default(),
+            )
+            .unwrap(),
+        );
+        let registry = std::sync::Arc::new(std::sync::Mutex::new(registry));
+        let owner = crate::codex_host_services::CodexOwner::new(
+            home.path().into(),
+            registry.clone(),
+            std::sync::Arc::downgrade(&driver),
+            std::sync::Arc::new(std::sync::Mutex::new(
+                crate::consent_store::ConsentStore::open(home.path()).unwrap(),
+            )),
+            std::sync::Arc::new(|_, _| true),
+        )
+        .unwrap();
+        let key = crate::turn_snapshot::SessionKey {
+            name: "alpha".into(),
+            created_at: "1970-01-01T00:00:00.000Z".into(),
+        };
+        assert!(matches!(
+            owner.snapshot(&key),
+            Err(crate::codex_host_services::OwnerError::Storage)
+        ));
+        assert!(driver.storage_failed());
+        let mut registry = registry.lock().unwrap();
         assert!(registry.find("alpha").unwrap().get("title").is_none());
         assert!(registry.seen("alpha", false, Some(0), 0).is_err());
         assert!(registry.archive("alpha", true).is_err());
