@@ -4,6 +4,7 @@ pub mod codex_host_services;
 pub mod codex_permissions;
 pub mod codex_process;
 pub mod codex_rpc;
+pub mod codex_runtime;
 pub mod codex_worker;
 pub mod consent_store;
 mod history;
