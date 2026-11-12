@@ -609,6 +609,14 @@ pub fn parse(raw: &RawValue) -> Result<Vec<Record>> {
         if eq(fields.get("scope"), "general") {
             rec.set_string("scope", "general");
         }
+        // Preserve unknown native-send evidence byte-for-byte, including future
+        // or malformed values. Presence is fail-closed, not a parsed ID grant.
+        if let Some(reserved) = fields.get("claudeReservedSessionId") {
+            rec.set_raw(
+                "claudeReservedSessionId",
+                crate::history::compact_raw(reserved)?,
+            );
+        }
         for key in ["model", "effort", "settingSources", "providerSessionId"] {
             string_field(&mut rec, &fields, key);
         }
@@ -816,6 +824,10 @@ fn recover_in_place(
 ) -> Result<RecoveryStats> {
     let mut stats = RecoveryStats::default();
     for rec in records {
+        if rec.get("claudeReservedSessionId").is_some() {
+            rec.set_string("lastStatus", "failed");
+            rec.set_bool("queuePaused", true);
+        }
         if !matches!(
             rec.scalar("lastStatus").as_deref(),
             Some("cold" | "done" | "failed")
@@ -1145,5 +1157,40 @@ mod tests {
         let before = got[0].raw().unwrap().get().to_owned();
         assert!(recover(&mut got, 4, |_| anyhow::bail!("unreadable projection")).is_err());
         assert_eq!(got[0].raw().unwrap().get(), before);
+    }
+}
+
+#[cfg(test)]
+mod claude_reservation_tests {
+    use super::*;
+    #[test]
+    fn opaque_candidate_survives_normalization_and_recovery_without_resend() {
+        for marker in [
+            "null",
+            "false",
+            "42",
+            r#""""#,
+            r#"{"future":["\ud800",1e+030],"nested":{"x":true}}"#,
+            "{\n  \"future\": [\"\\ud800\",1e+030],\n  \"nested\": {\"x\": true}\n}",
+        ] {
+            let raw=RawValue::from_string(format!(r#"{{"version":2,"sessions":[{{"name":"chat","createdAt":"2026-11-12T00:00:00Z","provider":"claude","cwd":"/fixture","lastStatus":"working","claudeReservedSessionId":{marker},"queue":[{{"id":"queued","at":"2026-11-12T00:00:00Z","text":"must not replay"}}]}}]}}"#)).unwrap();
+            let expected =
+                crate::history::compact_raw(&RawValue::from_string(marker.into()).unwrap())
+                    .unwrap();
+            let mut records = parse(&raw).unwrap();
+            assert_eq!(
+                records[0].get("claudeReservedSessionId").unwrap().get(),
+                expected.get()
+            );
+            recover(&mut records, 0, |_| Ok(Vec::new())).unwrap();
+            assert_eq!(
+                records[0].get("claudeReservedSessionId").unwrap().get(),
+                expected.get()
+            );
+            assert_eq!(records[0].scalar("lastStatus").as_deref(), Some("failed"));
+            assert!(yes(records[0].get("queuePaused")));
+            assert!(records[0].get("queue").is_some());
+            assert!(!records[0].raw().unwrap().get().contains('\n'));
+        }
     }
 }

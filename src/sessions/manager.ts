@@ -69,6 +69,11 @@ function pultHomeRefusal(name: string, cwd: string, home: string): string {
     + 'здесь можно только «Только чтение» (pult agent set ' + name + ' --approval read-only) или заведи сессию в папке проекта'
 }
 
+const CLAUDE_SEND_UNCERTAIN = 'Предыдущая реплика Claude могла выполниться, но подтверждение потеряно. Автоматический повтор запрещён. Проверь историю Claude и импортируй подтверждённый разговор в новый чат; повторная отправка может выполнить задачу дважды.'
+function requireResolvedNativeInput(rec: SessionRecord): void {
+  if (Object.hasOwn(rec, 'claudeReservedSessionId')) throw new ManagerError('start_unknown', CLAUDE_SEND_UNCERTAIN)
+}
+
 export class ManagerError extends Error {
   readonly code: string
   constructor(code: string, message: string) {
@@ -785,6 +790,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
   async function drain(name: string): Promise<void> {
     const rec = registry.get(name)
     if (!rec?.queue?.length || rec.queuePaused || holdDrain.has(name) || queueSending.has(name) || removing.has(name) || busyNow(name)) return
+    if (Object.hasOwn(rec, 'claudeReservedSessionId')) { pauseQueue(name, 'native_send_unknown'); return }
     if (opts.holdTurns?.()) return
     const [item, ...rest] = rec.queue as [QueueItem, ...QueueItem[]]
     // Голову правят — очередь стоит на ней: ни она, ни те, что за ней, не обгоняют правку.
@@ -1225,6 +1231,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
 
     async prompt(name, text, questionId, queueItemId, queueItemAt, inputAttachments) {
       const rec = needRec(name)
+      requireResolvedNativeInput(rec)
       if (rec.scope === 'general') {
         try { validateGeneralWorkspace(opts.paths.home, rec.name, rec.cwd) }
         catch (e) { throw new ManagerError('invalid_params', (e as Error).message) }
@@ -1400,6 +1407,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
 
     async say(name, text, sayOpts = {}) {
       const rec = needRec(name)
+      requireResolvedNativeInput(rec)
       if (rec.scope === 'general') {
         try { validateGeneralWorkspace(opts.paths.home, rec.name, rec.cwd) }
         catch (e) { throw new ManagerError('invalid_params', (e as Error).message) }
@@ -1488,6 +1496,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
 
     queueResume(name) {
       const rec = needRec(name)
+      requireResolvedNativeInput(rec)
       const next = rec.queuePaused ? registry.update(name, { queuePaused: undefined }) as SessionRecord : rec
       if (next.queue?.length) scheduleDrain(name)
       return queueState(next)
@@ -1496,6 +1505,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
     async queueSend(name, id) {
       if (queueSending.has(name)) throw new ManagerError('invalid_params', 'реплика уже отправляется — дождись результата')
       const { rec, at } = findQueueItem(name, id)
+      requireResolvedNativeInput(rec)
       if (rec.provider !== 'codex') throw new ManagerError('invalid_params', 'отправка из очереди в текущую задачу доступна только для Codex')
       if (editHolds.get(name)?.has(id)) throw new ManagerError('invalid_params', 'сначала сохрани или отмени правку реплики')
       const item = rec.queue![at]!
@@ -1917,6 +1927,15 @@ export function createManager(opts: ManagerOptions): SessionManager {
         if (a) await a.shutdown()
       }
     },
+  }
+  // A Rust send may have reached Claude before the durable init receipt. Keep
+  // that history visible and paused on rollback; never normalize it into cold.
+  for (const rec of registry.list()) if (Object.hasOwn(rec, 'claudeReservedSessionId')) {
+    if (!rec.queuePaused) registry.update(rec.name, { queuePaused: true })
+    const last = opts.store.readSession(rec.name).at(-1)
+    if (last?.kind !== 'status.changed' || last.data['errorCode'] !== 'start_unknown') {
+      emit({ sessionId: rec.name, provider: rec.provider, kind: 'status.changed', data: { status: 'failed', errorCode: 'start_unknown', error: CLAUDE_SEND_UNCERTAIN } })
+    }
   }
   return api
 }
