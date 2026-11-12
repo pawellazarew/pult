@@ -116,7 +116,7 @@ struct ReenterRedactor {
 }
 impl Redactor for ReenterRedactor {
     fn redact(&mut self, value: &Value) -> Result<Value, RedactionError> {
-        if value.get("text").is_some() {
+        if value.is_string() || value.get("text").is_some() {
             (self.callback)();
         }
         Ok(value.clone())
