@@ -2,7 +2,7 @@
 //! This is a trusted host API, not permission to execute a client command.
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::ExitStatusExt;
@@ -13,7 +13,7 @@ use std::sync::{
 };
 use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -69,6 +69,107 @@ impl std::fmt::Debug for PreparedInput {
             .finish()
     }
 }
+
+/// Stderr remains count-only unless a trusted host explicitly requests a tail.
+#[derive(Clone, Copy, Debug, Default)]
+pub enum StderrPolicy {
+    #[default]
+    CountOnly,
+    PrivateTail {
+        max_bytes: usize,
+    },
+}
+const MAX_PRIVATE_STDERR: usize = 64 * 1024;
+
+/// Validated launch with no spawned process. Arguments/environment are private.
+/// Keep preparation in an owned job: dropping its waiter does not abort the
+/// underlying blocking validation, and does not constitute IO cleanup proof.
+pub struct PreparedLaunch {
+    command: Command,
+    framing: Framing,
+    stderr: StderrPolicy,
+}
+impl std::fmt::Debug for PreparedLaunch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedLaunch").finish_non_exhaustive()
+    }
+}
+
+/// Static denial; never contains host callback errors or panic payloads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpawnDenied;
+impl std::fmt::Display for SpawnDenied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("worker spawn denied")
+    }
+}
+impl std::error::Error for SpawnDenied {}
+
+/// Trusted-host seal held across the actual OS spawn. No IO/callbacks in Drop.
+pub trait SpawnPermit {}
+/// A fresh synchronous authorization seal, not an ordinary check callback.
+/// The host must check the exact Driver Ticket/fault state and serialize
+/// cancellation/fault publication with this seal (e.g. a shared short mutex).
+/// Before-seal cancellation denies; after-seal cancellation may observe a new
+/// process, which the owned supervisor must stop and join. A Driver stop which
+/// does not share this protocol cannot promise that no PID will be created.
+/// Embedders install `crate::panic_guard::install()` before callbacks: catching
+/// unwinding does not suppress the process-wide default panic hook.
+pub trait SpawnGate: Send + Sync {
+    fn enter(&self) -> std::result::Result<Box<dyn SpawnPermit + '_>, SpawnDenied>;
+}
+struct TrustedSpawn;
+impl SpawnPermit for TrustedSpawn {}
+impl SpawnGate for TrustedSpawn {
+    fn enter(&self) -> std::result::Result<Box<dyn SpawnPermit + '_>, SpawnDenied> {
+        Ok(Box::new(TrustedSpawn))
+    }
+}
+
+struct StderrTail {
+    bytes: VecDeque<u8>,
+    limit: usize,
+    eof: bool,
+}
+impl StderrTail {
+    fn append(&mut self, bytes: &[u8]) {
+        let suffix = &bytes[bytes.len().saturating_sub(self.limit)..];
+        let remove = (self.bytes.len() + suffix.len()).saturating_sub(self.limit);
+        self.bytes.drain(..remove);
+        self.bytes.extend(suffix);
+    }
+}
+/// Private trusted-host evidence. Never serialize into public errors/events.
+/// Available only after confirmed EOF and the stderr reader's successful join.
+pub struct PrivateStderr(Vec<u8>);
+impl PrivateStderr {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+impl std::fmt::Debug for PrivateStderr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PrivateStderr")
+            .field("bytes", &self.0.len())
+            .finish()
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StderrUnavailable {
+    Disabled,
+    Incomplete,
+    Taken,
+}
+impl std::fmt::Display for StderrUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Disabled => "private stderr is disabled",
+            Self::Incomplete => "private stderr is incomplete",
+            Self::Taken => "private stderr was already taken",
+        })
+    }
+}
+impl std::error::Error for StderrUnavailable {}
 
 /// Best-effort control, never cleanup proof. The owner invalidates it before
 /// reaping/dropping Child, so a retained handle cannot signal a reused PID.
@@ -187,10 +288,50 @@ pub struct Process {
     output_taken: bool,
     readers: Vec<Option<JoinHandle<()>>>,
     stderr_bytes: Arc<AtomicU64>,
+    private_stderr: Option<Arc<Mutex<StderrTail>>>,
+    stderr_joined: bool,
+    stderr_taken: bool,
     write_failed: bool,
+    startup_reader: Option<BufReader<ChildStdout>>,
+    startup_sender: Option<mpsc::Sender<Result<Value>>>,
+    startup_attempted: bool,
+    ready: bool,
     exit: Option<Exit>,
     framing: Framing,
     discarded: Arc<AtomicU64>,
+}
+
+/// A spawned PID owner available before the first asynchronous holder ACK poll.
+/// Keep this value in the supervisor's vault while borrowing acknowledge().
+/// A panic/drop of that borrowed future cannot drop its Process or stdout FD.
+/// Holder readiness is not native input acceptance or cleanup proof.
+pub struct StartingProcess {
+    process: Process,
+}
+impl std::fmt::Debug for StartingProcess {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StartingProcess")
+            .field("ready", &self.process.ready)
+            .finish_non_exhaustive()
+    }
+}
+impl StartingProcess {
+    pub fn pid(&self) -> Option<u32> {
+        self.process.pid()
+    }
+    /// Best effort only; copy before borrowing acknowledge() so cancellation
+    /// need not acquire the vault mutex held by an in-flight startup future.
+    pub fn stop_signal(&self) -> StopSignal {
+        self.process.stop_signal()
+    }
+    pub async fn acknowledge(&mut self) -> Result<()> {
+        self.process.acknowledge().await
+    }
+    /// Also usable after a failed/panicking ACK waiter for owned stop/join.
+    /// An unacknowledged Process rejects stdin; this is not acceptance proof.
+    pub fn into_process(self) -> Process {
+        self.process
+    }
 }
 
 /// Startup failed. A retained process still requires confirmed cleanup, even
@@ -268,6 +409,23 @@ impl Process {
         launch: Launch,
         framing: Framing,
     ) -> std::result::Result<Self, SpawnFailure> {
+        let prepared = Self::prepare_launch(launch, framing, StderrPolicy::CountOnly).await?;
+        Self::spawn_prepared_owned(prepared, &TrustedSpawn).await
+    }
+
+    /// Owned validation must be awaited through cancellation by the supervisor.
+    /// This performs no spawn; dropping PreparedLaunch creates no process.
+    pub async fn prepare_launch(
+        launch: Launch,
+        framing: Framing,
+        stderr: StderrPolicy,
+    ) -> std::result::Result<PreparedLaunch, SpawnFailure> {
+        if matches!(stderr, StderrPolicy::PrivateTail { max_bytes } if max_bytes == 0 || max_bytes > MAX_PRIVATE_STDERR)
+        {
+            return Err(SpawnFailure::before_spawn(anyhow::anyhow!(
+                "invalid private stderr budget"
+            )));
+        }
         let launch = validated_launch(launch, Launch::validate).await?;
         let mut command = Command::new(&launch.holder);
         command
@@ -282,31 +440,41 @@ impl Process {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(false)
             .process_group(0);
-        let child = command
-            .spawn()
-            .context("worker holder spawn failed")
-            .map_err(SpawnFailure::before_spawn)?;
-        let (sender, output) = mpsc::channel(if framing.recover { 1 } else { QUEUE });
-        let discarded = Arc::new(AtomicU64::new(0));
-        let stderr_bytes = Arc::new(AtomicU64::new(0));
-        // The guard exists before any await: cancelling the startup handshake
-        // sends TERM to the holder, whose handler precedes provider launch.
-        let stop_signal = StopSignal(Arc::new(Mutex::new(
-            child.id().filter(|pid| *pid > 1 && *pid <= i32::MAX as u32),
-        )));
-        let mut process = Self {
-            child,
-            stop_signal,
-            stdin: None,
-            output,
-            output_taken: false,
-            readers: Vec::new(),
-            stderr_bytes: stderr_bytes.clone(),
-            write_failed: false,
-            exit: None,
+        Ok(PreparedLaunch {
+            command,
             framing,
-            discarded: discarded.clone(),
-        };
+            stderr,
+        })
+    }
+
+    /// The compatibility wrapper owns startup until ACK. Supervisors needing
+    /// recovery after an unexpected task panic use begin_spawn + a borrowed ACK.
+    pub async fn spawn_prepared_owned(
+        prepared: PreparedLaunch,
+        gate: &dyn SpawnGate,
+    ) -> std::result::Result<Self, SpawnFailure> {
+        let mut starting = Self::begin_spawn(prepared, gate)?;
+        if let Err(error) = starting.acknowledge().await {
+            return Err(SpawnFailure::after_spawn(starting.into_process(), error));
+        }
+        Ok(starting.into_process())
+    }
+
+    /// Synchronous actual spawn frontier, returning a PID owner before any ACK
+    /// await. Requires the trusted host's Tokio runtime with IO enabled. No
+    /// authorization callback/FS operation belongs inside the Driver seal.
+    pub fn begin_spawn(
+        prepared: PreparedLaunch,
+        gate: &dyn SpawnGate,
+    ) -> std::result::Result<StartingProcess, SpawnFailure> {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return Err(SpawnFailure::before_spawn(anyhow::anyhow!(
+                "worker startup requires a runtime"
+            )));
+        }
+        let (mut process, sender) = Self::spawn_frontier(prepared, gate)?;
+        let stderr_bytes = process.stderr_bytes.clone();
+        let private_stderr = process.private_stderr.clone();
         process.stdin = process.child.stdin.take();
         let Some(stdout) = process.child.stdout.take() else {
             return Err(SpawnFailure::after_spawn(
@@ -314,46 +482,59 @@ impl Process {
                 anyhow::anyhow!("worker stdout unavailable"),
             ));
         };
-        let Some(mut stderr) = process.child.stderr.take() else {
+        let Some(stderr) = process.child.stderr.take() else {
             return Err(SpawnFailure::after_spawn(
                 process,
                 anyhow::anyhow!("worker stderr unavailable"),
             ));
         };
-        process.readers.push(Some(tokio::spawn(async move {
-            let mut bytes = [0u8; 8192];
-            while let Ok(count) = stderr.read(&mut bytes).await {
-                if count == 0 {
-                    break;
-                }
-                let _ = stderr_bytes.try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                    Some(value.saturating_add(count as u64))
-                });
-            }
-        })));
-        let mut reader = BufReader::new(stdout);
-        let ready: Result<()> = async {
-            let line = tokio::time::timeout(START_TIMEOUT, bounded_line(&mut reader))
-                .await
-                .context("worker holder startup timeout")??
-                .context("worker holder exited before ready")?;
-            let value: Value = serde_json::from_slice(&line)
-                .map_err(|_| anyhow::anyhow!("invalid worker holder acknowledgement"))?;
-            ensure!(
-                value.get("holder_ready") == Some(&Value::Bool(true))
-                    && value
-                        .get("providerPid")
-                        .and_then(Value::as_u64)
-                        .is_some_and(|pid| pid > 0 && pid <= i32::MAX as u64),
-                "invalid worker holder acknowledgement"
-            );
-            Ok(())
-        }
-        .await;
-        if let Err(error) = ready {
-            return Err(SpawnFailure::after_spawn(process, error));
-        }
-        process.readers.push(Some(tokio::spawn(async move {
+        process.startup_reader = Some(BufReader::new(stdout));
+        process.startup_sender = Some(sender);
+        process.readers.push(Some(tokio::spawn(collect_stderr(
+            stderr,
+            stderr_bytes,
+            private_stderr,
+        ))));
+        Ok(StartingProcess { process })
+    }
+
+    async fn acknowledge(&mut self) -> Result<()> {
+        ensure!(
+            !self.startup_attempted && !self.ready && self.exit.is_none(),
+            "worker acknowledgement is unavailable"
+        );
+        self.startup_attempted = true;
+        // Borrow, never move, the reader across await: unwinding/cancellation
+        // must keep the stdout FD with the PID owner for subsequent stop/join.
+        let reader = self
+            .startup_reader
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("worker acknowledgement is unavailable"))?;
+        let line = tokio::time::timeout(START_TIMEOUT, bounded_line(reader))
+            .await
+            .context("worker holder startup timeout")??
+            .context("worker holder exited before ready")?;
+        let value: Value = serde_json::from_slice(&line)
+            .map_err(|_| anyhow::anyhow!("invalid worker holder acknowledgement"))?;
+        ensure!(
+            value.get("holder_ready") == Some(&Value::Bool(true))
+                && value
+                    .get("providerPid")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|pid| pid > 0 && pid <= i32::MAX as u64),
+            "invalid worker holder acknowledgement"
+        );
+        let mut reader = self
+            .startup_reader
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("worker acknowledgement is unavailable"))?;
+        let sender = self
+            .startup_sender
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("worker acknowledgement is unavailable"))?;
+        let framing = self.framing;
+        let discarded = self.discarded.clone();
+        self.readers.push(Some(tokio::spawn(async move {
             loop {
                 let value = if framing.recover {
                     match recovering_line(&mut reader, framing.max_wire_bytes).await {
@@ -385,7 +566,95 @@ impl Process {
                 }
             }
         })));
-        Ok(process)
+        self.ready = true;
+        Ok(())
+    }
+
+    fn spawn_frontier(
+        prepared: PreparedLaunch,
+        gate: &dyn SpawnGate,
+    ) -> std::result::Result<(Self, mpsc::Sender<Result<Value>>), SpawnFailure> {
+        let PreparedLaunch {
+            mut command,
+            framing,
+            stderr,
+        } = prepared;
+        let permit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| gate.enter()))
+            .ok()
+            .and_then(std::result::Result::ok)
+            .ok_or_else(|| SpawnFailure::before_spawn(anyhow::anyhow!("worker spawn denied")))?;
+        let child = command.spawn();
+        let child = match child {
+            Ok(child) => child,
+            Err(_) => {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(permit)));
+                return Err(SpawnFailure::before_spawn(anyhow::anyhow!(
+                    "worker holder spawn failed"
+                )));
+            }
+        };
+        let (sender, output) = mpsc::channel(if framing.recover { 1 } else { QUEUE });
+        let discarded = Arc::new(AtomicU64::new(0));
+        let stderr_bytes = Arc::new(AtomicU64::new(0));
+        // The guard exists before any await: cancelling the startup handshake
+        // sends TERM to the holder, whose handler precedes provider launch.
+        let stop_signal = StopSignal(Arc::new(Mutex::new(
+            child.id().filter(|pid| *pid > 1 && *pid <= i32::MAX as u32),
+        )));
+        let process = Self {
+            child,
+            stop_signal,
+            stdin: None,
+            output,
+            output_taken: false,
+            readers: Vec::new(),
+            stderr_bytes: stderr_bytes.clone(),
+            private_stderr: match stderr {
+                StderrPolicy::CountOnly => None,
+                StderrPolicy::PrivateTail { max_bytes } => Some(Arc::new(Mutex::new(StderrTail {
+                    bytes: VecDeque::with_capacity(max_bytes),
+                    limit: max_bytes,
+                    eof: false,
+                }))),
+            },
+            stderr_joined: false,
+            stderr_taken: false,
+            write_failed: false,
+            startup_reader: None,
+            startup_sender: None,
+            startup_attempted: false,
+            ready: false,
+            exit: None,
+            framing,
+            discarded: discarded.clone(),
+        };
+        // Install the PID owner before releasing any host-supplied guard.
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(permit))).is_err() {
+            return Err(SpawnFailure::after_spawn(
+                process,
+                anyhow::anyhow!("worker spawn seal release failed"),
+            ));
+        }
+        Ok((process, sender))
+    }
+
+    pub fn take_private_stderr(&mut self) -> std::result::Result<PrivateStderr, StderrUnavailable> {
+        let tail = self
+            .private_stderr
+            .as_ref()
+            .ok_or(StderrUnavailable::Disabled)?;
+        if self.exit.is_none() || !self.stderr_joined {
+            return Err(StderrUnavailable::Incomplete);
+        }
+        let mut tail = tail.lock().map_err(|_| StderrUnavailable::Incomplete)?;
+        if !tail.eof {
+            return Err(StderrUnavailable::Incomplete);
+        }
+        if self.stderr_taken {
+            return Err(StderrUnavailable::Taken);
+        }
+        self.stderr_taken = true;
+        Ok(PrivateStderr(tail.bytes.drain(..).collect()))
     }
 
     pub fn discarded_frames(&self) -> u64 {
@@ -401,7 +670,7 @@ impl Process {
 
     pub async fn send(&mut self, value: &Value) -> Result<()> {
         ensure!(
-            !self.write_failed && self.exit.is_none(),
+            self.ready && !self.write_failed && self.exit.is_none(),
             "worker input is unavailable"
         );
         let frame = self.framing.encode(value)?;
@@ -410,7 +679,7 @@ impl Process {
 
     pub async fn send_prepared(&mut self, frame: PreparedInput) -> Result<()> {
         ensure!(
-            !self.write_failed && self.exit.is_none(),
+            self.ready && !self.write_failed && self.exit.is_none(),
             "worker input is unavailable"
         );
         ensure!(
@@ -473,15 +742,23 @@ impl Process {
             status.signal().is_none() || status.signal() == Some(15),
             "worker holder cleanup interrupted"
         );
+        // Keep an unacknowledged stdout FD open until the holder exit proves
+        // cleanup; dropping it earlier can turn a valid ACK into a broken pipe.
+        self.startup_reader.take();
+        self.startup_sender.take();
         self.output.close();
-        for reader in &mut self.readers {
+        for (index, reader) in self.readers.iter_mut().enumerate() {
             if let Some(task) = reader.as_mut() {
-                if tokio::time::timeout(Duration::from_secs(1), &mut *task)
-                    .await
-                    .is_err()
-                {
-                    task.abort();
-                    let _ = task.await;
+                let joined = match tokio::time::timeout(Duration::from_secs(1), &mut *task).await {
+                    Ok(result) => result.is_ok(),
+                    Err(_) => {
+                        task.abort();
+                        let _ = task.await;
+                        false
+                    }
+                };
+                if index == 0 {
+                    self.stderr_joined = joined;
                 }
                 *reader = None;
             }
@@ -512,6 +789,32 @@ impl Drop for Process {
         for task in self.readers.iter().flatten() {
             task.abort();
         }
+    }
+}
+
+async fn collect_stderr<R: tokio::io::AsyncRead + Unpin>(
+    mut reader: R,
+    count: Arc<AtomicU64>,
+    tail: Option<Arc<Mutex<StderrTail>>>,
+) {
+    let mut bytes = [0u8; 8192];
+    while let Ok(read) = reader.read(&mut bytes).await {
+        if read == 0 {
+            if let Some(tail) = &tail {
+                tail.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .eof = true;
+            }
+            break;
+        }
+        if let Some(tail) = &tail {
+            tail.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .append(&bytes[..read]);
+        }
+        let _ = count.try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            Some(value.saturating_add(read as u64))
+        });
     }
 }
 
@@ -605,6 +908,60 @@ async fn bounded_line<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tail(limit: usize) -> Arc<Mutex<StderrTail>> {
+        Arc::new(Mutex::new(StderrTail {
+            bytes: VecDeque::with_capacity(limit),
+            limit,
+            eof: false,
+        }))
+    }
+    struct ErrorReader;
+    impl tokio::io::AsyncRead for ErrorReader {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            _: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Err(std::io::Error::other("PRIVATE_READ_FAILURE")))
+        }
+    }
+    #[tokio::test]
+    async fn private_stderr_read_error_is_not_eof_evidence() {
+        let tail = tail(32);
+        collect_stderr(ErrorReader, Arc::new(AtomicU64::new(0)), Some(tail.clone())).await;
+        assert!(!tail.lock().unwrap().eof);
+    }
+    #[tokio::test]
+    async fn private_stderr_aborted_reader_is_not_eof_evidence() {
+        let (read, mut write) = tokio::io::duplex(1);
+        let tail = tail(32);
+        let collector = tokio::spawn(collect_stderr(
+            read,
+            Arc::new(AtomicU64::new(0)),
+            Some(tail.clone()),
+        ));
+        write.write_all(b"x").await.unwrap();
+        collector.abort();
+        assert!(collector.await.unwrap_err().is_cancelled());
+        assert!(!tail.lock().unwrap().eof);
+    }
+    #[test]
+    fn private_stderr_chunking_keeps_actual_allocation_bounded() {
+        for limit in [1, 37, MAX_PRIVATE_STDERR] {
+            let mut tail = StderrTail {
+                bytes: VecDeque::with_capacity(limit),
+                limit,
+                eof: false,
+            };
+            let capacity = tail.bytes.capacity();
+            for size in [1, 8192, 100_000, 2, 50_000] {
+                tail.append(&vec![b'x'; size]);
+                assert!(tail.bytes.len() <= limit);
+                assert_eq!(tail.bytes.capacity(), capacity);
+            }
+        }
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn filesystem_launch_validation_does_not_block_runtime_heartbeat() {
