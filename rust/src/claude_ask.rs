@@ -131,6 +131,12 @@ impl Backend {
             controls: Mutex::new(Vec::new()),
         })
     }
+    pub(crate) fn host_resources(
+        &self,
+    ) -> Option<(std::path::PathBuf, Arc<crate::host_jobs::Tracker>)> {
+        let state = self.state.upgrade()?;
+        Some((state.home.clone(), state.host_jobs.clone()))
+    }
     /// Host-only issuance. Caller must retain the exact ticket until drain.
     /// A caller disappearing cannot abandon the owned authorization work.
     pub fn prepare(
