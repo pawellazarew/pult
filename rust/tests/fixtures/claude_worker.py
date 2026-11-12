@@ -11,7 +11,11 @@ for line in sys.stdin:
     def emit(value):
         value['session_id'] = sid
         print(json.dumps(value), flush=True)
-    emit({'type':'system', 'subtype':'init', 'permissionMode': 'acceptEdits' if mode == 'wide-mode' else 'manual'})
+    reported_mode = 'acceptEdits' if mode == 'wide-mode' else 'manual'
+    if mode == 'malformed-mode': reported_mode = {'mode':'manual'}
+    if mode == 'control-mode': reported_mode = 'manual\x00'
+    if mode == 'null-mode': reported_mode = None
+    emit({'type':'system', 'subtype':'init', 'permissionMode': reported_mode})
     emit({'type':'command_lifecycle', 'command_uuid':item['uuid'], 'state':'started'})
     if mode == 'assistant-block':
         emit({'type':'assistant', 'is_api_error_message':True, 'message':{'content':[{'type':'text','text':'Disabled Claude subscription access'}]}})

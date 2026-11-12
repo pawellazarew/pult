@@ -867,10 +867,22 @@ async fn turn(
                     "Claude init identity did not match its owned conversation",
                 ));
             }
-            let reported = frame["permissionMode"]
-                .as_str()
-                .filter(|v| v.len() <= 128 && !v.chars().any(char::is_control))
-                .map(str::to_owned);
+            // Only an omitted field is legacy absence. Malformed presence must
+            // not silently become None and bypass the reported-mode validation.
+            let reported = match frame.get("permissionMode") {
+                None => None,
+                Some(Value::String(value))
+                    if value.len() <= 128 && !value.chars().any(char::is_control) =>
+                {
+                    Some(value.clone())
+                }
+                Some(_) => {
+                    return Err(error(
+                        "protocol_error",
+                        "Claude reported an invalid permission mode",
+                    ));
+                }
+            };
             if !reported_mode_allowed(approval, reported.as_deref()) {
                 return Err(error(
                     "access_denied",

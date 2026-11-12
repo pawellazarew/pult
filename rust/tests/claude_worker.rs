@@ -152,7 +152,12 @@ async fn scenario(mode: &str, panic_final_gate: bool) {
             progress.changed().await.unwrap();
         }
     } else {
-        if panic_final_gate || mode == "wide-mode" || mode == "missing-program" {
+        if panic_final_gate
+            || matches!(
+                mode,
+                "wide-mode" | "missing-program" | "malformed-mode" | "control-mode" | "null-mode"
+            )
+        {
             assert!(handle.accepted().await.is_err());
         } else {
             handle.accepted().await.unwrap();
@@ -257,5 +262,21 @@ case!(
 case!(
     dropped_caller_handle_does_not_abandon_provider_or_durable_completion,
     "drop-handle",
+    false
+);
+
+case!(
+    malformed_init_permission_mode_is_not_legacy_absence,
+    "malformed-mode",
+    false
+);
+case!(
+    control_characters_in_init_mode_are_rejected,
+    "control-mode",
+    false
+);
+case!(
+    explicit_null_init_mode_is_not_legacy_absence,
+    "null-mode",
     false
 );

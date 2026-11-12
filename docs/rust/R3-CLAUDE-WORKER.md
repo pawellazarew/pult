@@ -122,3 +122,9 @@ accept an idempotent abort if no reservation was created, without clearing any
 foreign or initialized marker. Worker fixtures cover final-gate denial and
 missing-program abort, no abort after actual dispatch, and caller-handle drop
 before acceptance without abandoning durable completion.
+
+Malformed native permission-mode presence is rejected. Only an omitted field
+uses legacy absence; object/null/control-containing values no longer silently
+become None. Three real-process regressions fail against the former filtering
+parser and pass with the explicit shape check; all 12 worker cases pass. This is
+protocol validation, not proof of real installed Claude-version compatibility.
