@@ -147,7 +147,7 @@ impl EventSink for HostSink {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde_json::json;
     use std::os::unix::fs::PermissionsExt;
@@ -157,7 +157,7 @@ mod tests {
     use std::time::{Duration, Instant};
     use tokio::sync::watch;
 
-    fn fixture() -> (tempfile::TempDir, Arc<State>, HostSink) {
+    pub(crate) fn fixture() -> (tempfile::TempDir, Arc<State>, Arc<dyn EventSink>) {
         let home = tempfile::tempdir().unwrap();
         std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let mut store = crate::journal::EventStore::open(&home.path().join("events")).unwrap();
@@ -193,7 +193,7 @@ mod tests {
             live_sessions: Mutex::new(crate::session_live::Cache::new(65536).unwrap()),
         });
         initialize(&state).unwrap();
-        let sink = HostSink(Arc::downgrade(&state));
+        let sink: Arc<dyn EventSink> = Arc::new(HostSink(Arc::downgrade(&state)));
         (home, state, sink)
     }
     fn draft() -> Value {

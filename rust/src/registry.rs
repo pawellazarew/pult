@@ -212,6 +212,8 @@ pub struct Registry {
     observed: Option<Observed>,
     records: Vec<Record>,
     poisoned: bool,
+    #[cfg(test)]
+    fail_next_commit: Option<Step>,
     recovery: serde_json::Value,
     language: crate::locale::Setting,
 }
@@ -306,6 +308,8 @@ impl Registry {
             observed,
             records,
             poisoned: false,
+            #[cfg(test)]
+            fail_next_commit: None,
             recovery: serde_json::json!({"migrationCount":migrated,"startup":stats}),
             language,
         })
@@ -454,16 +458,34 @@ impl Registry {
         Ok(removed)
     }
 
+    #[cfg(test)]
+    pub(crate) fn fail_next_commit_for_test(&mut self, uncertain: bool) {
+        self.fail_next_commit = Some(if uncertain {
+            Step::DirectorySync
+        } else {
+            Step::FileSync
+        });
+    }
+
     fn commit_records(
         &mut self,
         records: Vec<Record>,
-        before: impl FnMut(Step) -> std::io::Result<()>,
+        mut before: impl FnMut(Step) -> std::io::Result<()>,
     ) -> Result<()> {
         ensure!(
             !self.poisoned,
             "registry commit outcome unknown; reopen before further writes"
         );
-        match atomic_write(&self.path, &self.observed, &envelope(&records)?, before) {
+        #[cfg(test)]
+        let injected = self.fail_next_commit.take();
+        match atomic_write(&self.path, &self.observed, &envelope(&records)?, |step| {
+            before(step)?;
+            #[cfg(test)]
+            if injected == Some(step) {
+                return Err(std::io::Error::other("injected registry commit failure"));
+            }
+            Ok(())
+        }) {
             Ok(observed) => {
                 self.observed = Some(observed);
                 self.records = records;
@@ -590,6 +612,8 @@ mod tests {
                 observed,
                 records,
                 poisoned: false,
+                #[cfg(test)]
+                fail_next_commit: None,
                 recovery: serde_json::json!({}),
                 language: crate::locale::Setting::Auto,
             },
