@@ -30,6 +30,7 @@ and three deterministic shutdown races. The previous implementation fails all
 three race regressions. This is fixture verification, with no model/account
 calls or installed service changes.
 
-This facade does not by itself wire Claude/ZCode provider dispatch into the
-stock daemon. Selected-provider bootstrap/router, full provider parity and
-working-install cutover remain separate acceptance steps.
+This facade does not by itself establish provider acceptance. The selected
+Claude/Codex bootstrap/router is documented in
+[R3-NATIVE-PROVIDERS](R3-NATIVE-PROVIDERS.md). ZCode dispatch, full provider
+parity and working-install cutover remain separate acceptance steps.

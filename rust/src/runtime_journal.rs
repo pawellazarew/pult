@@ -72,6 +72,7 @@ pub(crate) async fn shutdown(state: &Arc<State>, owner: crate::Ownership) {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }
+    crate::runtime_state::shutdown_claude(state).await;
     crate::permission_state::drain(state).await;
     retain_owner_until_stopped(
         state.driver.get().expect("driver initialized"),
@@ -213,6 +214,7 @@ pub(crate) mod tests {
             memory_turns: OnceLock::new(),
             claude_asks: OnceLock::new(),
             permissions: OnceLock::new(),
+            claude_runtime: OnceLock::new(),
             runtime_init: Mutex::new(()),
             consent: Mutex::new(None),
             live_sessions: Mutex::new(crate::session_live::Cache::new(65536).unwrap()),

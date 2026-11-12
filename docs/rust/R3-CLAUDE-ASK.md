@@ -53,6 +53,7 @@ actual source as its oracle.
 This is not full provider acceptance. The production ClaudeRuntime/controller,
 private MCP config-file factory, inherited settings wiring, full user/runtime
 MCP, memory MCP for Claude, warm/background/question parity and real installed
-provider smoke are not supplied by this backend alone. The per-method migration
-catalog remains unported until the full provider path can issue/use the role.
+provider smoke are not supplied by this backend alone. The selected daemon
+integration now issues/uses this role as described in
+[R3-NATIVE-PROVIDERS](R3-NATIVE-PROVIDERS.md); its catalogue entry is partial.
 No installed app, account or model is touched by these fixture tests.

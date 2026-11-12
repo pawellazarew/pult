@@ -48,4 +48,5 @@ and dropped callers. There are no real model, account or network calls.
 
 Full warm-process reuse, background/subagent lifecycle, question answering,
 ZCode, dynamic user MCP configuration and same-chat unknown-send recovery remain
-required later work. Production State/router wiring is outside this module.
+required later work. State/router integration is documented separately in
+[R3-NATIVE-PROVIDERS](R3-NATIVE-PROVIDERS.md).

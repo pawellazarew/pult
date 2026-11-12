@@ -261,8 +261,7 @@ fn update(
     reg.update_checked(key, f).map_err(|_| api::storage())
 }
 fn busy(state: &State, key: &SessionKey) -> bool {
-    state.native_runtime.get().is_some_and(|r| r.busy(key))
-        || state.session_commands.pending(&key.name)
+    crate::runtime_state::busy(state, key) || state.session_commands.pending(&key.name)
 }
 fn revoked(token: &watch::Sender<bool>) -> Result<()> {
     if *token.borrow() {
@@ -390,6 +389,11 @@ async fn preparation_failed(state: Arc<State>, key: SessionKey, code: &str) -> R
             | "internal"
             | "storage_unavailable"
             | "forbidden"
+            | "start_unknown"
+            | "invalid_path"
+            | "unsupported_fork"
+            | "provider_unavailable"
+            | "unsupported"
     ) {
         pause(state, key).await?;
     }
@@ -444,10 +448,10 @@ pub(crate) async fn prompt(
     })
     .await?;
     revoked(&token)?;
-    if provider != "codex" && params["steer"] != true {
+    if !matches!(provider.as_str(), "codex" | "claude") && params["steer"] != true {
         return Err(api::error(
             "unsupported",
-            "native queue execution currently requires Codex",
+            "provider queue execution is unsupported",
         ));
     }
     if params["steer"] == true {
@@ -528,17 +532,18 @@ pub(crate) async fn prompt(
     let result = async {
         if params["interrupt"] == true {
             pause(state.clone(), key.clone()).await?;
-            if let Some(runtime) = state.native_runtime.get() {
-                runtime.stop(&key, None).map_err(|_| api::storage())?;
-                tokio::time::timeout(Duration::from_secs(10), runtime.wait_idle(&key))
-                    .await
-                    .map_err(|_| {
-                        api::error(
-                            "timeout",
-                            "previous turn has not stopped; message was not sent",
-                        )
-                    })?;
-            }
+            crate::runtime_state::stop(&state, &key, None).map_err(|_| api::storage())?;
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                crate::runtime_state::wait_idle(&state, &key),
+            )
+            .await
+            .map_err(|_| {
+                api::error(
+                    "timeout",
+                    "previous turn has not stopped; message was not sent",
+                )
+            })?;
         }
         revoked(&token)?;
         api::ordinary(
@@ -605,7 +610,7 @@ pub(crate) async fn request(
         }
         if c.sending.get(&key).is_some_and(|id|params["id"]==*id){return Err(api::error("busy","queued message is being sent"));}
         if method=="agent.queue.resume" {
-            if provider!="codex"{return Err(api::error("unsupported","native queue execution currently requires Codex"));}
+            if !matches!(provider.as_str(),"codex"|"claude"){return Err(api::error("unsupported","provider queue execution is unsupported"));}
             if uncertain(&rec){return Err(api::error("send_unknown","previous delivery is unknown; Send now may duplicate it — explicitly Send now after cleanup, edit or remove the message"));}
             if q.first().is_some_and(|v|!v.native_safe()){return Err(api::error("invalid_params","legacy head contains unsupported Unicode; edit before resuming"));}
             let rec=update(reg,&key,|r|{r.remove("queuePaused");Ok(())})?;return Ok((queue_state(&rec)?,key,provider));
@@ -667,16 +672,27 @@ async fn selected(
             }
         })?;
         let key = api::key(&rec)?;
-        if rec.scalar("provider").as_deref() != Some("codex") {
+        if !matches!(rec.scalar("provider").as_deref(), Some("codex" | "claude")) {
             return Err(api::error(
-                "invalid_params",
-                "selected send is only available for Codex",
+                "unsupported",
+                "provider queue execution is unsupported",
+            ));
+        }
+        if rec.scalar("provider").as_deref() == Some("claude")
+            && checking
+                .driver
+                .get()
+                .is_some_and(|driver| driver.active_ticket(&key).is_some())
+        {
+            return Err(api::error(
+                "unsupported",
+                "Claude live steering is not supported",
             ));
         }
         if c.sending.contains_key(&key) {
             return Err(api::error("busy", "queued message is already sending"));
         }
-        if uncertain(&rec) && checking.native_runtime.get().is_some_and(|r| r.busy(&key)) {
+        if uncertain(&rec) && crate::runtime_state::busy(&checking, &key) {
             return Err(api::error(
                 "cleanup_unconfirmed",
                 "previous delivery is unknown; wait for cleanup before retry (which may duplicate)",
@@ -722,7 +738,7 @@ async fn selected(
     })
     .await?;
     let operation = async {
-        let runtime = crate::runtime_state::instance(&state)
+        let runtime = crate::runtime_state::for_key(&state, &key)
             .await
             .map_err(|_| api::error("runtime_unavailable", "native runtime is unavailable"))?;
         revoked(&token)?;
@@ -783,6 +799,10 @@ async fn selected(
                 | "network_denied"
                 | "forbidden"
                 | "runtime_unavailable"
+                | "invalid_path"
+                | "unsupported_fork"
+                | "provider_unavailable"
+                | "unsupported"
         )
     });
     let session = key.clone();
@@ -919,7 +939,7 @@ pub(crate) fn schedule(state: Arc<State>, key: SessionKey) {
                 };
                 let q = items(rec)?;
                 if rec.get("archived").is_some_and(|v| v.get() == "true")
-                    || rec.scalar("provider").as_deref() != Some("codex")
+                    || !matches!(rec.scalar("provider").as_deref(), Some("codex" | "claude"))
                 {
                     if !q.is_empty() {
                         update(reg, &copy, |r| {
@@ -961,7 +981,7 @@ pub(crate) fn schedule(state: Arc<State>, key: SessionKey) {
                         return Ok(false);
                     };
                     if rec.get("archived").is_some_and(|v| v.get() == "true")
-                        || rec.scalar("provider").as_deref() != Some("codex")
+                        || !matches!(rec.scalar("provider").as_deref(), Some("codex" | "claude"))
                     {
                         update(reg, &copy, |r| {
                             if r.get("queue").is_some() {
@@ -1581,7 +1601,7 @@ mod tests {
                 if archived {
                     rec.set_bool("archived", true);
                 } else {
-                    rec.set_string("provider", "claude");
+                    rec.set_string("provider", "zcode");
                 }
                 reg.insert(rec).unwrap();
             }
@@ -1595,41 +1615,53 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn pre_driver_network_failure_pauses_before_a_direct_reservation_is_released() {
-        let (_home, state, key) = fixture();
-        state
-            .registry
-            .lock()
-            .unwrap()
-            .update_checked(&key, |r| {
-                r.remove("queuePaused");
-                Ok(())
-            })
-            .unwrap();
-        {
-            let mut c = state.session_commands.queue.control.lock().unwrap();
-            c.direct.insert(key.clone());
-            c.holds.insert(
-                (key.clone(), "a".into()),
-                ("fixture".into(), Instant::now() + HOLD),
-            );
-        }
-        preparation_failed(state.clone(), key.clone(), "network_denied")
-            .await
-            .unwrap();
-        assert!(paused(state.registry.lock().unwrap().find("chat").unwrap()));
-        assert!(
+    async fn pre_driver_provider_failure_pauses_before_a_direct_reservation_is_released() {
+        for code in [
+            "network_denied",
+            "start_unknown",
+            "invalid_path",
+            "unsupported_fork",
+            "provider_unavailable",
+            "unsupported",
+        ] {
+            let (_home, state, key) = fixture();
             state
-                .session_commands
-                .queue
-                .control
+                .registry
                 .lock()
                 .unwrap()
-                .direct
-                .contains(&key)
-        );
-        assert!(state.native_runtime.get().is_none());
-        finish(state).await;
+                .update_checked(&key, |r| {
+                    r.remove("queuePaused");
+                    Ok(())
+                })
+                .unwrap();
+            {
+                let mut c = state.session_commands.queue.control.lock().unwrap();
+                c.direct.insert(key.clone());
+                c.holds.insert(
+                    (key.clone(), "a".into()),
+                    ("fixture".into(), Instant::now() + HOLD),
+                );
+            }
+            preparation_failed(state.clone(), key.clone(), code)
+                .await
+                .unwrap();
+            assert!(
+                paused(state.registry.lock().unwrap().find("chat").unwrap()),
+                "pre-driver {code} released the queue without pausing"
+            );
+            assert!(
+                state
+                    .session_commands
+                    .queue
+                    .control
+                    .lock()
+                    .unwrap()
+                    .direct
+                    .contains(&key)
+            );
+            assert!(state.native_runtime.get().is_none());
+            finish(state).await;
+        }
     }
     #[tokio::test]
     async fn stale_incarnation_is_rejected_before_runtime_bootstrap_or_receipt() {

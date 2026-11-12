@@ -247,7 +247,7 @@ export const RPC_CATALOG = {
       "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Owner ordinary Codex input, queue/FIFO lifecycle, interrupt-and-send and same-turn steering. Queue identity metadata stays host-owned; asynchronous question-answer protocol remains unsupported.",
+      "description": "Partial Rust ordinary Claude/Codex input, durable queue and interrupt-and-send; live steering is Codex-only. Warm Claude, background/questions and other providers remain unsupported.",
       "paramsSchema": {
         "type": "object",
         "properties": {
@@ -3276,12 +3276,77 @@ export const RPC_CATALOG = {
     {
       "name": "perm.request",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "partial",
       "access": "ask",
       "testOnly": false,
-      "description": "Migration inventory for perm.request.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Partial scoped ordinary-Claude permission question, issued by the trusted daemon for an exact active Ticket/generation/public turn. Only ask credentials may call; owner tokens are forbidden. Tool names are nonempty/control-free and bounded to 256 UTF-8 bytes; optional toolUseId is null or nonempty/control-free and bounded to 512 bytes. Optional sessionId must match the captured session. General runtime questions/elicitation and full provider parity remain unsupported.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "toolName": {
+            "type": "string"
+          },
+          "input": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "toolUseId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessionId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "toolName",
+          "input"
+        ],
+        "additionalProperties": true
+      },
+      "resultSchema": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "behavior": {
+                "type": "string",
+                "enum": [
+                  "allow"
+                ]
+              },
+              "updatedInput": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            },
+            "required": [
+              "behavior"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "behavior": {
+                "type": "string",
+                "enum": [
+                  "deny"
+                ]
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "behavior"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      }
     },
     {
       "name": "perm.resolve",
@@ -3289,7 +3354,7 @@ export const RPC_CATALOG = {
       "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Partial Rust durable resolution of offered ordinary Codex permission scopes and structured answers. Input substitution and persistent rule storage remain unsupported.",
+      "description": "Partial Rust durable resolution of offered permission scopes and structured answers in the daemon-owned Inbox. Ordinary Claude offers once only. Input substitution and persistent rule storage remain unsupported.",
       "paramsSchema": {
         "type": "object",
         "properties": {
@@ -3866,7 +3931,7 @@ export interface RustFoundationResults {
   "protocol.catalog": { "catalogVersion": 1; "protocolVersion": 1; "methods": Array<{ "name": string; "node": "implemented" | "reserved" | "extension"; "rust": "implemented" | "partial" | "unported"; "access": "owner" | "ask" | "owner-or-runtime" | "owner-shell" | "owner-or-memory" | "owner-or-turn-memory"; "testOnly": boolean; "description": string; "paramsSchema": { [key: string]: unknown } | null; "resultSchema": { [key: string]: unknown } | null }> }
 }
 
-export type RustPartialMethod = "agent.list" | "agent.prompt" | "agent.queue.move" | "agent.queue.remove" | "agent.queue.resume" | "agent.queue.send" | "agent.start" | "agent.stop" | "perm.list" | "perm.resolve"
+export type RustPartialMethod = "agent.list" | "agent.prompt" | "agent.queue.move" | "agent.queue.remove" | "agent.queue.resume" | "agent.queue.send" | "agent.start" | "agent.stop" | "perm.list" | "perm.request" | "perm.resolve"
 
 export interface RustPartialParams {
   "agent.list": Record<string, never>
@@ -3878,6 +3943,7 @@ export interface RustPartialParams {
   "agent.start": { "kind"?: "claude" | "codex" | "zcode"; "name"?: string; "cwd"?: string; "scope"?: "project" | "general"; "title"?: string; "model"?: string; "effort"?: string; "serviceTier"?: "default" | "fast"; "approval"?: "read-only" | "ask" | "workspace" | "full"; "confirm"?: boolean; "consentRev"?: number; "grant"?: "cli-once"; "mode"?: "turn" | "warm"; "browser"?: false | null; "memory"?: { "read"?: boolean; "write"?: "off" | "ask" } }
   "agent.stop": { "name": string; "turnId"?: string }
   "perm.list": { "name"?: string }
+  "perm.request": { "toolName": string; "input": { [key: string]: unknown }; "toolUseId"?: string | null; "sessionId"?: string; [key: string]: unknown }
   "perm.resolve": { "id": string; "decision": "allow" | "deny"; "scope"?: "once" | "session" | "rule"; "answers"?: { [key: string]: unknown }; "message"?: string }
 }
 
@@ -3891,5 +3957,6 @@ export interface RustPartialResults {
   "agent.start": { "name": string; "provider": string; "cwd": string; "mode": string; "createdAt": string; "lastStatus": string; "lastEventId": number; "memory"?: { "read": boolean; "write": "off" | "ask" }; [key: string]: unknown }
   "agent.stop": { "stopped": boolean }
   "perm.list": { "pending": Array<{ [key: string]: unknown }> }
+  "perm.request": { "behavior": "allow"; "updatedInput"?: { [key: string]: unknown } } | { "behavior": "deny"; "message"?: string }
   "perm.resolve": { "resolved": true; "id": string; "decision": "allow" | "deny"; "scope"?: "once" | "session" | "rule" }
 }

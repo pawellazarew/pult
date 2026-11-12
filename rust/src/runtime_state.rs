@@ -150,6 +150,9 @@ pub(crate) fn begin_shutdown(state: &State) {
         }
     }
     crate::permission_state::begin_shutdown(state);
+    if let Some(slot) = state.claude_runtime.get() {
+        drop(slot.runtime.shutdown());
+    }
     if let Some(runtime) = state.native_runtime.get() {
         drop(runtime.shutdown());
     }
@@ -225,4 +228,198 @@ pub(crate) fn unavailable(state: &State) -> bool {
             .driver
             .get()
             .is_some_and(|driver| driver.storage_failed())
+}
+
+/// The provider controller does not own a shared probe; State retains and joins
+/// its selected probe together with the controller before releasing ownership.
+pub(crate) struct Claude {
+    pub(crate) runtime: Arc<crate::claude_runtime::ClaudeRuntime>,
+    curl: Arc<crate::network_guard::CurlProbe>,
+}
+pub(crate) async fn claude_instance(
+    state: &Arc<State>,
+) -> Result<Arc<crate::claude_runtime::ClaudeRuntime>> {
+    if *state.stop.borrow() || unavailable(state) {
+        bail!("native execution is unavailable");
+    }
+    if let Some(slot) = state.claude_runtime.get() {
+        return Ok(slot.runtime.clone());
+    }
+    crate::permission_state::instance(state).await?;
+    let state = state.clone();
+    let handle = tokio::runtime::Handle::current();
+    let tracked = state.host_jobs.track();
+    tokio::task::spawn_blocking(move || {
+        let _tracked = tracked;
+        let _runtime = handle.enter();
+        let _init = state
+            .runtime_init
+            .lock()
+            .map_err(|_| anyhow!("runtime initialization unavailable"))?;
+        if *state.stop.borrow() || unavailable(&state) {
+            bail!("native execution is unavailable");
+        }
+        if let Some(slot) = state.claude_runtime.get() {
+            return Ok(slot.runtime.clone());
+        }
+        let parent = std::env::vars_os().collect();
+        let current =
+            std::env::current_exe().map_err(|_| anyhow!("daemon executable unavailable"))?;
+        let bootstrap = runtime_bootstrap::load_claude(&state.home, &current, &parent)?;
+        let curl = Arc::new(
+            crate::network_guard::CurlProbe::with_program(&bootstrap.curl, &bootstrap.parent)
+                .map_err(|_| anyhow!("network probe unavailable"))?,
+        );
+        let guard = Arc::new(crate::network_guard::NetworkGuard::new(curl.clone()));
+        let backend = state
+            .claude_asks
+            .get_or_init(|| crate::claude_ask::Backend::new(Arc::downgrade(&state)))
+            .clone();
+        let helper = current.clone();
+        let factory: crate::claude_runtime::McpFactory = Arc::new(move |gate| {
+            let factory = crate::claude_mcp::Factory::new(
+                backend.clone(),
+                gate,
+                helper.clone(),
+                Default::default(),
+            )?;
+            Ok(factory as Arc<dyn crate::claude_worker::ScopedMcp>)
+        });
+        let runtime = Arc::new(
+            crate::claude_runtime::ClaudeRuntime::new(
+                crate::claude_runtime::Dependencies {
+                    home: state.home.clone(),
+                    registry: state.registry.clone(),
+                    consent: consent(&state)?,
+                    driver: state
+                        .driver
+                        .get()
+                        .ok_or_else(|| anyhow!("execution driver unavailable"))?
+                        .clone(),
+                    sink: state.execution_sink(),
+                },
+                crate::claude_runtime::TrustedCommand {
+                    holder: bootstrap.holder,
+                    program: bootstrap.claude,
+                    prefix_args: bootstrap.prefix_args,
+                },
+                bootstrap.config,
+                bootstrap.parent,
+                crate::claude_runtime::SettingsRoots {
+                    child_home: bootstrap.child_home,
+                    managed_directory: bootstrap.managed_directory,
+                },
+                guard,
+                factory,
+                Default::default(),
+            )
+            .map_err(|_| anyhow!("Claude runtime configuration unavailable"))?,
+        );
+        state
+            .claude_runtime
+            .set(Arc::new(Claude {
+                runtime: runtime.clone(),
+                curl,
+            }))
+            .map_err(|_| anyhow!("Claude runtime already initialized"))?;
+        if *state.stop.borrow() || unavailable(&state) {
+            drop(runtime.shutdown());
+            bail!("daemon is stopping");
+        }
+        Ok(runtime)
+    })
+    .await
+    .map_err(|_| anyhow!("Claude runtime initialization failed"))?
+}
+/// Provider selection is read under the registry mutex in owned blocking work;
+/// the controller repeats full identity/path/policy checks before dispatch.
+pub(crate) async fn for_key(
+    state: &Arc<State>,
+    key: &crate::turn_snapshot::SessionKey,
+) -> Result<crate::provider_runtime::Runtime> {
+    let checking = state.clone();
+    let key = key.clone();
+    let tracked = state.host_jobs.track();
+    let provider = tokio::task::spawn_blocking(move || {
+        let _tracked = tracked;
+        if *checking.stop.borrow() || unavailable(&checking) {
+            bail!("native execution unavailable");
+        }
+        let registry = checking
+            .registry
+            .lock()
+            .map_err(|_| anyhow!("registry unavailable"))?;
+        let record = registry
+            .find(&key.name)
+            .ok_or_else(|| anyhow!("session unavailable"))?;
+        if record.scalar("createdAt").as_deref() != Some(&key.created_at)
+            || crate::owner_trust::yes(record, "archived")
+        {
+            bail!("session unavailable");
+        }
+        Ok::<_, anyhow::Error>(record.scalar("provider").unwrap_or_default())
+    })
+    .await
+    .map_err(|_| anyhow!("provider selection unavailable"))??;
+    match provider.as_str() {
+        "codex" => Ok(crate::provider_runtime::Runtime::Codex(
+            instance(state).await?,
+        )),
+        "claude" => Ok(crate::provider_runtime::Runtime::Claude(
+            claude_instance(state).await?,
+        )),
+        _ => bail!("provider execution is unsupported"),
+    }
+}
+fn existing(state: &State) -> Vec<crate::provider_runtime::Runtime> {
+    let mut runtimes = Vec::new();
+    if let Some(runtime) = state.native_runtime.get() {
+        runtimes.push(crate::provider_runtime::Runtime::Codex(runtime.clone()));
+    }
+    if let Some(slot) = state.claude_runtime.get() {
+        runtimes.push(crate::provider_runtime::Runtime::Claude(
+            slot.runtime.clone(),
+        ));
+    }
+    runtimes
+}
+pub(crate) fn busy(state: &State, key: &crate::turn_snapshot::SessionKey) -> bool {
+    existing(state).iter().any(|runtime| runtime.busy(key))
+}
+pub(crate) async fn wait_idle(state: &State, key: &crate::turn_snapshot::SessionKey) {
+    loop {
+        for runtime in existing(state) {
+            runtime.wait_idle(key).await;
+        }
+        if !busy(state, key) {
+            return;
+        }
+    }
+}
+pub(crate) fn stop(
+    state: &State,
+    key: &crate::turn_snapshot::SessionKey,
+    turn: Option<&str>,
+) -> Result<bool, crate::provider_runtime::Error> {
+    let mut stopped = false;
+    for runtime in existing(state) {
+        stopped |= runtime.stop(key, turn)?;
+    }
+    Ok(stopped)
+}
+pub(crate) fn stop_name(state: &State, name: &str) -> Result<bool, crate::provider_runtime::Error> {
+    let mut stopped = false;
+    for runtime in existing(state) {
+        stopped |= runtime.stop_name(name)?;
+    }
+    Ok(stopped)
+}
+pub(crate) async fn shutdown_claude(state: &State) {
+    if let Some(slot) = state.claude_runtime.get() {
+        while slot.runtime.shutdown().await.is_err() {
+            eprintln!("Claude cleanup is unconfirmed; daemon ownership retained");
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        slot.curl.shutdown().await;
+    }
 }

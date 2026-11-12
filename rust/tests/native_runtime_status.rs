@@ -89,7 +89,7 @@ async fn opt_in_bootstrap_starts_no_hosts_or_turns_and_restarts_cold() {
     for initialized in [first.unwrap(), second.unwrap()] {
         assert_eq!(
             initialized["nativeRuntime"],
-            json!({"initialized":true,"hosts":0,"activeTurns":0})
+            json!({"initialized":true,"hosts":0,"activeTurns":0,"providers":{"codex":{"initialized":true},"claude":{"initialized":false}}})
         );
         assert_eq!(initialized["lastEventId"], 0);
         assert_eq!(initialized["journal"]["executionUnavailable"], false);
@@ -129,7 +129,7 @@ async fn opt_in_bootstrap_starts_no_hosts_or_turns_and_restarts_cold() {
     let prepared: Value = serde_json::from_slice(&prepared.stdout).unwrap();
     assert_eq!(
         prepared["nativeRuntime"],
-        json!({"initialized":true,"hosts":0,"activeTurns":0})
+        json!({"initialized":true,"hosts":0,"activeTurns":0,"providers":{"codex":{"initialized":true},"claude":{"initialized":false}}})
     );
     stop(&home, &mut restarted).await;
 }

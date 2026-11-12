@@ -58,8 +58,8 @@ and cleanup failure/retry. Existing actual helper CLI/Role/Broker fixtures are
 run separately; this slice does not claim a new whole factory-to-CLI-to-Broker
 end-to-end test or a live Claude/provider call.
 
-There is no runtime factory issuer/controller integration or automatic memory /
-runtime MCP server here. A later trusted host can use the full McpContext at
-prepare time for additional servers; this module never invents a public turn ID
-from a Ticket or session lookup. Root's pending `public_turn` context extension
-must be preserved when this factory is composed with that runtime work.
+The selected daemon integration and its whole factory-to-helper-to-Broker
+fixture are documented in [R3-NATIVE-PROVIDERS](R3-NATIVE-PROVIDERS.md).
+Automatic memory/runtime MCP servers are not supplied by this factory. The
+complete McpContext, including the actual Driver public_turn, is forwarded to
+the backend; no public turn identity is invented from a Ticket/session lookup.

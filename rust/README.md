@@ -6,14 +6,16 @@
 `events.subscribe`, `events.unsubscribe`, `events.snapshot`, `events.history`, `events.get`,
 `agent.rename`, `agent.archive`, `agent.seen`, `agent.read`, `agent.tree` и `protocol.catalog`. Также добавлены M1-хранилище памяти и read-only ключи доверенных сессий с каталогом;
 договоры — [M1-MEMORY](../docs/rust/M1-MEMORY.md) и
-[M2-READ-CONTEXT](../docs/rust/M2-READ-CONTEXT.md). Всего Rust поддерживает 27 методов
-из 98 (15 перенесённых и 12 новых); ещё 10 экспериментальных partial RPC
-включают обычные Codex turns и [полную очередь/steering](../docs/rust/R3-SESSION-QUEUE.md). Журнал использует нынешний формат `events/journal.jsonl`.
+[M2-READ-CONTEXT](../docs/rust/M2-READ-CONTEXT.md). Всего Rust поддерживает 28 методов
+из 99; ещё 11 экспериментальных partial RPC включают обычные Claude/Codex turns,
+общую очередь и Codex steering. Интеграция провайдеров —
+[R3-NATIVE-PROVIDERS](../docs/rust/R3-NATIVE-PROVIDERS.md). Журнал использует нынешний формат `events/journal.jsonl`.
 
 Полный список методов берётся из `../protocol/methods.json`. В `hello_ok` и статусе
 публикуются `capabilities.experimental` и `supportedMethods`. Каталог отмечает остальные
 методы как `unported`, их вызов возвращает `not_implemented`. Неизвестное имя возвращает
-`not_found`. Ключи вопросов и runtime отвергаются до переноса их области доступа.
+`not_found`. Scoped-ключ Claude разрешает только вопросы своего хода; runtime-ключи
+отвергаются до переноса их области доступа.
 
 ## Сборка и проверки
 
