@@ -76,3 +76,31 @@ UTF-16, очередь, CLI, испорченные данные, опасные
 Далее переносятся запуск и начало хода, очередь исполнения, разрешения и адаптеры.
 `agent.list` получит поля фактического доступа, фаз и внимания вместе с менеджером сессий.
 Рабочее переключение и приёмка отката проходят по R5.
+
+
+## Trusted lifecycle transactions
+
+The public owner library API now offers insert, replace_checked,
+update_checked, remove_checked and raw records(). This is not execution
+authorization or the public agent.list projection. The host serializes one
+writer, assigns a fresh SessionKey incarnation on creation, validates consent
+and filesystem policy, and quiesces/revokes the old incarnation before removal.
+
+replace_checked compares both the SessionKey and the exact prior metadata
+snapshot, so delayed callbacks cannot restore older titles, approval, model
+or queue fields. update_checked applies a synchronous patch to freshly read
+metadata. Provider, cwd and creation identity cannot change through replacement.
+Escaped ASCII names are canonicalized before duplicate detection/persistence.
+A record is bounded below the RPC frame budget before writing.
+
+All lifecycle writes share the existing atomic commit implementation and
+post-rename poisoning. External edits remain untouched on conflict. Mutation
+panics discard the patch without poisoning the caller's owner mutex; the host
+installs panic_guard first to suppress panic-hook payloads. Record Debug shows
+counts only, and malformed raw name access returns an empty name instead of
+panicking. Stored names still require the validated canonical grammar.
+
+12 registry tests include durable insertion, stale/recreated identities,
+escaped duplicate names, external edits, callback failure/panic, privacy and
+refusal to restore Full after a newer ReadOnly selection. The stale full-record
+overwrite was reproduced RED before adding the metadata CAS.
