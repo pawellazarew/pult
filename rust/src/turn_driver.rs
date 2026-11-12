@@ -217,6 +217,42 @@ struct Inner {
     options: Options,
     changed: Notify,
 }
+/// Opaque admission state for one trusted memory mutation. Cancellation before
+/// seal wins; a sealed operation owns its subsequent commit outcome.
+pub(crate) struct MemoryAction {
+    state: std::sync::atomic::AtomicU8,
+    deadline: std::time::Instant,
+}
+impl MemoryAction {
+    pub(crate) fn new(deadline: std::time::Instant) -> Self {
+        Self {
+            state: std::sync::atomic::AtomicU8::new(0),
+            deadline,
+        }
+    }
+    pub(crate) fn cancel(&self) {
+        let _ = self.state.compare_exchange(
+            0,
+            2,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        );
+    }
+    fn seal(&self) -> bool {
+        if std::time::Instant::now() >= self.deadline {
+            return false;
+        }
+        self.state
+            .compare_exchange(
+                0,
+                1,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    }
+}
+
 pub struct Driver {
     inner: Arc<Inner>,
 }
@@ -394,6 +430,48 @@ impl Driver {
             .core
             .active(ticket)
             .map(|turn| turn.snapshot().clone())
+    }
+    /// Trusted host observation for lazy provenance. Starting has no accepted
+    /// user receipt; only Progress::Running carries a durable accepted event.
+    /// This does not grant dispatch or memory authority.
+    pub(crate) fn progress_for_ticket(&self, ticket: &Ticket) -> Option<watch::Receiver<Progress>> {
+        self.inner
+            .state
+            .lock()
+            .expect("driver state mutex")
+            .jobs
+            .get(ticket)
+            .map(|control| control.progress.subscribe())
+    }
+    /// Trusted host-only linearization. This contains no callback or IO and
+    /// must be invoked only after source policy/capability checks under their
+    /// own gates. It never invents acceptance for a pending/unknown native send.
+    pub(crate) fn seal_memory_action(
+        &self,
+        ticket: &Ticket,
+        action: &MemoryAction,
+        expected: &Accepted,
+    ) -> Option<Accepted> {
+        let state = self.inner.state.lock().expect("driver state mutex");
+        if state.closed || state.storage_failed {
+            return None;
+        }
+        let active = state.core.active(ticket)?;
+        if active.cancel_requested() || active.provider_turn_id().is_none() {
+            return None;
+        }
+        let control = state.jobs.get(ticket)?;
+        let Progress::Running(accepted) = control.progress.borrow().clone() else {
+            return None;
+        };
+        if &accepted != expected
+            || accepted.user_event_id == 0
+            || accepted.user_event_id > 9_007_199_254_740_991
+            || !action.seal()
+        {
+            return None;
+        }
+        Some(accepted)
     }
     pub async fn wait_for_storage_failure(&self) {
         loop {

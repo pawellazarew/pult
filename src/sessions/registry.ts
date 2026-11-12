@@ -111,6 +111,10 @@ export interface SessionRecord {
   model?: string
   effort?: string
   serviceTier?: ServiceTier
+  /** Rust-owned policy/markers: preserve opaque data on rollback, never execute it here. */
+  memory?: unknown
+  private?: unknown
+  temporary?: unknown
   mode: SessionMode
   /**
    * `--setting-sources` хода: какие наборы настроек CLI вообще разрешено читать.
@@ -362,6 +366,9 @@ export function parseSessions(raw: unknown): SessionRecord[] {
       ...(typeof o['effort'] === 'string' ? { effort: o['effort'] } : {}),
       ...(o['provider'] === 'codex' && isServiceTier(o['serviceTier']) ? { serviceTier: o['serviceTier'] } : {}),
       mode,
+      ...(Object.hasOwn(o, 'memory') ? { memory: o['memory'] } : {}),
+      ...(Object.hasOwn(o, 'private') ? { private: o['private'] } : {}),
+      ...(Object.hasOwn(o, 'temporary') ? { temporary: o['temporary'] } : {}),
       ...(typeof o['settingSources'] === 'string' ? { settingSources: o['settingSources'] } : {}),
       ...(typeof o['providerSessionId'] === 'string' ? { providerSessionId: o['providerSessionId'] } : {}),
       ...(o['forkOnResume'] === true ? { forkOnResume: true } : {}),

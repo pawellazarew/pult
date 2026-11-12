@@ -166,6 +166,7 @@ pub fn create(
                 | "consentRev"
                 | "grant"
                 | "browser"
+                | "memory"
         )
     }) {
         return Err(CreateError::Unsupported);
@@ -176,6 +177,8 @@ pub fn create(
     {
         return Err(CreateError::Unsupported);
     }
+    let memory_policy = crate::memory_policy::Policy::parse(params.get("memory"))
+        .map_err(|_| CreateError::Invalid)?;
     let provider = match optional(params, "kind")? {
         None | Some("claude") => Provider::Claude,
         Some("codex") => Provider::Codex,
@@ -338,6 +341,13 @@ pub fn create(
         ("lastStatus", "cold"),
     ] {
         record.set_string(key, value);
+    }
+    if params.get("memory").is_some() {
+        record.set_raw(
+            "memory",
+            serde_json::value::to_raw_value(&memory_policy.value())
+                .map_err(|_| CreateError::Invalid)?,
+        );
     }
     if scope == "general" {
         record.set_string("scope", "general");

@@ -14,6 +14,8 @@ use serde_json::Value;
 use std::borrow::Cow;
 use std::sync::OnceLock;
 
+const MEMORY_TURN_PATTERN: &str = r"(?i-u:mt_[0-9a-f]{64})";
+
 struct Rule {
     pattern: Regex,
     replacement: &'static str,
@@ -24,6 +26,7 @@ fn rules() -> &'static [Rule] {
         let non_space = r"[^\x{0009}-\x{000D}\x{0020}\x{00A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}/@]";
         let url = format!("([A-Za-z][A-Za-z0-9+.-]*://){non_space}+:{non_space}+@");
         [
+            (MEMORY_TURN_PATTERN, "<token>"),
             (r"sk-ant-[A-Za-z0-9_-]{8,}", "<token>"),
             (r"(?-u:\b)sk-[A-Za-z0-9]{16,}", "<token>"),
             (r"(?-u:\b)sk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{16,}", "<token>"),
@@ -82,8 +85,8 @@ fn redact_at(value: &Value, depth: u8) -> Value {
                 .filter(|(key, _)| key.as_str() != "__proto__")
                 .map(|(key, value)| {
                     (
-                        key.clone(),
-                        if secret_name(key) {
+                        memory_pattern().replace_all(key, "<token>").into_owned(),
+                        if memory_pattern().is_match(key) || secret_name(key) {
                             Value::String("<redacted>".into())
                         } else {
                             redact_at(value, depth + 1)
@@ -93,5 +96,50 @@ fn redact_at(value: &Value, depth: u8) -> Value {
                 .collect(),
         ),
         other => other.clone(),
+    }
+}
+
+fn memory_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN
+        .get_or_init(|| Regex::new(MEMORY_TURN_PATTERN).expect("fixed memory capability pattern"))
+}
+/// Purpose keys are secret even in command identifiers or object property names.
+pub(crate) fn contains_memory_capability(value: &Value) -> bool {
+    match value {
+        Value::String(text) => memory_pattern().is_match(text),
+        Value::Object(values) => values.iter().any(|(key, value)| {
+            memory_pattern().is_match(key) || contains_memory_capability(value)
+        }),
+        Value::Array(values) => values.iter().any(contains_memory_capability),
+        _ => false,
+    }
+}
+/// The final journal boundary preserves typed counters/opaque IDs while removing
+/// the explicit credential format, including hostile structural IDs/property names.
+/// This is the same purpose-key policy used by redact_string/redact above.
+pub(crate) fn redact_memory_capabilities(value: &Value) -> Value {
+    match value {
+        Value::String(text) => {
+            Value::String(memory_pattern().replace_all(text, "<token>").into_owned())
+        }
+        Value::Array(values) => {
+            Value::Array(values.iter().map(redact_memory_capabilities).collect())
+        }
+        Value::Object(values) => Value::Object(
+            values
+                .iter()
+                .map(|(key, value)| {
+                    let public_key = memory_pattern().replace_all(key, "<token>").into_owned();
+                    let value = if public_key != *key {
+                        Value::String("<redacted>".into())
+                    } else {
+                        redact_memory_capabilities(value)
+                    };
+                    (public_key, value)
+                })
+                .collect(),
+        ),
+        value => value.clone(),
     }
 }

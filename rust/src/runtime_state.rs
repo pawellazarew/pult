@@ -82,7 +82,16 @@ pub(crate) async fn instance(state: &Arc<State>) -> Result<Arc<codex_runtime::Co
             crate::network_guard::CurlProbe::with_program(&bootstrap.curl, &bootstrap.parent)
                 .map_err(|_| anyhow!("network probe unavailable"))?,
         );
-        let runtime = codex_runtime::CodexRuntime::new(
+        let memory = state
+            .memory_turns
+            .get_or_init(|| {
+                crate::memory_turn::Backend::new(
+                    Arc::downgrade(&state),
+                    current.with_file_name("pult-memory-mcp"),
+                )
+            })
+            .clone();
+        let runtime = codex_runtime::CodexRuntime::new_with_memory(
             codex_runtime::Dependencies {
                 home: state.home.clone(),
                 registry: state.registry.clone(),
@@ -103,6 +112,7 @@ pub(crate) async fn instance(state: &Arc<State>) -> Result<Arc<codex_runtime::Co
             bootstrap.parent,
             codex_runtime::Network::OwnedCurl(curl),
             Default::default(),
+            Some(memory),
         )?;
         state
             .native_runtime
@@ -122,9 +132,15 @@ pub(crate) async fn instance(state: &Arc<State>) -> Result<Arc<codex_runtime::Co
 pub(crate) fn begin_shutdown(state: &State) {
     // Seal admission and notify the owner before a response can stall/fail.
     // send_replace also seals fixtures with no current watch subscribers.
-    state.stop.send_replace(true);
-    if let Some(driver) = state.driver.get() {
-        driver.begin_shutdown();
+    {
+        let _admission = state
+            .execution_admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.stop.send_replace(true);
+        if let Some(driver) = state.driver.get() {
+            driver.begin_shutdown();
+        }
     }
     if let Some(runtime) = state.native_runtime.get() {
         drop(runtime.shutdown());

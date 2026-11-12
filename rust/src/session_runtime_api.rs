@@ -240,26 +240,31 @@ async fn create(state: Arc<State>, params: Value, client: ClientKind) -> Result<
         {
             return Err(error("capacity", "session status cache is full"));
         }
-        let mut record = crate::session_create::create(
+        let record = crate::session_create::create(
             &state.home,
             &state.registry,
             &consent,
             &params,
             client,
             store.last_id(),
-        )
-        .map_err(|e| {
-            if e == crate::session_create::CreateError::Storage {
-                state.execution_storage_failed();
+        );
+        let mut record = match record {
+            Ok(record) => record,
+            Err(e) => {
+                drop(store);
+                if e == crate::session_create::CreateError::Storage {
+                    state.execution_storage_failed();
+                }
+                return Err(error(e.code(), "session could not be created"));
             }
-            error(e.code(), "session could not be created")
-        })?;
+        };
         let registered = state.live_sessions.lock().map_err(|_| storage())?.seed(
             key(&record)?,
             crate::session_live::Status::Cold,
             0,
         );
         if registered.is_err() {
+            drop(store);
             state.execution_storage_failed();
             return Err(storage());
         }
@@ -605,9 +610,11 @@ mod tests {
             connection_id: AtomicU64::new(1),
             driver: OnceLock::new(),
             execution_storage_failed: AtomicBool::new(false),
+            execution_admission: Mutex::new(()),
             host_jobs: Arc::default(),
             session_commands: Arc::default(),
             native_runtime: OnceLock::new(),
+            memory_turns: OnceLock::new(),
             runtime_init: Mutex::new(()),
             consent: Mutex::new(None),
             live_sessions: Mutex::new(crate::session_live::Cache::new(65536).unwrap()),

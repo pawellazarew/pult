@@ -30,6 +30,12 @@ impl State {
     }
 
     pub(crate) fn execution_storage_failed(&self) {
+        // Shared with memory's bounded precommit seal; no IO/callback is held
+        // inside this gate. Direct Driver faults serialize on Driver itself.
+        let _admission = self
+            .execution_admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.execution_storage_failed.store(true, Ordering::Release);
         if let Some(driver) = self.driver.get() {
             driver.report_storage_failure();
@@ -111,6 +117,9 @@ impl EventSink for HostSink {
             let result = tokio::task::spawn_blocking(move || {
                 let _host_job = host_job;
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    // Cover even a credential forged into typed metadata,
+                    // without generic redaction of legitimate opaque IDs.
+                    let draft = crate::redaction::redact_memory_capabilities(&draft);
                     let mut store = state.store.lock().map_err(|_| unavailable())?;
                     let event = store.append(draft).map_err(|_| unavailable())?;
                     let receipt = Receipt {
@@ -185,9 +194,11 @@ pub(crate) mod tests {
             connection_id: AtomicU64::new(1),
             driver: OnceLock::new(),
             execution_storage_failed: AtomicBool::new(false),
+            execution_admission: Mutex::new(()),
             host_jobs: Arc::default(),
             session_commands: Arc::default(),
             native_runtime: OnceLock::new(),
+            memory_turns: OnceLock::new(),
             runtime_init: Mutex::new(()),
             consent: Mutex::new(None),
             live_sessions: Mutex::new(crate::session_live::Cache::new(65536).unwrap()),

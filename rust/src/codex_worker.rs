@@ -336,6 +336,8 @@ struct Shared {
     limits: Limits,
     timeouts: Timeouts,
     services: Services,
+    memory: Option<Arc<dyn crate::memory_turn::TurnMemory>>,
+    memory_used: AtomicBool,
     cleanup: Cleanup,
     storage_failed: AtomicBool,
     unsupported_background: AtomicBool,
@@ -427,6 +429,25 @@ struct Envelope {
 }
 impl CodexHost {
     pub fn start(config: HostConfig, services: Services) -> Result<Arc<Self>, WorkerError> {
+        Self::start_inner(config, services, None)
+    }
+    /// Single-turn dedicated host. Its caller retains ownership through shutdown;
+    /// memory credentials are supplied only in the trusted thread MCP config.
+    pub(crate) fn start_with_memory(
+        config: HostConfig,
+        services: Services,
+        memory: Arc<dyn crate::memory_turn::TurnMemory>,
+    ) -> Result<Arc<Self>, WorkerError> {
+        if config.limits.sessions != 1 || config.limits.jobs != 1 {
+            return Err(error("invalid_params", "memory host must be dedicated"));
+        }
+        Self::start_inner(config, services, Some(memory))
+    }
+    fn start_inner(
+        config: HostConfig,
+        services: Services,
+        memory: Option<Arc<dyn crate::memory_turn::TurnMemory>>,
+    ) -> Result<Arc<Self>, WorkerError> {
         tokio::runtime::Handle::try_current().map_err(|_| unavailable())?;
         if config
             .launch
@@ -478,6 +499,8 @@ impl CodexHost {
             limits: l,
             timeouts: config.timeouts,
             services,
+            memory,
+            memory_used: AtomicBool::new(false),
             cleanup,
             storage_failed: AtomicBool::new(false),
             unsupported_background: AtomicBool::new(false),
@@ -710,6 +733,9 @@ fn begin(
             "invalid_params",
             "unsupported or mismatched Codex turn snapshot",
         ));
+    }
+    if shared.memory.is_some() && shared.memory_used.swap(true, Ordering::AcqRel) {
+        return Err(error("invalid_params", "memory host is single-use"));
     }
     let (cancel, _) = watch::channel(false);
     let (approval_closed, _) = watch::channel(false);
@@ -1386,6 +1412,22 @@ async fn prepare(
     sender: mpsc::Sender<Envelope>,
 ) -> Result<(), WorkerError> {
     let client = ready_client(&shared, &job).await?;
+    let memory = if let Some(memory) = shared.memory.clone() {
+        let io = CheckGuard::new(&job);
+        let ticket = job.ticket.clone();
+        let at = snapshot.clone();
+        let public_id = job.public_id.clone();
+        Some(
+            tokio::spawn(async move {
+                let _io = io;
+                memory.prepare(ticket, at, public_id).await
+            })
+            .await
+            .map_err(|_| unavailable())??,
+        )
+    } else {
+        None
+    };
     let initial = snapshot.settings.approval;
     let (sandbox, approval) = policy(initial, spec.broker);
     let existing = {
@@ -1409,6 +1451,9 @@ async fn prepare(
         let mut params = json!({"cwd":spec.cwd,"sandbox":sandbox,"approvalPolicy":approval,"serviceTier":snapshot.settings.service_tier.map(|v|v.as_str()).unwrap_or("default"),"config":{"features.default_mode_request_user_input":true}});
         if let Some(model) = &snapshot.settings.model {
             params["model"] = json!(model);
+        }
+        if let Some(memory) = &memory {
+            params["config"]["mcp_servers"] = json!({"pult_memory":memory.server()});
         }
         let mut resume = existing.0.filter(|_| existing.2);
         let method = if resume.is_some() {
@@ -1547,6 +1592,9 @@ async fn prepare(
             },
         );
     }
+    if let Some(memory) = &memory {
+        memory_ready(&client, &thread, memory.writable(), shared.timeouts.control).await?;
+    }
     // Complete all async preparation before the final fresh synchronous gate.
     let config = client
         .request(
@@ -1578,6 +1626,17 @@ async fn prepare(
     })
     .await
     .map_err(|_| unavailable())??;
+    if let Some(memory) = shared.memory.clone() {
+        let io = CheckGuard::new(&job);
+        let ticket = job.ticket.clone();
+        let catalog = tokio::spawn(async move {
+            let _io = io;
+            memory.catalog(ticket).await
+        })
+        .await
+        .map_err(|_| unavailable())??;
+        input.push(json!({"type":"text","text":catalog}));
+    }
     // A previous terminal status must not survive into a newly dispatched turn.
     // Persist before the final fresh gate and before any native permission event:
     // writing after turn/start could overwrite an early blocked-permission state.
@@ -1600,6 +1659,9 @@ async fn prepare(
         let decision = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             checking.services.fresh_gate.check(&checking_job.ticket, &snapshot)
         })).unwrap_or(DispatchDecision::Deny);
+        if checking.memory.as_ref().is_some_and(|memory|!memory.check(&checking_job.ticket)) {
+            return Err(error("memory_unavailable","memory authority changed before dispatch"));
+        }
         let effective = match decision {
             DispatchDecision::Allow => initial,
             DispatchDecision::Restrict(mode) if narrowing(initial, mode) => mode,
@@ -1669,6 +1731,67 @@ async fn prepare(
     job.info.lock().expect("Codex job").acknowledged = true;
     job.changed.notify_waiters();
     Ok(())
+}
+async fn memory_ready(
+    client: &Client,
+    thread: &str,
+    writable: bool,
+    timeout: Duration,
+) -> Result<(), WorkerError> {
+    let wait = async {
+        loop {
+            let reply = client
+                .request(
+                    "mcpServerStatus/list",
+                    json!({"threadId":thread,"serverName":"pult_memory","limit":1}),
+                    timeout,
+                )
+                .await
+                .map_err(|_| error("memory_unavailable", "memory MCP readiness failed"))?;
+            let servers = reply["data"]
+                .as_array()
+                .filter(|servers| servers.len() <= 16)
+                .ok_or_else(|| error("memory_unavailable", "memory MCP status is invalid"))?;
+            if let Some(server) = servers
+                .iter()
+                .find(|server| server["name"] == "pult_memory")
+            {
+                match server["runtimeStatus"].as_str() {
+                    Some("connected") => {
+                        let tools = server["tools"].as_object().ok_or_else(|| {
+                            error("memory_unavailable", "memory MCP tool catalog is invalid")
+                        })?;
+                        if server["serverInfo"]["name"] != "pult-memory"
+                            || !server["toolsError"].is_null()
+                            || [
+                                "memory_catalog",
+                                "memory_list",
+                                "memory_search",
+                                "memory_get",
+                            ]
+                            .iter()
+                            .any(|name| !tools.contains_key(*name))
+                            || tools.contains_key("memory_propose") != writable
+                        {
+                            return Err(error(
+                                "memory_unavailable",
+                                "memory MCP capabilities differ from trusted policy",
+                            ));
+                        }
+                        return Ok(());
+                    }
+                    Some("failed" | "disconnected") => {
+                        return Err(error("memory_unavailable", "memory MCP did not start"));
+                    }
+                    _ => {}
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    };
+    tokio::time::timeout(timeout.min(Duration::from_secs(15)), wait)
+        .await
+        .map_err(|_| error("memory_unavailable", "memory MCP readiness timed out"))?
 }
 async fn append(shared: &Shared, draft: Value) -> Result<(), WorkerError> {
     if shared.storage_failed.load(Ordering::Acquire) {
@@ -2131,10 +2254,19 @@ async fn run_job(
         let _ = started.send(Err(failure));
         cancel_job(&job);
     }
+    if let Some(memory) = &shared.memory {
+        memory.revoke(&job.ticket);
+    }
     cleanup_job(&shared, &job).await;
     // Revoke/interrupt/stop above before waiting on policy IO. A stopped OS
     // process alone cannot prove a detached host filesystem check has finished.
     wait_checks(&job).await;
+    if let Some(memory) = &shared.memory {
+        while memory.drain(job.ticket.clone()).await.is_err() {
+            job.closed.send_replace(Closed::Unconfirmed);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
     // Removing the only route sender closes the per-ticket queue in order. Its
     // owner drains queued terminal/tail frames and joins all approval tasks.
     {

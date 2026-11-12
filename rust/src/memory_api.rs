@@ -1,13 +1,14 @@
-//! Owner-only memory administration. Agent-scoped access and turn context follow in M2.
+//! Owner memory administration. Scoped read/turn roles are routed separately.
 use crate::memory::{Context, MemoryError};
 use anyhow::anyhow;
 use serde_json::Value;
 use serde_json::value::RawValue;
 use std::{path::Path, sync::Arc};
 
-pub(crate) const METHODS: [&str; 12] = [
+pub(crate) const METHODS: [&str; 13] = [
     "memory.add",
     "memory.catalog",
+    "memory.configure",
     "memory.context.bind",
     "memory.context.issue",
     "memory.context.revoke",
@@ -73,6 +74,9 @@ pub(crate) async fn execute(
     method: String,
     params: Value,
 ) -> Result<Value, MemoryError> {
+    if method == "memory.configure" {
+        return crate::memory_policy::configure(state, params).await;
+    }
     if crate::session_memory_api::METHODS.contains(&method.as_str()) {
         return crate::session_memory_api::execute(state, method, params).await;
     }

@@ -141,7 +141,7 @@ export const RPC_CATALOG = {
       "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Partial Rust registered-session projection with reduced live status and pending permission counts. Full attention, phase, context and access details remain unported.",
+      "description": "Partial Rust registered-session projection with reduced live status and pending permission counts. Raw recovered metadata, including future memory policy, stays opaque; full attention, phase, context and access details remain unported.",
       "paramsSchema": {
         "type": "object",
         "properties": {},
@@ -637,7 +637,7 @@ export const RPC_CATALOG = {
       "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Partial Rust metadata creation with explicit settings and fresh access checks. Start prompts, drafts, inherited defaults, worktrees and active browser execution remain unsupported.",
+      "description": "Partial Rust metadata creation with explicit settings, optional memory policy, and fresh access checks. Start prompts, drafts, inherited defaults, worktrees and active browser execution remain unsupported.",
       "paramsSchema": {
         "type": "object",
         "properties": {
@@ -715,6 +715,23 @@ export const RPC_CATALOG = {
               false,
               null
             ]
+          },
+          "memory": {
+            "type": "object",
+            "properties": {
+              "read": {
+                "type": "boolean"
+              },
+              "write": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "ask"
+                ]
+              }
+            },
+            "required": [],
+            "additionalProperties": false
           }
         },
         "required": [],
@@ -743,6 +760,26 @@ export const RPC_CATALOG = {
           },
           "lastEventId": {
             "type": "integer"
+          },
+          "memory": {
+            "type": "object",
+            "properties": {
+              "read": {
+                "type": "boolean"
+              },
+              "write": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "ask"
+                ]
+              }
+            },
+            "required": [
+              "read",
+              "write"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [
@@ -1600,9 +1637,9 @@ export const RPC_CATALOG = {
       "name": "memory.add",
       "node": "extension",
       "rust": "implemented",
-      "access": "owner",
+      "access": "owner-or-turn-memory",
       "testOnly": false,
-      "description": "Owner-only shared memory add; experimental Rust scratch service, agent turn integration follows separately.",
+      "description": "Shared memory add: owner CRUD or a distinct exact-turn memory capability with mandatory human approval. Legacy read-only memory credentials cannot mutate records.",
       "paramsSchema": {
         "type": "object",
         "properties": {
@@ -1685,12 +1722,30 @@ export const RPC_CATALOG = {
             "type": "boolean"
           },
           "author": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "owner",
+              "claude",
+              "codex",
+              "zcode"
+            ]
           },
           "reason": {
             "type": "string"
           },
           "sourceSession": {
+            "type": "string"
+          },
+          "sourceEventId": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "sourceTurnId": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "sourceCreatedAt": {
             "type": "string"
           }
         },
@@ -1717,7 +1772,7 @@ export const RPC_CATALOG = {
       "rust": "implemented",
       "access": "owner-or-memory",
       "testOnly": false,
-      "description": "Bounded JSON-lines catalog of visible memory summaries. Owner must select session; memory credentials must omit it.",
+      "description": "Bounded JSON-lines catalog of visible memory summaries. Owner must select session; legacy read-only and authorized turn memory credentials must omit it.",
       "paramsSchema": {
         "type": "object",
         "properties": {
@@ -1792,6 +1847,76 @@ export const RPC_CATALOG = {
           "memories",
           "truncated",
           "context"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "memory.configure",
+      "node": "extension",
+      "rust": "implemented",
+      "access": "owner",
+      "testOnly": false,
+      "description": "Configure persisted session memory policy. Turn reads are optional; turn mutations in ask mode always require human approval. Provider delivery is partial and currently implemented for Codex only.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "session": {
+            "type": "string"
+          },
+          "memory": {
+            "type": "object",
+            "properties": {
+              "read": {
+                "type": "boolean"
+              },
+              "write": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "ask"
+                ]
+              }
+            },
+            "required": [],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "session"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "session": {
+            "type": "string"
+          },
+          "memory": {
+            "type": "object",
+            "properties": {
+              "read": {
+                "type": "boolean"
+              },
+              "write": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "ask"
+                ]
+              }
+            },
+            "required": [
+              "read",
+              "write"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "session",
+          "memory"
         ],
         "additionalProperties": false
       }
@@ -2008,9 +2133,9 @@ export const RPC_CATALOG = {
       "name": "memory.forget",
       "node": "extension",
       "rust": "implemented",
-      "access": "owner",
+      "access": "owner-or-turn-memory",
       "testOnly": false,
-      "description": "Owner-only shared memory forget; experimental Rust scratch service, agent turn integration follows separately.",
+      "description": "Shared memory forget: owner CRUD or a distinct exact-turn memory capability with mandatory human approval. Legacy read-only memory credentials cannot mutate records.",
       "paramsSchema": {
         "type": "object",
         "properties": {
@@ -2086,12 +2211,30 @@ export const RPC_CATALOG = {
             "type": "boolean"
           },
           "author": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "owner",
+              "claude",
+              "codex",
+              "zcode"
+            ]
           },
           "reason": {
             "type": "string"
           },
           "sourceSession": {
+            "type": "string"
+          },
+          "sourceEventId": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "sourceTurnId": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "sourceCreatedAt": {
             "type": "string"
           }
         },
@@ -2118,7 +2261,7 @@ export const RPC_CATALOG = {
       "rust": "implemented",
       "access": "owner-or-memory",
       "testOnly": false,
-      "description": "Owner-only shared memory get; experimental Rust scratch service, agent turn integration follows separately.",
+      "description": "Read visible shared memory through owner context, a legacy read-only memory credential, or an authorized turn memory capability. Scoped credentials must omit session.",
       "paramsSchema": {
         "type": "object",
         "properties": {
@@ -2183,12 +2326,30 @@ export const RPC_CATALOG = {
             "type": "boolean"
           },
           "author": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "owner",
+              "claude",
+              "codex",
+              "zcode"
+            ]
           },
           "reason": {
             "type": "string"
           },
           "sourceSession": {
+            "type": "string"
+          },
+          "sourceEventId": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "sourceTurnId": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "sourceCreatedAt": {
             "type": "string"
           }
         },
@@ -2215,7 +2376,7 @@ export const RPC_CATALOG = {
       "rust": "implemented",
       "access": "owner",
       "testOnly": false,
-      "description": "Owner-only shared memory history; experimental Rust scratch service, agent turn integration follows separately.",
+      "description": "Owner-only paginated shared memory version history.",
       "paramsSchema": {
         "type": "object",
         "properties": {
@@ -2291,12 +2452,30 @@ export const RPC_CATALOG = {
                   "type": "boolean"
                 },
                 "author": {
-                  "type": "string"
+                  "type": "string",
+                  "enum": [
+                    "owner",
+                    "claude",
+                    "codex",
+                    "zcode"
+                  ]
                 },
                 "reason": {
                   "type": "string"
                 },
                 "sourceSession": {
+                  "type": "string"
+                },
+                "sourceEventId": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                },
+                "sourceTurnId": {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "sourceCreatedAt": {
                   "type": "string"
                 }
               },
@@ -2334,7 +2513,7 @@ export const RPC_CATALOG = {
       "rust": "implemented",
       "access": "owner-or-memory",
       "testOnly": false,
-      "description": "Owner-only shared memory list; experimental Rust scratch service, agent turn integration follows separately.",
+      "description": "Read visible shared memory through owner context, a legacy read-only memory credential, or an authorized turn memory capability. Scoped credentials must omit session.",
       "paramsSchema": {
         "type": "object",
         "properties": {
@@ -2444,7 +2623,7 @@ export const RPC_CATALOG = {
       "rust": "implemented",
       "access": "owner-or-memory",
       "testOnly": false,
-      "description": "Owner-only shared memory search; experimental Rust scratch service, agent turn integration follows separately.",
+      "description": "Read visible shared memory through owner context, a legacy read-only memory credential, or an authorized turn memory capability. Scoped credentials must omit session.",
       "paramsSchema": {
         "type": "object",
         "properties": {
@@ -2557,9 +2736,9 @@ export const RPC_CATALOG = {
       "name": "memory.update",
       "node": "extension",
       "rust": "implemented",
-      "access": "owner",
+      "access": "owner-or-turn-memory",
       "testOnly": false,
-      "description": "Owner-only shared memory update; experimental Rust scratch service, agent turn integration follows separately.",
+      "description": "Shared memory update: owner CRUD or a distinct exact-turn memory capability with mandatory human approval. Legacy read-only memory credentials cannot mutate records.",
       "paramsSchema": {
         "type": "object",
         "properties": {
@@ -2647,12 +2826,30 @@ export const RPC_CATALOG = {
             "type": "boolean"
           },
           "author": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "owner",
+              "claude",
+              "codex",
+              "zcode"
+            ]
           },
           "reason": {
             "type": "string"
           },
           "sourceSession": {
+            "type": "string"
+          },
+          "sourceEventId": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "sourceTurnId": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "sourceCreatedAt": {
             "type": "string"
           }
         },
@@ -2922,7 +3119,8 @@ export const RPC_CATALOG = {
                     "ask",
                     "owner-or-runtime",
                     "owner-shell",
-                    "owner-or-memory"
+                    "owner-or-memory",
+                    "owner-or-turn-memory"
                   ]
                 },
                 "testOnly": {
@@ -3237,7 +3435,7 @@ export const RPC_CATALOG = {
 } as const
 
 export type RpcMethodName = typeof RPC_CATALOG.methods[number]['name']
-export type RustFoundationMethod = "agent.archive" | "agent.read" | "agent.rename" | "agent.seen" | "agent.tree" | "daemon.status" | "daemon.stop" | "events.emit" | "events.get" | "events.history" | "events.snapshot" | "events.subscribe" | "events.tail" | "events.unsubscribe" | "memory.add" | "memory.catalog" | "memory.context.bind" | "memory.context.issue" | "memory.context.revoke" | "memory.context.status" | "memory.forget" | "memory.get" | "memory.history" | "memory.list" | "memory.search" | "memory.update" | "protocol.catalog"
+export type RustFoundationMethod = "agent.archive" | "agent.read" | "agent.rename" | "agent.seen" | "agent.tree" | "daemon.status" | "daemon.stop" | "events.emit" | "events.get" | "events.history" | "events.snapshot" | "events.subscribe" | "events.tail" | "events.unsubscribe" | "memory.add" | "memory.catalog" | "memory.configure" | "memory.context.bind" | "memory.context.issue" | "memory.context.revoke" | "memory.context.status" | "memory.forget" | "memory.get" | "memory.history" | "memory.list" | "memory.search" | "memory.update" | "protocol.catalog"
 
 export interface RustFoundationParams {
   "agent.archive": { "name": string; "archived": boolean; [key: string]: unknown }
@@ -3256,6 +3454,7 @@ export interface RustFoundationParams {
   "events.unsubscribe": { "sub": number; [key: string]: unknown }
   "memory.add": { "session"?: string; "scope"?: "project" | "global"; "commandId": string; "reason": string; "name": string; "summary": string; "details": string; "pinned"?: boolean }
   "memory.catalog": { "session"?: string }
+  "memory.configure": { "session": string; "memory"?: { "read"?: boolean; "write"?: "off" | "ask" } }
   "memory.context.bind": { "session": string; "enabled"?: boolean }
   "memory.context.issue": { "session": string }
   "memory.context.revoke": { "session": string }
@@ -3284,19 +3483,20 @@ export interface RustFoundationResults {
   "events.subscribe": { "sub": number; "cursor": number; [key: string]: unknown }
   "events.tail": { "events": Array<{ "id": number; "ts": string; "sessionId": string; "parentId"?: string; "provider": string; "kind": string; "data": { [key: string]: unknown }; [key: string]: unknown }>; "cursor": number; [key: string]: unknown }
   "events.unsubscribe": { "removed": boolean; [key: string]: unknown }
-  "memory.add": { "id": string; "scope": "project" | "global"; "projectId"?: string; "name": string; "summary": string; "details": string; "pinned": boolean; "version": number; "createdAt": string; "updatedAt": string; "deleted": boolean; "author": string; "reason": string; "sourceSession"?: string }
+  "memory.add": { "id": string; "scope": "project" | "global"; "projectId"?: string; "name": string; "summary": string; "details": string; "pinned": boolean; "version": number; "createdAt": string; "updatedAt": string; "deleted": boolean; "author": "owner" | "claude" | "codex" | "zcode"; "reason": string; "sourceSession"?: string; "sourceEventId"?: number; "sourceTurnId"?: string; "sourceCreatedAt"?: string }
   "memory.catalog": { "text": string; "memories": Array<{ "id": string; "version": number }>; "truncated": boolean; "context": { "session": string; "generation": string; "projectId"?: string; "enabled": boolean; "readOnly": true } }
+  "memory.configure": { "session": string; "memory": { "read": boolean; "write": "off" | "ask" } }
   "memory.context.bind": { "session": string; "generation": string; "projectId"?: string; "enabled": boolean; "readOnly": true }
   "memory.context.issue": { "key": string; "context": { "session": string; "generation": string; "projectId"?: string; "enabled": boolean; "readOnly": true } }
   "memory.context.revoke": { "revoked": boolean }
   "memory.context.status": { "contexts": Array<{ "session": string; "generation": string; "projectId"?: string; "enabled": boolean; "readOnly": true }> }
-  "memory.forget": { "id": string; "scope": "project" | "global"; "projectId"?: string; "name": string; "summary": string; "details": string; "pinned": boolean; "version": number; "createdAt": string; "updatedAt": string; "deleted": boolean; "author": string; "reason": string; "sourceSession"?: string }
-  "memory.get": { "id": string; "scope": "project" | "global"; "projectId"?: string; "name": string; "summary": string; "details": string; "pinned": boolean; "version": number; "createdAt": string; "updatedAt": string; "deleted": boolean; "author": string; "reason": string; "sourceSession"?: string }
-  "memory.history": { "versions": Array<{ "id": string; "scope": "project" | "global"; "projectId"?: string; "name": string; "summary": string; "details": string; "pinned": boolean; "version": number; "createdAt": string; "updatedAt": string; "deleted": boolean; "author": string; "reason": string; "sourceSession"?: string }>; "hasMore": boolean }
+  "memory.forget": { "id": string; "scope": "project" | "global"; "projectId"?: string; "name": string; "summary": string; "details": string; "pinned": boolean; "version": number; "createdAt": string; "updatedAt": string; "deleted": boolean; "author": "owner" | "claude" | "codex" | "zcode"; "reason": string; "sourceSession"?: string; "sourceEventId"?: number; "sourceTurnId"?: string; "sourceCreatedAt"?: string }
+  "memory.get": { "id": string; "scope": "project" | "global"; "projectId"?: string; "name": string; "summary": string; "details": string; "pinned": boolean; "version": number; "createdAt": string; "updatedAt": string; "deleted": boolean; "author": "owner" | "claude" | "codex" | "zcode"; "reason": string; "sourceSession"?: string; "sourceEventId"?: number; "sourceTurnId"?: string; "sourceCreatedAt"?: string }
+  "memory.history": { "versions": Array<{ "id": string; "scope": "project" | "global"; "projectId"?: string; "name": string; "summary": string; "details": string; "pinned": boolean; "version": number; "createdAt": string; "updatedAt": string; "deleted": boolean; "author": "owner" | "claude" | "codex" | "zcode"; "reason": string; "sourceSession"?: string; "sourceEventId"?: number; "sourceTurnId"?: string; "sourceCreatedAt"?: string }>; "hasMore": boolean }
   "memory.list": { "memories": Array<{ "id": string; "scope": "project" | "global"; "projectId"?: string; "name": string; "summary": string; "pinned": boolean; "version": number; "createdAt": string; "updatedAt": string; "deleted": boolean; "author": string; "reason": string; "sourceSession"?: string }>; "hasMore": boolean }
   "memory.search": { "memories": Array<{ "id": string; "scope": "project" | "global"; "projectId"?: string; "name": string; "summary": string; "pinned": boolean; "version": number; "createdAt": string; "updatedAt": string; "deleted": boolean; "author": string; "reason": string; "sourceSession"?: string }>; "hasMore": boolean }
-  "memory.update": { "id": string; "scope": "project" | "global"; "projectId"?: string; "name": string; "summary": string; "details": string; "pinned": boolean; "version": number; "createdAt": string; "updatedAt": string; "deleted": boolean; "author": string; "reason": string; "sourceSession"?: string }
-  "protocol.catalog": { "catalogVersion": 1; "protocolVersion": 1; "methods": Array<{ "name": string; "node": "implemented" | "reserved" | "extension"; "rust": "implemented" | "partial" | "unported"; "access": "owner" | "ask" | "owner-or-runtime" | "owner-shell" | "owner-or-memory"; "testOnly": boolean; "description": string; "paramsSchema": { [key: string]: unknown } | null; "resultSchema": { [key: string]: unknown } | null }> }
+  "memory.update": { "id": string; "scope": "project" | "global"; "projectId"?: string; "name": string; "summary": string; "details": string; "pinned": boolean; "version": number; "createdAt": string; "updatedAt": string; "deleted": boolean; "author": "owner" | "claude" | "codex" | "zcode"; "reason": string; "sourceSession"?: string; "sourceEventId"?: number; "sourceTurnId"?: string; "sourceCreatedAt"?: string }
+  "protocol.catalog": { "catalogVersion": 1; "protocolVersion": 1; "methods": Array<{ "name": string; "node": "implemented" | "reserved" | "extension"; "rust": "implemented" | "partial" | "unported"; "access": "owner" | "ask" | "owner-or-runtime" | "owner-shell" | "owner-or-memory" | "owner-or-turn-memory"; "testOnly": boolean; "description": string; "paramsSchema": { [key: string]: unknown } | null; "resultSchema": { [key: string]: unknown } | null }> }
 }
 
 export type RustPartialMethod = "agent.list" | "agent.prompt" | "agent.start" | "agent.stop" | "perm.list" | "perm.resolve"
@@ -3304,7 +3504,7 @@ export type RustPartialMethod = "agent.list" | "agent.prompt" | "agent.start" | 
 export interface RustPartialParams {
   "agent.list": Record<string, never>
   "agent.prompt": { "name": string; "text": string; "attachments"?: Array<{ "path": string; "name": string; "mime": string; "bytes": number; "kind": "file" | "directory" }>; "queue"?: false; "interrupt"?: false; "steer"?: false }
-  "agent.start": { "kind"?: "claude" | "codex" | "zcode"; "name"?: string; "cwd"?: string; "scope"?: "project" | "general"; "title"?: string; "model"?: string; "effort"?: string; "serviceTier"?: "default" | "fast"; "approval"?: "read-only" | "ask" | "workspace" | "full"; "confirm"?: boolean; "consentRev"?: number; "grant"?: "cli-once"; "mode"?: "turn" | "warm"; "browser"?: false | null }
+  "agent.start": { "kind"?: "claude" | "codex" | "zcode"; "name"?: string; "cwd"?: string; "scope"?: "project" | "general"; "title"?: string; "model"?: string; "effort"?: string; "serviceTier"?: "default" | "fast"; "approval"?: "read-only" | "ask" | "workspace" | "full"; "confirm"?: boolean; "consentRev"?: number; "grant"?: "cli-once"; "mode"?: "turn" | "warm"; "browser"?: false | null; "memory"?: { "read"?: boolean; "write"?: "off" | "ask" } }
   "agent.stop": { "name": string; "turnId"?: string }
   "perm.list": { "name"?: string }
   "perm.resolve": { "id": string; "decision": "allow" | "deny"; "scope"?: "once" | "session" | "rule"; "answers"?: { [key: string]: unknown }; "message"?: string }
@@ -3313,7 +3513,7 @@ export interface RustPartialParams {
 export interface RustPartialResults {
   "agent.list": { "sessions": Array<{ "name": string; "provider": string; "cwd": string; "mode": string; "createdAt": string; "lastStatus": string; "lastEventId": number; "status": "cold" | "idle" | "working" | "blocked_permission" | "blocked_question" | "limited" | "interrupted" | "failed" | "done"; "pendingPermissions": number; "liveApproval": "read-only" | "ask" | "workspace" | "full" | "inherit" | null; [key: string]: unknown }> }
   "agent.prompt": { "turnId": string }
-  "agent.start": { "name": string; "provider": string; "cwd": string; "mode": string; "createdAt": string; "lastStatus": string; "lastEventId": number; [key: string]: unknown }
+  "agent.start": { "name": string; "provider": string; "cwd": string; "mode": string; "createdAt": string; "lastStatus": string; "lastEventId": number; "memory"?: { "read": boolean; "write": "off" | "ask" }; [key: string]: unknown }
   "agent.stop": { "stopped": boolean }
   "perm.list": { "pending": Array<{ [key: string]: unknown }> }
   "perm.resolve": { "resolved": true; "id": string; "decision": "allow" | "deny"; "scope"?: "once" | "session" | "rule" }

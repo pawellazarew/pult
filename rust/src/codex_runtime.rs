@@ -1,5 +1,6 @@
-//! Ordinary Codex orchestration only. No queue/question provenance, MCP setup,
-//! legacy approvals, background/subagent parity, or persistent permission rules.
+//! Ordinary Codex orchestration with optional exact-ticket memory MCP. General
+//! user MCP, legacy approvals, background/subagent parity and persistent rules
+//! remain separate. Queue/question integration is a separate delivery step.
 //! Stale generation hosts retain bounded slots until shutdown; no idle eviction.
 use crate::codex_host_services::CodexOwner;
 use crate::codex_permissions::{self, Capabilities, TrustedOwner};
@@ -19,9 +20,12 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{
+    Arc, Mutex, Weak,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
-use tokio::sync::{Notify, oneshot, watch};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, oneshot, watch};
 
 pub struct Dependencies {
     pub home: PathBuf,
@@ -115,6 +119,7 @@ impl PoolKey {
     }
 }
 struct Lease {
+    host: Weak<CodexHost>,
     nonce: Arc<()>,
     check: Check,
     key: PoolKey,
@@ -124,8 +129,42 @@ struct Entry {
     key: PoolKey,
     host: Arc<CodexHost>,
 }
+struct Dedicated {
+    host: Arc<CodexHost>,
+    _slot: OwnedSemaphorePermit,
+    retiring: AtomicBool,
+}
+struct DedicatedGuard {
+    shared: Weak<Shared>,
+    entry: Arc<Dedicated>,
+    runtime: tokio::runtime::Handle,
+}
+impl Drop for DedicatedGuard {
+    fn drop(&mut self) {
+        if self.entry.retiring.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let shared = self.shared.clone();
+        let entry = self.entry.clone();
+        self.runtime.spawn(async move {
+            entry.host.retry_cleanup();
+            if entry.host.shutdown().await.is_ok()
+                && let Some(shared) = shared.upgrade()
+            {
+                shared
+                    .state
+                    .lock()
+                    .expect("Codex runtime")
+                    .dedicated
+                    .retain(|current| !Arc::ptr_eq(current, &entry));
+                shared.changed.notify_waiters();
+            }
+        });
+    }
+}
 struct State {
     pool: Vec<Entry>,
+    dedicated: Vec<Arc<Dedicated>>,
     preparing: HashMap<SessionKey, watch::Sender<bool>>,
     leases: HashMap<SessionKey, Lease>,
 }
@@ -135,6 +174,7 @@ struct Shared {
     changed: Notify,
     guard: Arc<NetworkGuard>,
     parent: Environment,
+    memory_slots: Arc<Semaphore>,
     shutdown: Mutex<ShutdownPhase>,
     retry: Notify,
     finished: watch::Sender<Option<Result<(), RuntimeError>>>,
@@ -155,7 +195,7 @@ impl Shared {
             state
                 .leases
                 .get(ticket.session())
-                .filter(|l| !*l.cancelled.borrow())
+                .filter(|l| !*l.cancelled.borrow() && l.host.upgrade().is_some())
                 .map(|l| (l.check.clone(), l.key.clone()))
         };
         lease.is_some_and(|(check, key)| {
@@ -175,6 +215,7 @@ struct Inner {
     shared: Arc<Shared>,
     owner: Arc<CodexOwner>,
     broker: Broker,
+    memory: Option<Arc<dyn crate::memory_turn::TurnMemory>>,
     owned_curl: Option<Arc<CurlProbe>>,
     runtime: tokio::runtime::Handle,
 }
@@ -189,6 +230,19 @@ impl CodexRuntime {
         parent: Environment,
         network: Network,
         limits: Limits,
+    ) -> Result<Arc<Self>, RuntimeError> {
+        Self::new_with_memory(deps, config, command, parent, network, limits, None)
+    }
+    /// Host-selected optional memory service. Memory turns use bounded fresh
+    /// dedicated hosts; shared memory-off hosts retain their existing behavior.
+    pub(crate) fn new_with_memory(
+        deps: Dependencies,
+        config: RuntimeConfig,
+        command: TrustedCommand,
+        parent: Environment,
+        network: Network,
+        limits: Limits,
+        memory: Option<Arc<dyn crate::memory_turn::TurnMemory>>,
     ) -> Result<Arc<Self>, RuntimeError> {
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| RuntimeError::Invalid)?;
         if limits.hosts == 0 || limits.hosts > 16 || limits.preparing == 0 || limits.preparing > 256
@@ -225,6 +279,7 @@ impl CodexRuntime {
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
                 pool: vec![],
+                dedicated: vec![],
                 preparing: HashMap::new(),
                 leases: HashMap::new(),
             }),
@@ -232,6 +287,7 @@ impl CodexRuntime {
             changed: Notify::new(),
             guard,
             parent,
+            memory_slots: Arc::new(Semaphore::new(2)),
             shutdown: Mutex::new(ShutdownPhase::Idle),
             retry: Notify::new(),
             finished,
@@ -274,6 +330,7 @@ impl CodexRuntime {
                 shared,
                 owner,
                 broker,
+                memory,
                 owned_curl,
                 runtime,
             }),
@@ -302,6 +359,15 @@ impl CodexRuntime {
     }
     pub fn list_permissions(&self, session: Option<&str>) -> Vec<Value> {
         self.inner.broker.list(session)
+    }
+    pub(crate) fn request_memory_permission(
+        &self,
+        request: permission_broker::PermissionRequest,
+    ) -> Result<permission_broker::RequestHandle, permission_broker::BrokerError> {
+        if *self.inner.shared.closed.borrow() || self.inner.deps.driver.storage_failed() {
+            return Err(permission_broker::BrokerError::StorageUnavailable);
+        }
+        self.inner.broker.request(request)
     }
     pub fn resolve_permission(
         &self,
@@ -372,13 +438,8 @@ impl CodexRuntime {
         wait_shutdown(&self.inner.shared)
     }
     pub fn host_count(&self) -> usize {
-        self.inner
-            .shared
-            .state
-            .lock()
-            .expect("Codex runtime")
-            .pool
-            .len()
+        let state = self.inner.shared.state.lock().expect("Codex runtime");
+        state.pool.len() + state.dedicated.len()
     }
 }
 impl Drop for CodexRuntime {
@@ -505,6 +566,23 @@ async fn execute(
     if *closed.borrow() {
         return Err(RuntimeError::Closed);
     }
+    let memory_enabled = match &inner.memory {
+        Some(memory) => memory
+            .enabled(key.clone())
+            .await
+            .map_err(|_| RuntimeError::Session)?,
+        None => false,
+    };
+    let memory_slot = if memory_enabled {
+        Some(tokio::select! {
+            permit=inner.shared.memory_slots.clone().acquire_owned()=>permit.map_err(|_|RuntimeError::Closed)?,
+            _=closed.changed()=>return Err(RuntimeError::Closed),
+            _=cancelled.changed()=>return Err(RuntimeError::Cancelled),
+            _=inner.deps.driver.wait_for_storage_failure()=>return Err(RuntimeError::Storage),
+        })
+    } else {
+        None
+    };
     let rule = inner.config.guard.as_network_rule();
     let check = tokio::select! {
         check=inner.shared.guard.check(Provider::Codex,&inner.config.network.codex,&rule,false)=>check.map_err(|_|RuntimeError::NetworkDenied)?,
@@ -523,12 +601,68 @@ async fn execute(
         return Err(RuntimeError::Closed);
     }
     let pool_key = PoolKey::new(&check, env);
-    let host = {
+    let (host, dedicated_guard) = if let Some(slot) = memory_slot {
+        let building = inner.clone();
+        let environment = pool_key.env.clone();
+        let runtime = inner.runtime.clone();
+        let entry = tokio::task::spawn_blocking(move || {
+            let _context = runtime.enter();
+            let mut services = building.owner.services(building.deps.sink.clone(), None);
+            services.approval = Some(Arc::new(Approvals {
+                inner: Arc::downgrade(&building),
+                gate: services.fresh_gate.clone(),
+            }));
+            let mut limits = building.limits.host;
+            limits.sessions = 1;
+            limits.jobs = 1;
+            let host = CodexHost::start_with_memory(
+                codex_worker::HostConfig {
+                    launch: Launch {
+                        holder: building.command.holder.clone(),
+                        program: building.command.program.clone(),
+                        args: building.command.prefix_args.clone(),
+                        cwd: building.deps.home.clone(),
+                        env: environment,
+                    },
+                    fingerprint: "codex-memory-dedicated".into(),
+                    limits,
+                    timeouts: building.limits.timeouts,
+                },
+                services,
+                building.memory.clone().ok_or(RuntimeError::Invalid)?,
+            )
+            .map_err(|_| RuntimeError::Invalid)?;
+            Ok::<_, RuntimeError>(Arc::new(Dedicated {
+                host,
+                _slot: slot,
+                retiring: AtomicBool::new(false),
+            }))
+        })
+        .await
+        .map_err(|_| RuntimeError::Invalid)??;
+        inner
+            .shared
+            .state
+            .lock()
+            .expect("Codex runtime")
+            .dedicated
+            .push(entry.clone());
+        let host = entry.host.clone();
+        let guard = DedicatedGuard {
+            shared: Arc::downgrade(&inner.shared),
+            entry,
+            runtime: inner.runtime.clone(),
+        };
+        if *cancelled.borrow() || *closed.borrow() {
+            return Err(RuntimeError::Cancelled);
+        }
+        (host, Some(guard))
+    } else {
         let mut state = inner.shared.state.lock().expect("Codex runtime");
         if *closed.borrow() {
             return Err(RuntimeError::Closed);
         }
-        if let Some(entry) = state.pool.iter().find(|entry| {
+        let host = if let Some(entry) = state.pool.iter().find(|entry| {
             entry.key == pool_key
                 && matches!(
                     entry.host.status(),
@@ -566,7 +700,8 @@ async fn execute(
                 host: host.clone(),
             });
             host
-        }
+        };
+        (host, None)
     };
     let reading = inner.clone();
     let session = key.clone();
@@ -603,6 +738,7 @@ async fn execute(
         state.leases.insert(
             key.clone(),
             Lease {
+                host: Arc::downgrade(&host),
                 nonce: nonce.clone(),
                 check,
                 key: pool_key,
@@ -639,6 +775,7 @@ async fn execute(
     let mut progress = handle.subscribe_progress();
     let shared = Arc::downgrade(&inner.shared);
     inner.runtime.spawn(async move {
+        let _dedicated = dedicated_guard;
         loop {
             if matches!(*progress.borrow_and_update(), Progress::Finished(_)) {
                 break;
@@ -788,14 +925,12 @@ fn begin_shutdown(inner: Arc<Inner>) {
             }
             let _ = inner.deps.driver.shutdown(Duration::from_secs(1)).await;
             let hosts = {
-                inner
-                    .shared
-                    .state
-                    .lock()
-                    .expect("Codex runtime")
+                let state = inner.shared.state.lock().expect("Codex runtime");
+                state
                     .pool
                     .iter()
-                    .map(|e| e.host.clone())
+                    .map(|entry| entry.host.clone())
+                    .chain(state.dedicated.iter().map(|entry| entry.host.clone()))
                     .collect::<Vec<_>>()
             };
             let mut good = true;
@@ -803,6 +938,14 @@ fn begin_shutdown(inner: Arc<Inner>) {
                 host.retry_cleanup();
                 if host.shutdown().await.is_err() {
                     good = false;
+                } else {
+                    inner
+                        .shared
+                        .state
+                        .lock()
+                        .expect("Codex runtime")
+                        .dedicated
+                        .retain(|entry| !Arc::ptr_eq(&entry.host, &host));
                 }
             }
             if inner
