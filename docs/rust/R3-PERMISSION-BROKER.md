@@ -31,7 +31,14 @@ failure and retain bounded quarantines. A cancellation during an already
 started resolved-allow append may leave an allow record while the requester
 receives denial; the record is not proof that the operation was executed.
 
-19 tests cover real EventStore durability/redaction, blocked append deadlines,
+An observer of the durable requested event can answer before the actor receives
+its append receipt. The broker retains at most one validated early choice per
+entry and waits for the known requested receipt before starting resolved IO.
+Duplicate choices return false. Requested-write failure rejects the waiting
+resolution explicitly; cancellation, shutdown and deadlines deny immediately
+while retaining ownership of the outstanding write.
+
+23 tests cover real EventStore durability/redaction, blocked append deadlines,
 shutdown/cancellation, scopes/answers, original versus public inputs, secret
 rule offers, owned resolutions, sink failure/panic/invalid receipts, cross-job
 storage failure and exactly-one resolution. No real provider is used.
@@ -40,3 +47,5 @@ RPC permissions/control lease, adapter ownership and persistent rule files
 are not connected yet. updated_input is a trusted host override; RPC callers
 must not be allowed to replace a tool command through this library field.
 Hosts install the silent panic policy before callbacks.
+The public catalogue remains 27 implemented methods out of 98; this change
+adds no RPC handlers or provider calls.
