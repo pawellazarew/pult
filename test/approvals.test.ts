@@ -116,13 +116,25 @@ describe('M8d: брокер — предложения', () => {
     const drafts: EventDraft[] = []
     const broker = createBroker({ emit: (d) => { drafts.push(d) } })
     const done = broker.request({ sessionId: 'w', toolName: 'commandExecution', input: {},
-      offers: { session: true, rule: { kind: 'execpolicy', label: 'curl -u me@example.com https://x', note: 'n' } } })
+      offers: { session: true, rule: { kind: 'execpolicy', label: `curl -H sk-ant-${'Z'.repeat(24)} https://x`, note: 'n' } } })
     const p = broker.list('w')[0]!
     assert.deepEqual(p.offers, { session: true }, '«на сессию» остаётся, правило — нет')
     assert.deepEqual((drafts[0]?.data as { offers: unknown }).offers, { session: true })
     assert.throws(() => broker.resolve(p.id, { behavior: 'allow', scope: 'rule' }), ScopeError)
     broker.resolve(p.id, { behavior: 'allow', scope: 'session' })
     assert.equal((await done).scope, 'session')
+  })
+  it('почта в префиксе видна в карточке и журнале, правило остаётся доступным', async () => {
+    const drafts: EventDraft[] = []
+    const broker = createBroker({ emit: (d) => { drafts.push(d) } })
+    const rule = { kind: 'execpolicy' as const, label: 'curl -u me@example.com https://x', note: 'n' }
+    const done = broker.request({ sessionId: 'w', toolName: 'commandExecution', input: {}, offers: { rule } })
+    const pending = broker.list('w')[0]!
+    assert.deepEqual(pending.offers, { rule })
+    assert.deepEqual((drafts[0]?.data as { offers: unknown }).offers, { rule })
+    broker.resolve(pending.id, { behavior: 'allow', scope: 'rule' })
+    assert.equal((await done).scope, 'rule')
+    assert.deepEqual((drafts[1]?.data as { rule: unknown }).rule, { kind: rule.kind, label: rule.label })
   })
   it('чистый префикс — правило на месте, журнал пишет его ярлык', async () => {
     const drafts: EventDraft[] = []
