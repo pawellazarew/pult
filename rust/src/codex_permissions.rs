@@ -27,6 +27,7 @@ pub const CODEX_NET_RULE_NOTE: &str = "— без вопроса во всех �
 const COMMAND: &str = "item/commandExecution/requestApproval";
 const FILE_CHANGE: &str = "item/fileChange/requestApproval";
 const USER_INPUT: &str = "item/tool/requestUserInput";
+const MCP_ELICITATION: &str = "mcpServer/elicitation/request";
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct TrustedOwner {
@@ -47,6 +48,7 @@ pub enum Reject {
     Capacity,
     UnofferedScope,
     InvalidAnswers,
+    Forbidden,
 }
 impl std::fmt::Display for Reject {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -55,6 +57,11 @@ impl std::fmt::Display for Reject {
 }
 impl std::error::Error for Reject {}
 impl Reject {
+    /// Immediate native denial, without publishing a broker request. Hosts must
+    /// check this before using response_error for a rejected preparation.
+    pub fn static_response(self) -> Option<Value> {
+        (self == Self::Forbidden).then(|| json!({"action":"decline"}))
+    }
     /// Safe wire error: no remote method, input, answer, path or rule is echoed.
     pub fn response_error(self) -> ResponseError {
         ResponseError {
@@ -70,6 +77,7 @@ impl Reject {
                 Self::InvalidAnswers => "pult: invalid question answers",
                 Self::Capacity => "pult: permission payload too large",
                 Self::Invalid => "pult: invalid permission request",
+                Self::Forbidden => "pult: tool is not permitted",
             }
             .into(),
             data: None,
@@ -151,6 +159,7 @@ enum Plan {
         rule: Option<Value>,
     },
     Questions(Value),
+    McpElicitation,
 }
 impl Prepared {
     /// Provider-controlled metadata, capped but not yet secret-redacted. Give
@@ -199,6 +208,13 @@ impl Prepared {
                 };
                 Ok(json!({"decision":chosen}))
             }
+            Plan::McpElicitation => match decision {
+                Decision::Deny { .. } => Ok(json!({"action":"decline"})),
+                Decision::Allow {
+                    scope: Scope::Once, ..
+                } => Ok(json!({"action":"accept","content":{}})),
+                Decision::Allow { .. } => Err(Reject::UnofferedScope),
+            },
             Plan::Questions(questions) => match decision {
                 Decision::Deny { .. } => Ok(json!({"answers":{}})),
                 Decision::Allow { scope, answers, .. } => {
@@ -434,14 +450,180 @@ fn rule_offer(params: &Value) -> Option<(Rule, Value)> {
     }
     None
 }
-/// Unknown requests (including item/permissions/requestApproval and elicitation)
-/// produce a static protocol error; no command vocabulary fallback exists.
+
+/// Trusted, host-captured fallback from an unfinished MCP item in this same
+/// thread/turn. Do not construct owner from elicitation params. No Debug/Serialize:
+/// arguments may contain private material and are only broker input.
+pub struct PendingMcpCall {
+    pub owner: TrustedOwner,
+    pub server: String,
+    pub tool: String,
+    pub arguments: Value,
+}
+/// Optional metadata from the host's native request envelope and live item map.
+/// request_id is String(native JSON-RPC id), solely for display correlation;
+/// response authority always remains the original generation-bound permit.
+#[derive(Default)]
+pub struct McpApprovalContext {
+    pub request_id: Option<String>,
+    pub pending: Option<PendingMcpCall>,
+}
+/// Node's known tool-approval elicitation, with once-only decisions. Missing
+/// turnId binds to the captured current ticket; supplied turnId must match.
+/// Compared with Node, malformed schema/required/string metadata is rejected
+/// rather than guessed. Generic required-field forms remain unsupported. Tool
+/// names must fit the broker's 256-byte bound and contain no control characters;
+/// trusted native display ids use the existing nonempty 512-byte id bound.
+/// Stale/mismatched pending context is rejected rather than silently ignored.
+///
+/// Worker bridge TODO: accept this missing-turn variant using its captured owner,
+/// pass outer request id and same-owner pending item, and handle static_response
+/// before RPC errors. This pure mapper does not make that integration automatic.
+pub fn prepare_mcp_tool_approval(
+    params: &Value,
+    owner: TrustedOwner,
+    context: McpApprovalContext,
+) -> Result<Prepared, Reject> {
+    if !params.is_object() {
+        return Err(Reject::Invalid);
+    }
+    if !fits(params) {
+        return Err(Reject::Capacity);
+    }
+    let meta = params
+        .get("_meta")
+        .and_then(Value::as_object)
+        .ok_or(Reject::Unsupported)?;
+    if meta.get("codex_approval_kind").and_then(Value::as_str) != Some("mcp_tool_call") {
+        return Err(Reject::Unsupported);
+    }
+    if params
+        .get("mode")
+        .is_some_and(|v| v.as_str() != Some("form"))
+    {
+        return Err(Reject::Unsupported);
+    }
+    if let Some(schema) = params.get("requestedSchema") {
+        let schema = schema.as_object().ok_or(Reject::Invalid)?;
+        if let Some(required) = schema.get("required") {
+            let required = required.as_array().ok_or(Reject::Invalid)?;
+            if !required.is_empty() {
+                return Err(Reject::Unsupported);
+            }
+        }
+    }
+    // Unlike legacy requests, no conversationId alias is recognized here.
+    if !valid_owner(&owner)
+        || params.get("threadId").and_then(Value::as_str) != Some(&owner.thread_id)
+        || params
+            .get("turnId")
+            .is_some_and(|v| v.as_str() != Some(&owner.provider_turn_id))
+    {
+        return Err(Reject::WrongOwner);
+    }
+    for key in ["serverName", "message"] {
+        if params.get(key).is_some_and(|v| !v.is_string()) {
+            return Err(Reject::Invalid);
+        }
+    }
+    for key in ["tool_name", "toolName", "tool", "tool_title"] {
+        if meta.get(key).is_some_and(|v| !v.is_string()) {
+            return Err(Reject::Invalid);
+        }
+    }
+    let server = params
+        .get("serverName")
+        .and_then(Value::as_str)
+        .unwrap_or("mcp");
+    let message = params.get("message").and_then(Value::as_str);
+    let from_message = message.and_then(|s| {
+        s.match_indices("run tool \"").find_map(|(start, prefix)| {
+            let tail = &s[start + prefix.len()..];
+            let end = tail.find('"')?;
+            (end > 0).then_some(&tail[..end])
+        })
+    });
+    let meta_tool = ["tool_name", "toolName", "tool"]
+        .into_iter()
+        .find_map(|key| meta.get(key).and_then(Value::as_str))
+        .or(from_message);
+    // Refuse stale context even if params could supply all display fields: no
+    // prior ticket's private arguments may be repurposed by this preparation.
+    if let Some(pending) = &context.pending {
+        if pending.owner != owner
+            || pending.server != server
+            || meta_tool.is_some_and(|tool| tool != pending.tool)
+        {
+            return Err(Reject::WrongOwner);
+        }
+        if !fits(&pending.arguments) {
+            return Err(Reject::Capacity);
+        }
+    }
+    let tool = meta_tool
+        .or_else(|| context.pending.as_ref().map(|p| p.tool.as_str()))
+        .or_else(|| meta.get("tool_title").and_then(Value::as_str))
+        .unwrap_or("tool");
+    if server == "pult_browser"
+        && [
+            "browser_run_code_unsafe",
+            "browser_run_code",
+            "browser_evaluate",
+        ]
+        .contains(&tool)
+    {
+        return Err(Reject::Forbidden);
+    }
+    if server.len() > 256 || tool.len() > 256 {
+        return Err(Reject::Invalid);
+    }
+    let tool_name = format!("mcp__{server}__{tool}");
+    if tool_name.len() > 256 || tool_name.chars().any(char::is_control) {
+        return Err(Reject::Invalid);
+    }
+    let args = ["tool_params", "arguments", "tool_arguments"]
+        .into_iter()
+        .filter_map(|key| meta.get(key))
+        .find(|v| !v.is_null())
+        .or_else(|| context.pending.as_ref().map(|p| &p.arguments))
+        .filter(|v| !v.is_null());
+    let mut raw_input = json!({"arguments": args.cloned().unwrap_or_else(|| json!("аргументы не пришли — Codex не прислал их ни в вопросе, ни в начале вызова"))});
+    if let Some(message) = message {
+        raw_input["message"] = json!(message);
+    }
+    let (input, concealed) = display(&raw_input, &["accept".into(), "decline".into()])?;
+    let tool_use_id = match (params.get("turnId"), context.request_id) {
+        (_, Some(ref id)) if !short(id) => return Err(Reject::Invalid),
+        (Some(_), Some(id)) => Some(format!("{}:{id}", owner.provider_turn_id)),
+        _ => None,
+    };
+    let request = PermissionRequest {
+        session_id: owner.session.name.clone(),
+        tool_name,
+        tool_use_id,
+        input,
+        offers: Offers::default(),
+        concealed,
+    };
+    Ok(Prepared {
+        owner,
+        request,
+        plan: Plan::McpElicitation,
+    })
+}
+
+/// Unknown requests and generic elicitation produce a static protocol error.
+/// Known MCP tool approvals use empty fallback context here; hosts with captured
+/// pending-call metadata should use prepare_mcp_tool_approval instead.
 pub fn prepare(
     method: &str,
     params: &Value,
     owner: TrustedOwner,
     capabilities: Capabilities,
 ) -> Result<Prepared, Reject> {
+    if method == MCP_ELICITATION {
+        return prepare_mcp_tool_approval(params, owner, McpApprovalContext::default());
+    }
     let vocabulary = vocab(method);
     if vocabulary.is_none() && method != USER_INPUT {
         return Err(Reject::Unsupported);

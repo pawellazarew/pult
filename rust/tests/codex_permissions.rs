@@ -576,3 +576,396 @@ async fn prepared_request_crosses_real_broker_redaction_before_publication() {
             .all(|v| !v.to_string().contains("PRIVATE"))
     );
 }
+
+const MCP: &str = "mcpServer/elicitation/request";
+fn mcp_params() -> Value {
+    json!({"threadId":"thread","serverName":"pult_browser","mode":"form",
+        "message":"Allow to run tool \"browser_navigate\"?",
+        "_meta":{"codex_approval_kind":"mcp_tool_call","tool_description":"Navigate",
+            "tool_params":{"url":"http://x/"},"tool_params_display":"untrusted display"},
+        "requestedSchema":{"type":"object","properties":{}}})
+}
+fn pending(server: &str, tool: &str, arguments: Value) -> McpApprovalContext {
+    McpApprovalContext {
+        request_id: None,
+        pending: Some(PendingMcpCall {
+            owner: owner(),
+            server: server.into(),
+            tool: tool.into(),
+            arguments,
+        }),
+    }
+}
+#[test]
+fn live_mcp_fixture_has_exact_once_only_native_answers() {
+    let p = mcp_params();
+    let prepared = prepare(
+        MCP,
+        &p,
+        owner(),
+        Capabilities {
+            persistent_rules: true,
+        },
+    )
+    .unwrap();
+    let request = prepared.request();
+    assert_eq!(request.tool_name, "mcp__pult_browser__browser_navigate");
+    assert_eq!(request.tool_use_id, None);
+    assert_eq!(
+        request.input,
+        json!({"arguments":{"url":"http://x/"},
+        "message":"Allow to run tool \"browser_navigate\"?", "availableDecisions":["accept","decline"]})
+    );
+    assert!(!request.offers.session);
+    assert!(request.offers.rule.is_none());
+    assert_eq!(
+        prepared
+            .resolve(&owner(), Decision::allow(Scope::Once))
+            .unwrap(),
+        json!({"action":"accept","content":{}})
+    );
+    assert_eq!(
+        answer(MCP, &p, Decision::deny()).unwrap(),
+        json!({"action":"decline"})
+    );
+    for scope in [Scope::Session, Scope::Rule] {
+        assert_eq!(
+            answer(MCP, &p, Decision::allow(scope)),
+            Err(Reject::UnofferedScope)
+        );
+    }
+}
+#[test]
+fn mcp_pending_metadata_and_nullish_argument_precedence_match_node() {
+    let bare = json!({"threadId":"thread","serverName":"pult_browser","_meta":{"codex_approval_kind":"mcp_tool_call"}});
+    let request = prepare_mcp_tool_approval(
+        &bare,
+        owner(),
+        pending("pult_browser", "browser_click", json!({"target":"e3"})),
+    )
+    .unwrap()
+    .request();
+    assert_eq!(request.tool_name, "mcp__pult_browser__browser_click");
+    assert_eq!(request.input["arguments"], json!({"target":"e3"}));
+    let request = prepare_default(MCP, &bare).unwrap().request();
+    assert_eq!(request.tool_name, "mcp__pult_browser__tool");
+    assert_eq!(
+        request.input["arguments"],
+        "аргументы не пришли — Codex не прислал их ни в вопросе, ни в начале вызова"
+    );
+    assert!(request.input.get("message").is_none());
+    let mut p = bare;
+    p["_meta"]["tool_title"] = json!("title");
+    assert_eq!(
+        prepare_default(MCP, &p).unwrap().request().tool_name,
+        "mcp__pult_browser__title"
+    );
+    p["_meta"]["tool"] = json!("lowest");
+    p["_meta"]["toolName"] = json!("middle");
+    p["_meta"]["tool_name"] = json!("first");
+    p["_meta"]["tool_params"] = Value::Null;
+    p["_meta"]["arguments"] = json!(false);
+    p["_meta"]["tool_arguments"] = json!({"ignored":true});
+    let request = prepare_default(MCP, &p).unwrap().request();
+    assert_eq!(request.tool_name, "mcp__pult_browser__first");
+    assert_eq!(request.input["arguments"], false);
+}
+#[test]
+fn mcp_missing_turn_uses_captured_ticket_and_stale_context_is_rejected() {
+    let p = mcp_params();
+    let mut changed = owner();
+    changed.provider_turn_id = "new-turn".into();
+    assert_eq!(
+        prepare_default(MCP, &p)
+            .unwrap()
+            .resolve(&changed, Decision::allow(Scope::Once)),
+        Err(Reject::WrongOwner)
+    );
+    for (key, value) in [
+        ("threadId", json!("foreign")),
+        ("turnId", json!("foreign")),
+        ("turnId", Value::Null),
+    ] {
+        let mut p = p.clone();
+        p[key] = value;
+        assert!(matches!(prepare_default(MCP, &p), Err(Reject::WrongOwner)));
+    }
+    for mismatch in 0..4 {
+        let mut ctx = pending(
+            "pult_browser",
+            "browser_navigate",
+            json!({"PRIVATE":"secret"}),
+        );
+        let call = ctx.pending.as_mut().unwrap();
+        match mismatch {
+            0 => call.owner.provider_turn_id = "old".into(),
+            1 => call.owner = changed.clone(),
+            2 => call.server = "other".into(),
+            _ => call.tool = "other".into(),
+        }
+        assert!(matches!(
+            prepare_mcp_tool_approval(&p, owner(), ctx),
+            Err(Reject::WrongOwner)
+        ));
+    }
+    let mut fresh = owner();
+    fresh.ticket = Coordinator::new(CoordinatorLimits::default())
+        .unwrap()
+        .reserve(TurnSnapshot {
+            key: fresh.session.clone(),
+            provider: Provider::Codex,
+            cwd: "/project".into(),
+            settings: TurnSettings::default(),
+        })
+        .unwrap();
+    assert_eq!(
+        prepare_default(MCP, &p)
+            .unwrap()
+            .resolve(&fresh, Decision::allow(Scope::Once)),
+        Err(Reject::WrongOwner)
+    );
+}
+#[test]
+fn mcp_generic_or_malformed_forms_never_gain_authority() {
+    for (key, value, expected) in [
+        ("mode", json!("url"), Reject::Unsupported),
+        (
+            "requestedSchema",
+            json!({"required":["token"]}),
+            Reject::Unsupported,
+        ),
+        (
+            "requestedSchema",
+            json!({"required":"token"}),
+            Reject::Invalid,
+        ),
+        ("requestedSchema", Value::Null, Reject::Invalid),
+        ("message", json!([]), Reject::Invalid),
+        ("_meta", json!({}), Reject::Unsupported),
+        (
+            "_meta",
+            json!({"codex_approval_kind":"mcp_tool_call","tool":17}),
+            Reject::Invalid,
+        ),
+    ] {
+        let mut p = mcp_params();
+        p[key] = value;
+        assert_eq!(prepare_default(MCP, &p).err(), Some(expected));
+    }
+    let mut p = mcp_params();
+    p["_meta"]["tool_params"] = json!("x".repeat(MAX_INPUT_BYTES));
+    assert!(matches!(prepare_default(MCP, &p), Err(Reject::Capacity)));
+    let mut p = mcp_params();
+    p["message"] = json!("x".repeat(FIELD_LIMIT + 1));
+    let request = prepare_default(MCP, &p).unwrap().request();
+    assert!(request.concealed);
+    assert!(
+        request.input["message"]
+            .as_str()
+            .unwrap()
+            .ends_with("…(обрезано)")
+    );
+}
+#[test]
+fn browser_code_is_declined_without_a_broker_request() {
+    for tool in [
+        "browser_run_code_unsafe",
+        "browser_run_code",
+        "browser_evaluate",
+    ] {
+        let mut p = mcp_params();
+        p["_meta"]["tool_name"] = json!(tool);
+        let error = prepare_default(MCP, &p).err().unwrap();
+        assert_eq!(error, Reject::Forbidden);
+        assert_eq!(error.static_response(), Some(json!({"action":"decline"})));
+        p["serverName"] = json!("other");
+        assert!(prepare_default(MCP, &p).is_ok());
+        p["serverName"] = json!("pult_browser");
+        p["_meta"].as_object_mut().unwrap().remove("tool_name");
+        p["message"] = json!(format!("run tool \"\"; run tool \"{tool}\""));
+        assert!(matches!(prepare_default(MCP, &p), Err(Reject::Forbidden)));
+    }
+    let p = json!({"threadId":"thread","serverName":"pult_browser","_meta":{"codex_approval_kind":"mcp_tool_call"}});
+    assert!(matches!(
+        prepare_mcp_tool_approval(
+            &p,
+            owner(),
+            pending("pult_browser", "browser_evaluate", json!({}))
+        ),
+        Err(Reject::Forbidden)
+    ));
+    assert_eq!(Reject::Unsupported.static_response(), None);
+}
+#[test]
+fn native_request_identity_is_private_and_only_display_correlation() {
+    let mut p = mcp_params();
+    p["turnId"] = json!("turn");
+    p["id"] = json!("FORGED");
+    p["itemId"] = json!("FORGED");
+    let prepared = prepare_mcp_tool_approval(
+        &p,
+        owner(),
+        McpApprovalContext {
+            request_id: Some("raw-native-id".into()),
+            pending: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        prepared.request().tool_use_id,
+        Some("turn:raw-native-id".into())
+    );
+    assert!(!prepared.request().input.to_string().contains("FORGED"));
+    assert_eq!(
+        prepared
+            .resolve(&owner(), Decision::allow(Scope::Once))
+            .unwrap(),
+        json!({"action":"accept","content":{}})
+    );
+    assert_eq!(
+        prepare_default(MCP, &p).unwrap().request().tool_use_id,
+        None
+    );
+    p.as_object_mut().unwrap().remove("turnId");
+    let request = prepare_mcp_tool_approval(
+        &p,
+        owner(),
+        McpApprovalContext {
+            request_id: Some("raw-native-id".into()),
+            pending: None,
+        },
+    )
+    .unwrap()
+    .request();
+    assert_eq!(request.tool_use_id, None);
+}
+
+#[tokio::test]
+async fn mcp_real_broker_redacts_public_metadata_without_changing_native_plan() {
+    use pult_core::permission_broker::{Broker, Options, Redactors};
+    use pult_core::turn_driver::{EventSink, Receipt, SinkError, Task};
+    use std::sync::{Arc, Mutex};
+    struct Sink(Arc<Mutex<Vec<Value>>>);
+    impl EventSink for Sink {
+        fn append(&self, draft: Value) -> Task<Result<Receipt, SinkError>> {
+            let mut drafts = self.0.lock().unwrap();
+            drafts.push(draft);
+            let id = drafts.len() as u64;
+            Box::pin(async move {
+                Ok(Receipt {
+                    id,
+                    ts: "2026-11-12T00:00:00Z".into(),
+                })
+            })
+        }
+    }
+    let drafts = Arc::new(Mutex::new(Vec::new()));
+    let broker = Broker::new(
+        Arc::new(Sink(drafts.clone())),
+        Redactors {
+            value: Arc::new(pult_core::redaction::redact),
+            string: Arc::new(pult_core::redaction::redact_string),
+        },
+        Options::default(),
+    )
+    .unwrap();
+    let mut p = mcp_params();
+    p["turnId"] = json!("turn");
+    p["_meta"]["tool_params"] = json!({"token":"PRIVATE_ARGUMENT","url":"http://x/"});
+    p["message"] = json!("run tool \"browser_navigate\" for private@example.com");
+    let native_id = "0123456789abcdef0123456789abcdef";
+    let prepared = prepare_mcp_tool_approval(
+        &p,
+        owner(),
+        McpApprovalContext {
+            request_id: Some(native_id.into()),
+            pending: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        prepared.request().input["arguments"]["token"],
+        "PRIVATE_ARGUMENT"
+    );
+    assert_eq!(
+        prepared.request().tool_use_id,
+        Some(format!("turn:{native_id}"))
+    );
+    let mut handle = broker.request(prepared.request()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while broker.pending_count() != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let cards = broker.list(None);
+    assert_eq!(cards.len(), 1);
+    let public = cards[0].to_string();
+    for private in ["PRIVATE_ARGUMENT", "private@example.com", native_id] {
+        assert!(!public.contains(private));
+    }
+    assert_eq!(cards[0]["concealed"], true);
+    assert_eq!(cards[0]["input"]["arguments"]["token"], "<redacted>");
+    assert_eq!(cards[0]["toolUseId"], "turn:<token>");
+    assert!(
+        broker
+            .resolve(handle.id(), Decision::allow(Scope::Once), "human")
+            .unwrap()
+            .wait()
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        prepared.resolve(&owner(), handle.decision().await).unwrap(),
+        json!({"action":"accept","content":{}})
+    );
+    broker.drain().await;
+    let serialized = serde_json::to_string(&*drafts.lock().unwrap()).unwrap();
+    for private in ["PRIVATE_ARGUMENT", "private@example.com", native_id] {
+        assert!(!serialized.contains(private));
+    }
+}
+#[tokio::test]
+async fn mcp_broker_redactor_panic_maps_to_static_decline_without_publication() {
+    use pult_core::permission_broker::{Broker, Options, Redactors};
+    use pult_core::turn_driver::{EventSink, Receipt, SinkError, Task};
+    use std::sync::Arc;
+    struct NoWrite;
+    impl EventSink for NoWrite {
+        fn append(&self, _: Value) -> Task<Result<Receipt, SinkError>> {
+            panic!("must not publish");
+        }
+    }
+    pult_core::panic_guard::install();
+    for panic_value in [true, false] {
+        let broker = Broker::new(
+            Arc::new(NoWrite),
+            Redactors {
+                value: Arc::new(move |v| {
+                    if panic_value {
+                        panic!("PRIVATE_REDATOR_PAYLOAD")
+                    }
+                    v.clone()
+                }),
+                string: Arc::new(move |s| {
+                    if !panic_value {
+                        panic!("PRIVATE_REDATOR_PAYLOAD")
+                    }
+                    s.into()
+                }),
+            },
+            Options::default(),
+        )
+        .unwrap();
+        let prepared = prepare_default(MCP, &mcp_params()).unwrap();
+        assert!(broker.request(prepared.request()).is_err());
+        assert_eq!(broker.pending_count(), 0);
+        // Host maps broker failure to a deny; no raw panic text is part of plan.
+        assert_eq!(
+            prepared.resolve(&owner(), Decision::deny()).unwrap(),
+            json!({"action":"decline"})
+        );
+        broker.drain().await;
+    }
+}
