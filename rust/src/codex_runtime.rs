@@ -733,6 +733,23 @@ impl ApprovalHandler for Approvals {
 fn begin_shutdown(inner: Arc<Inner>) {
     inner.shared.closed.send_replace(true);
     inner.broker.shutdown();
+    inner.deps.driver.begin_shutdown();
+    let hosts = {
+        inner
+            .shared
+            .state
+            .lock()
+            .expect("Codex runtime")
+            .pool
+            .iter()
+            .map(|entry| entry.host.clone())
+            .collect::<Vec<_>>()
+    };
+    // Seal and request all available interrupts/process stops before waiting
+    // for owned host IO. A blocked preparation must not keep warm hosts alive.
+    for host in hosts {
+        drop(host.shutdown());
+    }
     {
         // Serialize admission/retry with terminal publication. Successful
         // completion is monotonic; nobody can reset an exited cleanup owner.

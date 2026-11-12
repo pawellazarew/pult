@@ -83,13 +83,14 @@ async fn shutdown_stops_warm_process_before_waiting_for_owned_registry_check() {
         .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
         .is_pending();
     drop(unblock);
-    assert!(
-        tokio::time::timeout(WAIT, preparation)
-            .await
-            .unwrap()
-            .is_err()
-    );
+    let rejected = tokio::time::timeout(WAIT, preparation)
+        .await
+        .unwrap()
+        .is_err();
     tokio::time::timeout(WAIT, stopping).await.unwrap().unwrap();
+    eprintln!(
+        "stop_before_release={stopped_before_release}; check_retained={retained}; preparation_rejected={rejected}"
+    );
     assert!(
         stopped_before_release,
         "shutdown delayed process stop behind owned registry IO"
@@ -98,10 +99,18 @@ async fn shutdown_stops_warm_process_before_waiting_for_owned_registry_check() {
         retained,
         "shutdown abandoned a still-blocked registry check"
     );
+    assert!(rejected, "stopped preparation was still admitted to Driver");
     assert_eq!(
         f.logs()
             .iter()
             .filter(|row| row["method"] == "turn/start")
+            .count(),
+        1
+    );
+    assert_eq!(
+        f.journal()
+            .iter()
+            .filter(|row| row["kind"] == "message.user")
             .count(),
         1
     );
