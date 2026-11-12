@@ -58,6 +58,8 @@ pub(crate) async fn instance(state: &Arc<State>) -> Result<Arc<codex_runtime::Co
     if let Some(runtime) = state.native_runtime.get() {
         return Ok(runtime.clone());
     }
+    // The shared Inbox can start without discovering any provider executable.
+    crate::permission_state::instance(state).await?;
     let state = state.clone();
     let handle = tokio::runtime::Handle::current();
     let host_job = state.host_jobs.track();
@@ -94,7 +96,8 @@ pub(crate) async fn instance(state: &Arc<State>) -> Result<Arc<codex_runtime::Co
         state
             .claude_asks
             .get_or_init(|| crate::claude_ask::Backend::new(Arc::downgrade(&state)));
-        let runtime = codex_runtime::CodexRuntime::new_with_memory(
+        let broker = crate::permission_state::ensure_locked(&state, &bootstrap.config)?;
+        let runtime = codex_runtime::CodexRuntime::new_daemon(
             codex_runtime::Dependencies {
                 home: state.home.clone(),
                 registry: state.registry.clone(),
@@ -116,6 +119,7 @@ pub(crate) async fn instance(state: &Arc<State>) -> Result<Arc<codex_runtime::Co
             codex_runtime::Network::OwnedCurl(curl),
             Default::default(),
             Some(memory),
+            broker,
         )?;
         state
             .native_runtime
@@ -145,6 +149,7 @@ pub(crate) fn begin_shutdown(state: &State) {
             driver.begin_shutdown();
         }
     }
+    crate::permission_state::begin_shutdown(state);
     if let Some(runtime) = state.native_runtime.get() {
         drop(runtime.shutdown());
     }

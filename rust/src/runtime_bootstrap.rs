@@ -219,6 +219,25 @@ fn codex(parent: &Environment, filtered: &Environment) -> Result<PathBuf, Static
     }
     Err(StaticError::ExecutableUnavailable)
 }
+/// Checked configuration only: independent of every provider executable, PATH,
+/// runtime holder and curl. Caller owns this blocking filesystem operation.
+pub fn configuration(home: &Path) -> Result<runtime_config::Parsed, StaticError> {
+    absolute(home)?;
+    let home = fs::canonicalize(home).map_err(|_| StaticError::UnsafeHome)?;
+    let before = home_metadata(&home)?;
+    let bytes = config_bytes(&home)?;
+    let raw = bytes
+        .as_deref()
+        .map(serde_json::from_slice::<serde_json::Value>)
+        .transpose()
+        .map_err(|_| StaticError::ConfigInvalid)?;
+    let parsed = runtime_config::parse(raw.as_ref().unwrap_or(&serde_json::json!({})));
+    let after = home_metadata(&home)?;
+    if (before.dev(), before.ino()) != (after.dev(), after.ino()) {
+        return Err(StaticError::UnsafeHome);
+    }
+    Ok(parsed)
+}
 /// Loads config and resolves trusted executables without spawning any of them.
 /// Only a missing config defaults; malformed JSON (including lone UTF-16
 /// surrogates), unsafe files and unreadable/changed files refuse bootstrap.
@@ -235,13 +254,7 @@ pub fn load(
     let before = home_metadata(&home)?;
     let filtered = worker_env::from_parent(parent, &Environment::new())
         .map_err(|_| StaticError::Environment)?;
-    let bytes = config_bytes(&home)?;
-    let raw = bytes
-        .as_deref()
-        .map(serde_json::from_slice::<serde_json::Value>)
-        .transpose()
-        .map_err(|_| StaticError::ConfigInvalid)?;
-    let parsed = runtime_config::parse(raw.as_ref().unwrap_or(&serde_json::json!({})));
+    let parsed = configuration(&home)?;
     executable(current_exe)?;
     let test = parent
         .get(OsStr::new("PULT_TEST"))

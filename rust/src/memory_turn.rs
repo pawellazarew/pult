@@ -527,10 +527,8 @@ impl Backend {
             concealed: false,
         };
         let expected_input = request.input.clone();
-        let runtime = state.native_runtime.get().ok_or_else(unavailable)?;
-        let mut question = runtime
-            .request_memory_permission(request)
-            .map_err(|_| denied())?;
+        let mut question =
+            crate::permission_state::request(&state, request).map_err(|_| denied())?;
         // Pin one waiter: dropping/recreating decision() on a control wake
         // cancels the request through DecisionWait's Drop implementation.
         let decision = {

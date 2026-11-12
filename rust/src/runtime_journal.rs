@@ -65,12 +65,14 @@ pub(crate) fn initialize(state: &Arc<State>) -> anyhow::Result<()> {
 
 pub(crate) async fn shutdown(state: &Arc<State>, owner: crate::Ownership) {
     crate::runtime_state::await_initialization(state).await;
+    crate::permission_state::begin_shutdown(state);
     if let Some(runtime) = state.native_runtime.get() {
         while runtime.shutdown().await.is_err() {
             eprintln!("native runtime cleanup is unconfirmed; daemon ownership retained");
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }
+    crate::permission_state::drain(state).await;
     retain_owner_until_stopped(
         state.driver.get().expect("driver initialized"),
         &state.host_jobs,
@@ -210,6 +212,7 @@ pub(crate) mod tests {
             native_runtime: OnceLock::new(),
             memory_turns: OnceLock::new(),
             claude_asks: OnceLock::new(),
+            permissions: OnceLock::new(),
             runtime_init: Mutex::new(()),
             consent: Mutex::new(None),
             live_sessions: Mutex::new(crate::session_live::Cache::new(65536).unwrap()),
