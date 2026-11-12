@@ -84,3 +84,29 @@ provider-event integration, and the daemon/CLI execution path. The configuration
 builder does not make its referenced command operational. Existing sessions and
 RPC support are not changed by this layer alone. Publish the worker step after
 its end-to-end acceptance; this document does not close provider issue #105.
+
+## Inherited settings resolver
+
+`claude_settings::Settings` captures the child HOME and trusted managed directory.
+It selects allowed user/project/local files, then applies managed base and sorted
+managed fragments regardless of setting-sources. Fragment ordering uses UTF-16,
+as JavaScript does. Reads follow dotfile symlinks, check the opened descriptor,
+use nonblocking open and stop at 1 MiB. Unsafe existing files contribute bypass;
+missing/malformed files match Node's no-contribution behavior. The raw parser
+retains lone UTF-16 surrogates even in unrelated JSON fields and duplicate keys
+use last-value semantics.
+
+No mode cache is used. Over 4096 managed-directory entries returns a capacity
+error instead of silently ignoring possibly stronger policy. A final mode with
+unpaired UTF-16 cannot cross the typed Rust String callback and returns an
+explicit error (the owner must deny), rather than falling back to an earlier or
+less privileged mode. Settings are read in owned blocking work; regular filesystem
+IO is not promised to finish within a hard deadline. This resolver does not read
+macOS MDM profiles; native init evidence and sticky inheritSeen remain necessary.
+
+Tests compare 17 filesystem/JSON combinations with the actual built Node helper,
+including FIFO, oversized file, symlink, malformed UTF-8, duplicate/escaped keys
+and lone surrogates. Additional tests cover source filtering, managed precedence,
+UTF-16 fragment order and refusal at the managed-directory resource limit.
+The concrete resolver is available for the in-progress ClaudeOwner bridge;
+that bridge and final daemon integration still require separate acceptance.
