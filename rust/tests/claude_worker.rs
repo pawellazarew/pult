@@ -628,3 +628,73 @@ owner_case!(
         }
     }
 );
+
+owner_case!(
+    subagent_or_malformed_init_cannot_replace_the_owned_fork_identity,
+    {
+        pult_core::panic_guard::install();
+        for mode in ["foreign-child", "malformed-parent"] {
+            let f = OwnerRig::new("ask", true);
+            let worker =
+                ClaudeWorker::new(f.config(mode), f.owner.services(f.sink.clone(), None)).unwrap();
+            let mut turn = f
+                .driver
+                .start(
+                    f.owner.snapshot(&f.key).unwrap(),
+                    "first input".into(),
+                    worker.clone(),
+                )
+                .unwrap();
+            let accepted = turn.accepted().await;
+            // Even if an invalid peer sent a matching command ACK afterwards, it
+            // cannot attribute the child's init to the root's ownership checkpoint.
+            assert!(accepted.is_err());
+            let terminal = turn.wait().await.unwrap();
+            let expected = if mode == "foreign-child" {
+                "not_implemented"
+            } else {
+                "protocol_error"
+            };
+            assert!(matches!(terminal.turn.outcome, Outcome::Failure {code,..} if code==expected));
+            f.stopped();
+            assert!(worker.is_retired());
+            assert_eq!(
+                f.record().scalar("providerSessionId").as_deref(),
+                Some(NATIVE_PARENT)
+            );
+            assert_eq!(
+                f.record().scalar("claudeReservedSessionId").as_deref(),
+                Some(NATIVE_PARENT)
+            );
+            assert!(f.record().get("forkOnResume").is_some());
+        }
+    }
+);
+owner_case!(
+    legacy_root_init_null_and_empty_parent_still_confirm_the_owned_fork,
+    {
+        pult_core::panic_guard::install();
+        for mode in ["root-null", "root-empty"] {
+            let f = OwnerRig::new("ask", true);
+            let worker =
+                ClaudeWorker::new(f.config(mode), f.owner.services(f.sink.clone(), None)).unwrap();
+            let mut turn = f
+                .driver
+                .start(
+                    f.owner.snapshot(&f.key).unwrap(),
+                    "first input".into(),
+                    worker.clone(),
+                )
+                .unwrap();
+            turn.accepted().await.unwrap();
+            assert_eq!(turn.wait().await.unwrap().turn.outcome, Outcome::Success);
+            f.stopped();
+            assert!(!worker.is_retired());
+            assert_eq!(
+                f.record().scalar("providerSessionId").as_deref(),
+                Some(NATIVE_CHILD)
+            );
+            assert!(f.record().get("claudeReservedSessionId").is_none());
+        }
+    }
+);

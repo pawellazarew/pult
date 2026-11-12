@@ -13,6 +13,11 @@ for line in sys.stdin:
     def emit(value):
         value['session_id']=sid
         print(json.dumps(value),flush=True)
-    emit({'type':'system','subtype':'init','permissionMode':'bypassPermissions' if mode=='bypass' else 'manual'})
+    init={'type':'system','subtype':'init','permissionMode':'bypassPermissions' if mode=='bypass' else 'manual'}
+    if mode=='foreign-child': init['parent_tool_use_id']='unowned-subagent-tool'
+    if mode=='malformed-parent': init['parent_tool_use_id']={'tool':'unowned'}
+    if mode=='root-null': init['parent_tool_use_id']=None
+    if mode=='root-empty': init['parent_tool_use_id']=''
+    emit(init)
     emit({'type':'command_lifecycle','command_uuid':request['uuid'],'state':'started'})
     emit({'type':'result','terminal_reason':'completed','is_error':False,'result':'fixture result','num_turns':1,'user_message_uuids':[request['uuid']]})

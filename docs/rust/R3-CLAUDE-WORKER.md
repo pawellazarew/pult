@@ -186,3 +186,15 @@ explicit stop, and only that stop proves PID cleanup. No production fault option
 or public send API is added. These simulations do not test write_all internals or
 claim that a real OS write naturally panics at those exact points. Targeted vault
 unit tests require building pult-worker-holder (also built by integration targets).
+
+
+### Root init attribution
+
+Only absent, null or empty-string parent_tool_use_id attributes init to this root
+Ticket. A nonempty parent identifies an unowned subagent and retires the facade
+with an explicit unsupported result; malformed attribution is a protocol error.
+Neither reaches Initialized persistence or start acceptance, including while a
+fork could otherwise accept a newly reported child ID. Real Owner fixtures prove
+that the original parent/fork and uncertain reservation remain intact, while
+legacy root null/empty attribution still confirms the correct owned fork. This
+fails closed on unsupported work rather than implementing background parity.

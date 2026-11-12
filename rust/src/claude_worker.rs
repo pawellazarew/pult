@@ -911,6 +911,26 @@ async fn turn(
         };
         let frame = frame.map_err(|_| unavailable())?;
         if frame["type"] == "system" && frame["subtype"] == "init" {
+            // Init can arrive from a subagent on the same process stream. Only
+            // root attribution may establish this Ticket's durable identity.
+            match frame.get("parent_tool_use_id") {
+                None | Some(Value::Null) => {}
+                Some(Value::String(parent)) if parent.is_empty() => {}
+                Some(Value::String(_)) => {
+                    retire(inner);
+                    return Err(error(
+                        "not_implemented",
+                        "Claude subagent init is not owned by this root turn",
+                    ));
+                }
+                Some(_) => {
+                    retire(inner);
+                    return Err(error(
+                        "protocol_error",
+                        "Claude init has invalid parent attribution",
+                    ));
+                }
+            }
             let id = frame["session_id"]
                 .as_str()
                 .filter(|id| native_id(id))
