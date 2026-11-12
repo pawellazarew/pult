@@ -1,4 +1,4 @@
-//! Owner registration and narrow memory credentials. No provider execution yet.
+//! Owner registration and narrow read credentials, also reused by trusted turn memory.
 use crate::{
     memory::{Context, MemoryError},
     session_memory::{self, MemoryLease},
@@ -45,7 +45,7 @@ fn fields(params: &Value, allowed: &[&str]) -> Result<(), MemoryError> {
     Ok(())
 }
 fn execution_available(state: &crate::State) -> Result<(), MemoryError> {
-    if crate::runtime_state::unavailable(state) {
+    if crate::runtime_state::unavailable(state) || state.session_memory.is_poisoned() {
         return Err(err("forbidden", "memory execution context is unavailable"));
     }
     Ok(())
@@ -87,6 +87,16 @@ fn active_record(state: &crate::State, name: &str) -> Result<Record, MemoryError
     let record = registry
         .find(name)
         .ok_or_else(|| err("not_found", "session not found"))?;
+    if crate::memory_policy::Policy::private(record) {
+        return Err(err("forbidden", "private memory is disabled"));
+    }
+    if record.get("memory").is_some()
+        && !crate::memory_policy::Policy::record(record)
+            .map_err(|_| err("forbidden", "invalid memory policy"))?
+            .read
+    {
+        return Err(err("forbidden", "memory is disabled"));
+    }
     if record.get("archived").is_some_and(|v| v.get() == "true") {
         return Err(err("forbidden", "session is archived"));
     }
@@ -136,6 +146,9 @@ pub(crate) async fn execute(
         }
         let name = name.expect("validated required selector");
         if method == "memory.context.revoke" {
+            if let Some(memory) = state.memory_turns.get() {
+                memory.revoke_session(name);
+            }
             return Ok(state
                 .session_memory
                 .lock()
@@ -183,6 +196,44 @@ pub(crate) async fn execute(
     })
     .await
     .map_err(|e| err("internal", e))?
+}
+
+/// Automatic registration is authorized by an explicit persisted policy. Never
+/// overwrite a disabled/stale existing owner registration or silently repin it.
+pub(crate) fn ensure_registered(
+    state: &crate::State,
+    name: &str,
+) -> Result<Arc<MemoryLease>, MemoryError> {
+    let record = active_record(state, name)?;
+    let policy = crate::memory_policy::Policy::record(&record)
+        .map_err(|_| err("forbidden", "invalid memory policy"))?;
+    if !policy.read {
+        return Err(err("forbidden", "memory is disabled"));
+    }
+    let fingerprint = session_memory::fingerprint(&record)?;
+    {
+        let credentials = lock_credentials(state)?;
+        if credentials.has_registration(name) {
+            return credentials.registration(name, &fingerprint);
+        }
+    }
+    let project = project(&record)?;
+    let registry = lock_registry(state)?;
+    let current = registry
+        .find(name)
+        .ok_or_else(|| err("not_found", "session not found"))?;
+    if current
+        .get("archived")
+        .is_some_and(|raw| raw.get() == "true")
+        || session_memory::fingerprint(current)? != fingerprint
+    {
+        return Err(err("forbidden", "memory context changed"));
+    }
+    let mut credentials = lock_credentials(state)?;
+    if !credentials.has_registration(name) {
+        credentials.bind(name, fingerprint.clone(), project, true)?;
+    }
+    credentials.registration(name, &fingerprint)
 }
 
 fn registered(state: &crate::State, name: &str) -> Result<Arc<MemoryLease>, MemoryError> {

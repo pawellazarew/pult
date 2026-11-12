@@ -15,6 +15,7 @@ interface CatalogMethod {
   name: string
   node: string
   rust: string
+  access: string
   paramsSchema: unknown
   resultSchema: unknown
 }
@@ -58,12 +59,12 @@ describe('RPC catalog generation and source drift', () => {
     })
   })
 
-  it('keeps partial schemas separate from the 27 fully implemented methods', () => {
+  it('keeps partial schemas separate from the 28 fully implemented methods', () => {
     const catalog = JSON.parse(readFileSync(catalogSource, 'utf8')) as Catalog
     const implemented = catalog.methods.filter((method) => method.rust === 'implemented').map((method) => method.name)
     const partial = catalog.methods.filter((method) => method.rust === 'partial')
-    assert.equal(implemented.length, 27)
-    assert.equal(catalog.methods.length, 98)
+    assert.equal(implemented.length, 28)
+    assert.equal(catalog.methods.length, 99)
     assert.equal(catalog.methods.filter((method) => method.node === 'implemented').length, 85)
     assert.deepEqual(partial.map((method) => method.name), ['agent.list', 'agent.prompt', 'agent.queue.move', 'agent.queue.remove', 'agent.queue.resume', 'agent.queue.send', 'agent.start', 'agent.stop', 'perm.list', 'perm.resolve'])
     assert.ok(partial.every((method) => method.paramsSchema && method.resultSchema))
@@ -80,6 +81,65 @@ describe('RPC catalog generation and source drift', () => {
       assert.match(output, /export interface RustPartialParams/)
       assert.match(output, /export interface RustPartialResults/)
     })
+  })
+
+  it('validates turn-memory access metadata and includes it in the catalog response enum', () => {
+    const catalog = JSON.parse(readFileSync(catalogSource, 'utf8')) as Catalog
+    const mutations = catalog.methods.filter((method) => method.access === 'owner-or-turn-memory')
+    assert.deepEqual(mutations.map((method) => method.name), ['memory.add', 'memory.forget', 'memory.update'])
+    const reads = catalog.methods.filter((method) => method.access === 'owner-or-memory')
+    assert.deepEqual(reads.map((method) => method.name), ['memory.catalog', 'memory.get', 'memory.list', 'memory.search'])
+    const response = catalog.methods.find((method) => method.name === 'protocol.catalog')?.resultSchema as {
+      properties: { methods: { items: { properties: { access: { enum: string[] } } } } }
+    }
+    assert.ok(response.properties.methods.items.properties.access.enum.includes('owner-or-turn-memory'))
+    assert.ok(catalog.methods.every((method) => response.properties.methods.items.properties.access.enum.includes(method.access)))
+    fixture((paths) => {
+      changeCatalog(paths.catalog, (value) => { value.methods[0]!.access = 'owner-or-invented' })
+      const rejected = generate(paths)
+      assert.equal(rejected.status, 1)
+      assert.match(rejected.stderr, /Invalid metadata/)
+    })
+    fixture((paths) => {
+      changeCatalog(paths.catalog, (value) => { value.methods[0]!.access = 'owner-or-turn-memory' })
+      const accepted = generate(paths)
+      assert.equal(accepted.status, 0, accepted.stderr)
+    })
+  })
+
+  it('describes strict owner configuration, optional session policy, and server-derived provenance', () => {
+    const catalog = JSON.parse(readFileSync(catalogSource, 'utf8'))
+    const method = (name: string) => catalog.methods.find((entry: { name: string }) => entry.name === name)
+    const configure = method('memory.configure')
+    assert.equal(configure.node, 'extension')
+    assert.equal(configure.rust, 'implemented')
+    assert.equal(configure.access, 'owner')
+    assert.deepEqual(configure.paramsSchema.required, ['session'])
+    assert.equal(configure.paramsSchema.additionalProperties, false)
+    const inputPolicy = configure.paramsSchema.properties.memory
+    assert.equal(inputPolicy.additionalProperties, false)
+    assert.deepEqual(inputPolicy.required, [])
+    assert.deepEqual(inputPolicy.properties.write.enum, ['off', 'ask'])
+    assert.deepEqual(configure.resultSchema.properties.memory.required, ['read', 'write'])
+    assert.deepEqual(method('agent.start').paramsSchema.properties.memory, inputPolicy)
+    assert.deepEqual(method('agent.start').resultSchema.properties.memory, configure.resultSchema.properties.memory)
+    const listedRecord = method('agent.list').resultSchema.properties.sessions.items
+    assert.equal(listedRecord.additionalProperties, true)
+    assert.equal(listedRecord.properties.memory, undefined, 'recovered future policy stays opaque instead of claiming normalized authority')
+    assert.ok(!method('agent.start').paramsSchema.required.includes('memory'))
+    for (const name of ['memory.add', 'memory.update', 'memory.forget', 'memory.get']) {
+      const entry = method(name)
+      const record = entry.resultSchema
+      assert.deepEqual(record.properties.author.enum, ['owner', 'claude', 'codex', 'zcode'])
+      assert.equal(record.properties.sourceEventId.minimum, 1)
+      assert.equal(record.properties.sourceEventId.maximum, Number.MAX_SAFE_INTEGER)
+      assert.equal(record.properties.sourceTurnId.maxLength, 256)
+      assert.equal(record.properties.sourceCreatedAt.type, 'string')
+      for (const field of ['sourceEventId', 'sourceTurnId', 'sourceCreatedAt']) {
+        assert.ok(!record.required.includes(field))
+        assert.equal(entry.paramsSchema.properties[field], undefined)
+      }
+    }
   })
 
   it('requires both schemas and supported schema types for partial methods', () => {
