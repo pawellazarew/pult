@@ -125,6 +125,8 @@ export interface SessionRecord {
   settingSources?: string
   /** Rust native input reserved before init: opaque unknown-send evidence, never execution authority. */
   claudeReservedSessionId?: unknown
+  /** Rust Route A unknown-send evidence, preserved opaquely on Node rollback. */
+  zcodePendingInput?: unknown
   /** Идентификатор сессии на стороне провайдера: у Claude — uuid для `--resume`. */
   providerSessionId?: string
   /** Copy an imported Claude conversation on its first resumed turn. */
@@ -375,6 +377,7 @@ export function parseSessions(raw: unknown): SessionRecord[] {
       ...(Object.hasOwn(o, 'temporary') ? { temporary: o['temporary'] } : {}),
       ...(typeof o['settingSources'] === 'string' ? { settingSources: o['settingSources'] } : {}),
       ...(Object.hasOwn(o, 'claudeReservedSessionId') ? { claudeReservedSessionId: o['claudeReservedSessionId'] } : {}),
+      ...(Object.hasOwn(o, 'zcodePendingInput') ? { zcodePendingInput: o['zcodePendingInput'] } : {}),
       ...(typeof o['providerSessionId'] === 'string' ? { providerSessionId: o['providerSessionId'] } : {}),
       ...(o['forkOnResume'] === true ? { forkOnResume: true } : {}),
       ...(worktree ? { worktree } : {}),
@@ -383,14 +386,14 @@ export function parseSessions(raw: unknown): SessionRecord[] {
       createdAt: typeof o['createdAt'] === 'string' ? o['createdAt'] : new Date(0).toISOString(),
       ...(typeof o['startRequest'] === 'string' && /^[0-9a-f-]{36}$/.test(o['startRequest']) ? { startRequest: o['startRequest'] } : {}),
       ...(typeof o['lastTurnAt'] === 'string' && Number.isFinite(Date.parse(o['lastTurnAt'])) ? { lastTurnAt: o['lastTurnAt'] } : {}),
-      lastStatus: Object.hasOwn(o, 'claudeReservedSessionId') ? 'failed' : isStatus(o['lastStatus']) ? o['lastStatus'] : 'cold',
+      lastStatus: (Object.hasOwn(o, 'claudeReservedSessionId') || Object.hasOwn(o, 'zcodePendingInput')) ? 'failed' : isStatus(o['lastStatus']) ? o['lastStatus'] : 'cold',
       lastEventId: typeof o['lastEventId'] === 'number' && Number.isSafeInteger(o['lastEventId']) ? o['lastEventId'] : 0,
       ...(context ? { context } : {}),
       ...(typeof o['lastSeenEventId'] === 'number' && Number.isSafeInteger(o['lastSeenEventId']) && o['lastSeenEventId'] >= 0
         ? { lastSeenEventId: o['lastSeenEventId'] } : {}),
       ...(o['markedUnread'] === true ? { markedUnread: true } : {}),
       ...((): { queue?: QueueItem[] } => { const q = parseQueue(o['queue']); return q.length ? { queue: q } : {} })(),
-      ...(o['queuePaused'] === true || Object.hasOwn(o, 'claudeReservedSessionId') ? { queuePaused: true } : {}),
+      ...(o['queuePaused'] === true || Object.hasOwn(o, 'claudeReservedSessionId') || Object.hasOwn(o, 'zcodePendingInput') ? { queuePaused: true } : {}),
       ...((): { queueDispatch?: { id: string; at: string }; queuePaused?: boolean } => {
         const m = o['queueDispatch'] as Record<string, unknown> | undefined
         return m && typeof m['id'] === 'string' && typeof m['at'] === 'string'

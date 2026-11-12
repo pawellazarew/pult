@@ -611,11 +611,10 @@ pub fn parse(raw: &RawValue) -> Result<Vec<Record>> {
         }
         // Preserve unknown native-send evidence byte-for-byte, including future
         // or malformed values. Presence is fail-closed, not a parsed ID grant.
-        if let Some(reserved) = fields.get("claudeReservedSessionId") {
-            rec.set_raw(
-                "claudeReservedSessionId",
-                crate::history::compact_raw(reserved)?,
-            );
+        for key in ["claudeReservedSessionId", "zcodePendingInput"] {
+            if let Some(reserved) = fields.get(key) {
+                rec.set_raw(key, crate::history::compact_raw(reserved)?);
+            }
         }
         for key in ["model", "effort", "settingSources", "providerSessionId"] {
             string_field(&mut rec, &fields, key);
@@ -856,7 +855,7 @@ fn recover_in_place(
 ) -> Result<RecoveryStats> {
     let mut stats = RecoveryStats::default();
     for rec in records {
-        if rec.get("claudeReservedSessionId").is_some() {
+        if rec.get("claudeReservedSessionId").is_some() || rec.get("zcodePendingInput").is_some() {
             rec.set_string("lastStatus", "failed");
             rec.set_bool("queuePaused", true);
         }

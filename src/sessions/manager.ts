@@ -70,7 +70,12 @@ function pultHomeRefusal(name: string, cwd: string, home: string): string {
 }
 
 const CLAUDE_SEND_UNCERTAIN = 'Предыдущая реплика Claude могла выполниться, но подтверждение потеряно. Автоматический повтор запрещён. Проверь историю Claude и импортируй подтверждённый разговор в новый чат; повторная отправка может выполнить задачу дважды.'
+const ZCODE_SEND_UNCERTAIN = 'Предыдущая реплика ZCode могла выполниться, но подтверждение потеряно. Автоматический повтор запрещён. Проверь историю ZCode перед ручным восстановлением; повторная отправка может выполнить задачу дважды.'
+function unresolvedNativeInput(rec: SessionRecord): boolean {
+  return Object.hasOwn(rec, 'claudeReservedSessionId') || Object.hasOwn(rec, 'zcodePendingInput')
+}
 function requireResolvedNativeInput(rec: SessionRecord): void {
+  if (Object.hasOwn(rec, 'zcodePendingInput')) throw new ManagerError('start_unknown', ZCODE_SEND_UNCERTAIN)
   if (Object.hasOwn(rec, 'claudeReservedSessionId')) throw new ManagerError('start_unknown', CLAUDE_SEND_UNCERTAIN)
 }
 
@@ -794,7 +799,7 @@ export function createManager(opts: ManagerOptions): SessionManager {
   async function drain(name: string): Promise<void> {
     const rec = registry.get(name)
     if (!rec?.queue?.length || rec.queuePaused || rec.queueDispatch || holdDrain.has(name) || queueSending.has(name) || removing.has(name) || busyNow(name)) return
-    if (Object.hasOwn(rec, 'claudeReservedSessionId')) { pauseQueue(name, 'native_send_unknown'); return }
+    if (unresolvedNativeInput(rec)) { pauseQueue(name, 'native_send_unknown'); return }
     if (opts.holdTurns?.()) return
     const [item, ...rest] = rec.queue as [QueueItem, ...QueueItem[]]
     // Голову правят — очередь стоит на ней: ни она, ни те, что за ней, не обгоняют правку.
@@ -1935,11 +1940,11 @@ export function createManager(opts: ManagerOptions): SessionManager {
   }
   // A Rust send may have reached Claude before the durable init receipt. Keep
   // that history visible and paused on rollback; never normalize it into cold.
-  for (const rec of registry.list()) if (Object.hasOwn(rec, 'claudeReservedSessionId')) {
+  for (const rec of registry.list()) if (unresolvedNativeInput(rec)) {
     if (!rec.queuePaused) registry.update(rec.name, { queuePaused: true })
     const last = opts.store.readSession(rec.name).at(-1)
     if (last?.kind !== 'status.changed' || last.data['errorCode'] !== 'start_unknown') {
-      emit({ sessionId: rec.name, provider: rec.provider, kind: 'status.changed', data: { status: 'failed', errorCode: 'start_unknown', error: CLAUDE_SEND_UNCERTAIN } })
+      emit({ sessionId: rec.name, provider: rec.provider, kind: 'status.changed', data: { status: 'failed', errorCode: 'start_unknown', error: Object.hasOwn(rec, 'zcodePendingInput') ? ZCODE_SEND_UNCERTAIN : CLAUDE_SEND_UNCERTAIN } })
     }
   }
   return api

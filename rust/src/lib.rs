@@ -65,7 +65,9 @@ pub mod turn_snapshot;
 pub mod worker_env;
 pub mod worker_process;
 pub mod zcode_events;
+pub mod zcode_host_services;
 pub mod zcode_launch;
+pub mod zcode_worker;
 
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
