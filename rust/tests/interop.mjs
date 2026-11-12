@@ -60,7 +60,7 @@ try {
     assert.equal(status.protocol, 1)
     assert.equal(status.pid, daemon.child.pid)
     assert.equal(status.home, realpathSync(home))
-    assert.deepEqual(status.capabilities.supportedMethods, ['agent.archive', 'agent.read', 'agent.rename', 'agent.seen', 'agent.tree', 'daemon.status', 'daemon.stop', 'events.emit', 'events.get', 'events.history', 'events.snapshot', 'events.subscribe', 'events.tail', 'events.unsubscribe', 'memory.add', 'memory.catalog', 'memory.configure', 'memory.context.bind', 'memory.context.issue', 'memory.context.revoke', 'memory.context.status', 'memory.forget', 'memory.get', 'memory.history', 'memory.list', 'memory.search', 'memory.update', 'protocol.catalog'])
+    assert.deepEqual(status.capabilities.supportedMethods, ['agent.archive', 'agent.read', 'agent.recovery.confirm', 'agent.recovery.get', 'agent.rename', 'agent.seen', 'agent.tree', 'daemon.status', 'daemon.stop', 'events.emit', 'events.get', 'events.history', 'events.snapshot', 'events.subscribe', 'events.tail', 'events.unsubscribe', 'memory.add', 'memory.catalog', 'memory.configure', 'memory.context.bind', 'memory.context.issue', 'memory.context.revoke', 'memory.context.status', 'memory.forget', 'memory.get', 'memory.history', 'memory.list', 'memory.search', 'memory.update', 'protocol.catalog'])
     assert.deepEqual([...status.capabilities.partialMethods].sort(), partialMethods)
     const hello = await frame({ type: 'hello', protocol: 1, client: 'cli', token: initialToken })
     assert.deepEqual([...hello.capabilities.partialMethods].sort(), partialMethods)
