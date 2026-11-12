@@ -173,6 +173,9 @@ impl Handle {
     pub fn progress(&self) -> Progress {
         self.progress.borrow().clone()
     }
+    pub fn subscribe_progress(&self) -> watch::Receiver<Progress> {
+        self.progress.clone()
+    }
     pub async fn accepted(&mut self) -> Result<Accepted, DriverError> {
         self.accepted
             .take()
