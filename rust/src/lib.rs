@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+pub mod ask_mcp;
 pub mod claude_events;
 pub mod claude_launch;
 pub mod claude_settings;
@@ -17,6 +18,7 @@ pub mod host_paths;
 pub mod host_policy;
 pub mod journal;
 mod locale;
+pub mod mcp_stdio;
 mod memory;
 mod memory_api;
 mod memory_catalog;

@@ -128,3 +128,24 @@ uses legacy absence; object/null/control-containing values no longer silently
 become None. Three real-process regressions fail against the former filtering
 parser and pass with the explicit shape check; all 12 worker cases pass. This is
 protocol validation, not proof of real installed Claude-version compatibility.
+
+## Rust permission stdio client
+
+The private `pultd-rust --home … mcp-ask` subcommand now serves the permission tool
+using the same bounded generic transport as the memory helper (copied unchanged
+from its frozen, reviewed implementation). It never reads an owner token/config,
+starts a daemon, or logs in. Each question opens a separate socket, authenticates
+only with the question credential and binds session identity from trusted helper
+environment, ignoring any session selector in tool arguments. Missing/invalid
+credentials, rejected/closed/malformed responses and timeout return deny.
+Malformed updatedInput cannot be dropped while allowing the broader original.
+
+Seven actual CLI/socket fixtures cover approved input, explicit denial, missing
+credential with poisoned owner files, rejected key, disconnect, malformed edited
+input, and EOF cancellation closing the pending question socket. Eight generic
+transport cases pass unchanged; the combined launch/settings/worker/client set
+has 37 tests. No real daemon permission issuance or model/account call is implied.
+Remaining client proofs include decision timeout, bad protocol/unrelated-frame
+budget and invalid session/argument non-connection. The Rust server ask-role,
+per-Ticket key issuance/revocation, scoped MCP factory and host permission evidence
+are separate required work; the client alone does not connect Claude to Inbox.
