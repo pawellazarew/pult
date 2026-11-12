@@ -92,6 +92,30 @@ impl fmt::Debug for ClaudeBootstrap {
             .finish_non_exhaustive()
     }
 }
+/// Selected-provider ZCode Route A startup snapshot. Provider configuration
+/// values are private explicit inputs, separate from the BASE-only environment.
+/// No other provider executable, settings directory or account file is required.
+pub struct ZcodeBootstrap {
+    pub config: RuntimeConfig,
+    pub parent: Environment,
+    pub extra_env: Environment,
+    pub holder: PathBuf,
+    pub zcode: PathBuf,
+    pub prefix_args: Vec<OsString>,
+    pub curl: PathBuf,
+    pub child_home: PathBuf,
+    warning_codes: Vec<WarningCode>,
+}
+impl fmt::Debug for ZcodeBootstrap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ZcodeBootstrap")
+            .field("parent_variables", &self.parent.len())
+            .field("explicit_variables", &self.extra_env.len())
+            .field("prefix_arguments", &self.prefix_args.len())
+            .field("configuration_warnings", &self.warning_codes.len())
+            .finish_non_exhaustive()
+    }
+}
 #[derive(Eq, PartialEq)]
 struct Identity {
     dev: u64,
@@ -387,6 +411,78 @@ pub fn load_claude(
         curl,
         child_home,
         managed_directory,
+        warning_codes: parsed.warnings.into_iter().map(|w| w.code).collect(),
+    })
+}
+
+/// Read-only selected ZCode bootstrap under the caller's Pult-home ownership
+/// lease. Resolve files only; never run CLI/version/login or read native config.
+/// Explicit ZCODE config values are extracted before BASE filtering and remain
+/// separate from network routing, credentials and Pult capability authority.
+pub fn load_zcode(
+    home: &Path,
+    current_exe: &Path,
+    parent: &Environment,
+) -> Result<ZcodeBootstrap, StaticError> {
+    absolute(home)?;
+    absolute(current_exe)?;
+    let home = fs::canonicalize(home).map_err(|_| StaticError::UnsafeHome)?;
+    let before = home_metadata(&home)?;
+    let extra_env = crate::zcode_launch::extra_env(parent).map_err(|_| StaticError::Environment)?;
+    let filtered = worker_env::from_parent(parent, &Environment::new())
+        .map_err(|_| StaticError::Environment)?;
+    let child_home = filtered
+        .get(OsStr::new("HOME"))
+        .map(PathBuf::from)
+        .ok_or(StaticError::Environment)?;
+    // Match the actual child's source HOME, including aliases/nonexistent paths.
+    // Canonicalizing it here would change which native files the child observes.
+    absolute(&child_home)?;
+    let parsed = configuration(&home)?;
+    executable(current_exe)?;
+    let test = parent
+        .get(OsStr::new("PULT_TEST"))
+        .is_some_and(|v| v == "1");
+    let holder = if test {
+        parent
+            .get(OsStr::new("PULT_WORKER_HOLDER_BIN"))
+            .map(PathBuf::from)
+    } else {
+        None
+    }
+    .unwrap_or_else(|| current_exe.with_file_name("pult-worker-holder"));
+    let curl = if test {
+        parent.get(OsStr::new("PULT_CURL_BIN")).map(PathBuf::from)
+    } else {
+        None
+    }
+    .unwrap_or_else(|| PathBuf::from("/usr/bin/curl"));
+    let holder = executable(&holder)?;
+    let curl = executable(&curl)?;
+    let zcode = if let Some(path) = parent.get(OsStr::new("PULT_ZCODE_BIN")) {
+        executable(Path::new(path))?
+    } else {
+        let paths = filtered
+            .get(OsStr::new("PATH"))
+            .ok_or(StaticError::Environment)?;
+        std::env::split_paths(paths)
+            .filter(|path| path.is_absolute())
+            .find_map(|path| executable(&path.join("zcode")).ok())
+            .ok_or(StaticError::ExecutableUnavailable)?
+    };
+    let after = home_metadata(&home)?;
+    if (before.dev(), before.ino()) != (after.dev(), after.ino()) {
+        return Err(StaticError::UnsafeHome);
+    }
+    Ok(ZcodeBootstrap {
+        config: parsed.config,
+        parent: filtered,
+        extra_env,
+        holder,
+        zcode,
+        prefix_args: vec![],
+        curl,
+        child_home,
         warning_codes: parsed.warnings.into_iter().map(|w| w.code).collect(),
     })
 }
