@@ -1104,3 +1104,282 @@ case!(
         rt.shutdown().await.unwrap();
     }
 );
+
+// Exact-ticket native approval journal ownership regressions.
+struct AuditResolvedSink {
+    sink: Arc<JournalSink>,
+    serial: Arc<tokio::sync::Mutex<()>>,
+    live: Arc<Mutex<pult_core::session_live::Cache>>,
+    blocked: std::sync::atomic::AtomicBool,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Semaphore>,
+    committed: Arc<tokio::sync::Notify>,
+}
+impl AuditResolvedSink {
+    fn new(sink: Arc<JournalSink>) -> Arc<Self> {
+        let mut live = pult_core::session_live::Cache::new(4).unwrap();
+        live.seed(key("one"), pult_core::session_live::Status::Cold, 0)
+            .unwrap();
+        live.seed(key("two"), pult_core::session_live::Status::Cold, 0)
+            .unwrap();
+        Arc::new(Self {
+            sink,
+            serial: Arc::new(tokio::sync::Mutex::new(())),
+            live: Arc::new(Mutex::new(live)),
+            blocked: std::sync::atomic::AtomicBool::new(false),
+            entered: Arc::new(tokio::sync::Notify::new()),
+            release: Arc::new(tokio::sync::Semaphore::new(0)),
+            committed: Arc::new(tokio::sync::Notify::new()),
+        })
+    }
+    fn status(&self, name: &str) -> pult_core::session_live::Status {
+        self.live.lock().unwrap().view(&key(name)).unwrap().status
+    }
+}
+impl pult_core::turn_driver::EventSink for AuditResolvedSink {
+    fn append(
+        &self,
+        draft: Value,
+    ) -> pult_core::turn_driver::Task<
+        Result<pult_core::turn_driver::Receipt, pult_core::turn_driver::SinkError>,
+    > {
+        let block = draft["sessionId"] == "one"
+            && draft["kind"] == "permission.resolved"
+            && !self.blocked.swap(true, Ordering::SeqCst);
+        let sink = self.sink.clone();
+        let serial = self.serial.clone();
+        let live = self.live.clone();
+        let entered = self.entered.clone();
+        let release = self.release.clone();
+        let committed = self.committed.clone();
+        Box::pin(async move {
+            if block {
+                entered.notify_one();
+                release.acquire_owned().await.unwrap().forget();
+            }
+            // This is only the host's normal global journal/projection ordering.
+            // The test barrier is before it so unrelated/new events can commit.
+            let _serial = serial.lock().await;
+            let receipt = sink.append(draft.clone()).await?;
+            live.lock().unwrap().note(
+                draft["sessionId"].as_str().unwrap(),
+                receipt.id,
+                draft["kind"].as_str().unwrap(),
+                &draft["data"],
+            );
+            if block {
+                committed.notify_one();
+            }
+            Ok(receipt)
+        })
+    }
+}
+struct AuditRelease(Arc<tokio::sync::Semaphore>);
+impl Drop for AuditRelease {
+    fn drop(&mut self) {
+        self.0.add_permits(1);
+    }
+}
+fn audit_fixture() -> (Fixture, Arc<AuditResolvedSink>) {
+    let mut fixture = Fixture::new();
+    let sink = AuditResolvedSink::new(fixture.sink.clone());
+    fixture.driver = Arc::new(
+        Driver::new(
+            sink.clone(),
+            Arc::new(pult_core::redaction::redact_string),
+            Options::default(),
+        )
+        .unwrap(),
+    );
+    (fixture, sink)
+}
+
+fn audit_unique_native_ids(fixture: &Fixture) {
+    // The baseline fake numbers threads from one in each process. A retired
+    // host plus a new shared neighbor would otherwise alias a resumed ID.
+    let path = fixture.home.join("app_server.py");
+    let source = std::fs::read_to_string(&path).unwrap().replace(
+        "'native-thread-' + str(sequence)",
+        "'native-audit-' + str(os.getpid()) + '-' + str(sequence)",
+    );
+    std::fs::write(path, source).unwrap();
+}
+
+async fn audit_process_stopped(fixture: &Fixture) {
+    let pids: Vec<u32> =
+        serde_json::from_slice(&std::fs::read(fixture.home.join("pids.json")).unwrap()).unwrap();
+    until(|| {
+        pids.iter().all(|pid| {
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(*pid as i32), None).is_err()
+        })
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn audit_codex_permission_resolved_io_must_hold_exact_ticket_until_drained() {
+    test_panic_guard();
+    tokio::time::timeout(WAIT, async {
+        let (f, sink) = audit_fixture();
+        let release = AuditRelease(sink.release.clone());
+        let (runtime, _) = f.runtime_with_sink(probe("US"), RuntimeConfig::default(), sink.clone());
+        audit_unique_native_ids(&f);
+        let mut turn = runtime.execute(key("one"), input("permit")).await.unwrap();
+        turn.accepted().await.unwrap();
+        until(|| !runtime.list_permissions(Some("one")).is_empty()).await;
+        let ticket = turn.ticket().clone();
+        assert!(f.driver.cancel(&ticket));
+        sink.entered.notified().await;
+        audit_process_stopped(&f).await;
+        let returned_while_blocked = matches!(tokio::time::timeout(Duration::from_secs(1), turn.wait()).await, Ok(Ok(_)));
+        let active_before_release = f.driver.active_count();
+        eprintln!("AUDIT host_stopped=true; returned_while_resolved_blocked={returned_while_blocked}; active_before_release={active_before_release}");
+        drop(release);
+        sink.committed.notified().await;
+        if turn.wait().await.is_err() { f.driver.cancel(&ticket); turn.wait().await.unwrap(); }
+        runtime.shutdown().await.unwrap();
+        assert!(!returned_while_blocked, "Driver wait returned while old permission.resolved IO remained owned");
+        assert_eq!(active_before_release, 1, "old exact Ticket was released before its permission journal outcome");
+        assert!(f.logs().iter().all(|row| row["result"]["decision"] != "accept"));
+    }).await.expect("audit watchdog");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn audit_codex_next_ticket_waits_old_resolution_but_other_session_is_independent() {
+    test_panic_guard();
+    tokio::time::timeout(WAIT, async {
+        let (f, sink) = audit_fixture();
+        let release = AuditRelease(sink.release.clone());
+        let (runtime, _) = f.runtime_with_sink(probe("US"), RuntimeConfig::default(), sink.clone());
+        audit_unique_native_ids(&f);
+        let mut first = runtime.execute(key("one"), input("permit")).await.unwrap();
+        first.accepted().await.unwrap();
+        until(|| !runtime.list_permissions(Some("one")).is_empty()).await;
+        let old_id = runtime.list_permissions(Some("one"))[0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(f.driver.cancel(first.ticket()));
+        sink.entered.notified().await;
+        audit_process_stopped(&f).await;
+        assert_eq!(f.driver.active_count(), 1);
+        assert!(matches!(
+            runtime.execute(key("one"), input("must-not-start")).await,
+            Err(RuntimeError::Busy)
+        ));
+        assert_eq!(
+            f.journal()
+                .iter()
+                .filter(|row| row["sessionId"] == "one" && row["kind"] == "message.user")
+                .count(),
+            1
+        );
+        // A different session can acquire its own real question while the old
+        // session's IO remains blocked; cleanup must not use global Broker.drain.
+        let mut neighbor = runtime.execute(key("two"), input("permit")).await.unwrap();
+        neighbor.accepted().await.unwrap();
+        until(|| !runtime.list_permissions(Some("two")).is_empty()).await;
+        let neighbor_id = runtime.list_permissions(Some("two"))[0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            sink.status("two"),
+            pult_core::session_live::Status::BlockedPermission
+        );
+        drop(release);
+        sink.committed.notified().await;
+        if first.wait().await.is_err() {
+            f.driver.cancel(first.ticket());
+            first.wait().await.unwrap();
+        }
+        assert!(
+            runtime
+                .list_permissions(Some("two"))
+                .iter()
+                .any(|card| card["id"] == neighbor_id)
+        );
+        assert_eq!(
+            sink.status("two"),
+            pult_core::session_live::Status::BlockedPermission
+        );
+        let mut second = runtime.execute(key("one"), input("permit")).await.unwrap();
+        second.accepted().await.unwrap();
+        until(|| !runtime.list_permissions(Some("one")).is_empty()).await;
+        let new_id = runtime.list_permissions(Some("one"))[0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_ne!(new_id, old_id);
+        assert_eq!(
+            sink.status("one"),
+            pult_core::session_live::Status::BlockedPermission
+        );
+        eprintln!(
+            "AUDIT early_next=busy; neighbor_pending_through_old_drain=true; next_status={}",
+            sink.status("one").as_str()
+        );
+        assert!(f.driver.cancel(second.ticket()));
+        second.wait().await.unwrap();
+        assert!(
+            runtime
+                .list_permissions(Some("two"))
+                .iter()
+                .any(|card| card["id"] == neighbor_id)
+        );
+        assert!(f.driver.cancel(neighbor.ticket()));
+        neighbor.wait().await.unwrap();
+        runtime.shutdown().await.unwrap();
+        assert!(
+            f.logs()
+                .iter()
+                .all(|row| row["result"]["decision"] != "accept")
+        );
+    })
+    .await
+    .expect("audit watchdog");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn audit_codex_provider_terminal_drops_handler_but_still_joins_question_io() {
+    test_panic_guard();
+    tokio::time::timeout(WAIT, async {
+        let (f, sink) = audit_fixture();
+        let release = AuditRelease(sink.release.clone());
+        let (runtime, _) = f.runtime_with_sink(probe("US"), RuntimeConfig::default(), sink.clone());
+        audit_unique_native_ids(&f);
+        let mut turn = runtime
+            .execute(key("one"), input("permit-terminal"))
+            .await
+            .unwrap();
+        turn.accepted().await.unwrap();
+        until(|| !runtime.list_permissions(Some("one")).is_empty()).await;
+        std::fs::write(f.home.join("terminal"), "release actual provider terminal").unwrap();
+        sink.entered.notified().await;
+        audit_process_stopped(&f).await;
+        let released_early = matches!(
+            tokio::time::timeout(Duration::from_secs(1), turn.wait()).await,
+            Ok(Ok(_))
+        );
+        let active = f.driver.active_count();
+        drop(release);
+        sink.committed.notified().await;
+        if turn.wait().await.is_err() {
+            f.driver.cancel(turn.ticket());
+            turn.wait().await.unwrap();
+        }
+        runtime.shutdown().await.unwrap();
+        assert!(
+            !released_early,
+            "native terminal dropped question ownership before journal drain"
+        );
+        assert_eq!(active, 1);
+        assert!(
+            f.logs()
+                .iter()
+                .all(|row| row["result"]["decision"] != "accept")
+        );
+    })
+    .await
+    .expect("audit watchdog");
+}

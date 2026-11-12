@@ -206,7 +206,19 @@ pub struct ScopedResponder {
     permit: Option<ResponsePermit>,
     job: Arc<Job>,
 }
+/// Exact-ticket policy IO ownership, independent of native response/process
+/// lifetime. No RPC response authority escapes through this guard.
+pub(crate) struct PolicyIoGuard {
+    _check: CheckGuard,
+}
 impl ScopedResponder {
+    /// Acquire synchronously before spawning an owned approval task. Even a
+    /// retired/stopped native host must wait for this IO before Ticket closure.
+    pub(crate) fn retain_policy_io(&self) -> PolicyIoGuard {
+        PolicyIoGuard {
+            _check: CheckGuard::new(&self.job),
+        }
+    }
     pub async fn respond(
         mut self,
         answer: Result<Value, crate::codex_rpc::ResponseError>,
