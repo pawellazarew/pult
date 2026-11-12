@@ -5,6 +5,7 @@ pub mod claude_events;
 pub mod claude_host_services;
 pub mod claude_launch;
 pub mod claude_mcp;
+pub mod claude_runtime;
 pub mod claude_settings;
 pub mod claude_worker;
 pub mod codex_events;
