@@ -29,6 +29,7 @@ pub mod runtime_bootstrap;
 pub mod runtime_config;
 mod runtime_journal;
 mod session_api;
+pub mod session_create;
 pub mod session_live;
 mod session_memory;
 mod session_memory_api;
