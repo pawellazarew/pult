@@ -355,7 +355,10 @@ impl ClaudeRuntime {
                 tokio::pin!(changed);
                 changed.as_mut().enable();
                 {
-                    let entries = shared.state.lock().expect("Claude runtime");
+                    let mut entries = shared.state.lock().expect("Claude runtime");
+                    if reap_finished(&mut entries) {
+                        shared.changed.notify_waiters();
+                    }
                     if entries.is_empty() {
                         return Ok(());
                     }
@@ -774,6 +777,197 @@ async fn prepare(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Exact stale cache after real Driver retry, with no observer/busy poll.
+    /// No provider process is launched: Worker.close is a controlled receipt.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_reaps_finished_driver_retry_without_busy_or_watcher_poll() {
+        use crate::journal::EventStore;
+        use crate::registry::Record;
+        use crate::turn_driver::{DriverError, Options, Started, Worker};
+        use crate::turn_journal::JournalSink;
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct RetryWorker {
+            entered: Mutex<Option<oneshot::Sender<()>>>,
+            ready: Arc<AtomicBool>,
+        }
+        impl Worker for RetryWorker {
+            fn start(
+                &self,
+                _: Ticket,
+                _: TurnSnapshot,
+                _: String,
+            ) -> Task<Result<Started, WorkerError>> {
+                if let Some(send) = self.entered.lock().unwrap().take() {
+                    let _ = send.send(());
+                }
+                Box::pin(std::future::pending())
+            }
+            fn close(&self, _: Ticket) -> Task<Result<(), WorkerError>> {
+                let ready = self.ready.load(Ordering::Acquire);
+                Box::pin(async move {
+                    if ready {
+                        Ok(())
+                    } else {
+                        Err(WorkerError {
+                            code: "cleanup_unconfirmed".into(),
+                            message: "synthetic close proof unavailable".into(),
+                        })
+                    }
+                })
+            }
+        }
+        struct NeverProbe;
+        impl crate::network_guard::Probe for NeverProbe {
+            fn probe<'a>(
+                &'a self,
+                _: &'a str,
+                _: Option<&'a str>,
+                _: Duration,
+            ) -> crate::network_guard::ProbeFuture<'a> {
+                Box::pin(async { panic!("shutdown unit must not invoke network probe") })
+            }
+        }
+        crate::panic_guard::install();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let cwd = home.join("project");
+        std::fs::create_dir(&cwd).unwrap();
+        let key = SessionKey {
+            name: "unit".into(),
+            created_at: "2026-11-12T00:00:00Z".into(),
+        };
+        let mut journal = EventStore::open(&home.join("events")).unwrap();
+        let mut registry = Registry::open(&home, &mut journal).unwrap();
+        let mut record = Record::default();
+        for (field, value) in [
+            ("name", "unit"),
+            ("createdAt", key.created_at.as_str()),
+            ("provider", "claude"),
+            ("cwd", cwd.to_str().unwrap()),
+            ("approval", "ask"),
+        ] {
+            record.set_string(field, value);
+        }
+        let snapshot = TurnSnapshot::try_from(&record).unwrap();
+        registry.insert(record).unwrap();
+        let sink = Arc::new(JournalSink::new(Arc::new(Mutex::new(journal))).unwrap());
+        let driver = Arc::new(
+            Driver::new(
+                sink.clone(),
+                Arc::new(crate::redaction::redact_string),
+                Options {
+                    close_timeout: Duration::from_millis(200),
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
+        let runtime = ClaudeRuntime::new(
+            Dependencies {
+                home: home.clone(),
+                registry: Arc::new(Mutex::new(registry)),
+                consent: Arc::new(Mutex::new(ConsentStore::open(&home).unwrap())),
+                driver: driver.clone(),
+                sink,
+            },
+            TrustedCommand {
+                holder: "/fixture/holder".into(),
+                program: "/fixture/provider".into(),
+                prefix_args: vec![],
+            },
+            RuntimeConfig::default(),
+            [
+                ("HOME".into(), home.as_os_str().to_owned()),
+                ("PATH".into(), "/usr/bin:/bin".into()),
+            ]
+            .into_iter()
+            .collect(),
+            SettingsRoots {
+                child_home: home.clone(),
+                managed_directory: home.join("managed"),
+            },
+            Arc::new(NetworkGuard::new(Arc::new(NeverProbe))),
+            Arc::new(|_| panic!("shutdown unit must not construct MCP")),
+            Limits::default(),
+        )
+        .unwrap();
+        let ready = Arc::new(AtomicBool::new(false));
+        let (send, receive) = oneshot::channel();
+        let mut handle = driver
+            .start(
+                snapshot,
+                "unit".into(),
+                Arc::new(RetryWorker {
+                    entered: Mutex::new(Some(send)),
+                    ready: ready.clone(),
+                }),
+            )
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), receive)
+            .await
+            .unwrap()
+            .unwrap();
+        let ticket = handle.ticket().clone();
+        runtime.inner.shared.state.lock().unwrap().insert(
+            key.clone(),
+            Entry {
+                nonce: Arc::new(()),
+                cancel: watch::channel(false).0,
+                ticket: Some(ticket.clone()),
+                route: None,
+                quarantined: false,
+                progress: Some(handle.subscribe_progress()),
+            },
+        );
+        assert!(driver.cancel(&ticket));
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), handle.wait())
+                .await
+                .unwrap()
+                .unwrap_err(),
+            DriverError::CleanupUnconfirmed
+        );
+        // Model the actual observer's cached Quarantined value, then delay its
+        // next poll. Claude's observer continues after Q; it does not exit.
+        runtime
+            .inner
+            .shared
+            .state
+            .lock()
+            .unwrap()
+            .get_mut(&key)
+            .unwrap()
+            .quarantined = true;
+        ready.store(true, Ordering::Release);
+        assert!(driver.cancel(&ticket));
+        tokio::time::timeout(Duration::from_secs(5), handle.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(handle.progress(), Progress::Finished(_)));
+        assert_eq!(driver.active_count(), 0);
+        assert!(
+            runtime
+                .inner
+                .shared
+                .state
+                .lock()
+                .unwrap()
+                .get(&key)
+                .unwrap()
+                .quarantined
+        );
+        // Neither busy/reserve nor a progress-observer poll cleans this cache.
+        let result = tokio::time::timeout(Duration::from_secs(5), runtime.shutdown())
+            .await
+            .unwrap();
+        assert_eq!(result, Ok(()));
+        assert!(runtime.inner.shared.state.lock().unwrap().is_empty());
+    }
+
     #[test]
     fn finished_receiver_releases_capacity_without_waiting_for_watcher_poll() {
         let key = SessionKey {

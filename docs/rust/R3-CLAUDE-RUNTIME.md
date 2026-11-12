@@ -38,7 +38,12 @@ no-ops. Closing or dropping the controller closes its admission and cancels its
 preparing/active tickets, without closing the shared Driver, Broker or network
 guard. Preparation remains owned until blocking IO joins. Entries remain through
 Driver quarantine; shutdown returns `cleanup_unconfirmed` rather than releasing
-those slots. Repeating shutdown retries those exact tickets. The outer daemon
+those slots. Repeating shutdown retries those exact tickets. Shutdown also reaps exact
+`Progress::Finished` receipts before consulting cached quarantine flags, matching
+busy/admission checks. The progress observer continues after quarantine; this
+avoids a false `cleanup_unconfirmed` while that observer has not polled a later
+successful Driver retry. Quarantined or absent-ticket state alone is not cleanup
+proof. The outer daemon
 must retain its lease and drain its shared Broker/network probe owners separately.
 No claim is made that dropping a shared probe future proves its OS cleanup.
 
