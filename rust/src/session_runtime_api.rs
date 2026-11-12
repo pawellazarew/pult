@@ -440,7 +440,7 @@ pub(crate) async fn ordinary(
             "session incarnation changed before dispatch",
         ));
     }
-    if !matches!(provider.as_str(), "codex" | "claude") {
+    if !matches!(provider.as_str(), "codex" | "claude" | "zcode") {
         return Err(error("unsupported", "provider execution is unsupported"));
     }
     let checking = state.clone();
@@ -479,7 +479,7 @@ pub(crate) async fn ordinary(
     };
     let mut handle = pending.await.map_err(|e| {
         let message = if e.code() == "start_unknown" {
-            crate::owner_trust::UNCERTAIN_MESSAGE
+            runtime.uncertainty_message()
         } else {
             "turn was not accepted"
         };
@@ -714,6 +714,7 @@ pub(crate) mod tests {
             claude_asks: OnceLock::new(),
             permissions: OnceLock::new(),
             claude_runtime: OnceLock::new(),
+            zcode_runtime: OnceLock::new(),
             runtime_init: Mutex::new(()),
             consent: Mutex::new(None),
             live_sessions: Mutex::new(crate::session_live::Cache::new(65536).unwrap()),

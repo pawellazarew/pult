@@ -557,6 +557,7 @@ struct State {
     claude_asks: OnceLock<Arc<claude_ask::Backend>>,
     permissions: OnceLock<permission_broker::Broker>,
     claude_runtime: OnceLock<Arc<runtime_state::Claude>>,
+    zcode_runtime: OnceLock<Arc<runtime_state::Zcode>>,
     runtime_init: Mutex<()>,
     consent: Mutex<Option<runtime_state::Consent>>,
     live_sessions: Mutex<session_live::Cache>,
@@ -1130,7 +1131,7 @@ async fn connection(
                         continue;
                     }
                 }
-                json!({"version":VERSION,"protocol":PROTOCOL,"pid":std::process::id(),"startedAt":state.started_at,"uptimeMs":state.started.elapsed().as_millis(),"home":state.home,"sock":state.home.join("run/pultd.sock"),"clients":state.clients.load(Ordering::Relaxed),"subscriptions":state.subscriptions.load(Ordering::Relaxed),"lastEventId":state.last_event_id.load(Ordering::Acquire),"mode":"on-demand","journal":{"projectionDegraded":state.projection_degraded.load(Ordering::Relaxed),"executionUnavailable":runtime_state::unavailable(&state)},"registry":state.registry.try_lock().ok().map(|r|r.status()),"memory":memory_status(&state),"nativeRuntime":{"initialized":state.native_runtime.get().is_some()||state.claude_runtime.get().is_some(),"hosts":state.native_runtime.get().map_or(0, |runtime|runtime.host_count()),"activeTurns":state.driver.get().map_or(0, |driver|driver.active_count()),"providers":{"codex":{"initialized":state.native_runtime.get().is_some()},"claude":{"initialized":state.claude_runtime.get().is_some()}}},"capabilities":{"experimental":true,"supportedMethods":SUPPORTED,"partialMethods":PARTIAL}})
+                json!({"version":VERSION,"protocol":PROTOCOL,"pid":std::process::id(),"startedAt":state.started_at,"uptimeMs":state.started.elapsed().as_millis(),"home":state.home,"sock":state.home.join("run/pultd.sock"),"clients":state.clients.load(Ordering::Relaxed),"subscriptions":state.subscriptions.load(Ordering::Relaxed),"lastEventId":state.last_event_id.load(Ordering::Acquire),"mode":"on-demand","journal":{"projectionDegraded":state.projection_degraded.load(Ordering::Relaxed),"executionUnavailable":runtime_state::unavailable(&state)},"registry":state.registry.try_lock().ok().map(|r|r.status()),"memory":memory_status(&state),"nativeRuntime":{"initialized":state.native_runtime.get().is_some()||state.claude_runtime.get().is_some()||state.zcode_runtime.get().is_some(),"hosts":state.native_runtime.get().map_or(0, |runtime|runtime.host_count()),"activeTurns":state.driver.get().map_or(0, |driver|driver.active_count()),"providers":{"codex":{"initialized":state.native_runtime.get().is_some()},"claude":{"initialized":state.claude_runtime.get().is_some()},"zcode":{"initialized":state.zcode_runtime.get().is_some(),"blocked":state.zcode_runtime.get().is_some_and(|slot|slot.runtime.blocked())}}},"capabilities":{"experimental":true,"supportedMethods":SUPPORTED,"partialMethods":PARTIAL}})
             }
             "daemon.stop" => {
                 runtime_state::begin_shutdown(&state);
@@ -1340,6 +1341,7 @@ async fn serve_owned(home: PathBuf, mut cancellation: watch::Receiver<bool>) -> 
         claude_asks: OnceLock::new(),
         permissions: OnceLock::new(),
         claude_runtime: OnceLock::new(),
+        zcode_runtime: OnceLock::new(),
         runtime_init: Mutex::new(()),
         consent: Mutex::new(None),
         live_sessions: Mutex::new(live_sessions),
