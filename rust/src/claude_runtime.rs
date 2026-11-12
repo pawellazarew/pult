@@ -101,6 +101,7 @@ struct Entry {
     ticket: Option<Ticket>,
     route: Option<(Check, Environment)>,
     quarantined: bool,
+    progress: Option<watch::Receiver<Progress>>,
 }
 struct Shared {
     state: Mutex<HashMap<SessionKey, Entry>>,
@@ -280,12 +281,11 @@ impl ClaudeRuntime {
         Box::pin(async move { receiver.await.unwrap_or(Err(RuntimeError::Storage)) })
     }
     pub fn busy(&self, key: &SessionKey) -> bool {
-        self.inner
-            .shared
-            .state
-            .lock()
-            .expect("Claude runtime")
-            .contains_key(key)
+        let mut entries = self.inner.shared.state.lock().expect("Claude runtime");
+        if reap_finished(&mut entries) {
+            self.inner.shared.changed.notify_waiters();
+        }
+        entries.contains_key(key)
     }
     pub async fn wait_idle(&self, key: &SessionKey) {
         loop {
@@ -431,6 +431,18 @@ fn remove(shared: &Shared, key: &SessionKey, nonce: &Arc<()>) {
     drop(entries);
     shared.changed.notify_waiters();
 }
+// The progress owner can be runnable but not yet scheduled. A Driver Finished
+// value is cleanup proof; Quarantined or an absent active-ticket lookup is not.
+fn reap_finished(entries: &mut HashMap<SessionKey, Entry>) -> bool {
+    let before = entries.len();
+    entries.retain(|_, entry| {
+        !entry
+            .progress
+            .as_ref()
+            .is_some_and(|progress| matches!(*progress.borrow(), Progress::Finished(_)))
+    });
+    before != entries.len()
+}
 fn reserve(
     inner: &Inner,
     key: &SessionKey,
@@ -463,6 +475,9 @@ fn reserve(
     if *inner.shared.closed.borrow() {
         return Err(RuntimeError::Closed);
     }
+    if reap_finished(&mut entries) {
+        inner.shared.changed.notify_waiters();
+    }
     if entries.keys().any(|other| other.name == key.name)
         || inner.deps.driver.active_ticket(key).is_some()
     {
@@ -481,6 +496,7 @@ fn reserve(
             ticket: None,
             route: None,
             quarantined: false,
+            progress: None,
         },
     );
     Ok(Reservation {
@@ -711,6 +727,7 @@ async fn prepare(
         let entry = entries.get_mut(&key).expect("owned preparation");
         let conflict = entry.ticket.as_ref().is_some_and(|bound| bound != &ticket);
         entry.ticket = Some(ticket.clone());
+        entry.progress = Some(handle.subscribe_progress());
         conflict || *entry.cancel.borrow() || *inner.shared.closed.borrow()
     };
     if cancel_now {
@@ -726,12 +743,24 @@ async fn prepare(
                 remove(&shared, &key, &nonce);
                 return;
             }
-            if let Some(entry) = shared.state.lock().expect("Claude runtime").get_mut(&key) {
+            if let Some(entry) = shared
+                .state
+                .lock()
+                .expect("Claude runtime")
+                .get_mut(&key)
+                .filter(|entry| Arc::ptr_eq(&entry.nonce, &nonce))
+            {
                 entry.quarantined = matches!(current, Progress::Quarantined(_));
             }
             shared.changed.notify_waiters();
             if progress.changed().await.is_err() {
-                if let Some(entry) = shared.state.lock().expect("Claude runtime").get_mut(&key) {
+                if let Some(entry) = shared
+                    .state
+                    .lock()
+                    .expect("Claude runtime")
+                    .get_mut(&key)
+                    .filter(|entry| Arc::ptr_eq(&entry.nonce, &nonce))
+                {
                     entry.quarantined = true;
                 }
                 shared.changed.notify_waiters();
@@ -740,4 +769,41 @@ async fn prepare(
         }
     });
     Ok(handle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn finished_receiver_releases_capacity_without_waiting_for_watcher_poll() {
+        let key = SessionKey {
+            name: "private-fixture".into(),
+            created_at: "2026-11-12T00:00:00Z".into(),
+        };
+        let (sender, progress) = watch::channel(Progress::Starting);
+        let mut entries = HashMap::from([(
+            key.clone(),
+            Entry {
+                nonce: Arc::new(()),
+                cancel: watch::channel(false).0,
+                ticket: None,
+                route: None,
+                quarantined: false,
+                progress: Some(progress),
+            },
+        )]);
+        assert!(!reap_finished(&mut entries));
+        sender.send_replace(Progress::Quarantined(
+            crate::turn_coordinator::Outcome::Interrupted,
+        ));
+        assert!(!reap_finished(&mut entries));
+        assert!(entries.contains_key(&key));
+        // No await or watcher poll can happen between terminal publication and
+        // this synchronous admission cleanup; this is the original handoff gap.
+        sender.send_replace(Progress::Finished(Err(
+            crate::turn_driver::DriverError::Cancelled,
+        )));
+        assert!(reap_finished(&mut entries));
+        assert!(!entries.contains_key(&key));
+    }
 }
