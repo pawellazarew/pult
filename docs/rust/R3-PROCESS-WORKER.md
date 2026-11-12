@@ -67,3 +67,12 @@ Three real-process tests cover malformed/oversized recovery followed by large
 Unicode replies and natural exit 7, and a 2 MiB roundtrip through a transferred
 receiver, plus cleanup with a full or dropped receiver. A fragmented-reader test verifies oversized drain and truncated
 EOF recovery. The previous process lifecycle tests remain required.
+
+
+`Process::output_finished_cleanly()` records acknowledged stdout's normal EOF
+path plus a successful reader-task join after `stop()`. Receiver closure alone,
+reader panic/abort, dropped consumer before EOF and unacknowledged startup do not
+qualify. Recovering profiles may still have discarded invalid frames. This is
+not consumption/delivery, native acceptance or PID-cleanup authority: a recovery
+caller must separately drain natural EOF **before** stop, obtain successful stop
+and any required complete stderr proof, and retain all provider-specific gates.

@@ -9,7 +9,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -280,12 +280,28 @@ pub struct Exit {
     pub stderr_bytes: u64,
 }
 
+/// Parser EOF and task completion are separate facts: a reader can panic or
+/// be aborted after EOF was observed. Neither receiver closure nor one flag is
+/// enough to certify the stdout reader's outcome.
+#[derive(Default)]
+struct OutputCompletion {
+    eof: AtomicBool,
+    joined: AtomicBool,
+}
+impl OutputCompletion {
+    fn finished_cleanly(&self) -> bool {
+        self.eof.load(Ordering::Acquire) && self.joined.load(Ordering::Acquire)
+    }
+}
+
 pub struct Process {
     child: Child,
     stop_signal: StopSignal,
     stdin: Option<ChildStdin>,
     output: mpsc::Receiver<Result<Value>>,
     output_taken: bool,
+    output_completion: Arc<OutputCompletion>,
+    stdout_reader_index: Option<usize>,
     readers: Vec<Option<JoinHandle<()>>>,
     stderr_bytes: Arc<AtomicU64>,
     private_stderr: Option<Arc<Mutex<StderrTail>>>,
@@ -524,7 +540,7 @@ impl Process {
                     .is_some_and(|pid| pid > 0 && pid <= i32::MAX as u64),
             "invalid worker holder acknowledgement"
         );
-        let mut reader = self
+        let reader = self
             .startup_reader
             .take()
             .ok_or_else(|| anyhow::anyhow!("worker acknowledgement is unavailable"))?;
@@ -534,38 +550,17 @@ impl Process {
             .ok_or_else(|| anyhow::anyhow!("worker acknowledgement is unavailable"))?;
         let framing = self.framing;
         let discarded = self.discarded.clone();
-        self.readers.push(Some(tokio::spawn(async move {
-            loop {
-                let value = if framing.recover {
-                    match recovering_line(&mut reader, framing.max_wire_bytes).await {
-                        Ok(Line::Bytes(line)) => match serde_json::from_slice::<Value>(&line) {
-                            Ok(value) if value.is_object() => Ok(value),
-                            _ => {
-                                discarded.fetch_add(1, Ordering::Relaxed);
-                                continue;
-                            }
-                        },
-                        Ok(Line::Discarded) => {
-                            discarded.fetch_add(1, Ordering::Relaxed);
-                            continue;
-                        }
-                        Ok(Line::Eof) => break,
-                        Err(error) => Err(error),
-                    }
-                } else {
-                    match bounded_line(&mut reader).await {
-                        Ok(Some(line)) => serde_json::from_slice(&line)
-                            .map_err(|_| anyhow::anyhow!("invalid subprocess JSON")),
-                        Ok(None) => break,
-                        Err(error) => Err(error),
-                    }
-                };
-                let failed = value.is_err();
-                if sender.send(value).await.is_err() || failed {
-                    break;
-                }
-            }
-        })));
+        let completion = self.output_completion.clone();
+        self.stdout_reader_index = Some(self.readers.len());
+        self.readers.push(Some(tokio::spawn(collect_output(
+            reader,
+            sender,
+            framing,
+            discarded,
+            completion,
+            #[cfg(test)]
+            None,
+        ))));
         self.ready = true;
         Ok(())
     }
@@ -607,6 +602,8 @@ impl Process {
             stdin: None,
             output,
             output_taken: false,
+            output_completion: Arc::default(),
+            stdout_reader_index: None,
             readers: Vec::new(),
             stderr_bytes: stderr_bytes.clone(),
             private_stderr: match stderr {
@@ -655,6 +652,15 @@ impl Process {
         }
         self.stderr_taken = true;
         Ok(PrivateStderr(tail.bytes.drain(..).collect()))
+    }
+
+    /// True only after the acknowledged stdout reader observed its normal EOF
+    /// path with a live receiver and stop() successfully joined that reader.
+    /// Recovering profiles may have discarded invalid frames before EOF. This
+    /// proves neither output consumption/delivery nor native acceptance or PID
+    /// cleanup: callers must retain those independent observations/proofs.
+    pub fn output_finished_cleanly(&self) -> bool {
+        self.ready && self.exit.is_some() && self.output_completion.finished_cleanly()
     }
 
     pub fn discarded_frames(&self) -> u64 {
@@ -749,16 +755,14 @@ impl Process {
         self.output.close();
         for (index, reader) in self.readers.iter_mut().enumerate() {
             if let Some(task) = reader.as_mut() {
-                let joined = match tokio::time::timeout(Duration::from_secs(1), &mut *task).await {
-                    Ok(result) => result.is_ok(),
-                    Err(_) => {
-                        task.abort();
-                        let _ = task.await;
-                        false
-                    }
-                };
+                let joined = join_reader(task).await;
                 if index == 0 {
                     self.stderr_joined = joined;
+                }
+                if self.stdout_reader_index == Some(index) {
+                    self.output_completion
+                        .joined
+                        .store(joined, Ordering::Release);
                 }
                 *reader = None;
             }
@@ -788,6 +792,78 @@ impl Drop for Process {
         self.term_holder();
         for task in self.readers.iter().flatten() {
             task.abort();
+        }
+    }
+}
+
+async fn join_reader(task: &mut JoinHandle<()>) -> bool {
+    match tokio::time::timeout(Duration::from_secs(1), &mut *task).await {
+        Ok(result) => result.is_ok(),
+        Err(_) => {
+            task.abort();
+            let _ = task.await;
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+enum OutputEofHook {
+    Panic,
+    Pause(Arc<tokio::sync::Notify>),
+}
+async fn collect_output<R: AsyncBufRead + Unpin>(
+    mut reader: R,
+    sender: mpsc::Sender<Result<Value>>,
+    framing: Framing,
+    discarded: Arc<AtomicU64>,
+    completion: Arc<OutputCompletion>,
+    #[cfg(test)] hook: Option<OutputEofHook>,
+) {
+    let eof = loop {
+        let value = if framing.recover {
+            match recovering_line(&mut reader, framing.max_wire_bytes).await {
+                Ok(Line::Bytes(line)) => match serde_json::from_slice::<Value>(&line) {
+                    Ok(value) if value.is_object() => Ok(value),
+                    _ => {
+                        discarded.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+                },
+                Ok(Line::Discarded) => {
+                    discarded.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                Ok(Line::Eof) => break true,
+                Err(error) => Err(error),
+            }
+        } else {
+            match bounded_line(&mut reader).await {
+                Ok(Some(line)) => serde_json::from_slice(&line)
+                    .map_err(|_| anyhow::anyhow!("invalid subprocess JSON")),
+                Ok(None) => break true,
+                Err(error) => Err(error),
+            }
+        };
+        let failed = value.is_err();
+        if sender.send(value).await.is_err() || failed {
+            break false;
+        }
+    };
+    // A dropped/closed consumer cannot manufacture output completion when EOF
+    // arrives later (including after stop). A later consumer drop does not
+    // erase EOF already witnessed while it was live.
+    if eof && !sender.is_closed() {
+        completion.eof.store(true, Ordering::Release);
+        #[cfg(test)]
+        if let Some(hook) = hook {
+            match hook {
+                OutputEofHook::Panic => panic!("synthetic stdout reader panic after EOF"),
+                OutputEofHook::Pause(entered) => {
+                    entered.notify_one();
+                    std::future::pending::<()>().await;
+                }
+            }
         }
     }
 }
@@ -925,6 +1001,70 @@ mod tests {
         ) -> std::task::Poll<std::io::Result<()>> {
             std::task::Poll::Ready(Err(std::io::Error::other("PRIVATE_READ_FAILURE")))
         }
+    }
+    #[tokio::test]
+    async fn output_completion_requires_successful_join_even_after_eof_reader_panic() {
+        crate::panic_guard::install();
+        let completion = Arc::new(OutputCompletion::default());
+        let (sender, mut output) = mpsc::channel(1);
+        let mut task = tokio::spawn(collect_output(
+            BufReader::new(&b"{}\n"[..]),
+            sender,
+            Framing::strict(),
+            Arc::new(AtomicU64::new(0)),
+            completion.clone(),
+            Some(OutputEofHook::Panic),
+        ));
+        assert!(output.recv().await.unwrap().is_ok());
+        assert!(output.recv().await.is_none());
+        assert!(completion.eof.load(Ordering::Acquire));
+        let joined = join_reader(&mut task).await;
+        completion.joined.store(joined, Ordering::Release);
+        assert!(!joined);
+        assert!(!completion.finished_cleanly());
+    }
+    #[tokio::test]
+    async fn output_completion_requires_successful_join_even_after_eof_reader_abort() {
+        let completion = Arc::new(OutputCompletion::default());
+        let (sender, mut output) = mpsc::channel(1);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let mut task = tokio::spawn(collect_output(
+            BufReader::new(&b"{}\n"[..]),
+            sender,
+            Framing::strict(),
+            Arc::new(AtomicU64::new(0)),
+            completion.clone(),
+            Some(OutputEofHook::Pause(entered.clone())),
+        ));
+        assert!(output.recv().await.unwrap().is_ok());
+        entered.notified().await;
+        assert!(completion.eof.load(Ordering::Acquire));
+        task.abort();
+        let joined = join_reader(&mut task).await;
+        completion.joined.store(joined, Ordering::Release);
+        assert!(output.recv().await.is_none());
+        assert!(!joined);
+        assert!(!completion.finished_cleanly());
+    }
+    #[tokio::test]
+    async fn output_reader_read_error_never_records_eof() {
+        let completion = Arc::new(OutputCompletion::default());
+        let (sender, mut output) = mpsc::channel(1);
+        let mut task = tokio::spawn(collect_output(
+            BufReader::new(ErrorReader),
+            sender,
+            Framing::strict(),
+            Arc::new(AtomicU64::new(0)),
+            completion.clone(),
+            None,
+        ));
+        assert!(output.recv().await.unwrap().is_err());
+        assert!(output.recv().await.is_none());
+        let joined = join_reader(&mut task).await;
+        completion.joined.store(joined, Ordering::Release);
+        assert!(joined);
+        assert!(!completion.eof.load(Ordering::Acquire));
+        assert!(!completion.finished_cleanly());
     }
     #[tokio::test]
     async fn private_stderr_read_error_is_not_eof_evidence() {
