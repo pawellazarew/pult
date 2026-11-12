@@ -27,7 +27,7 @@ checked against question IDs/options and whitespace rules.
 exact rule amendments, questions, clipping, unsupported methods and a real
 broker redaction crossing. Legacy schemas are checked-in 0.163 fixtures.
 The known MCP tool-approval form requires `_meta.codex_approval_kind` equal
-to `mcp_tool_call`, an empty form schema and matching trusted pending-call
+to `mcp_tool_call`, no required form inputs and matching trusted pending-call
 metadata when supplied. MCP grants are once-only; broader scopes are rejected.
 `pult_browser` code execution/evaluation tools are declined before Broker.
 Native replies use fixed accept/decline vocabulary and never replace native
