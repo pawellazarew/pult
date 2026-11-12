@@ -24,13 +24,13 @@ async fn accept(f: &Fixture, handle: &mut Handle) {
         );
         if let Ok(raw) = std::fs::read_to_string(f.home.join("events/journal.jsonl")) {
             for line in raw.lines() {
-                if let Ok(row) = serde_json::from_str::<Value>(line) {
-                    if row["kind"] == "provider.blocked" || row["kind"] == "status.changed" {
-                        eprintln!(
-                            "fixture status: kind={} status={} code={}",
-                            row["kind"], row["data"]["status"], row["data"]["code"]
-                        );
-                    }
+                if let Ok(row) = serde_json::from_str::<Value>(line)
+                    && (row["kind"] == "provider.blocked" || row["kind"] == "status.changed")
+                {
+                    eprintln!(
+                        "fixture status: kind={} status={} code={}",
+                        row["kind"], row["data"]["status"], row["data"]["code"]
+                    );
                 }
             }
         }
@@ -460,11 +460,11 @@ async fn daemon_shutdown_reconciles_ticket_after_blocked_driver_handoff() {
         Driver::new(
             f.sink.clone(),
             Arc::new(move |text| {
-                if text == "held-admission" {
-                    if let Some(receive) = receive.lock().unwrap().take() {
-                        signal.notify_one();
-                        receive.recv_timeout(Duration::from_secs(12)).unwrap();
-                    }
+                if text == "held-admission"
+                    && let Some(receive) = receive.lock().unwrap().take()
+                {
+                    signal.notify_one();
+                    receive.recv_timeout(Duration::from_secs(12)).unwrap();
                 }
                 crate::redaction::redact_string(text)
             }),
