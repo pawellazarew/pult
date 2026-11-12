@@ -68,6 +68,74 @@ async fn claude_input_expansion_does_not_expand_output_or_drop_valid_tail() {
     stop(&mut process).await;
 }
 
+#[tokio::test]
+async fn stop_signal_interrupts_an_owned_blocked_write_and_expires_before_reap() {
+    use pult_core::worker_process::Framing;
+    let home = tempfile::tempdir().unwrap();
+    let mut process =
+        Process::spawn_with_framing(launch(home.path(), "blocked-input"), Framing::claude())
+            .await
+            .unwrap();
+    assert!(receive(&mut process).await["provider"].as_u64().is_some());
+    let signal = process.stop_signal();
+    let frame = Framing::claude()
+        .encode(&json!({"payload":"x".repeat(2 * 1024 * 1024)}))
+        .unwrap();
+    let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let writing = entered.clone();
+    let send = tokio::spawn(async move {
+        writing.notify_one();
+        let result = process.send_prepared(frame).await;
+        (process, result)
+    });
+    entered.notified().await;
+    assert!(
+        signal.request_stop(),
+        "owned write lost its independent stop control"
+    );
+    let (mut process, result) = tokio::time::timeout(DEADLINE, send).await.unwrap().unwrap();
+    assert!(result.is_err());
+    stop(&mut process).await;
+    assert!(
+        !signal.request_stop(),
+        "retained stop handle still owns a reaped PID"
+    );
+    drop(process);
+    assert!(!signal.request_stop());
+}
+
+#[tokio::test]
+async fn prepared_input_cannot_widen_an_existing_process_profile() {
+    use pult_core::worker_process::Framing;
+    let home = tempfile::tempdir().unwrap();
+    let mut process = spawn(home.path(), "echo").await;
+    assert_eq!(receive(&mut process).await["ready"], true);
+    let frame = Framing::claude()
+        .encode(&json!({"payload":"x".repeat(2 * 1024 * 1024)}))
+        .unwrap();
+    assert!(process.send_prepared(frame).await.is_err());
+    let frame = Framing::strict()
+        .encode(&json!({"payload":"still-valid"}))
+        .unwrap();
+    process.send_prepared(frame).await.unwrap();
+    assert_eq!(
+        receive(&mut process).await["echo"]["payload"],
+        "still-valid"
+    );
+    stop(&mut process).await;
+}
+
+#[test]
+fn prepared_input_diagnostics_expose_only_size() {
+    use pult_core::worker_process::Framing;
+    let frame = Framing::claude()
+        .encode(&json!({"payload":"PRIVATE_PREPARED_PAYLOAD".repeat(200)}))
+        .unwrap();
+    let diagnostic = format!("{frame:?}");
+    assert!(diagnostic.len() < 64 && diagnostic.contains("bytes"));
+    assert!(!diagnostic.contains("PRIVATE_PREPARED_PAYLOAD"));
+}
+
 fn python() -> PathBuf {
     let primary = PathBuf::from("/usr/bin/python3");
     if primary.is_file() {

@@ -395,6 +395,17 @@ impl Driver {
             .active(ticket)
             .map(|turn| turn.snapshot().clone())
     }
+    /// Host-only receipt observation for the exact reserved execution.
+    /// This does not grant dispatch or memory authority.
+    pub(crate) fn progress_for_ticket(&self, ticket: &Ticket) -> Option<watch::Receiver<Progress>> {
+        self.inner
+            .state
+            .lock()
+            .expect("driver state mutex")
+            .jobs
+            .get(ticket)
+            .map(|control| control.progress.subscribe())
+    }
     pub async fn wait_for_storage_failure(&self) {
         loop {
             let changed = self.inner.changed.notified();

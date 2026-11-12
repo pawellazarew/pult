@@ -8,7 +8,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicU64, Ordering},
 };
 use std::time::Duration;
@@ -47,6 +47,56 @@ impl Framing {
             max_input_bytes: crate::claude_launch::MAX_INPUT_BYTES + 1,
             recover: true,
         }
+    }
+    /// Prepare outside event-loop/admission locks when input can be large.
+    pub fn encode(self, value: &Value) -> Result<PreparedInput> {
+        let mut bytes = serde_json::to_vec(value).context("worker request serialization failed")?;
+        ensure!(
+            bytes.len() < self.max_input_bytes,
+            "worker request exceeds framing limit"
+        );
+        bytes.push(b'\n');
+        Ok(PreparedInput(bytes))
+    }
+}
+
+/// A single encoded NDJSON frame; no public constructor or raw diagnostic data.
+pub struct PreparedInput(Vec<u8>);
+impl std::fmt::Debug for PreparedInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedInput")
+            .field("bytes", &self.0.len())
+            .finish()
+    }
+}
+
+/// Best-effort control, never cleanup proof. The owner invalidates it before
+/// reaping/dropping Child, so a retained handle cannot signal a reused PID.
+#[derive(Clone)]
+pub struct StopSignal(Arc<Mutex<Option<u32>>>);
+impl StopSignal {
+    pub fn request_stop(&self) -> bool {
+        let Ok(pid) = self.0.lock() else {
+            return false;
+        };
+        pid.is_some_and(|pid| {
+            nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGTERM,
+            )
+            .is_ok()
+        })
+    }
+    fn invalidate(&self) {
+        self.0
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take();
+    }
+}
+impl std::fmt::Debug for StopSignal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StopSignal").finish_non_exhaustive()
     }
 }
 
@@ -131,6 +181,7 @@ pub struct Exit {
 
 pub struct Process {
     child: Child,
+    stop_signal: StopSignal,
     stdin: Option<ChildStdin>,
     output: mpsc::Receiver<Result<Value>>,
     output_taken: bool,
@@ -240,8 +291,12 @@ impl Process {
         let stderr_bytes = Arc::new(AtomicU64::new(0));
         // The guard exists before any await: cancelling the startup handshake
         // sends TERM to the holder, whose handler precedes provider launch.
+        let stop_signal = StopSignal(Arc::new(Mutex::new(
+            child.id().filter(|pid| *pid > 1 && *pid <= i32::MAX as u32),
+        )));
         let mut process = Self {
             child,
+            stop_signal,
             stdin: None,
             output,
             output_taken: false,
@@ -340,17 +395,28 @@ impl Process {
         self.child.id()
     }
 
+    pub fn stop_signal(&self) -> StopSignal {
+        self.stop_signal.clone()
+    }
+
     pub async fn send(&mut self, value: &Value) -> Result<()> {
         ensure!(
             !self.write_failed && self.exit.is_none(),
             "worker input is unavailable"
         );
-        let mut bytes = serde_json::to_vec(value).context("worker request serialization failed")?;
+        let frame = self.framing.encode(value)?;
+        self.send_prepared(frame).await
+    }
+
+    pub async fn send_prepared(&mut self, frame: PreparedInput) -> Result<()> {
         ensure!(
-            bytes.len() < self.framing.max_input_bytes,
+            !self.write_failed && self.exit.is_none(),
+            "worker input is unavailable"
+        );
+        ensure!(
+            frame.0.len() <= self.framing.max_input_bytes,
             "worker request exceeds framing limit"
         );
-        bytes.push(b'\n');
         let mut write = WriteGuard {
             stdin: &mut self.stdin,
             failed: &mut self.write_failed,
@@ -358,7 +424,7 @@ impl Process {
         };
         let input = write.stdin.as_mut().context("worker input is closed")?;
         let result = tokio::time::timeout(WRITE_TIMEOUT, async {
-            input.write_all(&bytes).await?;
+            input.write_all(&frame.0).await?;
             input.flush().await
         })
         .await;
@@ -387,6 +453,7 @@ impl Process {
     }
 
     pub async fn stop(&mut self) -> Result<Exit> {
+        self.stop_signal.invalidate();
         if let Some(exit) = &self.exit {
             return Ok(exit.clone());
         }
@@ -439,6 +506,7 @@ impl Process {
 }
 impl Drop for Process {
     fn drop(&mut self) {
+        self.stop_signal.invalidate();
         self.stdin.take();
         self.term_holder();
         for task in self.readers.iter().flatten() {
