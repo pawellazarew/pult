@@ -388,7 +388,7 @@ fn retries_reset_on_content_and_storm_signal_is_bounded_and_redacted() {
     };
     assert_eq!(*retries, 3);
     assert_eq!(last_error["API_TOKEN"], "<redacted>");
-    assert_eq!(last_error["message"], "<email>");
+    assert_eq!(last_error["message"], "a@host.test");
     assert!(batch.terminal.is_none());
 }
 #[test]
@@ -401,7 +401,7 @@ fn account_block_phrase_only_matters_inside_error_envelopes() {
     error["is_api_error_message"] = json!(true);
     let blocked = push(&mut n, &c, error);
     assert!(
-        matches!(&blocked.signals[0],Signal::ProviderBlocked {text} if text.ends_with("<email>"))
+        matches!(&blocked.signals[0],Signal::ProviderBlocked {text} if text.ends_with("a@host.test"))
     );
     let (mut n, c) = setup(Limits::default());
     let mut successful = result(phrase);

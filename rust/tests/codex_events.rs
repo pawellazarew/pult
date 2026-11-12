@@ -761,7 +761,7 @@ fn production_redactor_preserves_typed_usage_counters() {
     assert_eq!(terminal.drafts[0].data["durationMs"], 100);
 }
 #[test]
-fn production_redactor_preserves_structural_ids_and_model_but_masks_message_text() {
+fn production_redactor_preserves_ids_model_and_email_but_masks_tokens() {
     let opaque = "0123456789abcdef0123456789abcdef";
     let (mut normalizer, callback) = setup(Limits::default(), Box::new(ProductionRedactor));
     let batch = push(
@@ -771,7 +771,7 @@ fn production_redactor_preserves_structural_ids_and_model_but_masks_message_text
         json!({"itemId":opaque,"delta":"person@example.test sk-proj-abcdefghijklmnopqrstuvwx"}),
     );
     assert_eq!(batch.drafts[0].data["itemId"], opaque);
-    assert_eq!(batch.drafts[0].data["text"], "<email> <token>");
+    assert_eq!(batch.drafts[0].data["text"], "person@example.test <token>");
     push(
         &mut normalizer,
         &callback,
