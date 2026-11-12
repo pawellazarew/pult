@@ -436,6 +436,17 @@ describe('журнал демона', () => {
     assert.deepEqual(redact(new Error(`provider echoed ${key}`)), { name: 'Error', message: 'provider echoed <token>' })
   })
 
+  it('ключи разрешений pa_ скрыты в тексте и именах полей', () => {
+    for (const prefix of ['pa_', 'PA_', 'pA_']) {
+      const key = prefix + 'a'.repeat(64)
+      assert.equal(redactString(`owner@example.com prefix_${key}_tail`), 'owner@example.com prefix_<token>_tail')
+      assert.equal(redactString(prefix + 'a'.repeat(63)), prefix + 'a'.repeat(63))
+      assert.deepEqual(redact({ [key]: 'private', text: key, email: 'owner@example.com' }), {
+        '<token>': '<redacted>', text: '<token>', email: 'owner@example.com',
+      })
+    }
+  })
+
   it('redact не ломает обычные значения', () => {
     assert.equal(redactString('всё хорошо'), 'всё хорошо')
     assert.deepEqual(redact({ n: 1, s: 'ok', arr: [1, 'two'] }), { n: 1, s: 'ok', arr: [1, 'two'] })

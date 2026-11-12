@@ -33,7 +33,8 @@ async fn scenario(mode: &str) {
     let server=server.map(|listener|tokio::spawn(async move {
         let (socket,_)=listener.accept().await.unwrap();let (input,mut output)=socket.into_split();let mut input=BufReader::new(input);
         let hello:Value=serde_json::from_slice(&pult_core::read_line(&mut input).await.unwrap().unwrap()).unwrap();
-        assert_eq!(hello["ask"],KEY);assert!(hello.get("token").is_none());assert_eq!(hello["client"],"mcp-ask");
+        let expected_key = if mode_owned=="prefixed-allow" {format!("pa_{KEY}")} else {KEY.into()};
+        assert_eq!(hello["ask"],expected_key);assert!(hello.get("token").is_none());assert_eq!(hello["client"],"mcp-ask");
         if mode_owned=="rejected-key"{output.write_all(b"{\"type\":\"error\",\"code\":\"bad_token\",\"message\":\"DO_NOT_REFLECT_SERVER_ERROR\"}\n").await.unwrap();return;}
         output.write_all(b"{\"type\":\"hello_ok\",\"protocol\":1}\n").await.unwrap();
         let request:Value=serde_json::from_slice(&pult_core::read_line(&mut input).await.unwrap().unwrap()).unwrap();
@@ -59,7 +60,14 @@ async fn scenario(mode: &str) {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if mode != "missing-key" {
-        cmd.env("PULT_ASK_KEY", KEY);
+        cmd.env(
+            "PULT_ASK_KEY",
+            if mode == "prefixed-allow" {
+                format!("pa_{KEY}")
+            } else {
+                KEY.into()
+            },
+        );
     }
     let mut child = cmd.spawn().unwrap();
     let mut input = child.stdin.take().unwrap();
@@ -94,7 +102,7 @@ async fn scenario(mode: &str) {
     let reply = frame(&mut output).await;
     let text = reply["result"]["content"][0]["text"].as_str().unwrap();
     let decision: Value = serde_json::from_str(text).unwrap();
-    if mode == "allow" {
+    if matches!(mode, "allow" | "prefixed-allow") {
         assert_eq!(decision["behavior"], "allow");
         assert_eq!(
             decision["updatedInput"]["command"],
@@ -139,6 +147,10 @@ macro_rules! case {
 case!(
     permission_cli_uses_only_scoped_key_and_preserves_approved_input,
     "allow"
+);
+case!(
+    permission_cli_accepts_exact_turn_purpose_key,
+    "prefixed-allow"
 );
 case!(
     missing_key_denies_without_owner_token_fallback,

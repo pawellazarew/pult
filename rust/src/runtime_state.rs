@@ -91,6 +91,9 @@ pub(crate) async fn instance(state: &Arc<State>) -> Result<Arc<codex_runtime::Co
                 )
             })
             .clone();
+        state
+            .claude_asks
+            .get_or_init(|| crate::claude_ask::Backend::new(Arc::downgrade(&state)));
         let runtime = codex_runtime::CodexRuntime::new_with_memory(
             codex_runtime::Dependencies {
                 home: state.home.clone(),

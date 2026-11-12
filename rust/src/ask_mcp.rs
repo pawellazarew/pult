@@ -25,10 +25,10 @@ impl Client {
                 .session
                 .as_deref()
                 .is_some_and(crate::session_model::is_name)
-            && self
-                .key
-                .as_deref()
-                .is_some_and(|k| k.len() == 64 && k.bytes().all(|b| b.is_ascii_hexdigit()))
+            && self.key.as_deref().is_some_and(|k| {
+                let raw = k.strip_prefix("pa_").unwrap_or(k);
+                raw.len() == 64 && raw.bytes().all(|b| b.is_ascii_hexdigit())
+            })
     }
     async fn ask(&self, args: Value) -> Option<Value> {
         if !self.valid() {

@@ -271,3 +271,18 @@ fn private_question_config_reserves_pult_without_owner_authority() {
     .unwrap_err();
     assert!(!error.to_string().contains("PRIVATE_"));
 }
+
+#[test]
+fn question_config_accepts_scoped_purpose_key_without_an_owner_token() {
+    let key = format!("pa_{}", "a".repeat(64));
+    let config = claude_launch::mcp_ask_config(
+        "/opt/pult/pultd-rust",
+        "/private/pult-fixture",
+        "chat",
+        &key,
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(config["mcpServers"]["pult"]["env"]["PULT_ASK_KEY"], key);
+    assert!(!config.to_string().contains("run/token"));
+}

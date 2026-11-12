@@ -310,9 +310,10 @@ pub fn mcp_ask_config(
         !session.is_empty() && session.len() <= 128 && !session.chars().any(char::is_control),
         "invalid Claude MCP session"
     );
+    let raw_key = ask_key.strip_prefix("pa_").unwrap_or(ask_key);
     ensure!(
-        ask_key.len() == 64
-            && ask_key
+        raw_key.len() == 64
+            && raw_key
                 .bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
         "invalid Claude question credential"

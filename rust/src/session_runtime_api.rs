@@ -723,6 +723,7 @@ pub(crate) mod tests {
             session_commands: Arc::default(),
             native_runtime: OnceLock::new(),
             memory_turns: OnceLock::new(),
+            claude_asks: OnceLock::new(),
             runtime_init: Mutex::new(()),
             consent: Mutex::new(None),
             live_sessions: Mutex::new(crate::session_live::Cache::new(65536).unwrap()),

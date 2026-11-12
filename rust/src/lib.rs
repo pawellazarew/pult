@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 pub mod ask_mcp;
+pub mod claude_ask;
 pub mod claude_events;
 pub mod claude_host_services;
 pub mod claude_launch;
@@ -531,6 +532,7 @@ struct State {
     execution_admission: Mutex<()>,
     native_runtime: OnceLock<Arc<codex_runtime::CodexRuntime>>,
     memory_turns: OnceLock<Arc<memory_turn::Backend>>,
+    claude_asks: OnceLock<Arc<claude_ask::Backend>>,
     runtime_init: Mutex<()>,
     consent: Mutex<Option<runtime_state::Consent>>,
     live_sessions: Mutex<session_live::Cache>,
@@ -695,6 +697,19 @@ async fn connection(
         write_value(&mut output, &json!({"type":"error","code":"bad_json"})).await?;
         return Ok(());
     }
+    let ask_given = hello.get("ask");
+    let ask_lease = if ask_given.is_some()
+        && hello.get("memory").is_none()
+        && hello.get("memoryTurn").is_none()
+        && hello.get("token").is_none()
+        && hello.get("runtime").is_none()
+    {
+        ask_given
+            .and_then(Value::as_str)
+            .and_then(|key| state.claude_asks.get()?.lookup(key))
+    } else {
+        None
+    };
     let memory_given = hello.get("memory");
     let memory_turn_given = hello.get("memoryTurn");
     let memory_turn_lease = if memory_turn_given.is_some()
@@ -731,7 +746,11 @@ async fn connection(
             && hello.get("runtime").is_none()
             && given.len() == state.token.len()
             && bool::from(given.as_bytes().ct_eq(state.token.as_bytes()));
-        if !owner_valid && memory_lease.is_none() && memory_turn_lease.is_none() {
+        if !owner_valid
+            && memory_lease.is_none()
+            && memory_turn_lease.is_none()
+            && ask_lease.is_none()
+        {
             Some("bad_token")
         } else if hello
             .get("protocol")
@@ -746,18 +765,21 @@ async fn connection(
         write_value(&mut output, &json!({"type":"error","code":code})).await?;
         return Ok(());
     }
-    let supported: &[&str] = if memory_turn_lease.is_some() {
+    let supported: &[&str] = if ask_lease.is_some() {
+        &claude_ask::METHODS
+    } else if memory_turn_lease.is_some() {
         &memory_turn::METHODS
     } else if memory_lease.is_some() {
         &session_memory_api::READ_METHODS
     } else {
         &SUPPORTED
     };
-    let partial: &[&str] = if memory_lease.is_some() || memory_turn_lease.is_some() {
-        &[]
-    } else {
-        &PARTIAL
-    };
+    let partial: &[&str] =
+        if memory_lease.is_some() || memory_turn_lease.is_some() || ask_lease.is_some() {
+            &[]
+        } else {
+            &PARTIAL
+        };
     let client_kind = if hello["client"].as_str() == Some("shell") {
         host_policy::ClientKind::Shell
     } else {
@@ -803,6 +825,49 @@ async fn connection(
                 break;
             }
         };
+        if let Some(lease) = &ask_lease {
+            // Purpose-specific role: no owner fallback, resolve or subscriptions.
+            let request: Value = match serde_json::from_slice(&bytes) {
+                Ok(request) => request,
+                Err(_) => {
+                    writer
+                        .response(&json!({"type":"error","code":"bad_json"}))
+                        .await?;
+                    break;
+                }
+            };
+            let id = request
+                .get("id")
+                .cloned()
+                .filter(|id| id.is_string() || id.is_number())
+                .unwrap_or(Value::Null);
+            if request["method"] != "perm.request" {
+                writer.response(&json!({"id":id,"error":{"code":"forbidden","message":"permission credential only permits perm.request"}})).await?;
+                continue;
+            }
+            while responses.try_join_next().is_some() {}
+            if id.is_null() || !request["params"].is_object() {
+                writer.response(&json!({"id":id,"error":{"code":"invalid_params","message":"request needs id and object params"}})).await?;
+                continue;
+            }
+            if responses.len() >= 16 {
+                writer.response(&json!({"id":id,"error":{"code":"capacity","message":"too many permission requests"}})).await?;
+                continue;
+            }
+            let Some(backend) = state.claude_asks.get() else {
+                break;
+            };
+            let reply = backend.call(lease.clone(), request["params"].clone());
+            let writer = writer.clone();
+            responses.spawn(async move {
+                let response = match reply.await {
+                    Ok(result) => json!({"id":id,"result":result}),
+                    Err(_) => json!({"id":id,"error":{"code":"forbidden","message":"permission turn is unavailable"}}),
+                };
+                let _ = writer.response(&response).await;
+            });
+            continue;
+        }
         if let Some(lease) = &memory_turn_lease {
             // This purpose-specific role never falls through to owner/core RPC.
             let response = if let Some((id, command)) = memory_api::parse(&bytes) {
@@ -993,6 +1058,10 @@ async fn connection(
             continue;
         }
         let method = request["method"].as_str().unwrap();
+        if method == "perm.request" {
+            writer.response(&json!({"id":id,"error":{"code":"forbidden","message":"permission questions require a scoped ask credential"}})).await?;
+            continue;
+        }
         if PARTIAL.contains(&method) {
             while responses.try_join_next().is_some() {}
             if responses.len() >= 16 {
@@ -1244,6 +1313,7 @@ async fn serve_owned(home: PathBuf, mut cancellation: watch::Receiver<bool>) -> 
         execution_admission: Mutex::new(()),
         native_runtime: OnceLock::new(),
         memory_turns: OnceLock::new(),
+        claude_asks: OnceLock::new(),
         runtime_init: Mutex::new(()),
         consent: Mutex::new(None),
         live_sessions: Mutex::new(live_sessions),

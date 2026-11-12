@@ -12,7 +12,7 @@ const SECRET_NAME_RE = /(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|COOKIE
 
 // Purpose keys can be embedded in text or spelled with upper-case hex/prefix.
 // A boundary after '_' would miss them because '_' is an ASCII word character.
-const MEMORY_TURN_RE = /mt_[0-9a-f]{64}/gi
+const MEMORY_TURN_RE = /(?:mt|pa)_[0-9a-f]{64}/gi
 
 const VALUE_RULES: Array<{ re: RegExp; to: string }> = [
   { re: MEMORY_TURN_RE, to: '<token>' },
