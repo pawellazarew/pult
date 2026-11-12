@@ -19,5 +19,5 @@ async fn session_commands_interoperate_with_real_node_client_and_fake_provider()
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("session runtime interop passed 7"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("session runtime interop passed 13"));
 }

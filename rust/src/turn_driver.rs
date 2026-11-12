@@ -447,6 +447,18 @@ impl Driver {
             .expect("driver state mutex")
             .storage_failed
     }
+    /// Waits for this exact ticket's final cleanup proof, never a status event.
+    pub async fn wait_ticket(&self, ticket: &Ticket) {
+        loop {
+            let changed = self.inner.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if !self.inner.state.lock().expect("driver state mutex").jobs.contains_key(ticket) {
+                return;
+            }
+            changed.await;
+        }
+    }
     pub fn result(&self, ticket: &Ticket) -> Option<FinishedTurn> {
         self.inner
             .state
@@ -565,7 +577,12 @@ fn input_draft(
     input: &Input,
 ) -> Result<Value, DriverError> {
     let metadata = &input.metadata;
-    if input.text.len() > 65536
+    if input.text.len()
+        > if input.metadata.queue_item_id.is_some() {
+            200_000
+        } else {
+            65536
+        }
         || (input.text.trim_matches(js_whitespace).is_empty() && metadata.attachments.is_empty())
         || metadata.attachments.len() > MAX_PROMPT_ATTACHMENTS
         || metadata
@@ -600,7 +617,14 @@ fn input_draft(
         }
     }
     let public_text = redact(inner, &input.text)
-        .filter(|s| s.len() <= 65536)
+        .filter(|s| {
+            s.len()
+                <= if metadata.queue_item_id.is_some() {
+                    200_000
+                } else {
+                    65536
+                }
+        })
         .ok_or(DriverError::Invalid)?;
     let mut data = json!({"text":public_text});
     if !metadata.attachments.is_empty() {

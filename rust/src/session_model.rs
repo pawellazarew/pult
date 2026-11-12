@@ -703,6 +703,20 @@ pub fn parse(raw: &RawValue) -> Result<Vec<Record>> {
                 rec.set_raw("queue", to_raw_value(&queue)?);
             }
         }
+        if let Some(marker) = fields.get("queueDispatch")
+            && let Some(marker_fields) = object(marker)?
+            && marker_fields
+                .get("id")
+                .and_then(units)
+                .is_some_and(|v| !v.is_empty() && v.len() <= 1024)
+            && marker_fields
+                .get("at")
+                .and_then(units)
+                .is_some_and(|v| v.len() <= 1024)
+        {
+            rec.set_raw("queueDispatch", marker.to_owned());
+            rec.set_bool("queuePaused", true);
+        }
         if let Some(approval) = fields.get("approval")
             && !eq(Some(approval), "ask")
         {
@@ -907,7 +921,20 @@ fn recover_in_place(
             if remaining.is_empty() {
                 rec.remove("queue");
                 rec.remove("queuePaused");
+                rec.remove("queueDispatch");
             } else {
+                if let Some(marker) = rec.get("queueDispatch") {
+                    let marker = Fields::parse(marker)?;
+                    let survives = remaining.iter().any(|v| {
+                        Fields::parse(v).is_ok_and(|f| {
+                            f.get("id").and_then(units) == marker.get("id").and_then(units)
+                                && f.get("at").and_then(units) == marker.get("at").and_then(units)
+                        })
+                    });
+                    if !survives {
+                        rec.remove("queueDispatch");
+                    }
+                }
                 rec.set_raw("queue", to_raw_value(&remaining)?);
                 if !yes(rec.get("queuePaused")) {
                     rec.set_bool("queuePaused", true);
@@ -922,13 +949,25 @@ fn recover_in_place(
 pub fn public_record(record: &Record) -> Result<Raw> {
     let mut record = record.clone();
     if let Some(queue) = record.get("queue") {
+        let marker = record.get("queueDispatch").map(Fields::parse).transpose()?;
         let mut previews = Vec::new();
         for item in array_values(queue)? {
             let mut fields = Fields::parse(&item)?;
-            let text = fields
+            let mut text = fields
                 .get("text")
                 .and_then(units)
                 .context("normalized queue text")?;
+            if marker.as_ref().is_some_and(|marker| {
+                marker.get("id").and_then(units) == fields.get("id").and_then(units)
+                    && marker.get("at").and_then(units) == fields.get("at").and_then(units)
+            }) {
+                let mut warning = "[Delivery unknown; Send now may duplicate] "
+                    .encode_utf16()
+                    .collect::<Vec<_>>();
+                warning.extend(text);
+                text = warning;
+                fields.set("text", RawValue::from_string(encode_string(&text))?);
+            }
             if title_length(&text) > 200 {
                 let mut preview = first_points(&text, 199);
                 preview.push(0x2026);

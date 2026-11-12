@@ -779,3 +779,109 @@ case!(
         rt.shutdown().await.unwrap();
     }
 );
+
+case!(
+    steering_is_exact_active_ticket_no_fallback_or_fake_receipt,
+    {
+        let f = Fixture::new();
+        let (runtime, _) = f.runtime(probe("US"), RuntimeConfig::default());
+        let mut one = runtime
+            .execute(key("one"), input("hold one"))
+            .await
+            .unwrap();
+        let accepted = one.accepted().await.unwrap();
+        let mut two = runtime
+            .execute(key("two"), input("hold two"))
+            .await
+            .unwrap();
+        two.accepted().await.unwrap();
+        let before = f
+            .journal()
+            .iter()
+            .filter(|e| e["kind"] == "message.user")
+            .count();
+        assert_eq!(
+            runtime
+                .steer(&key("one"), input("reject-steer"))
+                .await
+                .unwrap_err()
+                .code,
+            "invalid_params"
+        );
+        assert_eq!(
+            f.journal()
+                .iter()
+                .filter(|e| e["kind"] == "message.user")
+                .count(),
+            before
+        );
+        assert_eq!(
+            runtime.steer(&key("one"), input("clarify")).await.unwrap(),
+            accepted.turn_id
+        );
+        let sent = f
+            .logs()
+            .into_iter()
+            .find(|e| e["method"] == "turn/steer")
+            .unwrap();
+        assert_eq!(sent["params"]["expectedTurnId"], "native-turn-2");
+        assert_eq!(
+            f.logs()
+                .iter()
+                .filter(|e| e["method"] == "turn/start")
+                .count(),
+            2
+        );
+        runtime.stop(&key("one"), None).unwrap();
+        one.wait().await.unwrap();
+        assert!(runtime.steer(&key("one"), input("late")).await.is_err());
+        assert!(f.driver.active_ticket(&key("two")).is_some());
+        runtime.stop(&key("two"), None).unwrap();
+        two.wait().await.unwrap();
+        runtime.shutdown().await.unwrap();
+    }
+);
+
+case!(
+    unknown_steer_is_not_receipted_or_replayed_and_other_session_survives,
+    {
+        let f = Fixture::new();
+        let (runtime, _) = f.runtime(probe("US"), RuntimeConfig::default());
+        let mut one = runtime
+            .execute(key("one"), input("hold one"))
+            .await
+            .unwrap();
+        one.accepted().await.unwrap();
+        let mut two = runtime
+            .execute(key("two"), input("hold two"))
+            .await
+            .unwrap();
+        two.accepted().await.unwrap();
+        assert_eq!(
+            runtime
+                .steer(&key("one"), input("unknown-steer"))
+                .await
+                .unwrap_err()
+                .code,
+            "send_unknown"
+        );
+        assert_eq!(
+            f.logs()
+                .iter()
+                .filter(|e| e["method"] == "turn/steer")
+                .count(),
+            1
+        );
+        assert!(
+            !f.journal()
+                .iter()
+                .any(|e| e["kind"] == "message.user" && e["data"]["text"] == "unknown-steer")
+        );
+        assert!(f.driver.active_ticket(&key("two")).is_some());
+        runtime.stop(&key("one"), None).unwrap();
+        one.wait().await.unwrap();
+        runtime.stop(&key("two"), None).unwrap();
+        two.wait().await.unwrap();
+        runtime.shutdown().await.unwrap();
+    }
+);

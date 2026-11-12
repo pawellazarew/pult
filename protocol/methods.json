@@ -244,7 +244,7 @@
       "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Partial Rust ordinary Codex prompt dispatch with durable user receipts. Queue, interrupt, steer, Claude, ZCode and background flows remain unsupported.",
+      "description": "Owner ordinary Codex input, queue/FIFO lifecycle, interrupt-and-send and same-turn steering. Queue identity metadata stays host-owned; asynchronous question-answer protocol remains unsupported.",
       "paramsSchema": {
         "type": "object",
         "properties": {
@@ -340,42 +340,119 @@
     {
       "name": "agent.queue.move",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.queue.move.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Durable ordinary-message queue lifecycle; selected mid-turn sending uses Codex steering. Unknown delivery remains paused and requires explicit resolution.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "to": {
+            "type": "integer"
+          },
+          "hold": {
+            "type": "boolean"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
     },
     {
       "name": "agent.queue.remove",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.queue.remove.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Durable ordinary-message queue lifecycle; selected mid-turn sending uses Codex steering. Unknown delivery remains paused and requires explicit resolution.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
     },
     {
       "name": "agent.queue.resume",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.queue.resume.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Durable ordinary-message queue lifecycle; selected mid-turn sending uses Codex steering. Unknown delivery remains paused and requires explicit resolution.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
     },
     {
       "name": "agent.queue.send",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.queue.send.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Durable ordinary-message queue lifecycle; selected mid-turn sending uses Codex steering. Unknown delivery remains paused and requires explicit resolution.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
     },
     {
       "name": "agent.read",

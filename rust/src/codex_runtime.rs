@@ -282,8 +282,16 @@ impl CodexRuntime {
     /// Starts bounded owned preparation immediately. Dropping this caller's
     /// future does not abandon an authorized ordinary turn or owned probe IO.
     pub fn execute(&self, key: SessionKey, input: Input) -> Task<Result<Handle, RuntimeError>> {
+        self.execute_impl(key, input, false)
+    }
+    fn execute_impl(
+        &self,
+        key: SessionKey,
+        input: Input,
+        queued: bool,
+    ) -> Task<Result<Handle, RuntimeError>> {
         let inner = self.inner.clone();
-        let admission = reserve(&inner, &key, &input);
+        let admission = reserve(&inner, &key, &input, queued);
         let (sender, receiver) = oneshot::channel();
         match admission {
             Ok(guard) => {
@@ -300,6 +308,55 @@ impl CodexRuntime {
         }
         Box::pin(async move { receiver.await.unwrap_or(Err(RuntimeError::Closed)) })
     }
+    /// Trusted queue execution; queue identity comes from the owner registry,
+    /// never arbitrary prompt JSON. Uses the same owned admission as ordinary IO.
+    pub(crate) fn execute_queued(
+        &self,
+        key: SessionKey,
+        input: Input,
+    ) -> Task<Result<Handle, RuntimeError>> {
+        self.execute_impl(key, input, true)
+    }
+    pub fn steer(
+        &self,
+        key: &SessionKey,
+        input: Input,
+    ) -> Task<Result<String, crate::turn_driver::WorkerError>> {
+        self.steer_guarded(key, input, None)
+    }
+    pub(crate) fn steer_guarded(
+        &self,
+        key: &SessionKey,
+        input: Input,
+        cancel: Option<watch::Receiver<bool>>,
+    ) -> Task<Result<String, crate::turn_driver::WorkerError>> {
+        let inner = &self.inner;
+        let ticket = inner.deps.driver.active_ticket(key);
+        let selection = ticket.and_then(|ticket| {
+            let snapshot = inner.deps.driver.snapshot_for_dispatch(&ticket)?;
+            let state = inner.shared.state.lock().expect("Codex runtime");
+            let lease = state.leases.get(key)?;
+            let host = state
+                .pool
+                .iter()
+                .find(|entry| entry.key == lease.key)?
+                .host
+                .clone();
+            Some((ticket, snapshot, host))
+        });
+        if inner.broker.list(Some(&key.name)).is_empty()
+            && !*inner.shared.closed.borrow()
+            && let Some((ticket, snapshot, host)) = selection
+        {
+            return host.steer(ticket, snapshot, inner.deps.home.clone(), input, cancel);
+        }
+        Box::pin(async {
+            Err(crate::turn_driver::WorkerError {
+                code: "invalid_params".into(),
+                message: "no steerable Codex turn".into(),
+            })
+        })
+    }
     pub fn list_permissions(&self, session: Option<&str>) -> Vec<Value> {
         self.inner.broker.list(session)
     }
@@ -310,6 +367,32 @@ impl CodexRuntime {
         by: &str,
     ) -> Result<Resolution, permission_broker::BrokerError> {
         self.inner.broker.resolve(id, decision, by)
+    }
+    pub(crate) fn busy(&self, key: &SessionKey) -> bool {
+        self.inner.deps.driver.active_ticket(key).is_some()
+            || self
+                .inner
+                .shared
+                .state
+                .lock()
+                .expect("Codex runtime")
+                .preparing
+                .contains_key(key)
+    }
+    pub(crate) async fn wait_idle(&self, key: &SessionKey) {
+        loop {
+            let changed = self.inner.shared.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if !self.busy(key) {
+                return;
+            }
+            if let Some(ticket) = self.inner.deps.driver.active_ticket(key) {
+                tokio::select! {_=self.inner.deps.driver.wait_ticket(&ticket)=>{},_=changed=>{}}
+            } else {
+                changed.await;
+            }
+        }
     }
     pub fn stop(
         &self,
@@ -402,8 +485,13 @@ impl Drop for Reservation {
         self.shared.changed.notify_waiters();
     }
 }
-fn reserve(inner: &Inner, key: &SessionKey, input: &Input) -> Result<Reservation, RuntimeError> {
-    if input.text.len() > 65536
+fn reserve(
+    inner: &Inner,
+    key: &SessionKey,
+    input: &Input,
+    queued: bool,
+) -> Result<Reservation, RuntimeError> {
+    if input.text.len() > if queued { 200_000 } else { 65536 }
         || (input.text.chars().all(js_space) && input.metadata.attachments.is_empty())
         || input.metadata.attachments.len() > crate::prompt_attachments::MAX_PROMPT_ATTACHMENTS
         || input
@@ -415,8 +503,8 @@ fn reserve(inner: &Inner, key: &SessionKey, input: &Input) -> Result<Reservation
         return Err(RuntimeError::Invalid);
     }
     if input.metadata.question_id.is_some()
-        || input.metadata.queue_item_id.is_some()
-        || input.metadata.queue_item_at.is_some()
+        || (!queued
+            && (input.metadata.queue_item_id.is_some() || input.metadata.queue_item_at.is_some()))
     {
         return Err(RuntimeError::Unsupported);
     }

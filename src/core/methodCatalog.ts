@@ -247,7 +247,7 @@ export const RPC_CATALOG = {
       "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Partial Rust ordinary Codex prompt dispatch with durable user receipts. Queue, interrupt, steer, Claude, ZCode and background flows remain unsupported.",
+      "description": "Owner ordinary Codex input, queue/FIFO lifecycle, interrupt-and-send and same-turn steering. Queue identity metadata stays host-owned; asynchronous question-answer protocol remains unsupported.",
       "paramsSchema": {
         "type": "object",
         "properties": {
@@ -343,42 +343,119 @@ export const RPC_CATALOG = {
     {
       "name": "agent.queue.move",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.queue.move.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Durable ordinary-message queue lifecycle; selected mid-turn sending uses Codex steering. Unknown delivery remains paused and requires explicit resolution.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "to": {
+            "type": "integer"
+          },
+          "hold": {
+            "type": "boolean"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
     },
     {
       "name": "agent.queue.remove",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.queue.remove.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Durable ordinary-message queue lifecycle; selected mid-turn sending uses Codex steering. Unknown delivery remains paused and requires explicit resolution.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
     },
     {
       "name": "agent.queue.resume",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.queue.resume.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Durable ordinary-message queue lifecycle; selected mid-turn sending uses Codex steering. Unknown delivery remains paused and requires explicit resolution.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
     },
     {
       "name": "agent.queue.send",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.queue.send.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Durable ordinary-message queue lifecycle; selected mid-turn sending uses Codex steering. Unknown delivery remains paused and requires explicit resolution.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
     },
     {
       "name": "agent.read",
@@ -3299,11 +3376,15 @@ export interface RustFoundationResults {
   "protocol.catalog": { "catalogVersion": 1; "protocolVersion": 1; "methods": Array<{ "name": string; "node": "implemented" | "reserved" | "extension"; "rust": "implemented" | "partial" | "unported"; "access": "owner" | "ask" | "owner-or-runtime" | "owner-shell" | "owner-or-memory"; "testOnly": boolean; "description": string; "paramsSchema": { [key: string]: unknown } | null; "resultSchema": { [key: string]: unknown } | null }> }
 }
 
-export type RustPartialMethod = "agent.list" | "agent.prompt" | "agent.start" | "agent.stop" | "perm.list" | "perm.resolve"
+export type RustPartialMethod = "agent.list" | "agent.prompt" | "agent.queue.move" | "agent.queue.remove" | "agent.queue.resume" | "agent.queue.send" | "agent.start" | "agent.stop" | "perm.list" | "perm.resolve"
 
 export interface RustPartialParams {
   "agent.list": Record<string, never>
   "agent.prompt": { "name": string; "text": string; "attachments"?: Array<{ "path": string; "name": string; "mime": string; "bytes": number; "kind": "file" | "directory" }>; "queue"?: false; "interrupt"?: false; "steer"?: false }
+  "agent.queue.move": { "name": string; "id": string; "to"?: number; "hold"?: boolean; "text"?: string }
+  "agent.queue.remove": { "name": string; "id": string }
+  "agent.queue.resume": { "name": string }
+  "agent.queue.send": { "name": string; "id": string }
   "agent.start": { "kind"?: "claude" | "codex" | "zcode"; "name"?: string; "cwd"?: string; "scope"?: "project" | "general"; "title"?: string; "model"?: string; "effort"?: string; "serviceTier"?: "default" | "fast"; "approval"?: "read-only" | "ask" | "workspace" | "full"; "confirm"?: boolean; "consentRev"?: number; "grant"?: "cli-once"; "mode"?: "turn" | "warm"; "browser"?: false | null }
   "agent.stop": { "name": string; "turnId"?: string }
   "perm.list": { "name"?: string }
@@ -3313,6 +3394,10 @@ export interface RustPartialParams {
 export interface RustPartialResults {
   "agent.list": { "sessions": Array<{ "name": string; "provider": string; "cwd": string; "mode": string; "createdAt": string; "lastStatus": string; "lastEventId": number; "status": "cold" | "idle" | "working" | "blocked_permission" | "blocked_question" | "limited" | "interrupted" | "failed" | "done"; "pendingPermissions": number; "liveApproval": "read-only" | "ask" | "workspace" | "full" | "inherit" | null; [key: string]: unknown }> }
   "agent.prompt": { "turnId": string }
+  "agent.queue.move": { [key: string]: unknown }
+  "agent.queue.remove": { [key: string]: unknown }
+  "agent.queue.resume": { [key: string]: unknown }
+  "agent.queue.send": { [key: string]: unknown }
   "agent.start": { "name": string; "provider": string; "cwd": string; "mode": string; "createdAt": string; "lastStatus": string; "lastEventId": number; [key: string]: unknown }
   "agent.stop": { "stopped": boolean }
   "perm.list": { "pending": Array<{ [key: string]: unknown }> }
