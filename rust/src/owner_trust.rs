@@ -161,6 +161,9 @@ impl OwnerTrust {
         if self.provider != Provider::Claude && record.get("claudeReservedSessionId").is_some() {
             return Err(OwnerError::Uncertain);
         }
+        if self.provider != Provider::Zcode && record.get("zcodePendingInput").is_some() {
+            return Err(OwnerError::Uncertain);
+        }
         if self.provider == Provider::Codex && yes(record, "forkOnResume") {
             return Err(OwnerError::UnsupportedFork);
         }

@@ -65,6 +65,7 @@ pub mod turn_snapshot;
 pub mod worker_env;
 pub mod worker_process;
 pub mod zcode_events;
+pub mod zcode_host_services;
 pub mod zcode_launch;
 
 use anyhow::{Context, Result, bail, ensure};
