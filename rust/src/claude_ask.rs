@@ -435,17 +435,18 @@ impl Backend {
         if *cancelled.borrow() || tokio::time::Instant::now() >= expires {
             return Ok(deny());
         }
-        let runtime = state.native_runtime.get().ok_or_else(denied)?;
-        let mut question = runtime
-            .request_memory_permission(PermissionRequest {
+        let mut question = crate::permission_state::request(
+            &state,
+            PermissionRequest {
                 session_id: control.context.session.name.clone(),
                 tool_name: tool,
                 tool_use_id,
                 input,
                 offers: Offers::default(),
                 concealed: false,
-            })
-            .map_err(|_| denied())?;
+            },
+        )
+        .map_err(|_| denied())?;
         let decision = {
             let decision = question.decision();
             tokio::pin!(decision);

@@ -33,6 +33,7 @@ pub mod network_guard;
 mod owner_trust;
 pub mod panic_guard;
 pub mod permission_broker;
+mod permission_state;
 pub mod prompt_attachments;
 mod read_api;
 pub mod redaction;
@@ -533,6 +534,7 @@ struct State {
     native_runtime: OnceLock<Arc<codex_runtime::CodexRuntime>>,
     memory_turns: OnceLock<Arc<memory_turn::Backend>>,
     claude_asks: OnceLock<Arc<claude_ask::Backend>>,
+    permissions: OnceLock<permission_broker::Broker>,
     runtime_init: Mutex<()>,
     consent: Mutex<Option<runtime_state::Consent>>,
     live_sessions: Mutex<session_live::Cache>,
@@ -1314,6 +1316,7 @@ async fn serve_owned(home: PathBuf, mut cancellation: watch::Receiver<bool>) -> 
         native_runtime: OnceLock::new(),
         memory_turns: OnceLock::new(),
         claude_asks: OnceLock::new(),
+        permissions: OnceLock::new(),
         runtime_init: Mutex::new(()),
         consent: Mutex::new(None),
         live_sessions: Mutex::new(live_sessions),

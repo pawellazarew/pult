@@ -487,15 +487,6 @@ impl CodexRuntime {
     pub fn list_permissions(&self, session: Option<&str>) -> Vec<Value> {
         self.inner.broker.list(session)
     }
-    pub(crate) fn request_memory_permission(
-        &self,
-        request: permission_broker::PermissionRequest,
-    ) -> Result<permission_broker::RequestHandle, permission_broker::BrokerError> {
-        if *self.inner.shared.closed.borrow() || self.inner.deps.driver.storage_failed() {
-            return Err(permission_broker::BrokerError::StorageUnavailable);
-        }
-        self.inner.broker.request(request)
-    }
     pub fn resolve_permission(
         &self,
         id: &str,
