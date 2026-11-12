@@ -153,6 +153,9 @@ pub(crate) fn begin_shutdown(state: &State) {
     if let Some(slot) = state.claude_runtime.get() {
         drop(slot.runtime.shutdown());
     }
+    if let Some(slot) = state.zcode_runtime.get() {
+        drop(slot.runtime.shutdown());
+    }
     if let Some(runtime) = state.native_runtime.get() {
         drop(runtime.shutdown());
     }
@@ -331,6 +334,89 @@ pub(crate) async fn claude_instance(
     .await
     .map_err(|_| anyhow!("Claude runtime initialization failed"))?
 }
+/// ZCode keeps its selected probe alive through every preparation and process
+/// join. Initializing it never discovers a different provider or account.
+pub(crate) struct Zcode {
+    pub(crate) runtime: Arc<crate::zcode_runtime::ZcodeRuntime>,
+    curl: Arc<crate::network_guard::CurlProbe>,
+}
+pub(crate) async fn zcode_instance(
+    state: &Arc<State>,
+) -> Result<Arc<crate::zcode_runtime::ZcodeRuntime>> {
+    if *state.stop.borrow() || unavailable(state) {
+        bail!("native execution is unavailable");
+    }
+    if let Some(slot) = state.zcode_runtime.get() {
+        return Ok(slot.runtime.clone());
+    }
+    crate::permission_state::instance(state).await?;
+    let state = state.clone();
+    let handle = tokio::runtime::Handle::current();
+    let tracked = state.host_jobs.track();
+    tokio::task::spawn_blocking(move || {
+        let _tracked = tracked;
+        let _runtime = handle.enter();
+        let _init = state
+            .runtime_init
+            .lock()
+            .map_err(|_| anyhow!("runtime initialization unavailable"))?;
+        if *state.stop.borrow() || unavailable(&state) {
+            bail!("native execution is unavailable");
+        }
+        if let Some(slot) = state.zcode_runtime.get() {
+            return Ok(slot.runtime.clone());
+        }
+        let parent = std::env::vars_os().collect();
+        let current =
+            std::env::current_exe().map_err(|_| anyhow!("daemon executable unavailable"))?;
+        let bootstrap = runtime_bootstrap::load_zcode(&state.home, &current, &parent)?;
+        let curl = Arc::new(
+            crate::network_guard::CurlProbe::with_program(&bootstrap.curl, &bootstrap.parent)
+                .map_err(|_| anyhow!("network probe unavailable"))?,
+        );
+        let guard = Arc::new(crate::network_guard::NetworkGuard::new(curl.clone()));
+        let runtime = Arc::new(
+            crate::zcode_runtime::ZcodeRuntime::new(
+                crate::zcode_runtime::Dependencies {
+                    home: state.home.clone(),
+                    registry: state.registry.clone(),
+                    consent: consent(&state)?,
+                    driver: state
+                        .driver
+                        .get()
+                        .ok_or_else(|| anyhow!("execution driver unavailable"))?
+                        .clone(),
+                    sink: state.execution_sink(),
+                },
+                crate::zcode_runtime::TrustedCommand {
+                    holder: bootstrap.holder,
+                    program: bootstrap.zcode,
+                    prefix_args: bootstrap.prefix_args,
+                },
+                bootstrap.config,
+                bootstrap.parent,
+                bootstrap.extra_env,
+                guard,
+                Default::default(),
+            )
+            .map_err(|_| anyhow!("ZCode runtime configuration unavailable"))?,
+        );
+        state
+            .zcode_runtime
+            .set(Arc::new(Zcode {
+                runtime: runtime.clone(),
+                curl,
+            }))
+            .map_err(|_| anyhow!("ZCode runtime already initialized"))?;
+        if *state.stop.borrow() || unavailable(&state) {
+            drop(runtime.shutdown());
+            bail!("daemon is stopping");
+        }
+        Ok(runtime)
+    })
+    .await
+    .map_err(|_| anyhow!("ZCode runtime initialization failed"))?
+}
 /// Provider selection is read under the registry mutex in owned blocking work;
 /// the controller repeats full identity/path/policy checks before dispatch.
 pub(crate) async fn for_key(
@@ -368,6 +454,9 @@ pub(crate) async fn for_key(
         "claude" => Ok(crate::provider_runtime::Runtime::Claude(
             claude_instance(state).await?,
         )),
+        "zcode" => Ok(crate::provider_runtime::Runtime::Zcode(
+            zcode_instance(state).await?,
+        )),
         _ => bail!("provider execution is unsupported"),
     }
 }
@@ -378,6 +467,11 @@ fn existing(state: &State) -> Vec<crate::provider_runtime::Runtime> {
     }
     if let Some(slot) = state.claude_runtime.get() {
         runtimes.push(crate::provider_runtime::Runtime::Claude(
+            slot.runtime.clone(),
+        ));
+    }
+    if let Some(slot) = state.zcode_runtime.get() {
+        runtimes.push(crate::provider_runtime::Runtime::Zcode(
             slot.runtime.clone(),
         ));
     }
@@ -414,10 +508,17 @@ pub(crate) fn stop_name(state: &State, name: &str) -> Result<bool, crate::provid
     }
     Ok(stopped)
 }
-pub(crate) async fn shutdown_claude(state: &State) {
+pub(crate) async fn shutdown_providers(state: &State) {
     if let Some(slot) = state.claude_runtime.get() {
         while slot.runtime.shutdown().await.is_err() {
             eprintln!("Claude cleanup is unconfirmed; daemon ownership retained");
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        slot.curl.shutdown().await;
+    }
+    if let Some(slot) = state.zcode_runtime.get() {
+        while slot.runtime.shutdown().await.is_err() {
+            eprintln!("ZCode cleanup is unconfirmed; daemon ownership retained");
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
         slot.curl.shutdown().await;

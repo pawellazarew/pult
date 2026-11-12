@@ -167,6 +167,8 @@ fn paused(rec: &Record) -> bool {
 }
 fn uncertain(rec: &Record) -> bool {
     rec.get("queueDispatch").is_some()
+        || rec.get("claudeReservedSessionId").is_some()
+        || rec.get("zcodePendingInput").is_some()
 }
 fn save(rec: &mut Record, q: &[Item]) -> anyhow::Result<()> {
     if q.is_empty() {
@@ -448,7 +450,7 @@ pub(crate) async fn prompt(
     })
     .await?;
     revoked(&token)?;
-    if !matches!(provider.as_str(), "codex" | "claude") && params["steer"] != true {
+    if !matches!(provider.as_str(), "codex" | "claude" | "zcode") && params["steer"] != true {
         return Err(api::error(
             "unsupported",
             "provider queue execution is unsupported",
@@ -610,7 +612,7 @@ pub(crate) async fn request(
         }
         if c.sending.get(&key).is_some_and(|id|params["id"]==*id){return Err(api::error("busy","queued message is being sent"));}
         if method=="agent.queue.resume" {
-            if !matches!(provider.as_str(),"codex"|"claude"){return Err(api::error("unsupported","provider queue execution is unsupported"));}
+            if !matches!(provider.as_str(),"codex"|"claude"|"zcode"){return Err(api::error("unsupported","provider queue execution is unsupported"));}
             if uncertain(&rec){return Err(api::error("send_unknown","previous delivery is unknown; Send now may duplicate it — explicitly Send now after cleanup, edit or remove the message"));}
             if q.first().is_some_and(|v|!v.native_safe()){return Err(api::error("invalid_params","legacy head contains unsupported Unicode; edit before resuming"));}
             let rec=update(reg,&key,|r|{r.remove("queuePaused");Ok(())})?;return Ok((queue_state(&rec)?,key,provider));
@@ -672,13 +674,16 @@ async fn selected(
             }
         })?;
         let key = api::key(&rec)?;
-        if !matches!(rec.scalar("provider").as_deref(), Some("codex" | "claude")) {
+        if !matches!(
+            rec.scalar("provider").as_deref(),
+            Some("codex" | "claude" | "zcode")
+        ) {
             return Err(api::error(
                 "unsupported",
                 "provider queue execution is unsupported",
             ));
         }
-        if rec.scalar("provider").as_deref() == Some("claude")
+        if rec.scalar("provider").as_deref() != Some("codex")
             && checking
                 .driver
                 .get()
@@ -686,7 +691,7 @@ async fn selected(
         {
             return Err(api::error(
                 "unsupported",
-                "Claude live steering is not supported",
+                "live steering is only available for Codex",
             ));
         }
         if c.sending.contains_key(&key) {
@@ -939,7 +944,10 @@ pub(crate) fn schedule(state: Arc<State>, key: SessionKey) {
                 };
                 let q = items(rec)?;
                 if rec.get("archived").is_some_and(|v| v.get() == "true")
-                    || !matches!(rec.scalar("provider").as_deref(), Some("codex" | "claude"))
+                    || !matches!(
+                        rec.scalar("provider").as_deref(),
+                        Some("codex" | "claude" | "zcode")
+                    )
                 {
                     if !q.is_empty() {
                         update(reg, &copy, |r| {
@@ -981,7 +989,10 @@ pub(crate) fn schedule(state: Arc<State>, key: SessionKey) {
                         return Ok(false);
                     };
                     if rec.get("archived").is_some_and(|v| v.get() == "true")
-                        || !matches!(rec.scalar("provider").as_deref(), Some("codex" | "claude"))
+                        || !matches!(
+                            rec.scalar("provider").as_deref(),
+                            Some("codex" | "claude" | "zcode")
+                        )
                     {
                         update(reg, &copy, |r| {
                             if r.get("queue").is_some() {
@@ -1591,18 +1602,15 @@ mod tests {
         finish(state).await;
     }
     #[tokio::test]
-    async fn archived_or_unsupported_provider_queue_pauses_without_spin_or_spawn() {
-        for archived in [false, true] {
+    async fn archived_provider_queue_pauses_without_spin_or_spawn() {
+        for provider in ["codex", "claude", "zcode"] {
             let (_home, state, key) = fixture();
             {
                 let mut reg = state.registry.lock().unwrap();
                 let mut rec = reg.remove_checked(&key).unwrap();
                 rec.remove("queuePaused");
-                if archived {
-                    rec.set_bool("archived", true);
-                } else {
-                    rec.set_string("provider", "zcode");
-                }
+                rec.set_bool("archived", true);
+                rec.set_string("provider", provider);
                 reg.insert(rec).unwrap();
             }
             schedule(state.clone(), key);
@@ -1612,6 +1620,52 @@ mod tests {
             assert!(paused(state.registry.lock().unwrap().find("chat").unwrap()));
             assert!(state.native_runtime.get().is_none());
             finish(state).await;
+        }
+    }
+    #[tokio::test]
+    async fn provider_delivery_markers_stop_auto_drain_without_runtime_or_new_receipt() {
+        for (provider, marker) in [
+            ("claude", "claudeReservedSessionId"),
+            ("zcode", "zcodePendingInput"),
+        ] {
+            for raw in ["null", "{}", "true", "\"future-v3\""] {
+                let (_home, state, key) = fixture();
+                {
+                    let mut reg = state.registry.lock().unwrap();
+                    // Provider is part of immutable session identity. Build the
+                    // synthetic incarnation through remove/insert, not an update
+                    // which production correctly refuses.
+                    let mut rec = reg.remove_checked(&key).unwrap();
+                    rec.set_string("provider", provider);
+                    rec.remove("queuePaused");
+                    rec.set_raw(
+                        marker,
+                        serde_json::value::RawValue::from_string(raw.into()).unwrap(),
+                    );
+                    reg.insert(rec).unwrap();
+                }
+                schedule(state.clone(), key);
+                tokio::time::timeout(Duration::from_secs(5), state.host_jobs.wait())
+                    .await
+                    .unwrap();
+                let rec = state.registry.lock().unwrap().find("chat").unwrap().clone();
+                assert_eq!(rec.get(marker).unwrap().get(), raw);
+                assert_eq!(items(&rec).unwrap().len(), 2);
+                // A rejected attempted dispatch would pause/rewrite the queue;
+                // this case must not even select a head or create a marker.
+                assert!(!paused(&rec));
+                assert!(rec.get("queueDispatch").is_none());
+                assert!(state.native_runtime.get().is_none());
+                assert!(state.claude_runtime.get().is_none());
+                assert!(state.zcode_runtime.get().is_none());
+                assert_eq!(
+                    state
+                        .last_event_id
+                        .load(std::sync::atomic::Ordering::Acquire),
+                    0
+                );
+                finish(state).await;
+            }
         }
     }
     #[tokio::test]

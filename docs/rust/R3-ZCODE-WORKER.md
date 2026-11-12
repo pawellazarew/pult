@@ -69,7 +69,10 @@ host-requested cancellation still owns its separate interrupted outcome. A resul
 retirement; failure classification is allowed only after observed stdout EOF
 and joined, complete private stderr. The Node-compatible heuristic uses the last
 three stderr lines and at most 500 UTF-16 units. It emits static evidence and a
-typed provider signal, never raw stderr. An observed native authentication
+typed provider signal, never raw stderr. The current-source typed authentication signal runs before the blocked-event
+append: a slow durable sink cannot leave provider admission open. Quota and
+missing-session signals retain their evidence-first order.
+An observed native authentication
 failure is not proof that the user's account logged out; no relogin or account
 action occurs and the global Driver/Broker is not closed for that signal.
 Storage uncertainty does latch the shared Driver fault before the external host

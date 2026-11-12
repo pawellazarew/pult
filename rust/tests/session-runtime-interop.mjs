@@ -1,3 +1,4 @@
+import { readCompleteJsonl } from './support/complete-jsonl.mjs'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { mkdtempSync, mkdirSync, chmodSync, writeFileSync, readFileSync, existsSync, rmSync, realpathSync } from 'node:fs'
@@ -32,7 +33,7 @@ async function until(check, label) {
   const deadline = Date.now() + 6000
   while (!await check()) { assert.equal(child.exitCode, null, `daemon exited: ${stderr}`); assert.ok(Date.now() < deadline, label); await pause(10) }
 }
-const journal = () => existsSync(join(home, 'events/journal.jsonl')) ? readFileSync(join(home, 'events/journal.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : []
+const journal = () => readCompleteJsonl(join(home, 'events/journal.jsonl'))
 async function check(label, run) { await run(); checks++; console.log(`pass ${label}`) }
 async function nativeCli(args, extra = {}) {
   const process = spawn(binary, ['--home', home, ...args], { env: { ...env, ...extra }, stdio: ['ignore', 'pipe', 'pipe'] })
@@ -190,7 +191,7 @@ try {
     await client.request('agent.queue.move', { name: 'one', id: queued.id, text: '' })
     const accepted = await client.request('agent.queue.send', { name: 'one', id: queued.id })
     assert.equal(accepted.turnId, turn.turnId)
-    const wire = readFileSync(join(native, 'messages.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).findLast(e => e.method === 'turn/steer')
+    const wire = readCompleteJsonl(join(native, 'messages.jsonl')).findLast(e => e.method === 'turn/steer')
     assert.deepEqual(wire.params.input, [{ type: 'localImage', path }])
     const receipt = journal().find(e => e.kind === 'message.user' && e.data.queueItemId === queued.id)
     assert.equal(receipt.data.text, ''); assert.deepEqual(receipt.data.attachments, [attachment])

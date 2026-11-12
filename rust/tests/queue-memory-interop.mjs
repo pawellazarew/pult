@@ -1,6 +1,7 @@
+import { readCompleteJsonl } from './support/complete-jsonl.mjs'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import net from 'node:net'
@@ -21,7 +22,7 @@ for (const key of ['PULT_MEMORY_KEY', 'PULT_MEMORY_TURN_KEY', 'PULT_HOLDER_BIN']
 const paths = layout(home)
 const boundedClient = original => ({ ...original, request: (method, params, options = {}) => original.request(method, params, { timeoutMs: 10000, ...options }) })
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms))
-const jsonl = path => existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : []
+const jsonl = readCompleteJsonl
 const evidence = () => jsonl(join(native, 'memory-fixture.jsonl'))
 const journal = () => jsonl(join(home, 'events/journal.jsonl'))
 const records = () => JSON.parse(readFileSync(join(home, 'sessions.json'), 'utf8')).sessions
@@ -105,6 +106,18 @@ const watchdog = setTimeout(async () => { console.error('composed queue memory w
 try {
   await until(() => existsSync(paths.sock) && existsSync(paths.token), 'startup')
   client = boundedClient(await connectClient(paths, { timeoutMs: 5000 }))
+  await check('live fixture JSONL waits for newline and rejects complete corrupt records', async () => {
+    const file = join(native, 'reader-probe.jsonl')
+    writeFileSync(file, '{"first":1}\n{"second":"par', { mode: 0o600 })
+    assert.deepEqual(jsonl(file), [{ first: 1 }])
+    appendFileSync(file, 'tial"}')
+    assert.deepEqual(jsonl(file), [{ first: 1 }], 'a complete JSON value still needs its record newline')
+    appendFileSync(file, '\n')
+    assert.deepEqual(jsonl(file), [{ first: 1 }, { second: 'partial' }])
+    appendFileSync(file, '{"broken":}\n')
+    assert.throws(() => jsonl(file), SyntaxError, 'complete corrupt records must not be hidden')
+    rmSync(file)
+  })
   await check('ordinary setup has real memory MCP and a distinct shared neighbor', async () => {
     await start('writer')
     await start('neighbor', projectA, { memory: { read: false, write: 'off' } })

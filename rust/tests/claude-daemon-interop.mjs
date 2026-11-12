@@ -1,3 +1,4 @@
+import { readCompleteJsonl } from './support/complete-jsonl.mjs'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { mkdtempSync, mkdirSync, chmodSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs'
@@ -26,8 +27,8 @@ async function until(check, label) {
   const deadline = Date.now() + 10000
   while (!await check()) { assert.equal(child.exitCode, null, `scratch daemon exited: ${stderr}`); assert.ok(Date.now() < deadline, label); await pause(10) }
 }
-const rows = file => existsSync(join(native, file)) ? readFileSync(join(native, file), 'utf8').trim().split('\n').filter(Boolean).map(row => JSON.parse(row)) : []
-const journal = () => existsSync(join(home, 'events/journal.jsonl')) ? readFileSync(join(home, 'events/journal.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map(row => JSON.parse(row)) : []
+const rows = file => readCompleteJsonl(join(native, file))
+const journal = () => readCompleteJsonl(join(home, 'events/journal.jsonl'))
 const record = name => JSON.parse(readFileSync(join(home, 'sessions.json'), 'utf8')).sessions.find(row => row.name === name)
 const scope = name => JSON.parse(readFileSync(join(native, `${name}-scope.json`), 'utf8'))
 const row = async name => (await client.request('agent.list')).sessions.find(row => row.name === name)
