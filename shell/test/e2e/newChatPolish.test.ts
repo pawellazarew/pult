@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { after, before, describe, it } from 'node:test'
 import { launch, waitFor } from './harness.js'
 import type { Harness } from './harness.js'
+import type { CallReply } from '../../src/contract.js'
 
 describe('new chat composer and compact draft sidebar', () => {
   let h: Harness
@@ -140,7 +141,7 @@ async function holdFirstDraftPut(h: Harness): Promise<void> {
     if (!original) throw new Error('missing pult:call IPC handler')
     let release!: () => void
     const gate = new Promise<void>((resolve) => { release = resolve })
-    const state = { held: false, committed: false, puts: [] as Array<{ baseRev: number | undefined }>, removes: [] as Array<string | undefined>, release, restore: () => { ipcMain.removeHandler('pult:call'); ipcMain.handle('pult:call', original) } }
+    const state = { held: false, committed: false, puts: [] as Array<{ baseRev: number | undefined }>, replies: [] as Array<{ ok: boolean; rev?: number; code?: string }>, removes: [] as Array<string | undefined>, release, restore: () => { ipcMain.removeHandler('pult:call'); ipcMain.handle('pult:call', original) } }
     ;(globalThis as unknown as { __heldDraftPut: typeof state }).__heldDraftPut = state
     ipcMain.removeHandler('pult:call')
     ipcMain.handle('pult:call', async (...args: unknown[]) => {
@@ -148,11 +149,32 @@ async function holdFirstDraftPut(h: Harness): Promise<void> {
       if (args[1] === 'draft.remove') state.removes.push((args[2] as { owner?: string }).owner)
       const hold = args[1] === 'draft.put' && !state.held
       if (hold) state.held = true
-      const result = await original(...args)
+      const result = await original(...args) as CallReply
+      if (args[1] === 'draft.put') {
+        state.replies.push(result.ok
+          ? { ok: true, rev: (result.result as { draft: { rev: number } }).draft.rev }
+          : { ok: false, code: result.error.code })
+      }
       if (hold) { state.committed = true; await gate }
       return result
     })
   })
+}
+
+/** Observe the actual renderer debounce, rather than sleeping in the Node test runner. */
+async function observeDraftDebounce(h: Harness, text: string): Promise<void> {
+  await h.win.evaluate((text) => {
+    const original = window.setTimeout
+    const state = { fired: false, restore: () => { window.setTimeout = original } }
+    ;(window as unknown as { __draftDebounce: typeof state }).__draftDebounce = state
+    window.setTimeout = ((handler: TimerHandler, delay?: number, ...args: unknown[]): number => {
+      const target = delay === 400 && document.querySelector<HTMLTextAreaElement>('[data-testid="draft-input"]')?.value === text
+      if (!target || typeof handler !== 'function') return original(handler, delay, ...args)
+      return original(() => {
+        try { handler(...args) } finally { state.fired = true }
+      }, delay)
+    }) as typeof window.setTimeout
+  }, text)
 }
 
 describe('discard while the first draft save acknowledgement is pending', () => {
@@ -202,18 +224,33 @@ describe('discard while the first draft save acknowledgement is pending', () => 
       const id = await h.win.getByTestId('draft').getAttribute('data-draft')
       assert.ok(id)
       assert.ok(await waitFor(() => h.app.evaluate(() => (globalThis as unknown as { __heldDraftPut: { committed: boolean } }).__heldDraftPut.committed), 5000))
-      await input.fill('second version typed while the first ACK was pending')
-      // Let the edit's debounce expire while the first write is still awaiting its reply.
-      await h.win.waitForTimeout(500)
+      assert.deepEqual(await h.app.evaluate(() => (globalThis as unknown as { __heldDraftPut: { replies: unknown[] } }).__heldDraftPut.replies), [{ ok: true, rev: 1 }], 'the held reply must acknowledge a successful first write')
+      const secondText = 'second version typed while the first ACK was pending'
+      await observeDraftDebounce(h, secondText)
+      await input.fill(secondText)
+      // A busy/background renderer can execute this later than a 500 ms Node sleep.
+      // Prove that putDraft has run while the first write is still awaiting its reply.
+      assert.ok(await waitFor(() => h.win.evaluate(() => (window as unknown as { __draftDebounce: { fired: boolean } }).__draftDebounce.fired), 5000), 'the second edit debounce must run before releasing the first ACK')
       assert.deepEqual(await h.app.evaluate(() => (globalThis as unknown as { __heldDraftPut: { puts: Array<{ baseRev: number }> } }).__heldDraftPut.puts), [{ baseRev: 0 }])
       await h.app.evaluate(() => (globalThis as unknown as { __heldDraftPut: { release(): void } }).__heldDraftPut.release())
       const client = await h.client()
-      assert.ok(await waitFor(async () => {
+      let lastRevision: number | null = null
+      const savedFollowup = await waitFor(async () => {
         const saved = await client.request('draft.get', { id }) as { draft: { rev: number; data: { text: string } } }
-        return saved.draft.rev === 2 && saved.draft.data.text === 'second version typed while the first ACK was pending'
-      }, 5000), 'pending edits must save with the new revision after the first ACK')
+        lastRevision = saved.draft.rev
+        return saved.draft.rev === 2 && saved.draft.data.text === secondText
+      }, 5000)
+      assert.ok(savedFollowup, `pending edits must save with the new revision after the first ACK: ${JSON.stringify({
+        lastRevision,
+        inputStillEdited: await input.inputValue() === secondText,
+        ipc: await h.app.evaluate(() => {
+          const { puts, replies } = (globalThis as unknown as { __heldDraftPut: { puts: unknown[]; replies: unknown[] } }).__heldDraftPut
+          return { puts, replies }
+        }),
+      })}`)
       assert.deepEqual(await h.app.evaluate(() => (globalThis as unknown as { __heldDraftPut: { puts: Array<{ baseRev: number }> } }).__heldDraftPut.puts), [{ baseRev: 0 }, { baseRev: 1 }])
     } finally {
+      await h.win.evaluate(() => (window as unknown as { __draftDebounce?: { restore(): void } }).__draftDebounce?.restore()).catch(() => {})
       await h.app.evaluate(() => {
         const state = (globalThis as unknown as { __heldDraftPut?: { release(): void; restore(): void } }).__heldDraftPut
         state?.release(); state?.restore()
