@@ -819,3 +819,40 @@ async fn compact_failed_result_overrides_native_cancelled_completion() {
         matches!(f.finish(f.start(f.worker("cancelled-result-failure"),false)).await,Outcome::Failure{code,..}if code=="provider_failed")
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn direct_close_during_owned_acceptance_cannot_publish_late_started() {
+    use pult_core::turn_driver::Worker;
+    let f = Rig::new(None);
+    let store = Arc::new(HoldAccept {
+        inner: f.owner.store(),
+        entered: Default::default(),
+        release: Arc::new(tokio::sync::Semaphore::new(0)),
+        deadline: Default::default(),
+    });
+    let worker = f.worker_store("normal", false, false, None, Some(store.clone()));
+    let mut h = f.start(worker.clone(), true);
+    tokio::time::timeout(Duration::from_secs(10), store.entered.notified())
+        .await
+        .unwrap();
+    let mut close = worker.close(h.ticket().clone());
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(
+        close.as_mut().poll(&mut context).is_pending(),
+        "close must revoke now but join owned store"
+    );
+    assert_eq!(f.driver.active_count(), 1);
+    store.release.add_permits(1);
+    let accepted = tokio::time::timeout(Duration::from_secs(10), h.accepted())
+        .await
+        .unwrap();
+    let _ = f.finish(h).await;
+    tokio::time::timeout(Duration::from_secs(10), close)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(accepted.is_err());
+    assert!(!f.events().iter().any(|v| v["kind"] == "message.user"));
+    assert!(!f.driver.storage_failed());
+    assert_eq!(f.driver.active_count(), 0);
+}

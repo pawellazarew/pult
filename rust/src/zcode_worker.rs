@@ -24,7 +24,7 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc, Mutex, Weak,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -117,6 +117,8 @@ struct Vault {
 }
 struct Job {
     deadline: Instant,
+    // Ready(0) -> publication accepted(1) or locally revoked(2).
+    publication: AtomicU8,
     ticket: Ticket,
     generation: u64,
     public_turn: String,
@@ -132,6 +134,9 @@ struct Job {
 }
 impl Job {
     fn cancel(&self) {
+        let _ = self
+            .publication
+            .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire);
         self.cancel.send_replace(true);
         if let Some(a) = self.attempt.lock().expect("ZCode attempt").as_ref() {
             a.cancel_before_spawn();
@@ -247,6 +252,7 @@ impl Worker for ZcodeWorker {
             .collect::<String>();
         let job = Arc::new(Job {
             deadline: Instant::now() + self.0.config.start_timeout,
+            publication: AtomicU8::new(0),
             ticket,
             generation,
             public_turn: format!("zcode-turn-{nonce}-{generation}"),
@@ -311,12 +317,23 @@ impl Worker for ZcodeWorker {
         })
     }
 }
-fn start_deadline(job: &Job) -> Result<(), WorkerError> {
+fn start_live(inner: &Inner, job: &Job) -> Result<(), WorkerError> {
+    if job.cancelled() {
+        return Err(interrupted());
+    }
     if Instant::now() >= job.deadline {
         Err(error(
             "start_unknown",
             "ZCode input acceptance deadline expired",
         ))
+    } else if inner
+        .services
+        .driver
+        .upgrade()
+        .and_then(|d| d.snapshot_for_dispatch(&job.ticket))
+        .is_none()
+    {
+        Err(interrupted())
     } else {
         Ok(())
     }
@@ -427,18 +444,20 @@ impl SpawnGate for CheckedSpawn {
     }
 }
 async fn receipt_ready(progress: &mut watch::Receiver<Progress>, job: &Job) -> bool {
+    let mut cancel = job.cancel.subscribe();
     loop {
+        if job.cancelled() {
+            return false;
+        }
         let state = progress.borrow_and_update().clone();
         match state {
             Progress::Starting => {}
             Progress::Running(r) => return r.turn_id == job.public_turn && r.user_event_id > 0,
             _ => return false,
         }
-        if job.cancelled() {
-            return false;
-        }
-        if progress.changed().await.is_err() {
-            return false;
+        tokio::select! {
+            _=cancel.changed()=>return false,
+            changed=progress.changed()=>if changed.is_err(){return false;},
         }
     }
 }
@@ -564,7 +583,7 @@ async fn turn(
         tokio::task::spawn_blocking(move || policy(&*checking.services.gate, &scope, &initial))
             .await
             .map_err(|_| unavailable())??;
-    start_deadline(&job)?;
+    start_live(&inner, &job)?;
     let request = ReserveRequest::new(
         job.ticket.clone(),
         snapshot.clone(),
@@ -584,7 +603,7 @@ async fn turn(
         ));
     }
     *job.attempt.lock().expect("ZCode attempt") = Some(attempt.clone());
-    start_deadline(&job)?;
+    start_live(&inner, &job)?;
     if job.cancelled() {
         attempt.cancel_before_spawn();
         return Err(interrupted());
@@ -640,6 +659,7 @@ async fn turn(
     })
     .await
     .map_err(|_| unavailable())??;
+    start_live(&inner, &job)?;
     let prepared = Process::prepare_launch(
         prepared,
         Framing::codex(),
@@ -649,12 +669,13 @@ async fn turn(
     )
     .await
     .map_err(|_| unavailable())?;
-    start_deadline(&job)?;
+    start_live(&inner, &job)?;
     if job.cancelled() {
         attempt.cancel_before_spawn();
         return Err(interrupted());
     }
     append(&inner,&job,json!({"sessionId":inner.config.session.name,"provider":"zcode","kind":"status.changed","data":{"status":"working","turnId":job.public_turn}})).await?;
+    start_live(&inner, &job)?;
     let gate = CheckedSpawn {
         host,
         gate: inner.services.gate.clone(),
@@ -685,9 +706,7 @@ async fn turn(
     })
     .await
     .map_err(|_| unavailable())??;
-    if job.cancelled() {
-        job.stop();
-    }
+    start_live(&inner, &job)?;
     {
         let mut vault = job.vault.lock().await;
         let acknowledged = vault
@@ -700,7 +719,7 @@ async fn turn(
         vault.process = Some(starting.into_process());
         acknowledged.map_err(|_| unavailable())?;
     }
-    start_deadline(&job)?;
+    start_live(&inner, &job)?;
     let mut output = {
         let mut vault = job.vault.lock().await;
         vault
@@ -751,7 +770,7 @@ async fn turn(
             return Err(interrupted());
         }
         if !accepted {
-            start_deadline(&job)?;
+            start_live(&inner, &job)?;
         }
         for (field, known) in [("sessionId", &mut sid), ("turnId", &mut tid)] {
             if let Some(value) = frame.get(field) {
@@ -769,7 +788,7 @@ async fn turn(
                         let id = id.to_owned();
                         store(&inner, &job, move |s| s.record_native_session(a, id)).await?;
                         if !accepted {
-                            start_deadline(&job)?;
+                            start_live(&inner, &job)?;
                         }
                     }
                 }
@@ -807,21 +826,32 @@ async fn turn(
                     "ZCode acceptance receipt mismatched",
                 ));
             }
-            start_deadline(&job)?;
-            let sender = started
-                .lock()
-                .expect("ZCode start")
-                .take()
-                .ok_or_else(unavailable)?;
-            let completion = done.take().ok_or_else(unavailable)?;
-            let _ = sender.send(Ok(Started {
-                turn_id: job.public_turn.clone(),
-                done: Box::pin(async move {
-                    completion
-                        .await
-                        .unwrap_or_else(|_| failure("worker_failed", "ZCode completion was lost"))
-                }),
-            }));
+            start_live(&inner, &job)?;
+            {
+                // Atomic decision with local revocation, without a guard across
+                // channel send (which can invoke the waiting future's Waker).
+                if job
+                    .publication
+                    .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                    .is_err()
+                {
+                    return Err(interrupted());
+                }
+                let sender = started
+                    .lock()
+                    .expect("ZCode start")
+                    .take()
+                    .ok_or_else(unavailable)?;
+                let completion = done.take().ok_or_else(unavailable)?;
+                let _ = sender.send(Ok(Started {
+                    turn_id: job.public_turn.clone(),
+                    done: Box::pin(async move {
+                        completion.await.unwrap_or_else(|_| {
+                            failure("worker_failed", "ZCode completion was lost")
+                        })
+                    }),
+                }));
+            }
             accepted = true;
             if !receipt_ready(&mut progress, &job).await {
                 return Err(interrupted());

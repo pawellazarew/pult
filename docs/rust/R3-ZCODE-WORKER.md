@@ -22,7 +22,11 @@ acceptance. The returned receipt must match the exact Attempt capability and
 both native IDs. One absolute start deadline is captured before owned preparation
 and checked again after holder ACK, persistence waits and immediately before
 Started. A late store is still joined and its diagnostic identity retained, but
-cannot publish Started or a deferred user receipt. The input is not replayed. The Worker then returns a separate opaque public turn ID and
+cannot publish Started or a deferred user receipt. Exact Driver liveness and
+local revocation are also rechecked after owned waits. Publication and local
+close race through a private one-shot CAS; a close that wins prevents Started.
+The publication winner precedes subsequent close, without holding locks across
+a channel send or its Waker. The input is not replayed. The Worker then returns a separate opaque public turn ID and
 waits for Driver's durable accepted user receipt before publishing buffered
 native content. Early frames are bounded to 128 frames / 2 MiB; overflow fails
 closed rather than silently losing content.
