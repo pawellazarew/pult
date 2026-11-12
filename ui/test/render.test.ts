@@ -209,6 +209,27 @@ describe('служебное меню в подвале', () => {
     assert.doesNotMatch(out, /header-guard-alert/)
   })
 
+  it('причина блокировки и перепроверка находятся под стражем в закрытом поповере', () => {
+    const out = html(Header, { ...base,
+      conn: { state: 'up', daemon: { version: '0.1.0', pid: 1, startedAt: 'x' } },
+      guard: { ...base.guard, tone: 'fail', label: 'выход RU — стоп', detail: 'zcode: страны нет в списке разрешённых' },
+      onGuardRecheck: noop,
+    })
+    const panel = out.slice(out.indexOf('<details'), out.indexOf('</details>'))
+    assert.match(out, /<summary class="footer-icon health-summary t-fail"/)
+    assert.doesNotMatch(panel, /<details[^>]* open/)
+    assert.match(panel, /data-testid="net-blocked"/)
+    assert.match(panel, /zcode: страны нет в списке разрешённых/)
+    assert.match(panel, />Перепроверить<\/button>/)
+    assert.ok(panel.indexOf('data-testid="hdr-guard"') < panel.indexOf('data-testid="net-blocked"'))
+    assert.ok(panel.indexOf('data-testid="net-blocked"') < panel.indexOf('data-testid="provider-status-claude"'))
+    assert.doesNotMatch(out.replace(panel, ''), /data-testid="net-blocked"/)
+    const offline = html(Header, { ...base, guard: { ...base.guard, tone: 'fail' }, conn: { state: 'down', reason: 'x', attempt: 1, retryInMs: 1000 } })
+    assert.doesNotMatch(offline, /data-testid="net-blocked"/, 'устаревшая проверка не выдаётся за текущую блокировку')
+    const healthy = html(Header, { ...base, conn: { state: 'up', daemon: { version: '0.1.0', pid: 1, startedAt: 'x' } } })
+    assert.doesNotMatch(healthy, /data-testid="net-blocked"/)
+  })
+
   it('ожидающее уведомление не скрывает ошибку диагностики', () => {
     const out = html(Header, { ...base,
       conn: { state: 'up', daemon: { version: '0.1.0', pid: 1, startedAt: 'x' } },

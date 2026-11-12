@@ -54,6 +54,11 @@
 .footer-pop-title { color: var(--faint); font-size: 12px; padding: 4px 6px 10px; }
 .footer-health-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 32px; padding: 4px 6px; font-size: 12px; }
 .footer-health-row > :last-child { text-align: right; }
+.guard-notice { display: flex; align-items: flex-start; gap: 8px; margin: 4px 6px 10px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--sunk); color: var(--wait); font-size: 12px; }
+.guard-notice > .ic { flex: 0 0 auto; margin-top: 1px; }
+.guard-notice-content { min-width: 0; }
+.guard-notice p { margin: 4px 0 10px; color: var(--ink); overflow-wrap: anywhere; line-height: 1.5; }
+.guard-notice .btn { height: auto; min-height: 28px; white-space: normal; }
 .footer-menu-item { display: flex; align-items: center; gap: 9px; width: 100%; padding: 8px 6px; color: var(--ink); font: inherit; border: 0; background: transparent; text-align: left; border-radius: 7px; cursor: pointer; }
 .footer-menu-item:hover { background: var(--sunk); }
 .app[data-conn="down"] .grid .sidebar-footer button { pointer-events: auto; }
