@@ -2,7 +2,7 @@
 use crate::turn_coordinator::{
     Coordinator, DispatchAction, FinishedTurn, Limits, Outcome, StartAction, Ticket,
 };
-use crate::turn_snapshot::TurnSnapshot;
+use crate::turn_snapshot::{Approval, TurnSnapshot};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -47,6 +47,28 @@ pub trait Worker: Send + Sync + 'static {
     ) -> Task<Result<Started, WorkerError>>;
     fn close(&self, ticket: Ticket) -> Task<Result<(), WorkerError>>;
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DispatchDecision {
+    Allow,
+    Restrict(Approval),
+    Deny,
+}
+/// Fresh, synchronous host check after durable input and before dispatch seals.
+/// Must return promptly; provider preparation belongs outside this callback.
+/// The initial snapshot is immutable;
+/// only Coordinator's permitted approval restrictions can change dispatched data.
+/// Install panic_guard at host startup to suppress callback panic payloads.
+pub trait DispatchGate: Send + Sync + 'static {
+    fn check(&self, ticket: &Ticket, initial: &TurnSnapshot) -> DispatchDecision;
+}
+impl<F> DispatchGate for F
+where
+    F: Fn(&Ticket, &TurnSnapshot) -> DispatchDecision + Send + Sync + 'static,
+{
+    fn check(&self, ticket: &Ticket, initial: &TurnSnapshot) -> DispatchDecision {
+        self(ticket, initial)
+    }
+}
 pub type Redactor = Arc<dyn Fn(&str) -> String + Send + Sync>;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DriverError {
@@ -59,6 +81,7 @@ pub enum DriverError {
     Cancelled,
     CleanupUnconfirmed,
     Internal,
+    AccessDenied,
 }
 impl std::fmt::Display for DriverError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -185,6 +208,30 @@ impl Driver {
         text: String,
         worker: Arc<dyn Worker>,
     ) -> Result<Handle, DriverError> {
+        self.start_inner(snapshot, text, worker, None)
+    }
+    /// Recheck current host facts once after the durable user append. Denial,
+    /// expansion, or callback panic publishes only a static AccessDenied error.
+    /// This is a library integration seam, not RPC authorization. The host must
+    /// also recheck after asynchronous provider preparation and retire active
+    /// Full processes when access is revoked. This check cannot eliminate every
+    /// revocation race or authorize provider reuse by itself.
+    pub fn start_checked(
+        &self,
+        snapshot: TurnSnapshot,
+        text: String,
+        worker: Arc<dyn Worker>,
+        gate: Arc<dyn DispatchGate>,
+    ) -> Result<Handle, DriverError> {
+        self.start_inner(snapshot, text, worker, Some(gate))
+    }
+    fn start_inner(
+        &self,
+        snapshot: TurnSnapshot,
+        text: String,
+        worker: Arc<dyn Worker>,
+        gate: Option<Arc<dyn DispatchGate>>,
+    ) -> Result<Handle, DriverError> {
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| DriverError::Internal)?;
         if text.len() > 65536 || text.trim().is_empty() {
             return Err(DriverError::Invalid);
@@ -225,6 +272,7 @@ impl Driver {
                 text,
                 public_text,
                 worker,
+                gate,
                 Some(accepted),
             )
             .await;
@@ -418,6 +466,7 @@ async fn run(
     text: String,
     public_text: String,
     worker: Arc<dyn Worker>,
+    gate: Option<Arc<dyn DispatchGate>>,
     mut accepted: Option<oneshot::Sender<Result<Accepted, DriverError>>>,
 ) {
     let mut cancel = control.cancel.subscribe();
@@ -456,6 +505,8 @@ async fn run(
         &mut accepted,
         receipt.id,
         text,
+        gate.as_deref(),
+        &snapshot,
     )
     .await;
     finish(
@@ -481,6 +532,8 @@ async fn execute(
     accepted: &mut Option<oneshot::Sender<Result<Accepted, DriverError>>>,
     user_event_id: u64,
     text: String,
+    gate: Option<&dyn DispatchGate>,
+    initial: &TurnSnapshot,
 ) -> End {
     if *cancel.borrow_and_update() {
         return End {
@@ -489,12 +542,44 @@ async fn execute(
             touched: false,
         };
     }
+    // No await between the fresh check, applying its restriction and sealing.
+    // Call outside the driver mutex: host callbacks must not poison its state.
+    let decision = match gate {
+        Some(gate) => {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| gate.check(ticket, initial)))
+                .unwrap_or(DispatchDecision::Deny)
+        }
+        None => DispatchDecision::Allow,
+    };
     let dispatch = {
         let mut state = inner.state.lock().expect("driver state mutex");
         if state.storage_failed {
             return End {
                 outcome: failure("journal_unknown", "execution paused"),
                 error: Some(DriverError::StorageUnavailable),
+                touched: false,
+            };
+        }
+        if *cancel.borrow_and_update() {
+            return End {
+                outcome: Outcome::Interrupted,
+                error: Some(DriverError::Cancelled),
+                touched: false,
+            };
+        }
+        let denied = match decision {
+            DispatchDecision::Allow => false,
+            DispatchDecision::Deny => true,
+            DispatchDecision::Restrict(approval) => !matches!(
+                state.core.restrict_before_start(ticket, approval),
+                Ok(crate::turn_coordinator::Change::Applied
+                    | crate::turn_coordinator::Change::Unchanged)
+            ),
+        };
+        if denied {
+            return End {
+                outcome: failure("access_denied", "turn access denied before dispatch"),
+                error: Some(DriverError::AccessDenied),
                 touched: false,
             };
         }
