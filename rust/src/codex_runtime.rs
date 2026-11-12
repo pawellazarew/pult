@@ -909,20 +909,37 @@ struct Approvals {
     inner: Weak<Inner>,
     gate: Arc<dyn DispatchGate>,
 }
+/// Dropping the caller cancels only its exact question. The owned task retains
+/// response and policy-IO guards until the Broker's journal work is drained.
+struct ApprovalCancel(watch::Sender<bool>);
+impl Drop for ApprovalCancel {
+    fn drop(&mut self) {
+        self.0.send_replace(true);
+    }
+}
 impl ApprovalHandler for Approvals {
     fn handle(&self, context: ApprovalContext) -> Task<()> {
-        let inner = self.inner.upgrade();
+        let Some(inner) = self.inner.upgrade() else {
+            return Box::pin(async {});
+        };
         let gate = self.gate.clone();
-        Box::pin(async move {
-            let Some(inner) = inner else {
-                return;
-            };
-            if !matches!(
-                context.method.as_str(),
-                "item/commandExecution/requestApproval"
-                    | "item/fileChange/requestApproval"
-                    | "item/tool/requestUserInput"
-            ) {
+        let (cancelled, mut cancellation) = watch::channel(false);
+        let cancel_on_drop = ApprovalCancel(cancelled);
+        // Registration happens before the caller can drop/abort even an
+        // unpolled handler future. Holding only the responder count is not
+        // sufficient: process retirement can bypass that bounded wait.
+        let policy_io = context.responder.retain_policy_io();
+        let runtime = inner.runtime.clone();
+        let owned = runtime.spawn(async move {
+            let _policy_io = policy_io;
+            if *cancellation.borrow()
+                || !matches!(
+                    context.method.as_str(),
+                    "item/commandExecution/requestApproval"
+                        | "item/fileChange/requestApproval"
+                        | "item/tool/requestUserInput"
+                )
+            {
                 return;
             }
             let owner = TrustedOwner {
@@ -939,10 +956,15 @@ impl ApprovalHandler for Approvals {
             ) {
                 Ok(prepared) => prepared,
                 Err(error) => {
-                    let _ = context.responder.respond(Err(error.response_error())).await;
+                    if !*cancellation.borrow() {
+                        let _ = context.responder.respond(Err(error.response_error())).await;
+                    }
                     return;
                 }
             };
+            if *cancellation.borrow() {
+                return;
+            }
             let mut request = match inner.broker.request(prepared.request()) {
                 Ok(request) => request,
                 Err(_) => {
@@ -952,24 +974,66 @@ impl ApprovalHandler for Approvals {
                     return;
                 }
             };
-            let decision = request.decision().await;
+            let decision = {
+                // One waiter only: dropping/recreating DecisionWait on another
+                // notification would itself cancel the question.
+                let decision = request.decision();
+                tokio::pin!(decision);
+                if *cancellation.borrow() {
+                    None
+                } else {
+                    tokio::select! { biased;
+                        _ = cancellation.changed() => None,
+                        decision = &mut decision => Some(decision),
+                    }
+                }
+            };
+            request.cancel();
+            // This owner is not the outer cancellable handler. A hung requested
+            // or resolved append keeps policy_io and the exact Ticket alive.
+            request.drained().await;
             if inner.broker.storage_failed() {
                 inner.deps.driver.report_storage_failure();
                 return;
             }
+            if *cancellation.borrow() || *inner.shared.closed.borrow() {
+                return;
+            }
+            let Some(decision) = decision else {
+                return;
+            };
             let Some(snapshot) = inner.deps.driver.snapshot_for_dispatch(&context.ticket) else {
                 return;
             };
             let answer = prepared
                 .resolve(&owner, decision)
                 .map_err(|error| error.response_error());
+            let response_cancellation = cancellation.clone();
+            let gate = Arc::new(
+                move |ticket: &crate::turn_coordinator::Ticket, snapshot: &TurnSnapshot| {
+                    if *response_cancellation.borrow() {
+                        return turn_driver::DispatchDecision::Deny;
+                    }
+                    let decision = gate.check(ticket, snapshot);
+                    if *response_cancellation.borrow() {
+                        turn_driver::DispatchDecision::Deny
+                    } else {
+                        decision
+                    }
+                },
+            );
             let _ = context
                 .responder
                 .respond_checked(gate, snapshot, context.effective_approval, answer)
                 .await;
+        });
+        Box::pin(async move {
+            let _cancel_on_drop = cancel_on_drop;
+            let _ = owned.await;
         })
     }
 }
+
 fn begin_shutdown(inner: Arc<Inner>) {
     inner.shared.closed.send_replace(true);
     inner.broker.shutdown();
