@@ -1,5 +1,8 @@
 /** English translations of application-owned component text. Placeholder values remain untouched. */
 export const componentsEn: Readonly<Record<string, string>> = {
+  "Закрыть новый чат?": "Close the new chat?",
+  "Закрыть чат": "Close chat",
+  "Сообщение и вложения будут удалены.": "The message and attachments will be deleted.",
   "Развернуть": "Expand",
   "Свернуть": "Collapse",
   "CLI использует сетевой профиль Пульта. Страница входа использует сеть твоего браузера.": "The CLI uses the Pult network profile. The sign-in page uses your browser network.",

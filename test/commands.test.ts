@@ -228,6 +228,10 @@ describe('демон: agent.commands', () => {
       assert.deepEqual(cx.commands.map((x) => x.insert), ['$codex-hello ', '$imagegen '])
       assert.equal(cx.commands[1]?.description, 'Generate images')
 
+      const before = await c.request('agent.list', {})
+      const general = (await c.request('agent.commands', { provider: 'claude', scope: 'general' })) as { commands: SlashCommand[] }
+      assert.ok(general.commands.some((x) => x.name === 'hello-pult'))
+      assert.deepEqual(await c.request('agent.list', {}), before, 'discovery does not create a session')
       const draft = (await c.request('agent.commands', { provider: 'codex', cwd })) as { commands: SlashCommand[] }
       assert.equal(draft.commands.length, 2)
       const z = (await c.request('agent.commands', { provider: 'zcode', cwd })) as { commands: SlashCommand[] }
@@ -238,6 +242,8 @@ describe('демон: agent.commands', () => {
       await assert.rejects(c.request('agent.commands', { provider: 'claude', cwd: 'rel' }), code('invalid_params'))
       await assert.rejects(c.request('agent.commands', { provider: 'claude', cwd: join(cwd, 'missing') }), code('invalid_params'))
       await assert.rejects(c.request('agent.commands', { provider: 'gpt', cwd }), code('invalid_params'))
+      await assert.rejects(c.request('agent.commands', { provider: 'claude', scope: 'general', cwd }), code('invalid_params'))
+      await assert.rejects(c.request('agent.commands', { provider: 'claude', scope: 'bad', cwd }), code('invalid_params'))
     } finally {
       c.close()
       await d.stop('конец теста')
