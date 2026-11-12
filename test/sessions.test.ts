@@ -1239,13 +1239,15 @@ describe('журнал для окна (Ф2, О1)', () => {
     const { manager, store, close } = boot(home)
     try {
       await manager.start({ name: 'w', kind: 'claude', cwd, mode: 'turn' })
-      await manager.prompt('w', 'проверь почту ivan@example.com и ответь')
+      const token = `sk-ant-${'Z'.repeat(24)}`
+      await manager.prompt('w', `проверь почту ivan@example.com и токен ${token}`)
       assert.ok(await waitFor(() => manager.list()[0]?.lastStatus === 'idle', 10_000))
       const evs = store.readFrom(0, { sessionId: 'w' })
       const user = evs.filter((e) => e.kind === 'message.user')
       assert.equal(user.length, 1)
       const text = String((user[0]?.data as { text?: unknown }).text)
-      assert.ok(!text.includes('ivan@example.com'), `адрес почты уехал в журнал: ${text}`)
+      assert.ok(text.includes('ivan@example.com'), `адрес почты потерялся в журнале: ${text}`)
+      assert.ok(!text.includes(token) && text.includes('<token>'), 'токен скрыт в журнале')
       assert.ok(text.startsWith('проверь почту'), text)
       const working = evs.find((e) => e.kind === 'status.changed' && (e.data as { status?: unknown }).status === 'working')
       assert.ok(working && (user[0]?.id ?? 0) < working.id, 'реплика обязана идти раньше хода')

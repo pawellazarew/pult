@@ -577,7 +577,7 @@ function ChatFooter({ agent, usage, now, onReveal, onHelp, onConfigure, catalog,
   const approvalSpan = (
     <span className={`approval${chip.red ? ' t-fail' : chip.state === 'blocked' ? ' t-wait' : ''}`} data-testid="conv-approval" data-approval={desired}
       data-access-state={chip.state} title={approvalTitle}>
-      {chip.red && <Icon name="shield" />}{chip.label.toLowerCase()}{chip.suffix && <span className="access-suffix" data-testid="conv-access-suffix"> · {chip.suffix}</span>}
+      {chip.red && !onConfigure && <Icon name="shield" />}{chip.label.toLowerCase()}{chip.suffix && <span className="access-suffix" data-testid="conv-access-suffix"> · {chip.suffix}</span>}
     </span>
   )
   const menuItems = (): MenuEntry[] => {
@@ -592,7 +592,7 @@ function ChatFooter({ agent, usage, now, onReveal, onHelp, onConfigure, catalog,
         {onConfigure ? <>
           <button type="button" className="settings model-picker" data-testid="conv-settings" aria-haspopup="menu" aria-expanded={menuAt !== null && selection === 'model'} title={t('Модель')} onClick={(e) => openSettings(e,'model')}><ProviderIcon provider={agent.provider} /><span data-testid="conv-model">{agent.model ?? (provider === 'claude' ? 'Claude' : provider === 'zcode' ? 'GLM' : 'Codex')}</span><Icon name="chevd" /></button>
           {provider !== 'zcode' && <button type="button" className="settings effort-picker" data-testid="conv-effort" aria-haspopup="menu" aria-expanded={menuAt !== null && selection === 'effort'} title={t('Усилие')} aria-label={t`Усилие: ${agent.effort ?? t('по умолчанию')}`} onClick={(e) => openSettings(e,'effort')}><Icon name="gauge" /><span>{agent.effort ?? t('по умолчанию')}</span><Icon name="chevd" /></button>}
-          <button type="button" className="settings approval-picker" data-testid="conv-access" aria-haspopup="menu" aria-expanded={menuAt !== null && selection === 'approval'} title={approvalTitle} aria-label={approvalTitle} onClick={(e) => openSettings(e,'approval')}><Icon name="shield" />{approvalSpan}<Icon name="chevd" /></button>
+          <button type="button" className="settings approval-picker" data-testid="conv-access" aria-haspopup="menu" aria-expanded={menuAt !== null && selection === 'approval'} title={approvalTitle} aria-label={approvalTitle} onClick={(e) => openSettings(e,'approval')}><Icon name="shield" className={`ic${chip.red ? ' t-fail' : ''}`} />{approvalSpan}<Icon name="chevd" /></button>
           {provider === 'codex' && <button type="button" className={`settings speed-picker${agent.serviceTier === 'fast' ? ' fast' : ''}`} data-testid="conv-speed" aria-haspopup="menu" aria-expanded={menuAt !== null && selection === 'speed'} title={`Speed: ${agent.serviceTier === 'fast' ? 'Fast' : 'Normal'}`} aria-label={`Speed: ${agent.serviceTier === 'fast' ? 'Fast' : 'Normal'}`} onClick={(e) => openSettings(e,'speed')}><Icon name="bolt" /></button>}
         </> : <>{modelSpan}{approvalSpan}</>}
         {agent.background && <span className="bg" data-testid="conv-background" title={agent.background.tasks.join('\n')}>{t("в фоне · ")}{agent.background.count}</span>}

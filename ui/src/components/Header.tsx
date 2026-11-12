@@ -17,7 +17,7 @@ export function Header(p: {
   providers?: ProviderCatalog | null; providersChecking?: boolean; onProvidersCheck?(): void
   doctorTone: Tone; inboxCount: number; inboxOpen: boolean
   sidebarHidden?: boolean; onToggleSidebar?(): void
-  onDoctor(): void; onInbox(): void; onMaintenance?(): void
+  onDoctor(): void; onGuardRecheck?(): void; onInbox(): void; onMaintenance?(): void
   runtimeOpen?: boolean; runtimeAvailable?: boolean; onRuntime?(): void
   filesOpen?: boolean; filesAvailable?: boolean; onFiles?(): void
   onSettings?(): void; onHelp?(): void; onNews?(): void; onExternal?(): void; onAddProject?(): void
@@ -41,6 +41,14 @@ export function Header(p: {
           {up && p.conn.state === 'up' ? <span data-testid="daemon-meta">{p.conn.daemon.version}{uptime !== null ? ` · ${formatUptime(uptime)}` : ''}</span> : <span data-testid="conn-state">{p.conn.state === 'connecting' ? t('подключение…') : t('недоступен')}</span>}
         </span></div>
         <div className="footer-health-row" data-testid="hdr-guard" title={up ? p.guard.detail : t`Последняя проверка, не обновляется — демон недоступен. ${p.guard.detail}`}><span>{t('страж сети')}</span><span className={`t-${up ? p.guard.tone : 'mut'}`}>{p.guard.label}{p.guard.checkedAt ? ` · ${hhmm(p.guard.checkedAt)}` : ''}</span></div>
+        {up && p.guard.tone === 'fail' && <div className="guard-notice" role="alert" data-testid="net-blocked">
+          <Icon name="alert" />
+          <div className="guard-notice-content">
+            <b>{t('Страж сети не пускает ходы:')}</b>
+            <p>{p.guard.detail}</p>
+            <button type="button" className="btn" onClick={p.onGuardRecheck ?? p.onDoctor}>{t('Перепроверить')}</button>
+          </div>
+        </div>}
         {(['claude','codex','zcode'] as const).map((provider) => { const st = providerStatusView(p.providers?.[provider], p.providersChecking ?? false); return <div key={provider} className="footer-health-row"><span>{provider === 'zcode' ? 'ZCode' : provider === 'claude' ? 'Claude' : 'Codex'}</span><button type="button" className={`link-btn t-${up ? st.tone : 'mut'}`} title={st.title} disabled={!up || p.providersChecking || !p.onProvidersCheck} onClick={p.onProvidersCheck} data-testid={`provider-status-${provider}`}>{st.label}</button></div> })}
         <div className="health-notices">{p.children}</div>
         <button type="button" className="footer-menu-item" onClick={() => { const el = document.querySelector<HTMLDetailsElement>('.health-menu'); if (el) el.open = false; p.onDoctor() }} data-testid="open-doctor"><Icon name="pulse" />{t('Запустить диагностику')}</button>

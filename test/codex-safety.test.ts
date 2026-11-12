@@ -397,11 +397,11 @@ describe('codex: инвариант 7 на снимке лимитов', () => {
       assert.ok(hit)
       const snapshot = (hit.data as { snapshot?: Record<string, unknown> }).snapshot
       assert.ok(snapshot)
-      assert.equal(snapshot['limitName'], '<email>')
+      assert.equal(snapshot['limitName'], 'leaked-secret@example.com')
       assert.equal(snapshot['normalModelSlug'], '<token>')
-      // И ни в одном событии адаптера секретов нет вообще.
+      // Почта читаема, секретный ключ скрыт во всех событиях адаптера.
       const whole = JSON.stringify(r.drafts)
-      assert.ok(!whole.includes('leaked-secret@example.com'), 'почта утекла в журнал')
+      assert.ok(whole.includes('leaked-secret@example.com'), 'почта должна оставаться читаемой')
       assert.ok(!whole.includes('deadbeefdeadbeefdeadbeefdeadbeef'), 'ключ утёк в журнал')
     } finally { await r.adapter.shutdown(); r.remove() }
   })

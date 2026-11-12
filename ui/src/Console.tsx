@@ -1629,6 +1629,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         onHelp={() => setModal({ type: 'help' })} onSettings={() => setModal({ type: 'settings' })}
         onNews={() => { void followLink(bridge, 'https://github.com/pawellazarew/pult/releases', 'https://github.com/pawellazarew/pult/releases') }}
         onInbox={() => { setMobileNavOpen(false); setFilesOpen(false); setRuntimeOpen(false); setInboxOpen((v) => !v) }}
+        onGuardRecheck={() => { setModal({ type: 'doctor' }); void runDoctor() }}
         noticeTone={view.banner || blocked.length || guard.tone === 'fail' || bannerError ? 'fail' : updateView || updNote || settings?.disk?.status.state === 'low' ? 'wait' : undefined}>
       {view.banner && (
         <div className="banner banner-fail" role="alert" data-testid="conn-banner">
@@ -1649,13 +1650,6 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
           <button type="button" className="btn" onClick={() => resetProvider(b.provider)} data-testid="provider-reset">{tr("Снять остановку")}</button>
         </div>
       ))}
-      {!view.banner && guard.tone === 'fail' && (
-        <div className="banner banner-wait" role="alert" data-testid="net-blocked">
-          <Icon name="alert" />
-          <span className="grow"><b>{tr("Страж сети не пускает ходы:")}</b> {guard.detail}.</span>
-          <button type="button" className="btn" onClick={() => { setModal({ type: 'doctor' }); void runDoctor() }}>{tr("Перепроверить")}</button>
-        </div>
-      )}
       {!view.banner && (
         <UpdateBanner view={updateView} busy={updBusy} onAction={applyUpdate}
           onNotes={(url) => { void followLink(bridge, url, url) }}

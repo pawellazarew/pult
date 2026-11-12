@@ -328,9 +328,9 @@ Every question from every session goes to the Inbox (⌘I in the window, `pult p
   Linux the file is edited without codex's lock (on macOS under it). Pult also tells you if other lines still
   allow the same thing. Unmarked lines are never touched.
 - **Claude** doesn't offer reusable rules to Pult today, so Claude cards only offer "once".
-- **A card says when it shows less than will run.** The secret filter masks e-mails, tokens and URL credentials on
-  the card (`<email>`, `<token>`, `<redacted>`), and Codex fields are clipped; the ORIGINAL command still runs, so
-  `ssh root@prod.example.com` shows as `ssh <email>`. Such a card is marked "Показано не всё" ("not everything is
+- **A card says when it shows less than will run.** The secret filter masks tokens and URL credentials on
+  the card (`<token>`, `<redacted>`), and Codex fields are clipped; the ORIGINAL command still runs.
+  Email addresses remain readable. Previously masked history is unchanged. Such a card is marked "Показано не всё" ("not everything is
   shown") and `pult perm list` prints `ВНИМАНИЕ: показано не всё`; if unsure, deny. ⌘Enter only approves a card you can
   see: the open session's own request or one in the open Inbox. Pressed in a session's reply box, it only approves that
   session's own request — never a card of another session.
