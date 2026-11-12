@@ -174,6 +174,48 @@ impl Backend {
             hooks: Arc::new(tests::Hooks::default()),
         })
     }
+    /// Claude host adapter: snapshot is selected only by the exact trusted Ticket.
+    /// The captured effective approval may narrow, never widen Driver authority.
+    pub(crate) fn prepare_current(
+        &self,
+        ticket: Ticket,
+        public_turn: String,
+        approval: Approval,
+    ) -> Task<Result<Prepared, WorkerError>> {
+        let snapshot = self.state.upgrade().and_then(|state| {
+            let driver = state.driver.get()?;
+            if public_turn.is_empty()
+                || public_turn.len() > 512
+                || public_turn.chars().any(char::is_control)
+                || driver
+                    .public_turn_id(&ticket)
+                    .is_some_and(|known| known != public_turn)
+            {
+                return None;
+            }
+            driver.snapshot_for_dispatch(&ticket)
+        });
+        let Some(mut snapshot) = snapshot else {
+            return Box::pin(async { Err(worker(denied())) });
+        };
+        fn rank(approval: Approval) -> u8 {
+            match approval {
+                Approval::ReadOnly => 0,
+                Approval::Ask => 1,
+                Approval::Workspace => 2,
+                Approval::Full => 3,
+                Approval::Inherit => 4,
+            }
+        }
+        if snapshot.key != *ticket.session()
+            || snapshot.provider != crate::turn_snapshot::Provider::Claude
+            || rank(approval) > rank(snapshot.settings.approval)
+        {
+            return Box::pin(async { Err(worker(denied())) });
+        }
+        snapshot.settings.approval = approval;
+        <Self as TurnMemory>::prepare(self, ticket, snapshot, public_turn)
+    }
     fn control(&self, ticket: &Ticket) -> Option<Arc<Control>> {
         self.controls
             .lock()
@@ -244,7 +286,8 @@ impl Backend {
             return Err(denied());
         }
         if writing
-            && (policy.write != Write::Ask
+            && (!control.writable.load(Ordering::Acquire)
+                || policy.write != Write::Ask
                 || current.settings.approval == Approval::ReadOnly
                 || record.scalar("approval").as_deref() == Some("read-only"))
         {
