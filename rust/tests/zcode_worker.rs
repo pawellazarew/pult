@@ -603,3 +603,219 @@ async fn dropped_waiter_does_not_drop_owned_execution() {
     assert_eq!(f.driver.active_count(), 0);
     assert!(f.record().get("zcodePendingInput").is_none());
 }
+
+struct PanicClear {
+    inner: Arc<dyn SessionStore>,
+    io: Arc<GateBarrier>,
+    thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
+    home: PathBuf,
+    retires: Arc<std::sync::atomic::AtomicUsize>,
+}
+impl SessionStore for PanicClear {
+    fn reserve(
+        &self,
+        r: ReserveRequest,
+    ) -> pult_core::turn_driver::Task<Result<Attempt, StoreError>> {
+        self.inner.reserve(r)
+    }
+    fn record_native_session(
+        &self,
+        a: Attempt,
+        s: String,
+    ) -> pult_core::turn_driver::Task<Result<(), StoreError>> {
+        self.inner.record_native_session(a, s)
+    }
+    fn accept_turn_started(
+        &self,
+        a: Attempt,
+        e: TurnStartedEvidence,
+    ) -> pult_core::turn_driver::Task<Result<Acceptance, StoreError>> {
+        self.inner.accept_turn_started(a, e)
+    }
+    fn clear_never_sent(
+        &self,
+        _: Attempt,
+        _: JoinedCleanup,
+    ) -> pult_core::turn_driver::Task<Result<(), StoreError>> {
+        let io = self.io.clone();
+        let thread = self.thread.clone();
+        let path = self.home.join("late-store-write");
+        Box::pin(async move {
+            let ready = io.clone();
+            *thread.lock().unwrap() = Some(std::thread::spawn(move || {
+                ready.entered.notify_one();
+                let mut released = ready.released.lock().unwrap();
+                while !*released {
+                    released = ready.wake.wait(released).unwrap();
+                }
+                std::fs::write(path, "owned IO completed").unwrap();
+            }));
+            io.entered.notified().await;
+            panic!("synthetic callback panic after starting IO");
+        })
+    }
+    fn retire(
+        &self,
+        _: Attempt,
+        _: JoinedCleanup,
+    ) -> pult_core::turn_driver::Task<Result<(), StoreError>> {
+        self.retires
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async { Ok(()) })
+    }
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unknown_clear_io_cannot_be_erased_by_successful_retire() {
+    let f = Rig::options(
+        None,
+        Options {
+            close_timeout: Duration::from_millis(200),
+            ..Default::default()
+        },
+    );
+    let io = Arc::new(GateBarrier::default());
+    let thread = Arc::new(Mutex::new(None));
+    let retires = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let store = Arc::new(PanicClear {
+        inner: f.owner.store(),
+        io: io.clone(),
+        thread: thread.clone(),
+        home: f.home.clone(),
+        retires: retires.clone(),
+    });
+    let mut h = f.start(
+        f.worker_store("normal", true, false, None, Some(store)),
+        true,
+    );
+    let result = tokio::time::timeout(Duration::from_secs(10), h.wait())
+        .await
+        .unwrap();
+    let still_owned = f.driver.active_count();
+    let calls = retires.load(std::sync::atomic::Ordering::SeqCst);
+    // Release/join the intentional external IO even when the old source fails.
+    io.release();
+    thread.lock().unwrap().take().unwrap().join().unwrap();
+    assert_eq!(
+        result.unwrap_err(),
+        pult_core::turn_driver::DriverError::CleanupUnconfirmed
+    );
+    assert_eq!(still_owned, 1);
+    assert_eq!(calls, 0);
+    assert!(f.driver.storage_failed());
+    assert!(f.record().get("zcodePendingInput").is_some());
+    assert!(f.home.join("late-store-write").exists());
+    assert!(!f.home.join("provider.pid").exists());
+}
+
+struct HoldAccept {
+    inner: Arc<dyn SessionStore>,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Semaphore>,
+    deadline: Arc<Mutex<Option<std::time::Instant>>>,
+}
+impl SessionStore for HoldAccept {
+    fn reserve(
+        &self,
+        r: ReserveRequest,
+    ) -> pult_core::turn_driver::Task<Result<Attempt, StoreError>> {
+        *self.deadline.lock().unwrap() = Some(r.deadline());
+        self.inner.reserve(r)
+    }
+    fn record_native_session(
+        &self,
+        a: Attempt,
+        s: String,
+    ) -> pult_core::turn_driver::Task<Result<(), StoreError>> {
+        self.inner.record_native_session(a, s)
+    }
+    fn accept_turn_started(
+        &self,
+        a: Attempt,
+        e: TurnStartedEvidence,
+    ) -> pult_core::turn_driver::Task<Result<Acceptance, StoreError>> {
+        let task = self.inner.accept_turn_started(a, e);
+        let entered = self.entered.clone();
+        let release = self.release.clone();
+        Box::pin(async move {
+            let result = task.await;
+            entered.notify_one();
+            let _permit = release.acquire().await.unwrap();
+            result
+        })
+    }
+    fn clear_never_sent(
+        &self,
+        a: Attempt,
+        p: JoinedCleanup,
+    ) -> pult_core::turn_driver::Task<Result<(), StoreError>> {
+        self.inner.clear_never_sent(a, p)
+    }
+    fn retire(
+        &self,
+        a: Attempt,
+        p: JoinedCleanup,
+    ) -> pult_core::turn_driver::Task<Result<(), StoreError>> {
+        self.inner.retire(a, p)
+    }
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn late_owned_acceptance_cannot_publish_started_or_deferred_receipt() {
+    let f = Rig::new(None);
+    let store = Arc::new(HoldAccept {
+        inner: f.owner.store(),
+        entered: Default::default(),
+        release: Arc::new(tokio::sync::Semaphore::new(0)),
+        deadline: Default::default(),
+    });
+    let mut h = f.start(
+        f.worker_store("normal", false, false, None, Some(store.clone())),
+        true,
+    );
+    tokio::time::timeout(Duration::from_secs(10), store.entered.notified())
+        .await
+        .unwrap();
+    let deadline = store.deadline.lock().unwrap().unwrap();
+    // An absolute deadline barrier, not a scheduling sleep or larger timeout.
+    assert!(
+        tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline) + Duration::from_millis(1),
+            std::future::pending::<()>()
+        )
+        .await
+        .is_err()
+    );
+    assert!(std::time::Instant::now() >= deadline);
+    assert!(!f.events().iter().any(|v| v["kind"] == "message.user"));
+    store.release.add_permits(1);
+    let accepted = tokio::time::timeout(Duration::from_secs(10), h.accepted())
+        .await
+        .unwrap();
+    let outcome = f.finish(h).await;
+    assert!(accepted.is_err());
+    assert!(matches!(outcome,Outcome::Failure{code,..}if code=="start_unknown"));
+    assert!(!f.events().iter().any(|v| v["kind"] == "message.user"));
+    assert_eq!(
+        f.record().scalar("providerSessionId").as_deref(),
+        Some("sess_fixture_native")
+    );
+    assert_eq!(f.driver.active_count(), 0);
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_unused_facade_denies_future_start() {
+    let f = Rig::new(None);
+    let worker = f.worker("normal");
+    worker.begin_shutdown();
+    assert!(
+        matches!(f.finish(f.start(worker,true)).await,Outcome::Failure{code,..}if code=="worker_retired")
+    );
+    assert!(!f.home.join("provider.pid").exists());
+    assert!(f.record().get("zcodePendingInput").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compact_failed_result_overrides_native_cancelled_completion() {
+    let f = Rig::new(None);
+    assert!(
+        matches!(f.finish(f.start(f.worker("cancelled-result-failure"),false)).await,Outcome::Failure{code,..}if code=="provider_failed")
+    );
+}

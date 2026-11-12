@@ -19,7 +19,10 @@ from the exact new process. `session.titleUpdated` or `session.resumed` can
 persist diagnostic identity but cannot acknowledge the input. Only native
 `turn.started` with valid matching `sessionId` and `turnId` supplies typed Owner
 acceptance. The returned receipt must match the exact Attempt capability and
-both native IDs. The Worker then returns a separate opaque public turn ID and
+both native IDs. One absolute start deadline is captured before owned preparation
+and checked again after holder ACK, persistence waits and immediately before
+Started. A late store is still joined and its diagnostic identity retained, but
+cannot publish Started or a deferred user receipt. The input is not replayed. The Worker then returns a separate opaque public turn ID and
 waits for Driver's durable accepted user receipt before publishing buffered
 native content. Early frames are bounded to 128 frames / 2 MiB; overflow fails
 closed rather than silently losing content.
@@ -39,6 +42,10 @@ spawn-permit release panic retain a recoverable PID owner. StopSignal permits
 cancellation without waiting for that vault lock. Blocking preparation and
 Store/Sink IO stay owned even if the start waiter is dropped. Cleanup never
 fabricates a JoinedCleanup capability while a process or external IO is unknown.
+An external Store/Sink task panic makes uncertainty sticky: a later successful
+bookkeeping operation cannot erase it. Without an independent trusted IO
+completion capability this worker remains permanently quarantined; releasing
+that slot requires a future recovery seam, not an inferred receipt.
 Only joined never-sent attempts clear their exact reservation. Unknown sealed
 input remains visibly blocked by Owner's persisted recovery marker.
 
@@ -52,7 +59,9 @@ rather than attributing it to another turn. Unknown event kinds remain ignored.
 
 A compact `result` is authoritative. If it is absent, successful
 `turn.completed` with nonempty response is accepted only after stdout EOF;
-cancelled completion maps to interrupted. A result can trigger bounded process
+cancelled completion maps to interrupted only when no compact result exists.
+An explicit failed result overrides an earlier native cancelled completion;
+host-requested cancellation still owns its separate interrupted outcome. A result can trigger bounded process
 retirement; failure classification is allowed only after observed stdout EOF
 and joined, complete private stderr. The Node-compatible heuristic uses the last
 three stderr lines and at most 500 UTF-16 units. It emits static evidence and a

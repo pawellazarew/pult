@@ -127,6 +127,8 @@ struct Job {
     signal: Mutex<Option<StopSignal>>,
     vault: tokio::sync::Mutex<Vault>,
     unknown_io: AtomicBool,
+    // Sticky: a failed task cannot prove completion of IO it may have started.
+    uncertain_io: AtomicBool,
 }
 impl Job {
     fn cancel(&self) {
@@ -182,7 +184,12 @@ impl ZcodeWorker {
         self.0.state.lock().expect("ZCode state").used
     }
     pub fn begin_shutdown(&self) {
-        if let Some(job) = self.0.state.lock().expect("ZCode state").active.clone() {
+        let active = {
+            let mut state = self.0.state.lock().expect("ZCode state");
+            state.used = true;
+            state.active.clone()
+        };
+        if let Some(job) = active {
             job.cancel();
         }
     }
@@ -254,6 +261,7 @@ impl Worker for ZcodeWorker {
                 spawn_inflight: false,
             }),
             unknown_io: AtomicBool::new(false),
+            uncertain_io: AtomicBool::new(false),
         });
         {
             let mut state = self.0.state.lock().expect("ZCode state");
@@ -303,6 +311,16 @@ impl Worker for ZcodeWorker {
         })
     }
 }
+fn start_deadline(job: &Job) -> Result<(), WorkerError> {
+    if Instant::now() >= job.deadline {
+        Err(error(
+            "start_unknown",
+            "ZCode input acceptance deadline expired",
+        ))
+    } else {
+        Ok(())
+    }
+}
 fn fatal(inner: &Inner) {
     if let Some(d) = inner.services.driver.upgrade() {
         d.report_storage_failure();
@@ -330,6 +348,7 @@ async fn store<T: Send + 'static>(
             })
         }
         Err(_) => {
+            job.uncertain_io.store(true, Ordering::Release);
             fatal(inner);
             Err(error(
                 "storage_unavailable",
@@ -357,6 +376,7 @@ async fn append(inner: &Inner, job: &Job, draft: Value) -> Result<(), WorkerErro
             }
         }
         Err(_) => {
+            job.uncertain_io.store(true, Ordering::Release);
             fatal(inner);
             Err(error(
                 "storage_unavailable",
@@ -463,13 +483,13 @@ async fn run(
             let a = attempt.clone();
             store(&inner, &job, move |s| s.retire(a, proof)).await
         };
-        if cleared.is_err() {
+        if cleared.is_err() && !job.uncertain_io.load(Ordering::Acquire) {
             let proof = JoinedCleanup::from_owned_join(&attempt);
             let _ = store(&inner, &job, move |s| s.retire(attempt, proof)).await;
         }
     }
     // Unknown external Store/Sink IO is not a cleanup receipt, even on panic.
-    while job.unknown_io.load(Ordering::Acquire) {
+    while job.unknown_io.load(Ordering::Acquire) || job.uncertain_io.load(Ordering::Acquire) {
         job.closed.send_replace(Closed::Unconfirmed);
         job.retry.notified().await;
     }
@@ -510,7 +530,10 @@ async fn cleanup(inner: &Inner, job: &Job) {
                 true
             }
         };
-        if result && !job.unknown_io.load(Ordering::Acquire) {
+        if result
+            && !job.unknown_io.load(Ordering::Acquire)
+            && !job.uncertain_io.load(Ordering::Acquire)
+        {
             break;
         }
         job.closed.send_replace(Closed::Unconfirmed);
@@ -541,6 +564,7 @@ async fn turn(
         tokio::task::spawn_blocking(move || policy(&*checking.services.gate, &scope, &initial))
             .await
             .map_err(|_| unavailable())??;
+    start_deadline(&job)?;
     let request = ReserveRequest::new(
         job.ticket.clone(),
         snapshot.clone(),
@@ -560,6 +584,7 @@ async fn turn(
         ));
     }
     *job.attempt.lock().expect("ZCode attempt") = Some(attempt.clone());
+    start_deadline(&job)?;
     if job.cancelled() {
         attempt.cancel_before_spawn();
         return Err(interrupted());
@@ -624,6 +649,7 @@ async fn turn(
     )
     .await
     .map_err(|_| unavailable())?;
+    start_deadline(&job)?;
     if job.cancelled() {
         attempt.cancel_before_spawn();
         return Err(interrupted());
@@ -674,6 +700,7 @@ async fn turn(
         vault.process = Some(starting.into_process());
         acknowledged.map_err(|_| unavailable())?;
     }
+    start_deadline(&job)?;
     let mut output = {
         let mut vault = job.vault.lock().await;
         vault
@@ -723,6 +750,9 @@ async fn turn(
         if job.cancelled() {
             return Err(interrupted());
         }
+        if !accepted {
+            start_deadline(&job)?;
+        }
         for (field, known) in [("sessionId", &mut sid), ("turnId", &mut tid)] {
             if let Some(value) = frame.get(field) {
                 let id = value
@@ -738,6 +768,9 @@ async fn turn(
                         let a = attempt.clone();
                         let id = id.to_owned();
                         store(&inner, &job, move |s| s.record_native_session(a, id)).await?;
+                        if !accepted {
+                            start_deadline(&job)?;
+                        }
                     }
                 }
             }
@@ -774,6 +807,7 @@ async fn turn(
                     "ZCode acceptance receipt mismatched",
                 ));
             }
+            start_deadline(&job)?;
             let sender = started
                 .lock()
                 .expect("ZCode start")
@@ -869,7 +903,7 @@ async fn turn(
     if result == Some(true) || result.is_none() && ended.is_some_and(|(ok, text, _)| ok && text) {
         return Ok(Outcome::Success);
     }
-    if ended.is_some_and(|(_, _, cancelled)| cancelled) {
+    if result.is_none() && ended.is_some_and(|(_, _, cancelled)| cancelled) {
         return Ok(Outcome::Interrupted);
     }
     if !natural_eof {

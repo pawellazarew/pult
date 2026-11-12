@@ -29,9 +29,11 @@ if mode == 'malformed':
     print(json.dumps({'type':'session.updated','sessionId':None,'turnId':tid}), flush=True)
     sys.exit(0)
 emit('model.streaming', {'kind':'text_delta','delta':'Привет 🌊'})
-if mode == 'cancelled':
+if mode in ('cancelled', 'cancelled-result-failure'):
     emit('turn.completed', {'resultType':'cancelled'})
-    sys.exit(130)
+    if mode == 'cancelled': sys.exit(130)
+    print(json.dumps({'type':'result','sessionId':sid,'turnId':tid,'resultType':'error'}), flush=True)
+    sys.exit(1)
 emit('turn.completed', {'resultType':'success','response':'Привет 🌊'})
 if mode != 'completed-only':
     print(json.dumps({'type':'result','sessionId':sid,'turnId':tid,'success':True,'response':'Привет 🌊'}), flush=True)
