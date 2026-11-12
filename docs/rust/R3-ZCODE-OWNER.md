@@ -79,12 +79,11 @@ reservation guards remain in place. A Node version from before this paired
 compatibility change cannot be promised to understand the new marker.
 
 Confirmed native IDs with no pending-input marker remain known resumable metadata.
-Unknown input requires manual history inspection. Required future parity gap:
-a missing native session must be classified by the real Worker and reset only
-under an explicit **next-turn** policy with fresh exact SID/marker comparison and
-prior cleanup proof. This slice intentionally provides no reset API, regex-based
-auto-clear, current-input retry, queue consumption on uncertain delivery, or
-new-ID fallback.
+Unknown input requires manual history inspection. The Owner-only primitive below
+supports explicit **next-turn** metadata recovery; actual Worker proof delivery,
+Runtime cache/admission and authenticated owner UI/RPC consumption remain separate
+required integration. There is no regex-based auto-clear, current-input retry,
+queue consumption on uncertain delivery, or new-ID fallback.
 
 ## Checks
 
@@ -94,3 +93,69 @@ reservation, separate identity/acceptance, hot queue neutrality and preserved us
 pause, cold failed/paused recovery, null/future/UTF-16 raw framing, known IDs,
 foreign/stale/cancelled evidence, invalid resume IDs, metadata preservation and
 shared policy faults. No provider, account, login, model or network is invoked.
+
+
+## Explicit owner-confirmed next-turn recovery primitive
+
+`MissingAfterJoin` is opaque and has no JSON/Debug/Clone implementation. The
+crate-private Worker constructor requires an exact joined Attempt, known retired
+Owner IO, a sealed prior spawn and a captured valid resume SID. Its actual
+`saw_matching_native_turn_started` predicate must be false; this must not mean
+merely "no Published Started" (a late native acceptance can precede a denied
+publication). Only the Worker can supply the observed missing-session diagnostic
+and confirm real stdout EOF/process/stderr reader joins plus all Store/Sink IO
+known. The type constructor checks the host binding; it cannot inspect an OS
+process. A stderr regex is diagnostic evidence, never proof of non-execution.
+
+The future Worker one-shot getter transfers this proof only after known cleanup.
+The future Runtime caches it with a bounded exact recovery handle and takes it
+only after this Ticket's real `Progress::Finished` receipt. Cold marker JSON cannot
+reconstruct an Attempt or proof: restart without an in-memory proof stays in the
+explicit history-inspection/import boundary.
+
+`IdleRecoveryPermit::from_finished_idle` is crate-private and checks the exact
+captured Terminal Ticket, a durable terminal event ID, no published start and the
+original recovery deadline. It does **not** reserve a Runtime slot itself. Its
+trusted caller must already reserve the same session/name (including all active,
+preparing and quarantined work), prevent new own starts and retain that reservation
+until every recovery IO outcome is known. Neighboring sessions stay independent.
+Direct uncoordinated trusted Driver starts are outside this sole-controller
+boundary; this is not a same-UID sandbox.
+
+`OwnerConfirmedRecovery` is minted only after an explicit authenticated owner
+confirmation of possible prior execution. It is authorization by the owner caller,
+not a universal proof that a human clicked. Scoped MCP/model JSON, filesystem Full
+and tool rules cannot construct it. `RecoveryWarningReceipt` is bound to the exact
+permit and a real durable **requested** warning appended after the old terminal.
+Its internal constructor must be called only for that exact owned append. A
+requested warning must not claim that reset already succeeded or contain a
+`changes` payload describing a completed reset. The later consumer must distinguish
+committed metadata from failure/unconfirmed outcome with separate notices.
+
+`ZcodeOwner::confirm_missing_for_next_turn` runs in owned blocking work, after that
+requested-warning receipt. The issuing Owner and every issued Attempt share a
+private in-memory Arc brand. Confirm rejects a foreign brand before any FS read or
+callback: copied SessionKey/SID/marker/cwd metadata cannot transfer this capability
+to another home/Owner, and a recreated Owner on the same stores cannot inherit it.
+This is trusted-host API correctness, not an external-model exploit claim.
+It rechecks policy, home/cwd/incarnation, current native SID and private marker after lock waits, and rejects a visible active Driver ticket
+for that name or a Driver storage fault. The private Ready/Sealed/Revoked CAS is
+bounded memory work, without callbacks/IO under Driver or Runtime locks. Cancel
+before seal wins; once sealed the owned metadata write may finish after cancellation
+and makes no rollback promise. No input is executed.
+
+The exact Registry transaction removes only `providerSessionId` and
+`zcodePendingInput`, sets `queuePaused=true`, and preserves queueDispatch/items,
+concurrent title/model/settings and other metadata. A `RecoveryReceipt` is metadata
+only; it never grants a dispatch or resumes a queue. The next explicit input still
+needs fresh Driver/policy/network checks. A failed/unknown atomic write faults
+execution after all transaction guards drop; an error must not be reported as
+proof that the file was unchanged. The Runtime must retain owned work through the
+known IO outcome, not abandon it when the owner caller stops waiting.
+
+Owner-focused tests use actual Driver/journal/Registry/ConsentStore and controlled
+fake Worker close receipts. They exercise opaque proof/terminal/confirmation and
+warning bindings, cancel/deadline, stale CAS after waits, metadata/queue preservation,
+visible active tickets, cold uncertainty and injected precommit/directory-sync
+failure. These are Owner contract tests, not real ZCode diagnostic/OS-join proof;
+actual Worker/Runtime/UI acceptance remains required separately.

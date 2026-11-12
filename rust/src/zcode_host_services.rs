@@ -4,14 +4,14 @@ use crate::consent_store::ConsentStore;
 use crate::owner_trust::{OwnerError, OwnerTrust, RouteValidity, yes};
 use crate::registry::{Record, Registry};
 use crate::turn_coordinator::Ticket;
-use crate::turn_driver::{DispatchDecision, Driver, SpawnAction};
+use crate::turn_driver::{DispatchDecision, Driver, Receipt, SpawnAction, Terminal};
 use crate::turn_snapshot::{Provider, SessionKey, TurnSnapshot};
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{
     Arc, Mutex, Weak,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU8, Ordering},
 };
 
 const MARKER: &str = "zcodePendingInput";
@@ -61,6 +61,7 @@ fn id(value: &str) -> bool {
         && !value.chars().any(char::is_control)
 }
 struct Entry {
+    owner_brand: Arc<()>,
     ticket: Ticket,
     initial: TurnSnapshot,
     generation: u64,
@@ -155,7 +156,161 @@ impl Acceptance {
         &self.native_turn
     }
 }
+/// Observed missing-session diagnostic plus exact owned cleanup, NOT proof
+/// that the previous argv input did not execute. No cold/JSON constructor.
+pub struct MissingAfterJoin {
+    attempt: Attempt,
+    expected_resume: String,
+}
+impl MissingAfterJoin {
+    /// Trusted Worker only, after natural stdout EOF, confirmed process/stderr
+    /// reader joins, and all Store/Sink IO known. `saw_matching_native_turn_started`
+    /// is actual protocol observation, never merely Published Started state.
+    #[allow(dead_code)] // Worker consumer is added separately.
+    pub(crate) fn from_owned_missing_after_join(
+        attempt: &Attempt,
+        joined: JoinedCleanup,
+        saw_matching_native_turn_started: bool,
+    ) -> Result<Self, Error> {
+        if !Arc::ptr_eq(&attempt.0, &joined.0.0)
+            || saw_matching_native_turn_started
+            || !attempt.sealed()
+            || !attempt.0.retired.load(Ordering::Acquire)
+        {
+            return Err(Error::Invalid);
+        }
+        let expected_resume = attempt
+            .resume_session_id()
+            .filter(|v| id(v))
+            .ok_or(Error::Invalid)?
+            .to_owned();
+        Ok(Self {
+            attempt: attempt.clone(),
+            expected_resume,
+        })
+    }
+    pub fn session(&self) -> &SessionKey {
+        self.attempt.ticket().session()
+    }
+    pub fn expected_resume_session_id(&self) -> &str {
+        &self.expected_resume
+    }
+    pub fn previous_public_turn(&self) -> &str {
+        self.attempt.public_turn()
+    }
+}
+/// Host's same-name idle reservation, retained until all metadata IO is known.
+/// Constructor is internal and does not itself reserve a Runtime slot. Caller
+/// must exclude every own active/preparing/quarantined/new same-name execution.
+/// No external callbacks, FS operations, or arbitrary JSON authority live here.
+pub struct IdleRecoveryPermit {
+    proof: Arc<MissingAfterJoin>,
+    terminal_event_id: u64,
+    deadline: std::time::Instant,
+    // Ready(0) -> sealed metadata commit(1) or revoked(2).
+    state: AtomicU8,
+}
+impl IdleRecoveryPermit {
+    #[allow(dead_code)] // Runtime consumer is added separately.
+    pub(crate) fn from_finished_idle(
+        proof: Arc<MissingAfterJoin>,
+        finished: &Terminal,
+        deadline: std::time::Instant,
+    ) -> Result<Arc<Self>, Error> {
+        let terminal_event_id = finished
+            .terminal_event_id
+            .filter(|v| *v > 0 && *v <= 9_007_199_254_740_991)
+            .ok_or(Error::Invalid)?;
+        if finished.turn.ticket != *proof.attempt.ticket()
+            || finished.turn.provider_turn_id.is_some()
+            || !proof.attempt.0.retired.load(Ordering::Acquire)
+            || std::time::Instant::now() >= deadline
+        {
+            return Err(Error::Invalid);
+        }
+        Ok(Arc::new(Self {
+            proof,
+            terminal_event_id,
+            deadline,
+            state: AtomicU8::new(0),
+        }))
+    }
+    /// Cancellation before seal wins. After seal the owned metadata commit may
+    /// finish; it never dispatches input and does not promise rollback.
+    pub fn cancel(&self) -> bool {
+        self.state
+            .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+    pub fn sealed(&self) -> bool {
+        self.state.load(Ordering::Acquire) == 1
+    }
+    fn ready(&self) -> bool {
+        self.state.load(Ordering::Acquire) == 0 && std::time::Instant::now() < self.deadline
+    }
+    fn seal(&self) -> bool {
+        self.ready()
+            && self
+                .state
+                .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+    }
+}
+/// Explicit authenticated owner acknowledgement of possible prior execution.
+/// This is host authorization, not a universal proof that a human clicked.
+/// Scoped MCP/model JSON, filesystem Full and tool rules cannot construct it.
+pub struct OwnerConfirmedRecovery(Arc<IdleRecoveryPermit>);
+impl OwnerConfirmedRecovery {
+    #[allow(dead_code)] // Authenticated owner RPC/UI consumer is added separately.
+    pub(crate) fn from_owner_confirmation(permit: &Arc<IdleRecoveryPermit>) -> Self {
+        Self(permit.clone())
+    }
+}
+/// Durable REQUESTED warning, never an assertion that reset already committed.
+pub struct RecoveryWarningReceipt {
+    permit: Arc<IdleRecoveryPermit>,
+    receipt: Receipt,
+}
+impl RecoveryWarningReceipt {
+    #[allow(dead_code)] // Runtime calls only after actual owned requested-warning append.
+    pub(crate) fn from_owned_requested_append(
+        permit: &Arc<IdleRecoveryPermit>,
+        receipt: Receipt,
+    ) -> Result<Self, Error> {
+        if receipt.id <= permit.terminal_event_id
+            || receipt.id > 9_007_199_254_740_991
+            || receipt.ts.is_empty()
+            || receipt.ts.len() > 128
+            || receipt.ts.chars().any(char::is_control)
+        {
+            return Err(Error::Invalid);
+        }
+        Ok(Self {
+            permit: permit.clone(),
+            receipt,
+        })
+    }
+}
+/// Metadata-only success receipt. Never grants a dispatch or resumes the queue.
+pub struct RecoveryReceipt {
+    permit: Arc<IdleRecoveryPermit>,
+    warning_event_id: u64,
+}
+impl RecoveryReceipt {
+    pub fn session(&self) -> &SessionKey {
+        self.permit.proof.session()
+    }
+    pub fn warning_event_id(&self) -> u64 {
+        self.warning_event_id
+    }
+    #[allow(dead_code)]
+    pub(crate) fn matches(&self, permit: &Arc<IdleRecoveryPermit>) -> bool {
+        Arc::ptr_eq(&self.permit, permit)
+    }
+}
+
 pub struct ZcodeOwner {
+    brand: Arc<()>,
     trust: OwnerTrust,
     attempts: Mutex<HashMap<SessionKey, Attempt>>,
     failed: AtomicBool,
@@ -173,6 +328,7 @@ impl ZcodeOwner {
         fatal: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<Arc<Self>, Error> {
         Ok(Arc::new(Self {
+            brand: Arc::new(()),
             trust: OwnerTrust::new(
                 home,
                 registry,
@@ -187,6 +343,85 @@ impl ZcodeOwner {
             fatal,
         }))
     }
+    /// Metadata recovery only, executed in owned blocking work. Runtime must
+    /// retain this exact same-name idle reservation until the outcome is known.
+    /// Direct uncoordinated trusted Driver starts are outside that controller
+    /// boundary; next input still requires fresh Driver/policy authorization.
+    pub fn confirm_missing_for_next_turn(
+        &self,
+        permit: Arc<IdleRecoveryPermit>,
+        confirmed: OwnerConfirmedRecovery,
+        warning: RecoveryWarningReceipt,
+    ) -> Result<RecoveryReceipt, Error> {
+        // Proof is local to the issuing Owner lifetime, even if another home
+        // copies all visible metadata or a fresh Owner reopens the same stores.
+        // Reject before any policy/FS read, callback or recovery side effect.
+        if !Arc::ptr_eq(&self.brand, &permit.proof.attempt.0.owner_brand) {
+            return Err(Error::Invalid);
+        }
+        self.operation(|| {
+            if !Arc::ptr_eq(&permit, &confirmed.0) || !Arc::ptr_eq(&permit, &warning.permit) {
+                return Err(Error::Invalid);
+            }
+            if !permit.ready() {
+                return Err(Error::Unavailable);
+            }
+            let proof = &permit.proof;
+            let policy = self.trust.snapshot_policy(proof.session())?;
+            if policy.snapshot.cwd != proof.attempt.0.initial.cwd {
+                return Err(Error::Invalid);
+            }
+            #[cfg(test)]
+            tests::before_recovery_transaction();
+            let mut consent = self.trust.consent.lock().map_err(|_| Error::Storage)?;
+            let mut registry = self.trust.registry()?;
+            if registry.write_poisoned() {
+                return Err(Error::Storage);
+            }
+            let record = registry.find(&proof.session().name).ok_or(Error::Invalid)?;
+            self.trust.transaction_scope(record, &policy.snapshot)?;
+            if !crate::owner_trust::same_authority(&policy.record, record) {
+                return Err(Error::Unavailable);
+            }
+            // Refresh consent after both mutex waits; no user callback is run
+            // under these guards. Metadata recovery never grants effective Full.
+            consent.read().map_err(|_| Error::Storage)?;
+            if record.scalar("providerSessionId").as_deref() != Some(proof.expected_resume.as_str())
+                || record.get(MARKER).map(|v| v.get()) != Some(proof.attempt.0.marker.as_str())
+            {
+                return Err(Error::Uncertain);
+            }
+            if !proof.attempt.0.retired.load(Ordering::Acquire) {
+                return Err(Error::Unavailable);
+            }
+            let driver = self.trust.driver.upgrade().ok_or(Error::Unavailable)?;
+            if driver.storage_failed()
+                || driver
+                    .active_ticket_for_name(&proof.session().name)
+                    .is_some()
+            {
+                return Err(Error::Unavailable);
+            }
+            // Bounded local CAS only. No callbacks, FS or OS spawn under a
+            // Driver/Runtime mutex; Runtime's reservation excludes new starts.
+            if !permit.seal() {
+                return Err(Error::Unavailable);
+            }
+            registry
+                .update_checked(proof.session(), |record| {
+                    record.remove("providerSessionId");
+                    record.remove(MARKER);
+                    record.set_bool("queuePaused", true);
+                    Ok(())
+                })
+                .map_err(|_| Error::Storage)?;
+            Ok(RecoveryReceipt {
+                permit: permit.clone(),
+                warning_event_id: warning.receipt.id,
+            })
+        })
+    }
+
     pub fn store(self: &Arc<Self>) -> Arc<dyn SessionStore> {
         Arc::new(OwnerStore(self.clone()))
     }
@@ -371,6 +606,7 @@ impl ZcodeOwner {
                 .map_err(|_| Error::Storage)?;
             let spawn = Arc::new(SpawnAction::new(ticket.clone(), deadline));
             let attempt = Attempt(Arc::new(Entry {
+                owner_brand: self.brand.clone(),
                 ticket,
                 initial,
                 generation,
