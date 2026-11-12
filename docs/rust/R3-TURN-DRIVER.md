@@ -150,3 +150,8 @@ or queue item actually belongs to this session.
 There are now 35 driver scenarios, including metadata-only input, blocked
 start/append, first-poll failure/panic/interruption, storage uncertainty,
 dropped callers, no resend, and exact JavaScript whitespace behavior.
+
+This is a bounded library input seam, not an RPC migration. Queue ownership,
+question routing and their protocol handlers remain unported; the trusted host
+must validate these identities before calling it. The public method catalogue
+remains 27 implemented methods out of 98.
