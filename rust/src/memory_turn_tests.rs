@@ -705,3 +705,243 @@ fn memory_capability_format_is_never_public_memory_content() {
     assert_eq!(value["id"], "b".repeat(32));
     assert_eq!(value["summary"], "Contact owner@example.com");
 }
+
+// Deterministic regression for request-scoped permission journal ownership.
+struct AuditProbe;
+impl crate::network_guard::Probe for AuditProbe {
+    fn probe<'a>(
+        &'a self,
+        _: &'a str,
+        _: Option<&'a str>,
+        _: Duration,
+    ) -> crate::network_guard::ProbeFuture<'a> {
+        Box::pin(async { panic!("audit never probes a network") })
+    }
+}
+struct AuditResolvedSink {
+    inner: Arc<dyn crate::turn_driver::EventSink>,
+    entered: Arc<Notify>,
+    release: Arc<Semaphore>,
+    finished: Arc<Notify>,
+    blocked_once: Arc<AtomicBool>,
+}
+impl crate::turn_driver::EventSink for AuditResolvedSink {
+    fn append(
+        &self,
+        draft: Value,
+    ) -> Task<Result<crate::turn_driver::Receipt, crate::turn_driver::SinkError>> {
+        let inner = self.inner.clone();
+        let entered = self.entered.clone();
+        let release = self.release.clone();
+        let finished = self.finished.clone();
+        let blocked_once = self.blocked_once.clone();
+        Box::pin(async move {
+            let blocked = draft["kind"] == "permission.resolved"
+                && !blocked_once.swap(true, Ordering::SeqCst);
+            if blocked {
+                entered.notify_one();
+                release.acquire_owned().await.unwrap().forget();
+            }
+            let result = inner.append(draft).await;
+            if blocked {
+                finished.notify_one();
+            }
+            result
+        })
+    }
+}
+async fn audit_memory_permission_drain(timeout: bool, drop_caller: bool) {
+    use crate::codex_runtime::{CodexRuntime, Dependencies, Network, TrustedCommand};
+    let mut fixture = Fixture::new().await;
+    let state = fixture.state.clone();
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Semaphore::new(0));
+    struct Release(Arc<Semaphore>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.add_permits(1);
+        }
+    }
+    let release_on_exit = Release(release.clone());
+    let finished = Arc::new(Notify::new());
+    let sink = Arc::new(AuditResolvedSink {
+        inner: state.execution_sink(),
+        entered: entered.clone(),
+        release,
+        finished: finished.clone(),
+        blocked_once: Arc::new(AtomicBool::new(false)),
+    });
+    let runtime = CodexRuntime::new(
+        Dependencies {
+            home: state.home.clone(),
+            registry: state.registry.clone(),
+            consent: Arc::new(Mutex::new(
+                crate::consent_store::ConsentStore::open(&state.home).unwrap(),
+            )),
+            driver: state.driver.get().unwrap().clone(),
+            sink,
+        },
+        crate::runtime_config::RuntimeConfig::default(),
+        TrustedCommand {
+            holder: "/bin/echo".into(),
+            program: "/bin/echo".into(),
+            prefix_args: vec![],
+        },
+        crate::worker_env::Environment::new(),
+        Network::Shared(Arc::new(crate::network_guard::NetworkGuard::new(Arc::new(
+            AuditProbe,
+        )))),
+        Default::default(),
+    )
+    .unwrap();
+    assert!(state.native_runtime.set(runtime.clone()).is_ok());
+    let control = fixture.control();
+    let proposal = if timeout {
+        let backend = fixture.backend.clone();
+        let state = state.clone();
+        let params = fixture.update();
+        let job = control.admit().unwrap();
+        let tracked = state.host_jobs.track();
+        tokio::spawn(async move {
+            let _job = job;
+            let _tracked = tracked;
+            backend
+                .propose(
+                    state,
+                    control,
+                    "memory.update".into(),
+                    params,
+                    std::time::Instant::now() + Duration::from_millis(100),
+                )
+                .await
+        })
+    } else {
+        tokio::spawn(
+            fixture
+                .backend
+                .call(Lease(control), "memory.update".into(), fixture.update()),
+        )
+    };
+    bounded(async {
+        while runtime.list_permissions(None).is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    let old_id = runtime.list_permissions(None)[0]["id"].clone();
+    let proposal = if drop_caller {
+        proposal.abort();
+        assert!(proposal.await.unwrap_err().is_cancelled());
+        None
+    } else {
+        Some(proposal)
+    };
+    if !timeout {
+        state.driver.get().unwrap().cancel(fixture.handle.ticket());
+    }
+    bounded(entered.notified()).await;
+    assert!(
+        proposal
+            .as_ref()
+            .is_none_or(|proposal| !proposal.is_finished()),
+        "owned memory Job ended before resolved IO"
+    );
+    assert_eq!(state.driver.get().unwrap().active_count(), 1);
+    let drain = fixture.backend.drain(fixture.handle.ticket().clone());
+    tokio::pin!(drain);
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(drain.as_mut().poll(cx).is_pending()))
+            .await
+    );
+    assert!(
+        state
+            .driver
+            .get()
+            .unwrap()
+            .execution_snapshot(fixture.handle.ticket())
+            .is_some()
+    );
+    assert!(state.host_jobs.active() > 0);
+    drop(release_on_exit);
+    bounded(finished.notified()).await;
+    if let Some(proposal) = proposal {
+        assert!(bounded(proposal).await.unwrap().is_err());
+    }
+    if timeout {
+        state.driver.get().unwrap().cancel(fixture.handle.ticket());
+    }
+    bounded(drain).await.unwrap();
+    bounded(fixture.handle.wait()).await.unwrap();
+    assert_eq!(state.driver.get().unwrap().active_count(), 0);
+    let key = fixture.handle.ticket().session().clone();
+    let snapshot = TurnSnapshot {
+        key: key.clone(),
+        provider: Provider::Codex,
+        cwd: fixture._project.path().canonicalize().unwrap(),
+        settings: TurnSettings {
+            approval: Approval::Full,
+            ..Default::default()
+        },
+    };
+    let mut next = state
+        .driver
+        .get()
+        .unwrap()
+        .start(
+            snapshot,
+            "next turn".into(),
+            Arc::new(FixtureWorker(fixture.backend.clone())),
+        )
+        .unwrap();
+    bounded(next.accepted()).await.unwrap();
+    let cursor = state.last_event_id.load(Ordering::Acquire);
+    state
+        .live_sessions
+        .lock()
+        .unwrap()
+        .seed(key.clone(), crate::session_live::Status::Working, cursor)
+        .unwrap();
+    let mut next_params = fixture.update();
+    next_params["commandId"] = json!("new-ticket-proposal");
+    let next_control = fixture.backend.control(next.ticket()).unwrap();
+    let next_proposal = tokio::spawn(fixture.backend.call(
+        Lease(next_control),
+        "memory.update".into(),
+        next_params,
+    ));
+    bounded(async {
+        while runtime.list_permissions(None).is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert_ne!(old_id, runtime.list_permissions(None)[0]["id"]);
+    assert_eq!(
+        state
+            .live_sessions
+            .lock()
+            .unwrap()
+            .view(&key)
+            .unwrap()
+            .status,
+        crate::session_live::Status::BlockedPermission
+    );
+    assert_eq!(runtime.list_permissions(None).len(), 1);
+    state.driver.get().unwrap().cancel(next.ticket());
+    bounded(next.wait()).await.unwrap();
+    assert!(bounded(next_proposal).await.unwrap().is_err());
+    bounded(runtime.shutdown()).await.unwrap();
+}
+#[tokio::test]
+async fn audit_memory_cancel_must_hold_ticket_until_resolution_known() {
+    audit_memory_permission_drain(false, false).await;
+}
+
+#[tokio::test]
+async fn memory_proposal_timeout_holds_owned_job_through_scoped_journal_drain() {
+    audit_memory_permission_drain(true, false).await;
+}
+#[tokio::test]
+async fn dropped_memory_caller_cannot_lose_scoped_journal_cleanup() {
+    audit_memory_permission_drain(false, true).await;
+}

@@ -400,12 +400,17 @@ impl Backend {
                 method.as_str(),
                 "memory.add" | "memory.update" | "memory.forget"
             ) {
-                tokio::time::timeout(
-                    PROPOSAL_TIMEOUT,
-                    backend.propose(state, control, method, params),
-                )
-                .await
-                .unwrap_or_else(|_| Err(denied()))
+                // The owned Job includes per-question journal cleanup. Never
+                // timeout/drop the whole scope while broker IO is still owned.
+                backend
+                    .propose(
+                        state,
+                        control,
+                        method,
+                        params,
+                        std::time::Instant::now() + PROPOSAL_TIMEOUT,
+                    )
+                    .await
             } else {
                 Err(denied())
             };
@@ -486,9 +491,14 @@ impl Backend {
         control: Arc<Control>,
         method: String,
         params: Value,
+        deadline: std::time::Instant,
     ) -> Result<Value, MemoryError> {
-        let deadline = std::time::Instant::now() + PROPOSAL_TIMEOUT;
-        let accepted = Self::accepted(&control).await?;
+        let accepted = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            Self::accepted(&control),
+        )
+        .await
+        .map_err(|_| denied())??;
         let checking_state = state.clone();
         let checking = control.clone();
         let arguments = params.clone();
@@ -521,15 +531,31 @@ impl Backend {
         let mut question = runtime
             .request_memory_permission(request)
             .map_err(|_| denied())?;
-        let decision = loop {
-            let changed = control.changed.notified();
-            tokio::pin!(changed);
-            changed.as_mut().enable();
-            if !control.valid.load(Ordering::Acquire) {
-                return Err(denied());
-            }
-            tokio::select! { decision = question.decision() => break decision, _ = changed => {} }
+        // Pin one waiter: dropping/recreating decision() on a control wake
+        // cancels the request through DecisionWait's Drop implementation.
+        let decision = {
+            let decision = question.decision();
+            tokio::pin!(decision);
+            tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
+                loop {
+                    let changed = control.changed.notified();
+                    tokio::pin!(changed);
+                    changed.as_mut().enable();
+                    if !control.valid.load(Ordering::Acquire) {
+                        return None;
+                    }
+                    tokio::select! { result = &mut decision => return Some(result), _ = changed => {} }
+                }
+            })
+            .await
+            .ok()
+            .flatten()
         };
+        // This await is deliberately outside the decision timeout/cancellation
+        // scope, inside the owned memory Job. Never wait on other sessions.
+        question.cancel();
+        question.drained().await;
+        let decision = decision.ok_or_else(denied)?;
         // Broker returns the approved raw input even when the resolver supplied
         // no override. Accept only that exact payload; never execute a changed
         // input or a wider scope, and retain the original immutable params.
