@@ -11,7 +11,9 @@ dispatch, general workspaces use the existing private-directory guard. Archive,
 incarnation replacement, unsupported fork requests and path retargeting reject
 dispatch. The final check may narrow approval but never widen its frozen snapshot.
 Injected route callbacks run outside locks; liveness and authority are reread
-following callback reentry.
+following callback reentry. `execution_snapshot` retains cancelling work for
+diagnostics until cleanup. Dispatch uses `snapshot_for_dispatch`, which revokes
+authority immediately on cancellation, shutdown or storage fault.
 
 The mandatory thread store owns its blocking registry transaction. It verifies
 the live ticket, incarnation, provider and canonical cwd before changing only
