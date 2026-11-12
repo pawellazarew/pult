@@ -23,10 +23,19 @@ Public input is clipped with concealed metadata and subsequently redacted by
 Broker. Errors are static and omit native payloads. Structured answers are
 checked against question IDs/options and whitespace rules.
 
-15 tests cover vocabulary, incomplete/malformed offers, stale identities,
+23 tests cover vocabulary, incomplete/malformed offers, stale identities,
 exact rule amendments, questions, clipping, unsupported methods and a real
 broker redaction crossing. Legacy schemas are checked-in 0.163 fixtures.
-MCP tool-approval elicitation, generic elicitation and newer permissions
-request methods are not supported by this slice yet. Current Node has a
-specific MCP tool-approval subcase which must be ported before browser parity.
+The known MCP tool-approval form requires `_meta.codex_approval_kind` equal
+to `mcp_tool_call`, an empty form schema and matching trusted pending-call
+metadata when supplied. MCP grants are once-only; broader scopes are rejected.
+`pult_browser` code execution/evaluation tools are declined before Broker.
+Native replies use fixed accept/decline vocabulary and never replace native
+arguments with a broker input override. Generic elicitation and newer permission
+request methods remain unsupported.
+
+Broker publication keeps email addresses visible under the current redaction
+policy while concealing credentials and opaque provider identifiers.
 No production host callback or rule-file writer is wired here.
+The public method catalogue remains 27 implemented methods out of 98. This
+pure mapper does not add a Codex Worker or production MCP bridge.
