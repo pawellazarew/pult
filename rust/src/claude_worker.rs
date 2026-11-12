@@ -66,6 +66,8 @@ fn uuid() -> Result<String, WorkerError> {
 pub enum SessionStage {
     Reserved,
     Initialized,
+    /// The joined worker proves stdin dispatch never reached its first poll.
+    AbortedBeforeInput,
 }
 pub struct SessionWrite {
     session: SessionKey,
@@ -649,7 +651,7 @@ async fn run(
     let mut started = Some(started);
     let mut process = None;
     let (done, done_rx) = oneshot::channel();
-    let result = turn(
+    let mut result = turn(
         &inner,
         &job,
         &snapshot,
@@ -662,6 +664,21 @@ async fn run(
     )
     .await;
     cleanup(&inner, &job, &mut process).await;
+    // Revoke/retire the process and MCP first, then clear only a reservation
+    // whose input was never dispatched. CAS=1 is uncertain even if write failed.
+    if job.dispatch.load(Ordering::Acquire) != 1
+        && let Err(err) = persist(
+            &inner,
+            &job,
+            &identity.native_id,
+            &identity.native_id,
+            SessionStage::AbortedBeforeInput,
+            None,
+        )
+        .await
+    {
+        result = Err(err);
+    }
     {
         let mut state = inner.state.lock().expect("Claude state");
         if state

@@ -1,6 +1,7 @@
 //! Real process/Driver integration using a synthetic Claude fixture, no account.
 use pult_core::claude_worker::{
-    ClaudeWorker, Config, Services, SessionReceipt, SessionStore, SessionWrite, StoreError,
+    ClaudeWorker, Config, Services, SessionReceipt, SessionStage, SessionStore, SessionWrite,
+    StoreError,
 };
 use pult_core::turn_coordinator::{Outcome, Ticket};
 use pult_core::turn_driver::{
@@ -33,9 +34,10 @@ impl EventSink for Sink {
         })
     }
 }
-struct Store;
+struct Store(Arc<Mutex<Vec<SessionStage>>>);
 impl SessionStore for Store {
     fn persist(&self, request: SessionWrite) -> Task<Result<SessionReceipt, StoreError>> {
+        self.0.lock().unwrap().push(request.stage());
         Box::pin(async move { Ok(request.acknowledge()) })
     }
 }
@@ -87,6 +89,7 @@ async fn scenario(mode: &str, panic_final_gate: bool) {
         );
         DispatchDecision::Allow
     });
+    let stages = Arc::new(Mutex::new(Vec::new()));
     let snapshot = snapshot(&home);
     let worker = ClaudeWorker::new(
         Config {
@@ -94,7 +97,11 @@ async fn scenario(mode: &str, panic_final_gate: bool) {
             home: home.clone(),
             launch: Launch {
                 holder: env!("CARGO_BIN_EXE_pult-worker-holder").into(),
-                program: python(),
+                program: if mode == "missing-program" {
+                    home.join("missing-provider")
+                } else {
+                    python()
+                },
                 args: vec![
                     "-B".into(),
                     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -124,7 +131,7 @@ async fn scenario(mode: &str, panic_final_gate: bool) {
             driver: Arc::downgrade(&driver),
             sink: sink.clone(),
             gate,
-            store: Arc::new(Store),
+            store: Arc::new(Store(stages.clone())),
             redactors: Arc::new(|| Box::new(pult_core::claude_events::LogRedactor)),
             fatal_storage: Arc::new(|| panic!("unexpected storage fault")),
             mcp: None,
@@ -134,17 +141,31 @@ async fn scenario(mode: &str, panic_final_gate: bool) {
     let mut handle = driver
         .start(snapshot, "fixture prompt".into(), worker.clone())
         .unwrap();
-    if panic_final_gate || mode == "wide-mode" {
-        assert!(handle.accepted().await.is_err());
-    } else {
-        handle.accepted().await.unwrap();
-        if mode == "hold" {
-            assert!(driver.cancel(handle.ticket()));
+    let terminal = if mode == "drop-handle" {
+        let mut progress = handle.subscribe_progress();
+        drop(handle);
+        loop {
+            let state = progress.borrow().clone();
+            if let pult_core::turn_driver::Progress::Finished(result) = state {
+                break result.unwrap();
+            }
+            progress.changed().await.unwrap();
         }
-    }
-    let terminal = handle.wait().await.unwrap();
+    } else {
+        if panic_final_gate || mode == "wide-mode" || mode == "missing-program" {
+            assert!(handle.accepted().await.is_err());
+        } else {
+            handle.accepted().await.unwrap();
+            if mode == "hold" {
+                assert!(driver.cancel(handle.ticket()));
+            }
+        }
+        handle.wait().await.unwrap()
+    };
     match mode {
-        "normal" if !panic_final_gate => assert_eq!(terminal.turn.outcome, Outcome::Success),
+        "normal" | "drop-handle" if !panic_final_gate => {
+            assert_eq!(terminal.turn.outcome, Outcome::Success)
+        }
         "hold" => assert_eq!(terminal.turn.outcome, Outcome::Interrupted),
         _ => assert!(matches!(terminal.turn.outcome, Outcome::Failure { .. })),
     }
@@ -167,6 +188,13 @@ async fn scenario(mode: &str, panic_final_gate: bool) {
             content < terminal,
             "provider evidence must precede Driver terminal"
         );
+    }
+    let stages = stages.lock().unwrap();
+    if panic_final_gate || mode == "missing-program" {
+        assert!(stages.contains(&SessionStage::Reserved));
+        assert!(stages.contains(&SessionStage::AbortedBeforeInput));
+    } else {
+        assert!(!stages.contains(&SessionStage::AbortedBeforeInput));
     }
     assert_eq!(driver.active_count(), 0);
     if panic_final_gate {
@@ -217,5 +245,17 @@ case!(
 case!(
     provider_block_preserves_usage_before_terminal,
     "result-block",
+    false
+);
+
+case!(
+    startup_failure_releases_only_its_never_sent_reservation,
+    "missing-program",
+    false
+);
+
+case!(
+    dropped_caller_handle_does_not_abandon_provider_or_durable_completion,
+    "drop-handle",
     false
 );

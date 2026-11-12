@@ -110,3 +110,15 @@ and lone surrogates. Additional tests cover source filtering, managed precedence
 UTF-16 fragment order and refusal at the managed-directory resource limit.
 The concrete resolver is available for the in-progress ClaudeOwner bridge;
 that bridge and final daemon integration still require separate acceptance.
+
+## Known never-sent cleanup
+
+After process/MCP retirement, a joined worker with dispatch CAS still 0/2 sends
+AbortedBeforeInput to the trusted store. That typed request can clear only its
+exact reservation; CAS=1 retains uncertainty even if the first write failed.
+This prevents a preflight or missing-program failure from permanently blocking a
+chat despite proof that its new input was never dispatched. The owner must also
+accept an idempotent abort if no reservation was created, without clearing any
+foreign or initialized marker. Worker fixtures cover final-gate denial and
+missing-program abort, no abort after actual dispatch, and caller-handle drop
+before acceptance without abandoning durable completion.
