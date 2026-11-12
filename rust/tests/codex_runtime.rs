@@ -22,9 +22,27 @@ use std::sync::{
 use std::time::Duration;
 const WAIT: Duration = Duration::from_secs(20);
 
+// Keep payloads/backtraces secret while making CI assertion locations useful.
+// This hook exists only in this isolated synthetic integration-test process.
+fn test_panic_guard() {
+    pult_core::panic_guard::install();
+    static LOCATION_HOOK: std::sync::Once = std::sync::Once::new();
+    LOCATION_HOOK.call_once(|| {
+        std::panic::set_hook(Box::new(|info| {
+            if let Some(location) = info.location() {
+                eprintln!(
+                    "runtime fixture panic at {}:{}",
+                    location.file(),
+                    location.line()
+                );
+            }
+        }));
+    });
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_stops_warm_process_before_waiting_for_owned_registry_check() {
-    pult_core::panic_guard::install();
+    test_panic_guard();
     let mut f = Fixture::new();
     let entered = Arc::new(tokio::sync::Notify::new());
     let arriving = entered.clone();
@@ -115,7 +133,7 @@ async fn shutdown_stops_warm_process_before_waiting_for_owned_registry_check() {
         1
     );
 }
-macro_rules! case {($name:ident,$body:block)=>{#[tokio::test]async fn $name(){pult_core::panic_guard::install();tokio::time::timeout(WAIT,async $body).await.expect("runtime watchdog");}};}
+macro_rules! case {($name:ident,$body:block)=>{#[tokio::test]async fn $name(){test_panic_guard();tokio::time::timeout(WAIT,async $body).await.expect("runtime watchdog");}};}
 struct ScriptProbe {
     loc: &'static str,
     calls: AtomicUsize,
@@ -700,7 +718,7 @@ case!(stale_stop_is_a_noop_for_finished_missing_or_reused_turns, {
 });
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_shutdown_callers_cannot_erase_terminal_success() {
-    pult_core::panic_guard::install();
+    test_panic_guard();
     tokio::time::timeout(WAIT, async {
         let f = Fixture::new();
         let probe = Arc::new(ScriptProbe {
