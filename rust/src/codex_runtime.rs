@@ -345,6 +345,27 @@ impl CodexRuntime {
         }
         Ok(self.inner.deps.driver.cancel(&ticket))
     }
+    /// Unconditional owner stop across the preparing -> Driver handoff.
+    pub fn stop_name(&self, name: &str) -> Result<bool, RuntimeError> {
+        let mut stopped = false;
+        if let Some(ticket) = self.inner.deps.driver.active_ticket_for_name(name) {
+            stopped |= self.stop(ticket.session(), None)?;
+        }
+        {
+            let state = self.inner.shared.state.lock().expect("Codex runtime");
+            for (key, cancelled) in &state.preparing {
+                if key.name == name {
+                    cancelled.send_replace(true);
+                    stopped = true;
+                }
+            }
+        }
+        // A preparation could have become active and left the preparing map.
+        if let Some(ticket) = self.inner.deps.driver.active_ticket_for_name(name) {
+            stopped |= self.stop(ticket.session(), None)?;
+        }
+        Ok(stopped)
+    }
     /// Owned shutdown continues if this waiting future is dropped. Repeating
     /// shutdown requests a retry of any unconfirmed process cleanup.
     pub fn shutdown(&self) -> Task<Result<(), RuntimeError>> {

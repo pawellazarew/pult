@@ -128,6 +128,9 @@ impl Cache {
             last_event_id: 0,
         })
     }
+    pub(crate) fn can_register(&self) -> bool {
+        self.entries.len() < self.capacity
+    }
     /// Explicit trusted initialization/reset, not an event. Same-name new
     /// incarnations replace their slot; recovery must already have cooled busy.
     pub fn seed(

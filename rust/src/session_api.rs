@@ -189,7 +189,9 @@ pub(crate) async fn execute(
     state: std::sync::Arc<crate::State>,
     command: Command,
 ) -> std::result::Result<Box<RawValue>, ApiError> {
+    let host_job = state.host_jobs.track();
     tokio::task::spawn_blocking(move || {
+        let _host_job = host_job;
         // Use the same lock order as startup and all registry/journal commands.
         let mut store = state.store.lock().map_err(ApiError::internal)?;
         let mut registry = state.registry.lock().map_err(ApiError::internal)?;

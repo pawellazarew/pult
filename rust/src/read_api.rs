@@ -95,7 +95,9 @@ pub(crate) async fn execute(
     state: std::sync::Arc<crate::State>,
     query: Query,
 ) -> Result<Box<RawValue>> {
+    let host_job = state.host_jobs.track();
     tokio::task::spawn_blocking(move || {
+        let _host_job = host_job;
         let mut store = state
             .store
             .lock()

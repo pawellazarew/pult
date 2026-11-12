@@ -9,6 +9,7 @@ pub mod codex_runtime;
 pub mod codex_worker;
 pub mod consent_store;
 mod history;
+mod host_jobs;
 pub mod host_paths;
 pub mod host_policy;
 pub mod journal;
@@ -36,6 +37,7 @@ mod session_memory;
 mod session_memory_api;
 mod session_model;
 mod session_read;
+mod session_runtime_api;
 mod session_tree;
 mod snapshot;
 mod stream;
@@ -75,6 +77,7 @@ use tokio::task::JoinSet;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const PROTOCOL: u64 = 1;
 pub const MAX_LINE: usize = 1024 * 1024;
+pub const PARTIAL: [&str; 6] = session_runtime_api::METHODS;
 pub const SUPPORTED: [&str; 27] = [
     "agent.archive",
     "agent.read",
@@ -485,6 +488,9 @@ struct State {
     started: Instant,
     token: String,
     clients: AtomicUsize,
+    connection_id: AtomicU64,
+    host_jobs: Arc<host_jobs::Tracker>,
+    session_commands: Arc<session_runtime_api::Gate>,
     stop: watch::Sender<bool>,
     store: Mutex<journal::EventStore>,
     history: Mutex<history::HistoryCache>,
@@ -533,7 +539,9 @@ async fn journal_request(
     method: String,
     params: Value,
 ) -> Result<Box<RawValue>> {
+    let host_job = state.host_jobs.track();
     tokio::task::spawn_blocking(move || {
+        let _host_job = host_job;
         if method == "events.tail" {
             let mut store = state
                 .store
@@ -703,11 +711,35 @@ async fn connection(
     } else {
         &SUPPORTED
     };
-    write_value(&mut output, &json!({"type":"hello_ok","protocol":PROTOCOL,"daemon":{"version":VERSION,"pid":std::process::id(),"startedAt":state.started_at},"capabilities":{"experimental":true,"supportedMethods":supported}})).await?;
+    let partial: &[&str] = if memory_lease.is_some() {
+        &[]
+    } else {
+        &PARTIAL
+    };
+    let client_kind = if hello["client"].as_str() == Some("shell") {
+        host_policy::ClientKind::Shell
+    } else {
+        host_policy::ClientKind::Other
+    };
+    // Only a bounded client label becomes durable permission provenance; an
+    // arbitrary hello string must not become a journal payload or an identity.
+    let client_label = match hello["client"].as_str() {
+        Some("shell") => "shell",
+        Some("cli") => "cli",
+        Some("sdk") => "sdk",
+        _ => "other",
+    };
+    let by = format!(
+        "{}#{}",
+        client_label,
+        state.connection_id.fetch_add(1, Ordering::Relaxed)
+    );
+    write_value(&mut output, &json!({"type":"hello_ok","protocol":PROTOCOL,"daemon":{"version":VERSION,"pid":std::process::id(),"startedAt":state.started_at},"capabilities":{"experimental":true,"supportedMethods":supported,"partialMethods":partial}})).await?;
     let (writer, _writer_task) = stream::Writer::start(output);
     let mut writer_closed = writer.closed();
     let mut subscriptions = subscriptions::Subscriptions::new();
     let mut daemon_stopping = false;
+    let mut responses = JoinSet::new();
     loop {
         let line = tokio::select! {
             _ = shutdown.changed() => { daemon_stopping = true; break; },
@@ -874,6 +906,38 @@ async fn connection(
             continue;
         }
         let method = request["method"].as_str().unwrap();
+        if PARTIAL.contains(&method) {
+            while responses.try_join_next().is_some() {}
+            if responses.len() >= 16 {
+                writer.response(&json!({"id":id,"error":{"code":"capacity","message":"too many concurrent session commands"}})).await?;
+                continue;
+            }
+            let reply = session_runtime_api::execute(
+                state.clone(),
+                method,
+                request.get("params").cloned().unwrap_or_else(|| json!({})),
+                client_kind,
+                &by,
+            );
+            let writer = writer.clone();
+            let id = id.clone();
+            // Read further frames while preparation runs so stop/resolve on
+            // this same socket cannot be queued behind a pending prompt.
+            responses.spawn(async move {
+                match reply.await {
+                    Ok(result) => {
+                        let response = RpcResult { id:&id, result };
+                        if serde_json::to_vec(&response).is_ok_and(|bytes|bytes.len()<MAX_LINE) {
+                            let _ = writer.response(&response).await;
+                        } else {
+                            let _ = writer.response(&json!({"id":id,"error":{"code":"capacity","message":"response exceeds frame budget; query current session state"}})).await;
+                        }
+                    },
+                    Err(error) => { let _ = writer.response(&json!({"id":id,"error":{"code":error.code,"message":error.message}})).await; },
+                }
+            });
+            continue;
+        }
         let result = match method {
             "daemon.status" => {
                 if let Some(initialize) = request["params"].get("initializeRuntime") {
@@ -886,7 +950,7 @@ async fn connection(
                         continue;
                     }
                 }
-                json!({"version":VERSION,"protocol":PROTOCOL,"pid":std::process::id(),"startedAt":state.started_at,"uptimeMs":state.started.elapsed().as_millis(),"home":state.home,"sock":state.home.join("run/pultd.sock"),"clients":state.clients.load(Ordering::Relaxed),"subscriptions":state.subscriptions.load(Ordering::Relaxed),"lastEventId":state.last_event_id.load(Ordering::Acquire),"mode":"on-demand","journal":{"projectionDegraded":state.projection_degraded.load(Ordering::Relaxed),"executionUnavailable":runtime_state::unavailable(&state)},"registry":state.registry.try_lock().ok().map(|r|r.status()),"memory":memory_status(&state),"nativeRuntime":{"initialized":state.native_runtime.get().is_some(),"hosts":state.native_runtime.get().map_or(0, |runtime|runtime.host_count()),"activeTurns":state.driver.get().map_or(0, |driver|driver.active_count())},"capabilities":{"experimental":true,"supportedMethods":SUPPORTED}})
+                json!({"version":VERSION,"protocol":PROTOCOL,"pid":std::process::id(),"startedAt":state.started_at,"uptimeMs":state.started.elapsed().as_millis(),"home":state.home,"sock":state.home.join("run/pultd.sock"),"clients":state.clients.load(Ordering::Relaxed),"subscriptions":state.subscriptions.load(Ordering::Relaxed),"lastEventId":state.last_event_id.load(Ordering::Acquire),"mode":"on-demand","journal":{"projectionDegraded":state.projection_degraded.load(Ordering::Relaxed),"executionUnavailable":runtime_state::unavailable(&state)},"registry":state.registry.try_lock().ok().map(|r|r.status()),"memory":memory_status(&state),"nativeRuntime":{"initialized":state.native_runtime.get().is_some(),"hosts":state.native_runtime.get().map_or(0, |runtime|runtime.host_count()),"activeTurns":state.driver.get().map_or(0, |driver|driver.active_count())},"capabilities":{"experimental":true,"supportedMethods":SUPPORTED,"partialMethods":PARTIAL}})
             }
             "daemon.stop" => {
                 runtime_state::begin_shutdown(&state);
@@ -1073,6 +1137,9 @@ async fn serve_owned(home: PathBuf, mut cancellation: watch::Receiver<bool>) -> 
         started_at,
         started: Instant::now(),
         clients: AtomicUsize::new(0),
+        connection_id: AtomicU64::new(1),
+        host_jobs: Arc::default(),
+        session_commands: Arc::default(),
         stop,
         store: Mutex::new(store),
         history: Mutex::new(history::HistoryCache::default()),
@@ -1251,5 +1318,17 @@ mod tests {
         let mut supported = SUPPORTED.to_vec();
         supported.sort_unstable();
         assert_eq!(implemented, supported);
+        let mut partial: Vec<_> = catalog["methods"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|method| method["rust"] == "partial")
+            .map(|method| method["name"].as_str().unwrap())
+            .collect();
+        partial.sort_unstable();
+        let mut advertised = PARTIAL.to_vec();
+        advertised.sort_unstable();
+        assert_eq!(partial, advertised);
+        assert!(PARTIAL.iter().all(|method| !SUPPORTED.contains(method)));
     }
 }

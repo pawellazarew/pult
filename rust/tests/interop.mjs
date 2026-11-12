@@ -18,6 +18,7 @@ const paths = layout(home)
 const pause = (ms) => new Promise((r) => setTimeout(r, ms))
 let daemon
 let client
+const partialMethods = ['agent.list', 'agent.prompt', 'agent.start', 'agent.stop', 'perm.list', 'perm.resolve']
 let passed = 0
 async function check(name, run) { await run(); passed++; console.log(`pass ${name}`) }
 function launch(directory = home) {
@@ -60,6 +61,10 @@ try {
     assert.equal(status.pid, daemon.child.pid)
     assert.equal(status.home, realpathSync(home))
     assert.deepEqual(status.capabilities.supportedMethods, ['agent.archive', 'agent.read', 'agent.rename', 'agent.seen', 'agent.tree', 'daemon.status', 'daemon.stop', 'events.emit', 'events.get', 'events.history', 'events.snapshot', 'events.subscribe', 'events.tail', 'events.unsubscribe', 'memory.add', 'memory.catalog', 'memory.context.bind', 'memory.context.issue', 'memory.context.revoke', 'memory.context.status', 'memory.forget', 'memory.get', 'memory.history', 'memory.list', 'memory.search', 'memory.update', 'protocol.catalog'])
+    assert.deepEqual([...status.capabilities.partialMethods].sort(), partialMethods)
+    const hello = await frame({ type: 'hello', protocol: 1, client: 'cli', token: initialToken })
+    assert.deepEqual([...hello.capabilities.partialMethods].sort(), partialMethods)
+    assert.deepEqual(hello.capabilities.supportedMethods, status.capabilities.supportedMethods)
     assert.equal(status.lastEventId, 0)
   })
   await check('private runtime paths', async () => {
@@ -87,8 +92,12 @@ try {
     assert.equal(catalog.protocolVersion, 1)
     const status = await client.request('daemon.status')
     assert.deepEqual(catalog.methods.filter((m) => m.rust === 'implemented').map((m) => m.name).sort(), [...status.capabilities.supportedMethods].sort())
-    assert.ok(catalog.methods.some((m) => m.name === 'agent.start' && m.rust === 'unported'))
-    await assert.rejects(client.request('agent.start', { name: 'must-not-start' }), (e) => e.code === 'not_implemented')
+    assert.deepEqual(catalog.methods.filter((m) => m.rust === 'partial').map((m) => m.name).sort(), partialMethods)
+    assert.ok(catalog.methods.some((m) => m.name === 'agent.retry' && m.rust === 'unported'))
+    await assert.rejects(client.request('agent.retry', { name: 'must-not-start' }), (e) => e.code === 'not_implemented')
+    // Malformed name fails before metadata creation, runtime initialization or provider IO.
+    await assert.rejects(client.request('agent.start', { name: '../must-not-start' }), (e) => e.code === 'invalid_params')
+    assert.equal((await client.request('daemon.status')).lastEventId, 0)
     await assert.rejects(client.request('invented.action'), (e) => e.code === 'not_found')
   })
   await check('second owner cannot rotate credentials', async () => {

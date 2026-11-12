@@ -135,12 +135,98 @@
     {
       "name": "agent.list",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.list.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Partial Rust registered-session projection with reduced live status and pending permission counts. Full attention, phase, context and access details remain unported.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "sessions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "provider": {
+                  "type": "string"
+                },
+                "cwd": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string"
+                },
+                "createdAt": {
+                  "type": "string"
+                },
+                "lastStatus": {
+                  "type": "string"
+                },
+                "lastEventId": {
+                  "type": "integer"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "cold",
+                    "idle",
+                    "working",
+                    "blocked_permission",
+                    "blocked_question",
+                    "limited",
+                    "interrupted",
+                    "failed",
+                    "done"
+                  ]
+                },
+                "pendingPermissions": {
+                  "type": "integer"
+                },
+                "liveApproval": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "enum": [
+                    "read-only",
+                    "ask",
+                    "workspace",
+                    "full",
+                    "inherit",
+                    null
+                  ]
+                }
+              },
+              "required": [
+                "name",
+                "provider",
+                "cwd",
+                "mode",
+                "createdAt",
+                "lastStatus",
+                "lastEventId",
+                "status",
+                "pendingPermissions",
+                "liveApproval"
+              ],
+              "additionalProperties": true
+            }
+          }
+        },
+        "required": [
+          "sessions"
+        ],
+        "additionalProperties": false
+      }
     },
     {
       "name": "agent.preflight",
@@ -155,12 +241,91 @@
     {
       "name": "agent.prompt",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.prompt.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Partial Rust ordinary Codex prompt dispatch with durable user receipts. Queue, interrupt, steer, Claude, ZCode and background flows remain unsupported.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "attachments": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "mime": {
+                  "type": "string"
+                },
+                "bytes": {
+                  "type": "integer"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "file",
+                    "directory"
+                  ]
+                }
+              },
+              "required": [
+                "path",
+                "name",
+                "mime",
+                "bytes",
+                "kind"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "queue": {
+            "type": "boolean",
+            "enum": [
+              false
+            ]
+          },
+          "interrupt": {
+            "type": "boolean",
+            "enum": [
+              false
+            ]
+          },
+          "steer": {
+            "type": "boolean",
+            "enum": [
+              false
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "text"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "turnId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "turnId"
+        ],
+        "additionalProperties": false
+      }
     },
     {
       "name": "agent.question.answer",
@@ -466,12 +631,128 @@
     {
       "name": "agent.start",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.start.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Partial Rust metadata creation with explicit settings and fresh access checks. Start prompts, drafts, inherited defaults, worktrees and active browser execution remain unsupported.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "claude",
+              "codex",
+              "zcode"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "project",
+              "general"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "effort": {
+            "type": "string"
+          },
+          "serviceTier": {
+            "type": "string",
+            "enum": [
+              "default",
+              "fast"
+            ]
+          },
+          "approval": {
+            "type": "string",
+            "enum": [
+              "read-only",
+              "ask",
+              "workspace",
+              "full"
+            ]
+          },
+          "confirm": {
+            "type": "boolean"
+          },
+          "consentRev": {
+            "type": "integer"
+          },
+          "grant": {
+            "type": "string",
+            "enum": [
+              "cli-once"
+            ]
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "turn",
+              "warm"
+            ]
+          },
+          "browser": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "enum": [
+              false,
+              null
+            ]
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "lastStatus": {
+            "type": "string"
+          },
+          "lastEventId": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "provider",
+          "cwd",
+          "mode",
+          "createdAt",
+          "lastStatus",
+          "lastEventId"
+        ],
+        "additionalProperties": true
+      }
     },
     {
       "name": "agent.startStatus",
@@ -486,12 +767,37 @@
     {
       "name": "agent.stop",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.stop.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Partial Rust exact ordinary turn cancellation or cold-session interruption. Full provider and background stop semantics remain unported.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "turnId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "stopped": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "stopped"
+        ],
+        "additionalProperties": false
+      }
     },
     {
       "name": "agent.tree",
@@ -2367,12 +2673,38 @@
     {
       "name": "perm.list",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for perm.list.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Partial Rust owner listing of redacted ordinary Codex permission requests.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "pending": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {},
+              "required": [],
+              "additionalProperties": true
+            }
+          }
+        },
+        "required": [
+          "pending"
+        ],
+        "additionalProperties": false
+      }
     },
     {
       "name": "perm.request",
@@ -2387,12 +2719,82 @@
     {
       "name": "perm.resolve",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for perm.resolve.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Partial Rust durable resolution of offered ordinary Codex permission scopes and structured answers. Input substitution and persistent rule storage remain unsupported.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "decision": {
+            "type": "string",
+            "enum": [
+              "allow",
+              "deny"
+            ]
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "once",
+              "session",
+              "rule"
+            ]
+          },
+          "answers": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": true
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "decision"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "resolved": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "decision": {
+            "type": "string",
+            "enum": [
+              "allow",
+              "deny"
+            ]
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "once",
+              "session",
+              "rule"
+            ]
+          }
+        },
+        "required": [
+          "resolved",
+          "id",
+          "decision"
+        ],
+        "additionalProperties": false
+      }
     },
     {
       "name": "perm.rules",
@@ -2506,6 +2908,7 @@
                   "type": "string",
                   "enum": [
                     "implemented",
+                    "partial",
                     "unported"
                   ]
                 },

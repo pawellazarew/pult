@@ -1487,6 +1487,15 @@ async fn prepare(
         &spec.attachments,
     )
     .map_err(|_| error("invalid_params", "Codex prompt attachment is unavailable"))?;
+    // A previous terminal status must not survive into a newly dispatched turn.
+    // Persist before the final fresh gate and before any native permission event:
+    // writing after turn/start could overwrite an early blocked-permission state.
+    append(
+        &shared,
+        json!({"sessionId":spec.key.name,"provider":"codex",
+        "kind":"status.changed","data":{"status":"working","turnId":job.public_id}}),
+    )
+    .await?;
     let decision = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         shared.services.fresh_gate.check(&job.ticket, &snapshot)
     }))

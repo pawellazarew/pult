@@ -44,6 +44,26 @@ impl EventSink for MemorySink {
         })
     }
 }
+// Before native acknowledgement only the host's dispatch intent is public.
+// Content, approval cards and terminal events remain forbidden.
+fn assert_only_host_working(sink: &MemorySink, session: &str) {
+    let rows: Vec<_> = sink
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|event| event["sessionId"] == session)
+        .cloned()
+        .collect();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["kind"], "status.changed");
+    let turn_id = rows[0]["data"]["turnId"].as_str().unwrap();
+    assert!(turn_id.starts_with("pult-"));
+    assert_eq!(
+        rows[0]["data"],
+        json!({"status":"working","turnId":turn_id})
+    );
+}
 struct Identity;
 struct Acknowledge;
 impl ThreadStore for Acknowledge {
@@ -690,13 +710,19 @@ case!(
                 .iter()
                 .any(|e| e["kind"] == "message.done" && e["data"]["text"] == "done")
         );
-        assert!(
-            sink.events
-                .lock()
-                .unwrap()
-                .iter()
-                .all(|e| e["kind"] != "status.changed")
+        let statuses: Vec<_> = sink
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e["kind"] == "status.changed")
+            .map(|e| e["data"].clone())
+            .collect();
+        assert_eq!(
+            statuses,
+            vec![json!({"status":"working","turnId":started.turn_id})]
         );
+
         let next = ticket(&snapshot);
         let started = worker
             .start(next.clone(), snapshot, "normal".into())
@@ -1056,14 +1082,7 @@ case!(
         let sc = c.start(tc.clone(), barrier, "normal".into()).await.unwrap();
         assert_eq!(sc.done.await, Outcome::Success);
         c.close(tc).await.unwrap();
-        assert!(
-            !sink
-                .events
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|e| e["sessionId"] == "one")
-        );
+        assert_only_host_working(&sink, "one");
         a.close(ta).await.unwrap();
         assert!(task.await.unwrap().is_err());
         assert_eq!(host.status(), HostStatus::Ready);
@@ -1824,27 +1843,13 @@ case!(
         assert_eq!(done.done.await, Outcome::Success);
         b.close(tb).await.unwrap();
         assert_eq!(calls.load(Ordering::Acquire), 0);
-        assert!(
-            !sink
-                .events
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|e| e["sessionId"] == "one")
-        );
+        assert_only_host_working(&sink, "one");
         assert!(!request.is_finished());
         std::fs::write(home.path().join("reject-ack"), "yes").unwrap();
         assert!(matches!(request.await.unwrap(),Err(error) if error.code=="start_unknown"));
         a.close(ta).await.unwrap();
         assert_eq!(calls.load(Ordering::Acquire), 0);
-        assert!(
-            !sink
-                .events
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|e| e["sessionId"] == "one")
-        );
+        assert_only_host_working(&sink, "one");
         until(|| host.status() == HostStatus::Stopped).await;
         assert_gone(home.path());
     }

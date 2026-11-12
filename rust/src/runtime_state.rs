@@ -60,7 +60,9 @@ pub(crate) async fn instance(state: &Arc<State>) -> Result<Arc<codex_runtime::Co
     }
     let state = state.clone();
     let handle = tokio::runtime::Handle::current();
+    let host_job = state.host_jobs.track();
     tokio::task::spawn_blocking(move || {
+        let _host_job = host_job;
         let _runtime_context = handle.enter();
         let _initialization = state
             .runtime_init

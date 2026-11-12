@@ -77,7 +77,9 @@ pub(crate) async fn execute(
     method: String,
     params: Value,
 ) -> Result<Value, MemoryError> {
+    let host_job = state.host_jobs.track();
     tokio::task::spawn_blocking(move || {
+        let _host_job = host_job;
         fields(
             &params,
             if method == "memory.context.bind" {
@@ -175,7 +177,9 @@ pub(crate) async fn read(
     lease: Option<Arc<MemoryLease>>,
 ) -> Result<Value, MemoryError> {
     let scoped = lease.is_some();
+    let host_job = state.host_jobs.track();
     let result = tokio::task::spawn_blocking(move || {
+        let _host_job = host_job;
         let bound = if let Some(lease) = lease {
             if !READ_METHODS.contains(&method.as_str()) {
                 return Err(err("forbidden", "memory credential is read-only"));

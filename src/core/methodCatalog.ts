@@ -138,12 +138,98 @@ export const RPC_CATALOG = {
     {
       "name": "agent.list",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.list.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Partial Rust registered-session projection with reduced live status and pending permission counts. Full attention, phase, context and access details remain unported.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "sessions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "provider": {
+                  "type": "string"
+                },
+                "cwd": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string"
+                },
+                "createdAt": {
+                  "type": "string"
+                },
+                "lastStatus": {
+                  "type": "string"
+                },
+                "lastEventId": {
+                  "type": "integer"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "cold",
+                    "idle",
+                    "working",
+                    "blocked_permission",
+                    "blocked_question",
+                    "limited",
+                    "interrupted",
+                    "failed",
+                    "done"
+                  ]
+                },
+                "pendingPermissions": {
+                  "type": "integer"
+                },
+                "liveApproval": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "enum": [
+                    "read-only",
+                    "ask",
+                    "workspace",
+                    "full",
+                    "inherit",
+                    null
+                  ]
+                }
+              },
+              "required": [
+                "name",
+                "provider",
+                "cwd",
+                "mode",
+                "createdAt",
+                "lastStatus",
+                "lastEventId",
+                "status",
+                "pendingPermissions",
+                "liveApproval"
+              ],
+              "additionalProperties": true
+            }
+          }
+        },
+        "required": [
+          "sessions"
+        ],
+        "additionalProperties": false
+      }
     },
     {
       "name": "agent.preflight",
@@ -158,12 +244,91 @@ export const RPC_CATALOG = {
     {
       "name": "agent.prompt",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.prompt.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Partial Rust ordinary Codex prompt dispatch with durable user receipts. Queue, interrupt, steer, Claude, ZCode and background flows remain unsupported.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "attachments": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "mime": {
+                  "type": "string"
+                },
+                "bytes": {
+                  "type": "integer"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "file",
+                    "directory"
+                  ]
+                }
+              },
+              "required": [
+                "path",
+                "name",
+                "mime",
+                "bytes",
+                "kind"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "queue": {
+            "type": "boolean",
+            "enum": [
+              false
+            ]
+          },
+          "interrupt": {
+            "type": "boolean",
+            "enum": [
+              false
+            ]
+          },
+          "steer": {
+            "type": "boolean",
+            "enum": [
+              false
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "text"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "turnId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "turnId"
+        ],
+        "additionalProperties": false
+      }
     },
     {
       "name": "agent.question.answer",
@@ -469,12 +634,128 @@ export const RPC_CATALOG = {
     {
       "name": "agent.start",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.start.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Partial Rust metadata creation with explicit settings and fresh access checks. Start prompts, drafts, inherited defaults, worktrees and active browser execution remain unsupported.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "claude",
+              "codex",
+              "zcode"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "project",
+              "general"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "effort": {
+            "type": "string"
+          },
+          "serviceTier": {
+            "type": "string",
+            "enum": [
+              "default",
+              "fast"
+            ]
+          },
+          "approval": {
+            "type": "string",
+            "enum": [
+              "read-only",
+              "ask",
+              "workspace",
+              "full"
+            ]
+          },
+          "confirm": {
+            "type": "boolean"
+          },
+          "consentRev": {
+            "type": "integer"
+          },
+          "grant": {
+            "type": "string",
+            "enum": [
+              "cli-once"
+            ]
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "turn",
+              "warm"
+            ]
+          },
+          "browser": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "enum": [
+              false,
+              null
+            ]
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "lastStatus": {
+            "type": "string"
+          },
+          "lastEventId": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "provider",
+          "cwd",
+          "mode",
+          "createdAt",
+          "lastStatus",
+          "lastEventId"
+        ],
+        "additionalProperties": true
+      }
     },
     {
       "name": "agent.startStatus",
@@ -489,12 +770,37 @@ export const RPC_CATALOG = {
     {
       "name": "agent.stop",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.stop.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Partial Rust exact ordinary turn cancellation or cold-session interruption. Full provider and background stop semantics remain unported.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "turnId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "stopped": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "stopped"
+        ],
+        "additionalProperties": false
+      }
     },
     {
       "name": "agent.tree",
@@ -2370,12 +2676,38 @@ export const RPC_CATALOG = {
     {
       "name": "perm.list",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for perm.list.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Partial Rust owner listing of redacted ordinary Codex permission requests.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "pending": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {},
+              "required": [],
+              "additionalProperties": true
+            }
+          }
+        },
+        "required": [
+          "pending"
+        ],
+        "additionalProperties": false
+      }
     },
     {
       "name": "perm.request",
@@ -2390,12 +2722,82 @@ export const RPC_CATALOG = {
     {
       "name": "perm.resolve",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for perm.resolve.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Partial Rust durable resolution of offered ordinary Codex permission scopes and structured answers. Input substitution and persistent rule storage remain unsupported.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "decision": {
+            "type": "string",
+            "enum": [
+              "allow",
+              "deny"
+            ]
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "once",
+              "session",
+              "rule"
+            ]
+          },
+          "answers": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": true
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "decision"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "resolved": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "decision": {
+            "type": "string",
+            "enum": [
+              "allow",
+              "deny"
+            ]
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "once",
+              "session",
+              "rule"
+            ]
+          }
+        },
+        "required": [
+          "resolved",
+          "id",
+          "decision"
+        ],
+        "additionalProperties": false
+      }
     },
     {
       "name": "perm.rules",
@@ -2509,6 +2911,7 @@ export const RPC_CATALOG = {
                   "type": "string",
                   "enum": [
                     "implemented",
+                    "partial",
                     "unported"
                   ]
                 },
@@ -2893,5 +3296,25 @@ export interface RustFoundationResults {
   "memory.list": { "memories": Array<{ "id": string; "scope": "project" | "global"; "projectId"?: string; "name": string; "summary": string; "pinned": boolean; "version": number; "createdAt": string; "updatedAt": string; "deleted": boolean; "author": string; "reason": string; "sourceSession"?: string }>; "hasMore": boolean }
   "memory.search": { "memories": Array<{ "id": string; "scope": "project" | "global"; "projectId"?: string; "name": string; "summary": string; "pinned": boolean; "version": number; "createdAt": string; "updatedAt": string; "deleted": boolean; "author": string; "reason": string; "sourceSession"?: string }>; "hasMore": boolean }
   "memory.update": { "id": string; "scope": "project" | "global"; "projectId"?: string; "name": string; "summary": string; "details": string; "pinned": boolean; "version": number; "createdAt": string; "updatedAt": string; "deleted": boolean; "author": string; "reason": string; "sourceSession"?: string }
-  "protocol.catalog": { "catalogVersion": 1; "protocolVersion": 1; "methods": Array<{ "name": string; "node": "implemented" | "reserved" | "extension"; "rust": "implemented" | "unported"; "access": "owner" | "ask" | "owner-or-runtime" | "owner-shell" | "owner-or-memory"; "testOnly": boolean; "description": string; "paramsSchema": { [key: string]: unknown } | null; "resultSchema": { [key: string]: unknown } | null }> }
+  "protocol.catalog": { "catalogVersion": 1; "protocolVersion": 1; "methods": Array<{ "name": string; "node": "implemented" | "reserved" | "extension"; "rust": "implemented" | "partial" | "unported"; "access": "owner" | "ask" | "owner-or-runtime" | "owner-shell" | "owner-or-memory"; "testOnly": boolean; "description": string; "paramsSchema": { [key: string]: unknown } | null; "resultSchema": { [key: string]: unknown } | null }> }
+}
+
+export type RustPartialMethod = "agent.list" | "agent.prompt" | "agent.start" | "agent.stop" | "perm.list" | "perm.resolve"
+
+export interface RustPartialParams {
+  "agent.list": Record<string, never>
+  "agent.prompt": { "name": string; "text": string; "attachments"?: Array<{ "path": string; "name": string; "mime": string; "bytes": number; "kind": "file" | "directory" }>; "queue"?: false; "interrupt"?: false; "steer"?: false }
+  "agent.start": { "kind"?: "claude" | "codex" | "zcode"; "name"?: string; "cwd"?: string; "scope"?: "project" | "general"; "title"?: string; "model"?: string; "effort"?: string; "serviceTier"?: "default" | "fast"; "approval"?: "read-only" | "ask" | "workspace" | "full"; "confirm"?: boolean; "consentRev"?: number; "grant"?: "cli-once"; "mode"?: "turn" | "warm"; "browser"?: false | null }
+  "agent.stop": { "name": string; "turnId"?: string }
+  "perm.list": { "name"?: string }
+  "perm.resolve": { "id": string; "decision": "allow" | "deny"; "scope"?: "once" | "session" | "rule"; "answers"?: { [key: string]: unknown }; "message"?: string }
+}
+
+export interface RustPartialResults {
+  "agent.list": { "sessions": Array<{ "name": string; "provider": string; "cwd": string; "mode": string; "createdAt": string; "lastStatus": string; "lastEventId": number; "status": "cold" | "idle" | "working" | "blocked_permission" | "blocked_question" | "limited" | "interrupted" | "failed" | "done"; "pendingPermissions": number; "liveApproval": "read-only" | "ask" | "workspace" | "full" | "inherit" | null; [key: string]: unknown }> }
+  "agent.prompt": { "turnId": string }
+  "agent.start": { "name": string; "provider": string; "cwd": string; "mode": string; "createdAt": string; "lastStatus": string; "lastEventId": number; [key: string]: unknown }
+  "agent.stop": { "stopped": boolean }
+  "perm.list": { "pending": Array<{ [key: string]: unknown }> }
+  "perm.resolve": { "resolved": true; "id": string; "decision": "allow" | "deny"; "scope"?: "once" | "session" | "rule" }
 }

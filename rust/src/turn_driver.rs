@@ -413,6 +413,16 @@ impl Driver {
             .filter(|turn| turn.ticket().session() == key)
             .map(|turn| turn.ticket().clone())
     }
+    /// Owner cancellation lookup only; never dispatch authority.
+    pub fn active_ticket_for_name(&self, name: &str) -> Option<Ticket> {
+        self.inner
+            .state
+            .lock()
+            .expect("driver state mutex")
+            .core
+            .by_name(name)
+            .map(|turn| turn.ticket().clone())
+    }
     /// Pult public ID returned by Worker::start, never a native provider turn ID.
     pub fn public_turn_id(&self, ticket: &Ticket) -> Option<String> {
         self.inner

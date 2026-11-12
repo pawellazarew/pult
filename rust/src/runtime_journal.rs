@@ -67,6 +67,7 @@ pub(crate) async fn shutdown(state: &Arc<State>, owner: crate::Ownership) {
     }
     retain_owner_until_stopped(
         state.driver.get().expect("driver initialized"),
+        &state.host_jobs,
         owner,
         std::time::Duration::from_secs(10),
     )
@@ -75,6 +76,7 @@ pub(crate) async fn shutdown(state: &Arc<State>, owner: crate::Ownership) {
 
 async fn retain_owner_until_stopped(
     driver: &Driver,
+    host_jobs: &crate::host_jobs::Tracker,
     owner: crate::Ownership,
     checkpoint: std::time::Duration,
 ) {
@@ -87,6 +89,7 @@ async fn retain_owner_until_stopped(
         // shutdown closes admission and requests another cleanup attempt. The
         // ownership guard remains on this stack until every job proves closure.
     }
+    host_jobs.wait().await;
     drop(owner);
 }
 
@@ -104,7 +107,9 @@ impl EventSink for HostSink {
             let failed = Arc::downgrade(&state);
             // Keep commit publication inside the owned blocking job. Dropping
             // this future must not lose a successfully committed event notice.
+            let host_job = state.host_jobs.track();
             let result = tokio::task::spawn_blocking(move || {
+                let _host_job = host_job;
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let mut store = state.store.lock().map_err(|_| unavailable())?;
                     let event = store.append(draft).map_err(|_| unavailable())?;
@@ -177,8 +182,11 @@ mod tests {
             subscriptions: AtomicUsize::new(0),
             committed,
             live_id: AtomicU64::new(1),
+            connection_id: AtomicU64::new(1),
             driver: OnceLock::new(),
             execution_storage_failed: AtomicBool::new(false),
+            host_jobs: Arc::default(),
+            session_commands: Arc::default(),
             native_runtime: OnceLock::new(),
             runtime_init: Mutex::new(()),
             consent: Mutex::new(None),
@@ -247,6 +255,57 @@ mod tests {
         sink.append(draft()).await.unwrap();
         assert!(state.execution_storage_failed.load(Ordering::Acquire));
     }
+    #[tokio::test]
+    async fn dropped_journal_caller_keeps_owner_until_blocked_io_commits() {
+        let (_home, state, _sink) = fixture();
+        let owner = crate::Ownership::acquire(&state.home, "fixture").unwrap();
+        let (entered, entered_rx) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let blocked = state.clone();
+        let holder = std::thread::spawn(move || {
+            let _store = blocked.store.lock().unwrap();
+            entered.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let mut request = Box::pin(crate::journal_request(
+            state.clone(),
+            "events.emit".into(),
+            json!({"kind":"message.user"}),
+        ));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(request.as_mut().poll(&mut context).is_pending());
+        drop(request);
+        assert_eq!(state.host_jobs.active(), 1);
+        crate::runtime_state::begin_shutdown(&state);
+        let mut stopping = Box::pin(shutdown(&state, owner));
+        let observed = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                biased;
+                _ = &mut stopping => true,
+                _ = state.host_jobs.draining.notified() => false,
+            }
+        })
+        .await;
+        let retained = crate::Ownership::acquire(&state.home, "replacement").is_err();
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        let stopped_early = observed.expect("shutdown neither completed nor entered host drain");
+        if !stopped_early {
+            tokio::time::timeout(Duration::from_secs(5), stopping)
+                .await
+                .unwrap();
+        }
+        assert!(
+            !stopped_early,
+            "ownership released before detached IO finished"
+        );
+        assert!(retained, "replacement daemon acquired ownership during IO");
+        assert_eq!(state.last_event_id.load(Ordering::Acquire), 1);
+        assert_eq!(state.host_jobs.active(), 0);
+        assert!(crate::Ownership::acquire(&state.home, "replacement").is_ok());
+    }
+
     #[tokio::test]
     async fn stop_barrier_seals_initialization_before_response_or_cleanup_is_polled() {
         let (_home, state, _sink) = fixture();
@@ -352,8 +411,9 @@ mod tests {
             .unwrap();
         handle.accepted().await.unwrap();
         let owner = crate::Ownership::acquire(&state.home, "fixture").unwrap();
+        let host_jobs = state.host_jobs.clone();
         let stopping = tokio::spawn(async move {
-            retain_owner_until_stopped(&driver, owner, Duration::from_millis(10)).await;
+            retain_owner_until_stopped(&driver, &host_jobs, owner, Duration::from_millis(10)).await;
         });
         // A second attempt proves a shutdown checkpoint expired and cleanup
         // was retried, rather than assuming it from an arbitrary sleep.

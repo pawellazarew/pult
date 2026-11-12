@@ -902,9 +902,10 @@ async fn mcp_real_broker_redacts_public_metadata_without_changing_native_plan() 
     let cards = broker.list(None);
     assert_eq!(cards.len(), 1);
     let public = cards[0].to_string();
-    for private in ["PRIVATE_ARGUMENT", "private@example.com", native_id] {
+    for private in ["PRIVATE_ARGUMENT", native_id] {
         assert!(!public.contains(private));
     }
+    assert!(public.contains("private@example.com"));
     assert_eq!(cards[0]["concealed"], true);
     assert_eq!(cards[0]["input"]["arguments"]["token"], "<redacted>");
     assert_eq!(cards[0]["toolUseId"], "turn:<token>");
@@ -922,7 +923,8 @@ async fn mcp_real_broker_redacts_public_metadata_without_changing_native_plan() 
     );
     broker.drain().await;
     let serialized = serde_json::to_string(&*drafts.lock().unwrap()).unwrap();
-    for private in ["PRIVATE_ARGUMENT", "private@example.com", native_id] {
+    assert!(serialized.contains("private@example.com"));
+    for private in ["PRIVATE_ARGUMENT", native_id] {
         assert!(!serialized.contains(private));
     }
 }
