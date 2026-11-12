@@ -66,3 +66,32 @@ ACK failure retaining uncertain cleanup, bounded exact tail independent of stdou
 invalid budgets and default count-only behavior. Unit tests cover bounded ring
 allocation, read errors and aborted readers without fabricated EOF evidence.
 No provider/account/network calls are used.
+
+
+## Retain the startup owner before awaiting ACK
+
+`Process::begin_spawn(prepared, gate)` returns an opaque `StartingProcess`
+synchronously after the actual spawn frontier. It exposes a diagnostic PID and
+best-effort `stop_signal`; neither is cleanup or native-input acceptance proof.
+A supervisor places this value in its retained vault before its first await,
+copies the signal for cancellation, and borrows `acknowledge(&mut self)` from
+that vault in its isolated task. If the task unexpectedly panics, the outer
+owner can recover the value and call `into_process().stop()` rather than lose
+the PID in a dropped startup future.
+
+The ACK future borrows its stdout reader from Process. A pending/unwinding
+future must not move/drop that FD: the holder may still need to write its ACK.
+The pending reader stays with the Process through holder wait during cleanup.
+A polled ACK cannot be retried after cancellation/panic; partial line state is
+not acceptance. An unacknowledged Process rejects stdin. Successful ACK still
+means only holder readiness, not a provider's `turn.started` or a user receipt.
+The old `spawn_prepared_owned` wrapper delegates to the split with its previous
+caller-owned cancellation contract.
+
+Real-holder tests panic an isolated startup task before its first ACK poll and
+after two controlled Pending polls. The vault still owns the holder, its stdout
+FD survives the unwind, and the real holder subsequently starts a synthetic
+provider/descendant. Owned stop proves their exit and joins stderr. This does
+not claim the ACK implementation spontaneously panics. A runtime counterfactual
+moving the reader into the future makes the latter regression fail; the exact
+positive source is restored before verification. No model/account calls occur.

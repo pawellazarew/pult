@@ -13,7 +13,7 @@ use std::sync::{
 };
 use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -292,9 +292,46 @@ pub struct Process {
     stderr_joined: bool,
     stderr_taken: bool,
     write_failed: bool,
+    startup_reader: Option<BufReader<ChildStdout>>,
+    startup_sender: Option<mpsc::Sender<Result<Value>>>,
+    startup_attempted: bool,
+    ready: bool,
     exit: Option<Exit>,
     framing: Framing,
     discarded: Arc<AtomicU64>,
+}
+
+/// A spawned PID owner available before the first asynchronous holder ACK poll.
+/// Keep this value in the supervisor's vault while borrowing acknowledge().
+/// A panic/drop of that borrowed future cannot drop its Process or stdout FD.
+/// Holder readiness is not native input acceptance or cleanup proof.
+pub struct StartingProcess {
+    process: Process,
+}
+impl std::fmt::Debug for StartingProcess {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StartingProcess")
+            .field("ready", &self.process.ready)
+            .finish_non_exhaustive()
+    }
+}
+impl StartingProcess {
+    pub fn pid(&self) -> Option<u32> {
+        self.process.pid()
+    }
+    /// Best effort only; copy before borrowing acknowledge() so cancellation
+    /// need not acquire the vault mutex held by an in-flight startup future.
+    pub fn stop_signal(&self) -> StopSignal {
+        self.process.stop_signal()
+    }
+    pub async fn acknowledge(&mut self) -> Result<()> {
+        self.process.acknowledge().await
+    }
+    /// Also usable after a failed/panicking ACK waiter for owned stop/join.
+    /// An unacknowledged Process rejects stdin; this is not acceptance proof.
+    pub fn into_process(self) -> Process {
+        self.process
+    }
 }
 
 /// Startup failed. A retained process still requires confirmed cleanup, even
@@ -410,16 +447,33 @@ impl Process {
         })
     }
 
-    /// No await/poll gap between the host seal and actual Command::spawn.
-    /// Keep this future in an owned supervisor until cleanup is confirmed.
+    /// The compatibility wrapper owns startup until ACK. Supervisors needing
+    /// recovery after an unexpected task panic use begin_spawn + a borrowed ACK.
     pub async fn spawn_prepared_owned(
         prepared: PreparedLaunch,
         gate: &dyn SpawnGate,
     ) -> std::result::Result<Self, SpawnFailure> {
+        let mut starting = Self::begin_spawn(prepared, gate)?;
+        if let Err(error) = starting.acknowledge().await {
+            return Err(SpawnFailure::after_spawn(starting.into_process(), error));
+        }
+        Ok(starting.into_process())
+    }
+
+    /// Synchronous actual spawn frontier, returning a PID owner before any ACK
+    /// await. Requires the trusted host's Tokio runtime with IO enabled. No
+    /// authorization callback/FS operation belongs inside the Driver seal.
+    pub fn begin_spawn(
+        prepared: PreparedLaunch,
+        gate: &dyn SpawnGate,
+    ) -> std::result::Result<StartingProcess, SpawnFailure> {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return Err(SpawnFailure::before_spawn(anyhow::anyhow!(
+                "worker startup requires a runtime"
+            )));
+        }
         let (mut process, sender) = Self::spawn_frontier(prepared, gate)?;
-        let framing = process.framing;
         let stderr_bytes = process.stderr_bytes.clone();
-        let discarded = process.discarded.clone();
         let private_stderr = process.private_stderr.clone();
         process.stdin = process.child.stdin.take();
         let Some(stdout) = process.child.stdout.take() else {
@@ -434,34 +488,53 @@ impl Process {
                 anyhow::anyhow!("worker stderr unavailable"),
             ));
         };
+        process.startup_reader = Some(BufReader::new(stdout));
+        process.startup_sender = Some(sender);
         process.readers.push(Some(tokio::spawn(collect_stderr(
             stderr,
             stderr_bytes,
             private_stderr,
         ))));
-        let mut reader = BufReader::new(stdout);
-        let ready: Result<()> = async {
-            let line = tokio::time::timeout(START_TIMEOUT, bounded_line(&mut reader))
-                .await
-                .context("worker holder startup timeout")??
-                .context("worker holder exited before ready")?;
-            let value: Value = serde_json::from_slice(&line)
-                .map_err(|_| anyhow::anyhow!("invalid worker holder acknowledgement"))?;
-            ensure!(
-                value.get("holder_ready") == Some(&Value::Bool(true))
-                    && value
-                        .get("providerPid")
-                        .and_then(Value::as_u64)
-                        .is_some_and(|pid| pid > 0 && pid <= i32::MAX as u64),
-                "invalid worker holder acknowledgement"
-            );
-            Ok(())
-        }
-        .await;
-        if let Err(error) = ready {
-            return Err(SpawnFailure::after_spawn(process, error));
-        }
-        process.readers.push(Some(tokio::spawn(async move {
+        Ok(StartingProcess { process })
+    }
+
+    async fn acknowledge(&mut self) -> Result<()> {
+        ensure!(
+            !self.startup_attempted && !self.ready && self.exit.is_none(),
+            "worker acknowledgement is unavailable"
+        );
+        self.startup_attempted = true;
+        // Borrow, never move, the reader across await: unwinding/cancellation
+        // must keep the stdout FD with the PID owner for subsequent stop/join.
+        let reader = self
+            .startup_reader
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("worker acknowledgement is unavailable"))?;
+        let line = tokio::time::timeout(START_TIMEOUT, bounded_line(reader))
+            .await
+            .context("worker holder startup timeout")??
+            .context("worker holder exited before ready")?;
+        let value: Value = serde_json::from_slice(&line)
+            .map_err(|_| anyhow::anyhow!("invalid worker holder acknowledgement"))?;
+        ensure!(
+            value.get("holder_ready") == Some(&Value::Bool(true))
+                && value
+                    .get("providerPid")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|pid| pid > 0 && pid <= i32::MAX as u64),
+            "invalid worker holder acknowledgement"
+        );
+        let mut reader = self
+            .startup_reader
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("worker acknowledgement is unavailable"))?;
+        let sender = self
+            .startup_sender
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("worker acknowledgement is unavailable"))?;
+        let framing = self.framing;
+        let discarded = self.discarded.clone();
+        self.readers.push(Some(tokio::spawn(async move {
             loop {
                 let value = if framing.recover {
                     match recovering_line(&mut reader, framing.max_wire_bytes).await {
@@ -493,7 +566,8 @@ impl Process {
                 }
             }
         })));
-        Ok(process)
+        self.ready = true;
+        Ok(())
     }
 
     fn spawn_frontier(
@@ -546,6 +620,10 @@ impl Process {
             stderr_joined: false,
             stderr_taken: false,
             write_failed: false,
+            startup_reader: None,
+            startup_sender: None,
+            startup_attempted: false,
+            ready: false,
             exit: None,
             framing,
             discarded: discarded.clone(),
@@ -592,7 +670,7 @@ impl Process {
 
     pub async fn send(&mut self, value: &Value) -> Result<()> {
         ensure!(
-            !self.write_failed && self.exit.is_none(),
+            self.ready && !self.write_failed && self.exit.is_none(),
             "worker input is unavailable"
         );
         let frame = self.framing.encode(value)?;
@@ -601,7 +679,7 @@ impl Process {
 
     pub async fn send_prepared(&mut self, frame: PreparedInput) -> Result<()> {
         ensure!(
-            !self.write_failed && self.exit.is_none(),
+            self.ready && !self.write_failed && self.exit.is_none(),
             "worker input is unavailable"
         );
         ensure!(
@@ -664,6 +742,10 @@ impl Process {
             status.signal().is_none() || status.signal() == Some(15),
             "worker holder cleanup interrupted"
         );
+        // Keep an unacknowledged stdout FD open until the holder exit proves
+        // cleanup; dropping it earlier can turn a valid ACK into a broken pipe.
+        self.startup_reader.take();
+        self.startup_sender.take();
         self.output.close();
         for (index, reader) in self.readers.iter_mut().enumerate() {
             if let Some(task) = reader.as_mut() {

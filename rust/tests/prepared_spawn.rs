@@ -365,3 +365,189 @@ async fn prepared_holder_ack_failure_retains_process_and_denies_stderr_receipt()
         Some(StderrUnavailable::Incomplete)
     );
 }
+
+#[tokio::test]
+async fn split_startup_requires_ack_before_stdin_and_cleans_without_ack() {
+    let home = tempfile::tempdir().unwrap();
+    let prepared = Process::prepare_launch(
+        launch(home.path(), "echo"),
+        Framing::strict(),
+        StderrPolicy::CountOnly,
+    )
+    .await
+    .unwrap();
+    let starting = Process::begin_spawn(prepared, &Gate(Mutex::new(Flags::default()))).unwrap();
+    assert!(starting.pid().is_some());
+    let signal = starting.stop_signal();
+    let mut process = starting.into_process();
+    assert!(
+        process
+            .send(&serde_json::json!({"must":"not send"}))
+            .await
+            .is_err()
+    );
+    stopped(&mut process).await;
+    assert!(!signal.request_stop());
+}
+
+#[tokio::test]
+async fn split_success_keeps_the_existing_framing_and_input_contract() {
+    let home = tempfile::tempdir().unwrap();
+    let prepared = Process::prepare_launch(
+        launch(home.path(), "echo"),
+        Framing::strict(),
+        StderrPolicy::CountOnly,
+    )
+    .await
+    .unwrap();
+    let mut starting = Process::begin_spawn(prepared, &Gate(Mutex::new(Flags::default()))).unwrap();
+    tokio::time::timeout(WATCHDOG, starting.acknowledge())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut process = starting.into_process();
+    let _ = tokio::time::timeout(WATCHDOG, process.recv())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let input = serde_json::json!({"literal":"split input"});
+    process.send(&input).await.unwrap();
+    assert_eq!(
+        tokio::time::timeout(WATCHDOG, process.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        Some(serde_json::json!({"echo":input}))
+    );
+    stopped(&mut process).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_task_panic_before_or_after_pending_ack_keeps_real_pid_in_vault() {
+    use std::future::{Future, poll_fn};
+    use std::os::unix::fs::PermissionsExt;
+    use std::task::Poll;
+    pult_core::panic_guard::install();
+    for pending_polls in [0, 2] {
+        let home = tempfile::tempdir().unwrap();
+        let holder = home.path().join("held-holder");
+        let real = serde_json::to_string(env!("CARGO_BIN_EXE_pult-worker-holder")).unwrap();
+        std::fs::write(
+            &holder,
+            format!(
+                r#"#!/usr/bin/python3
+import os, pathlib, sys, time
+root = pathlib.Path(os.environ['HOME'])
+(root/'holder-entered').write_text('ready')
+while not (root/'release-holder').exists(): time.sleep(0.002)
+real = {real}
+os.execv(real, [real, *sys.argv[1:]])
+"#
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&holder, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let provider = home.path().join("startup-provider");
+        std::fs::write(
+            &provider,
+            r#"#!/usr/bin/python3
+import json, os, pathlib, signal, subprocess, sys
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+root = pathlib.Path(os.environ['HOME'])
+(root/'native-staged').write_text(json.dumps([os.getpid(), child.pid]))
+os.replace(root/'native-staged', root/'native-started')
+while True: signal.pause()
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut config = launch(home.path(), "echo");
+        config.holder = holder;
+        config.program = provider;
+        config.args.clear();
+        let prepared = Process::prepare_launch(
+            config,
+            Framing::strict(),
+            StderrPolicy::PrivateTail { max_bytes: 32 },
+        )
+        .await
+        .unwrap();
+        let starting = Process::begin_spawn(prepared, &Gate(Mutex::new(Flags::default()))).unwrap();
+        let pid = starting.pid().unwrap();
+        let signal = starting.stop_signal();
+        let vault = Arc::new(tokio::sync::Mutex::new(Some(starting)));
+        tokio::time::timeout(WATCHDOG, async {
+            while !home.path().join("holder-entered").exists() {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let owned = vault.clone();
+        let task = tokio::spawn(async move {
+            let mut slot = owned.lock_owned().await;
+            let starting = slot.as_mut().unwrap();
+            let mut ack = Box::pin(starting.acknowledge());
+            for _ in 0..pending_polls {
+                poll_fn(|cx| {
+                    assert!(
+                        ack.as_mut().poll(cx).is_pending(),
+                        "held holder unexpectedly acknowledged"
+                    );
+                    Poll::Ready(())
+                })
+                .await;
+                tokio::task::yield_now().await;
+            }
+            // This is an unexpected owned-task panic around the actual ACK
+            // future, not a claim that the stdio implementation itself panics.
+            panic!("synthetic startup task panic");
+        });
+        assert!(
+            tokio::time::timeout(WATCHDOG, task)
+                .await
+                .unwrap()
+                .unwrap_err()
+                .is_panic()
+        );
+        assert!(nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok());
+        let mut starting = vault
+            .lock()
+            .await
+            .take()
+            .expect("startup task lost PID owner");
+        if pending_polls > 0 {
+            assert!(
+                starting.acknowledge().await.is_err(),
+                "partial ACK was retried"
+            );
+        }
+        // Let the real holder spawn real native/descendant PIDs AFTER the ACK
+        // waiter has unwound. Retaining its stdout FD prevents a broken ACK pipe.
+        std::fs::write(home.path().join("release-holder"), "go").unwrap();
+        tokio::time::timeout(WATCHDOG, async {
+            while !home.path().join("native-started").exists() {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let children: Vec<i32> =
+            serde_json::from_slice(&std::fs::read(home.path().join("native-started")).unwrap())
+                .unwrap();
+        let mut process = starting.into_process();
+        stopped(&mut process).await;
+        assert!(!signal.request_stop());
+        process.take_private_stderr().unwrap();
+        tokio::time::timeout(WATCHDOG, async {
+            for child in children {
+                while nix::sys::signal::kill(nix::unistd::Pid::from_raw(child), None).is_ok() {
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
+            }
+        })
+        .await
+        .unwrap();
+    }
+}
