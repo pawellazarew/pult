@@ -366,6 +366,49 @@ impl Driver {
             .core
             .active_count()
     }
+    /// Trusted owner query. Clone outside this lock before filesystem checks or
+    /// injected callbacks; absence revokes new provider dispatch authority.
+    pub fn snapshot_for_dispatch(&self, ticket: &Ticket) -> Option<TurnSnapshot> {
+        let state = self.inner.state.lock().expect("driver state mutex");
+        if state.closed || state.storage_failed {
+            return None;
+        }
+        state
+            .core
+            .active(ticket)
+            .filter(|turn| !turn.cancel_requested())
+            .map(|turn| turn.snapshot().clone())
+    }
+    /// Diagnostic snapshot includes cancellation until cleanup is proved. Never
+    /// use it for dispatch authority; snapshot_for_dispatch revokes that scope.
+    pub fn execution_snapshot(&self, ticket: &Ticket) -> Option<TurnSnapshot> {
+        self.inner
+            .state
+            .lock()
+            .expect("driver state mutex")
+            .core
+            .active(ticket)
+            .map(|turn| turn.snapshot().clone())
+    }
+    /// Includes cancelling jobs so stop/archive can address the exact incarnation.
+    pub fn active_ticket(&self, key: &crate::turn_snapshot::SessionKey) -> Option<Ticket> {
+        let state = self.inner.state.lock().expect("driver state mutex");
+        state
+            .core
+            .by_name(&key.name)
+            .filter(|turn| turn.ticket().session() == key)
+            .map(|turn| turn.ticket().clone())
+    }
+    /// Pult public ID returned by Worker::start, never a native provider turn ID.
+    pub fn public_turn_id(&self, ticket: &Ticket) -> Option<String> {
+        self.inner
+            .state
+            .lock()
+            .expect("driver state mutex")
+            .core
+            .active(ticket)
+            .and_then(|turn| turn.provider_turn_id().map(str::to_owned))
+    }
     /// Trusted host bridge for failed provider/broker journal IO. Unknown
     /// outcomes close admission and cancel every owned execution.
     pub fn report_storage_failure(&self) {
