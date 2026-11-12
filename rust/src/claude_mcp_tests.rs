@@ -86,6 +86,7 @@ impl Worker for FixtureWorker {
                     session: snapshot.key,
                     ticket,
                     generation: 1,
+                    public_turn: "factory-input".into(),
                     approval: Approval::Ask,
                 })
                 .await?;
@@ -317,6 +318,7 @@ async fn dropped_unpolled_prepare_keeps_written_io_owned_until_cleanup() {
         session: snapshot.key,
         ticket: h.ticket().clone(),
         generation: 2,
+        public_turn: "factory-input".into(),
         approval: Approval::Ask,
     });
     bounded(barrier.entered.notified()).await;
@@ -454,6 +456,7 @@ async fn replaced_leaf_before_publication(symlink: bool) {
         session: snapshot.key,
         ticket: h.ticket().clone(),
         generation: 2,
+        public_turn: "factory-input".into(),
         approval: Approval::Ask,
     });
     bounded(barrier.entered.notified()).await;

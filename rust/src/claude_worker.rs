@@ -114,6 +114,7 @@ pub trait SessionStore: Send + Sync + 'static {
     fn persist(&self, request: SessionWrite) -> Task<Result<SessionReceipt, StoreError>>;
 }
 
+#[derive(Clone)]
 pub struct McpContext {
     pub session: SessionKey,
     pub ticket: Ticket,

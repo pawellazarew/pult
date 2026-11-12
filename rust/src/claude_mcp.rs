@@ -320,15 +320,9 @@ impl ScopedMcp for Factory {
             );
         }
         // Backend reserves synchronously, so revoke cannot miss pending issuance.
-        let preparation = self.backend.prepare(
-            McpContext {
-                session: entry.context.session.clone(),
-                ticket: entry.context.ticket.clone(),
-                generation: entry.context.generation,
-                approval: entry.context.approval,
-            },
-            self.gate.clone(),
-        );
+        let preparation = self
+            .backend
+            .prepare(entry.context.clone(), self.gate.clone());
         let wait = Wait {
             entry: Some(entry.clone()),
             backend: self.backend.clone(),
