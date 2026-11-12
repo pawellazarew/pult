@@ -92,7 +92,9 @@ pub enum DispatchDecision {
 }
 /// Fresh, synchronous host check immediately before dispatch seals. Ordinary
 /// input is already durable; queue/question receipts follow the start checkpoint.
-/// Must return promptly; provider preparation belongs outside this callback.
+/// Runs in an owned blocking step, including its dispatch seal. Registry and
+/// filesystem checks may block; provider preparation belongs outside this callback.
+/// Cancellation revokes dispatch but retains the ticket until the check returns.
 /// The initial snapshot is immutable;
 /// only Coordinator's permitted approval restrictions can change dispatched data.
 /// Install panic_guard at host startup to suppress callback panic payloads.
@@ -172,6 +174,9 @@ impl Handle {
     }
     pub fn progress(&self) -> Progress {
         self.progress.borrow().clone()
+    }
+    pub fn subscribe_progress(&self) -> watch::Receiver<Progress> {
+        self.progress.clone()
     }
     pub async fn accepted(&mut self) -> Result<Accepted, DriverError> {
         self.accepted
@@ -390,6 +395,17 @@ impl Driver {
             .active(ticket)
             .map(|turn| turn.snapshot().clone())
     }
+    pub async fn wait_for_storage_failure(&self) {
+        loop {
+            let changed = self.inner.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.storage_failed() {
+                return;
+            }
+            changed.await;
+        }
+    }
     /// Includes cancelling jobs so stop/archive can address the exact incarnation.
     pub fn active_ticket(&self, key: &crate::turn_snapshot::SessionKey) -> Option<Ticket> {
         let state = self.inner.state.lock().expect("driver state mutex");
@@ -397,6 +413,16 @@ impl Driver {
             .core
             .by_name(&key.name)
             .filter(|turn| turn.ticket().session() == key)
+            .map(|turn| turn.ticket().clone())
+    }
+    /// Owner cancellation lookup only; never dispatch authority.
+    pub fn active_ticket_for_name(&self, name: &str) -> Option<Ticket> {
+        self.inner
+            .state
+            .lock()
+            .expect("driver state mutex")
+            .core
+            .by_name(name)
             .map(|turn| turn.ticket().clone())
     }
     /// Pult public ID returned by Worker::start, never a native provider turn ID.
@@ -409,8 +435,8 @@ impl Driver {
             .active(ticket)
             .and_then(|turn| turn.provider_turn_id().map(str::to_owned))
     }
-    /// Trusted host bridge for failed provider/broker journal IO. Unknown
-    /// outcomes close admission and cancel every owned execution.
+    /// Trusted host bridge for a failed provider/broker journal write. An
+    /// unknown outcome must stop admission and cancel every owned execution.
     pub fn report_storage_failure(&self) {
         latch_storage(&self.inner);
     }
@@ -430,8 +456,12 @@ impl Driver {
             .result(ticket)
             .cloned()
     }
-    pub async fn shutdown(&self, timeout: Duration) -> Result<(), DriverError> {
+    /// Synchronous stop barrier; no new dispatch is authorized after return.
+    pub fn begin_shutdown(&self) {
         close_admission(&self.inner);
+    }
+    pub async fn shutdown(&self, timeout: Duration) -> Result<(), DriverError> {
+        self.begin_shutdown();
         tokio::time::timeout(timeout, async {
             loop {
                 let notified = self.inner.changed.notified();
@@ -486,6 +516,8 @@ fn latch_storage(inner: &Inner) {
         control.progress.send_replace(Progress::Closing);
         control.cancel.send_replace(true);
     }
+    drop(state);
+    inner.changed.notify_waiters();
 }
 fn redact(inner: &Inner, text: &str) -> Option<String> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (inner.redactor)(text))).ok()
@@ -698,7 +730,7 @@ async fn run(
         &mut accepted,
         &mut user_event_id,
         text,
-        gate.as_deref(),
+        gate,
         &snapshot,
         deferred_draft,
     )
@@ -726,7 +758,7 @@ async fn execute(
     accepted: &mut Option<oneshot::Sender<Result<Accepted, DriverError>>>,
     user_event_id: &mut Option<u64>,
     text: String,
-    gate: Option<&dyn DispatchGate>,
+    gate: Option<Arc<dyn DispatchGate>>,
     initial: &TurnSnapshot,
     deferred_draft: Option<Value>,
 ) -> End {
@@ -737,48 +769,72 @@ async fn execute(
             touched: false,
         };
     }
-    // No await between the fresh check, applying its restriction and sealing.
-    // Call outside the driver mutex: host callbacks must not poison its state.
-    let decision = match gate {
-        Some(gate) => {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| gate.check(ticket, initial)))
-                .unwrap_or(DispatchDecision::Deny)
-        }
-        None => DispatchDecision::Allow,
-    };
-    let dispatch = {
-        let mut state = inner.state.lock().expect("driver state mutex");
-        if state.storage_failed {
-            return End {
-                outcome: failure("journal_unknown", "execution paused"),
-                error: Some(DriverError::StorageUnavailable),
-                touched: false,
-            };
-        }
-        if *cancel.borrow_and_update() {
-            return End {
+    // The owned run waits for this check even after cancellation. It retains
+    // the ticket until blocking policy IO ends; the callback and seal have no
+    // await between them, and no external callback runs under the driver lock.
+    let owner = inner.clone();
+    let scope = ticket.clone();
+    let initial = initial.clone();
+    let cancellation = control.cancel.subscribe();
+    let checked = tokio::task::spawn_blocking(move || {
+        if *cancellation.borrow() {
+            return Err(End {
                 outcome: Outcome::Interrupted,
                 error: Some(DriverError::Cancelled),
                 touched: false,
-            };
+            });
+        }
+        let decision = match gate {
+            Some(gate) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                gate.check(&scope, &initial)
+            }))
+            .unwrap_or(DispatchDecision::Deny),
+            None => DispatchDecision::Allow,
+        };
+        let mut state = owner.state.lock().expect("driver state mutex");
+        if state.storage_failed {
+            return Err(End {
+                outcome: failure("journal_unknown", "execution paused"),
+                error: Some(DriverError::StorageUnavailable),
+                touched: false,
+            });
+        }
+        if *cancellation.borrow() {
+            return Err(End {
+                outcome: Outcome::Interrupted,
+                error: Some(DriverError::Cancelled),
+                touched: false,
+            });
         }
         let denied = match decision {
             DispatchDecision::Allow => false,
             DispatchDecision::Deny => true,
             DispatchDecision::Restrict(approval) => !matches!(
-                state.core.restrict_before_start(ticket, approval),
+                state.core.restrict_before_start(&scope, approval),
                 Ok(crate::turn_coordinator::Change::Applied
                     | crate::turn_coordinator::Change::Unchanged)
             ),
         };
         if denied {
-            return End {
+            return Err(End {
                 outcome: failure("access_denied", "turn access denied before dispatch"),
                 error: Some(DriverError::AccessDenied),
                 touched: false,
+            });
+        }
+        Ok(state.core.dispatch_start(&scope))
+    })
+    .await;
+    let dispatch = match checked {
+        Ok(Ok(dispatch)) => dispatch,
+        Ok(Err(end)) => return end,
+        Err(_) => {
+            return End {
+                outcome: failure("worker_panic", "dispatch check failed"),
+                error: Some(DriverError::WorkerFailed),
+                touched: false,
             };
         }
-        state.core.dispatch_start(ticket)
     };
     let snapshot = match dispatch {
         Ok(DispatchAction::Proceed(snapshot)) => snapshot,

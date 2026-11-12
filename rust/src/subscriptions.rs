@@ -115,7 +115,9 @@ impl Subscriptions {
         let active = Arc::new(AtomicBool::new(true));
         let task_active = active.clone();
         let id = pending.id;
+        let host_job = state.host_jobs.track();
         let task = tokio::spawn(async move {
+            let _host_job = host_job;
             let _count = count;
             let result = if let Some(live_id) = pending.live_id {
                 let event = json!({"id":live_id,"ts":Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),"sessionId":"daemon","provider":"pult","kind":"turn.phase","data":{"reset":true}});
@@ -179,7 +181,9 @@ async fn replay(
         while cursor < until {
             let page_state = state.clone();
             let session = pending.session.clone();
+            let host_job = page_state.host_jobs.track();
             let page = tokio::task::spawn_blocking(move || {
+                let _host_job = host_job;
                 page_state
                     .store
                     .lock()

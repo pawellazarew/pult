@@ -79,8 +79,9 @@ jobs:
   check:
     needs: changes
     runs-on: ${{ matrix.os }}
-    # Полный e2e окна запускает отдельный Electron на каждый сценарий; запас на загрузку и медленный runner.
-    timeout-minutes: 25
+    # Полный e2e окна запускает отдельный Electron на каждый сценарий.
+    # На macOS проверки уже занимают почти 25 минут; оставляем запас на runner и cleanup.
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:

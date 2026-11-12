@@ -189,7 +189,9 @@ pub(crate) async fn execute(
     state: std::sync::Arc<crate::State>,
     command: Command,
 ) -> std::result::Result<Box<RawValue>, ApiError> {
+    let host_job = state.host_jobs.track();
     tokio::task::spawn_blocking(move || {
+        let _host_job = host_job;
         // Use the same lock order as startup and all registry/journal commands.
         let mut store = state.store.lock().map_err(ApiError::internal)?;
         let mut registry = state.registry.lock().map_err(ApiError::internal)?;
@@ -261,8 +263,17 @@ pub(crate) async fn execute(
                 unread,
                 up_to,
             } => registry.seen(&name, unread, up_to, store.last_id()),
+        };
+        let poisoned = registry.write_poisoned();
+        // Revoke execution for an unknown durability outcome, including a
+        // previously poisoned writer. Ordinary precommit/validation errors do
+        // not revoke authority. Never call Driver under either storage mutex.
+        drop(registry);
+        drop(store);
+        if poisoned {
+            state.execution_storage_failed();
         }
-        .map_err(ApiError::internal)?;
+        let record = record.map_err(ApiError::internal)?;
         crate::session_model::public_record(&record).map_err(ApiError::internal)
     })
     .await
@@ -292,5 +303,161 @@ mod tests {
                 ..
             }
         ));
+    }
+    struct PendingWorker(std::sync::atomic::AtomicUsize);
+    impl crate::turn_driver::Worker for PendingWorker {
+        fn start(
+            &self,
+            _: crate::turn_coordinator::Ticket,
+            _: crate::turn_snapshot::TurnSnapshot,
+            _: String,
+        ) -> crate::turn_driver::Task<
+            Result<crate::turn_driver::Started, crate::turn_driver::WorkerError>,
+        > {
+            Box::pin(async {
+                Ok(crate::turn_driver::Started {
+                    turn_id: "fixture-turn".into(),
+                    done: Box::pin(std::future::pending()),
+                })
+            })
+        }
+        fn close(
+            &self,
+            _: crate::turn_coordinator::Ticket,
+        ) -> crate::turn_driver::Task<Result<(), crate::turn_driver::WorkerError>> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { Ok(()) })
+        }
+    }
+    fn mutation(which: usize) -> Command {
+        match which {
+            0 => Command::Rename {
+                name: "chat".into(),
+                title: "new title".encode_utf16().collect(),
+            },
+            1 => Command::Archive {
+                name: "chat".into(),
+                archived: true,
+            },
+            _ => Command::Seen {
+                name: "chat".into(),
+                unread: true,
+                up_to: None,
+            },
+        }
+    }
+    async fn commit_failure(uncertain: bool, which: usize) {
+        use crate::turn_snapshot::{Approval, Provider, SessionKey, TurnSettings, TurnSnapshot};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let (_home, state, _sink) = crate::runtime_journal::tests::fixture();
+        let cwd = state.home.join("project");
+        std::fs::create_dir(&cwd).unwrap();
+        let key = SessionKey {
+            name: "chat".into(),
+            created_at: "2026-11-12T00:00:00Z".into(),
+        };
+        let mut record = crate::registry::Record::default();
+        for (name, value) in [
+            ("name", key.name.as_str()),
+            ("createdAt", key.created_at.as_str()),
+            ("provider", "codex"),
+            ("cwd", cwd.to_str().unwrap()),
+            ("approval", "full"),
+        ] {
+            record.set_string(name, value);
+        }
+        state.registry.lock().unwrap().insert(record).unwrap();
+        let snapshot = TurnSnapshot {
+            key,
+            provider: Provider::Codex,
+            cwd,
+            settings: TurnSettings {
+                approval: Approval::Full,
+                ..Default::default()
+            },
+        };
+        let worker = Arc::new(PendingWorker(AtomicUsize::new(0)));
+        let driver = state.driver.get().unwrap();
+        let mut handle = driver
+            .start(snapshot.clone(), "fixture".into(), worker.clone())
+            .unwrap();
+        handle.accepted().await.unwrap();
+        state
+            .registry
+            .lock()
+            .unwrap()
+            .fail_next_commit_for_test(uncertain);
+        assert!(execute(state.clone(), mutation(which)).await.is_err());
+        assert_eq!(state.registry.lock().unwrap().write_poisoned(), uncertain);
+        // Invalid parameters are rejected without turning a healthy source into
+        // an execution fault, independently of a precommit IO failure.
+        assert!(
+            parse(br#"{"id":1,"method":"agent.rename","params":{"name":"chat","title":{}}}"#)
+                .unwrap()
+                .1
+                .is_err()
+        );
+        assert_eq!(
+            state.execution_storage_failed.load(Ordering::Acquire),
+            uncertain
+        );
+        assert_eq!(crate::runtime_state::unavailable(&state), uncertain);
+        assert_eq!(driver.storage_failed(), uncertain);
+        if uncertain {
+            assert!(driver.snapshot_for_dispatch(handle.ticket()).is_none());
+            assert!(matches!(
+                driver.start(snapshot, "later".into(), worker.clone()),
+                Err(crate::turn_driver::DriverError::StorageUnavailable)
+            ));
+        } else {
+            assert!(driver.snapshot_for_dispatch(handle.ticket()).is_some());
+            let oversized = Command::Rename {
+                name: "chat".into(),
+                title: vec![b'x' as u16; 61],
+            };
+            assert!(execute(state.clone(), oversized).await.is_err());
+            assert!(!driver.storage_failed());
+            driver.cancel(handle.ticket());
+        }
+        let _ = handle.wait().await;
+        assert_eq!(worker.0.load(Ordering::SeqCst), 1);
+        assert!(driver.active_ticket(&snapshot_key(&state)).is_none());
+        assert_eq!(driver.active_count(), 0);
+    }
+    fn snapshot_key(state: &crate::State) -> crate::turn_snapshot::SessionKey {
+        crate::turn_snapshot::SessionKey {
+            name: "chat".into(),
+            created_at: state
+                .registry
+                .lock()
+                .unwrap()
+                .find("chat")
+                .unwrap()
+                .scalar("createdAt")
+                .unwrap(),
+        }
+    }
+    #[tokio::test]
+    async fn uncertain_foundation_writes_cancel_active_execution() {
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            for which in 0..3 {
+                commit_failure(true, which).await;
+            }
+        })
+        .await
+        .expect("uncertain-write cancellation watchdog");
+    }
+    #[tokio::test]
+    async fn precommit_and_invalid_foundation_writes_preserve_execution() {
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            for which in 0..3 {
+                commit_failure(false, which).await;
+            }
+        })
+        .await
+        .expect("precommit-write watchdog");
     }
 }

@@ -19,6 +19,80 @@ use std::task::{Context, Waker};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
+#[test]
+fn blocking_fresh_gates_keep_two_worker_runtime_responsive_and_owned() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let fixture = Fixture::new();
+    let driver = fixture.driver();
+    let worker = WorkerControl::new();
+    let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+    let (entered, arrivals) = std::sync::mpsc::channel();
+    let barrier = release.clone();
+    let gate = Arc::new(move |_: &Ticket, _: &TurnSnapshot| {
+        entered.send(()).unwrap();
+        let (lock, changed) = &*barrier;
+        let mut released = lock.lock().unwrap();
+        while !*released {
+            released = changed.wait(released).unwrap();
+        }
+        DispatchDecision::Allow
+    });
+    let handles = runtime.block_on(async {
+        ["one", "two"].map(|name| {
+            let mut snapshot = snapshot();
+            snapshot.key.name = name.into();
+            driver
+                .start_checked(
+                    snapshot,
+                    "hello".into(),
+                    worker.worker.clone(),
+                    gate.clone(),
+                )
+                .unwrap()
+        })
+    });
+    for _ in 0..2 {
+        arrivals.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+    // Both callbacks have entered their controlled blocking section. A queued
+    // heartbeat and shutdown timer must run before either callback is released.
+    driver.begin_shutdown();
+    let (beat, heartbeat) = std::sync::mpsc::channel();
+    runtime.spawn(async move {
+        let _ = beat.send(());
+    });
+    let (report, stopped) = std::sync::mpsc::channel();
+    let stopping = driver.clone();
+    runtime.spawn(async move {
+        let _ = report.send(stopping.shutdown(Duration::from_millis(20)).await);
+    });
+    let responsive = heartbeat.recv_timeout(Duration::from_secs(2)).is_ok();
+    let result = stopped.recv_timeout(Duration::from_millis(200)).ok();
+    let retained = driver.active_count();
+    *release.0.lock().unwrap() = true;
+    release.1.notify_all();
+    runtime.block_on(async {
+        driver.shutdown(Duration::from_secs(5)).await.unwrap();
+        for mut handle in handles {
+            assert_eq!(handle.accepted().await, Err(DriverError::Cancelled));
+        }
+    });
+    assert!(
+        responsive,
+        "blocking fresh gates starved the two Tokio workers"
+    );
+    assert_eq!(result, Some(Err(DriverError::CleanupUnconfirmed)));
+    assert_eq!(retained, 2, "blocked checks lost their driver ownership");
+    assert!(
+        worker.starts.is_empty(),
+        "cancelled fresh gate dispatched a late worker"
+    );
+}
+
 async fn bounded<T>(future: impl Future<Output = T>) -> T {
     tokio::time::timeout(Duration::from_secs(10), future)
         .await
@@ -1592,4 +1666,33 @@ async fn javascript_trim_preserves_next_line_character_as_nonempty_text() {
     done.send(Outcome::Success).unwrap();
     next(&mut worker.closes).await.reply.send(Ok(())).unwrap();
     bounded(handle.wait()).await.unwrap();
+}
+
+#[tokio::test]
+async fn synchronous_stop_barrier_prevents_dispatch_before_async_cleanup_is_polled() {
+    let fixture = Fixture::new();
+    let driver = fixture.driver();
+    let mut worker = WorkerControl::new();
+    driver.begin_shutdown();
+    assert!(matches!(
+        driver.start(snapshot(), "fixture".into(), worker.worker.clone()),
+        Err(DriverError::Closed)
+    ));
+    assert_eq!(fixture.store.lock().unwrap().last_id(), 0);
+    assert!(worker.starts.try_recv().is_err());
+    assert!(!driver.storage_failed());
+    bounded(driver.shutdown(Duration::from_secs(1)))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn storage_fault_wakes_the_daemon_observer_without_a_job_completion() {
+    let fixture = Fixture::new();
+    let driver = fixture.driver();
+    let waiting = driver.wait_for_storage_failure();
+    tokio::pin!(waiting);
+    assert_pending(waiting.as_mut());
+    driver.report_storage_failure();
+    bounded(waiting).await;
 }

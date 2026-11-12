@@ -1,17 +1,15 @@
 #![forbid(unsafe_code)]
 pub mod claude_events;
-pub mod network_guard;
-pub mod permission_broker;
-pub mod prompt_attachments;
-
 pub mod codex_events;
 pub mod codex_host_services;
 pub mod codex_permissions;
 pub mod codex_process;
 pub mod codex_rpc;
+pub mod codex_runtime;
 pub mod codex_worker;
 pub mod consent_store;
 mod history;
+mod host_jobs;
 pub mod host_paths;
 pub mod host_policy;
 pub mod journal;
@@ -21,17 +19,25 @@ mod memory_api;
 mod memory_catalog;
 pub mod memory_client;
 mod memory_project;
+pub mod network_guard;
 pub mod panic_guard;
+pub mod permission_broker;
+pub mod prompt_attachments;
 mod read_api;
 pub mod redaction;
 pub mod registry;
+pub mod runtime_bootstrap;
 pub mod runtime_config;
+mod runtime_journal;
+mod runtime_state;
 mod session_api;
+pub mod session_create;
 pub mod session_live;
 mod session_memory;
 mod session_memory_api;
 mod session_model;
 mod session_read;
+mod session_runtime_api;
 mod session_tree;
 mod snapshot;
 mod stream;
@@ -58,7 +64,7 @@ use std::os::unix::fs::{DirBuilderExt, FileTypeExt, OpenOptionsExt, PermissionsE
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{
-    Arc, Mutex,
+    Arc, Mutex, OnceLock,
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
@@ -71,6 +77,7 @@ use tokio::task::JoinSet;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const PROTOCOL: u64 = 1;
 pub const MAX_LINE: usize = 1024 * 1024;
+pub const PARTIAL: [&str; 6] = session_runtime_api::METHODS;
 pub const SUPPORTED: [&str; 27] = [
     "agent.archive",
     "agent.read",
@@ -299,12 +306,22 @@ fn holder_live(bytes: &[u8]) -> bool {
     }
 }
 
+// Release the open-file-description lock explicitly after owner cleanup. An
+// unrelated child between fork and exec may still hold a duplicate descriptor;
+// waiting for its last close would extend daemon ownership beyond this owner.
+struct OwnershipGuard(std::fs::File);
+impl Drop for OwnershipGuard {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.0);
+    }
+}
+
 struct Ownership {
     run: PathBuf,
     record: Vec<u8>,
     token: String,
     socket: Option<(u64, u64)>,
-    _guard: std::fs::File,
+    _guard: OwnershipGuard,
     token_published: bool,
 }
 
@@ -342,6 +359,7 @@ impl Ownership {
         guard
             .try_lock_exclusive()
             .context("another Rust daemon owns this home")?;
+        let guard = OwnershipGuard(guard);
         let pid = std::process::id();
         let record = serde_json::to_vec(
             &json!({"pid":pid,"startedAt":started_at,"started":ps_start(pid).context("cannot identify this process")?,"cmd":"pultd-rust"}),
@@ -481,10 +499,13 @@ struct State {
     started: Instant,
     token: String,
     clients: AtomicUsize,
+    connection_id: AtomicU64,
+    host_jobs: Arc<host_jobs::Tracker>,
+    session_commands: Arc<session_runtime_api::Gate>,
     stop: watch::Sender<bool>,
     store: Mutex<journal::EventStore>,
     history: Mutex<history::HistoryCache>,
-    registry: Mutex<registry::Registry>,
+    registry: Arc<Mutex<registry::Registry>>,
     memory: Mutex<std::result::Result<memory::MemoryStore, String>>,
     session_memory: Mutex<session_memory::SessionMemory>,
     last_event_id: AtomicU64,
@@ -493,6 +514,12 @@ struct State {
     subscriptions: AtomicUsize,
     committed: watch::Sender<u64>,
     live_id: AtomicU64,
+    driver: OnceLock<Arc<turn_driver::Driver>>,
+    execution_storage_failed: AtomicBool,
+    native_runtime: OnceLock<Arc<codex_runtime::CodexRuntime>>,
+    runtime_init: Mutex<()>,
+    consent: Mutex<Option<runtime_state::Consent>>,
+    live_sessions: Mutex<session_live::Cache>,
 }
 
 fn memory_status(state: &State) -> Value {
@@ -523,12 +550,14 @@ async fn journal_request(
     method: String,
     params: Value,
 ) -> Result<Box<RawValue>> {
+    let host_job = state.host_jobs.track();
     tokio::task::spawn_blocking(move || {
-        let mut store = state
-            .store
-            .lock()
-            .map_err(|_| anyhow::anyhow!("journal lock poisoned"))?;
+        let _host_job = host_job;
         if method == "events.tail" {
+            let mut store = state
+                .store
+                .lock()
+                .map_err(|_| anyhow::anyhow!("journal lock poisoned"))?;
             let since = params["since"].as_f64().unwrap_or(0.0).floor().max(0.0) as u64;
             let limit = params["limit"]
                 .as_f64()
@@ -573,20 +602,36 @@ async fn journal_request(
             if let Some(parent) = params["parentId"].as_str() {
                 draft["parentId"] = json!(parent);
             }
-            let event = store.append(draft)?;
-            state
-                .last_event_id
-                .store(store.last_id(), Ordering::Release);
-            state.committed.send_replace(store.last_id());
-            if store.projection_error().is_some()
-                && !state.projection_degraded.swap(true, Ordering::Relaxed)
-            {
-                eprintln!("journal is committed but a session projection needs repair");
+            let mut store = match state.store.lock() {
+                Ok(store) => store,
+                Err(_) => {
+                    state.execution_storage_failed();
+                    bail!("journal lock poisoned");
+                }
+            };
+            let result = store.append(draft);
+            let projected = result
+                .as_ref()
+                .map_or(Ok(()), |event| runtime_state::project(&state, event));
+            let last = store.last_id();
+            let degraded = store.projection_error().is_some();
+            drop(store);
+            state.publish_commit(last, degraded);
+            if projected.is_err() {
+                state.execution_storage_failed();
+                bail!("live projection persistence unconfirmed");
             }
+            let event = match result {
+                Ok(event) => event,
+                Err(error) => {
+                    state.execution_storage_failed();
+                    return Err(error);
+                }
+            };
             ids.push(event["id"].clone());
         }
         Ok(to_raw_value(
-            &json!({"ids":ids,"lastEventId":store.last_id()}),
+            &json!({"ids":ids,"lastEventId":state.last_event_id.load(Ordering::Acquire)}),
         )?)
     })
     .await
@@ -677,11 +722,35 @@ async fn connection(
     } else {
         &SUPPORTED
     };
-    write_value(&mut output, &json!({"type":"hello_ok","protocol":PROTOCOL,"daemon":{"version":VERSION,"pid":std::process::id(),"startedAt":state.started_at},"capabilities":{"experimental":true,"supportedMethods":supported}})).await?;
+    let partial: &[&str] = if memory_lease.is_some() {
+        &[]
+    } else {
+        &PARTIAL
+    };
+    let client_kind = if hello["client"].as_str() == Some("shell") {
+        host_policy::ClientKind::Shell
+    } else {
+        host_policy::ClientKind::Other
+    };
+    // Only a bounded client label becomes durable permission provenance; an
+    // arbitrary hello string must not become a journal payload or an identity.
+    let client_label = match hello["client"].as_str() {
+        Some("shell") => "shell",
+        Some("cli") => "cli",
+        Some("sdk") => "sdk",
+        _ => "other",
+    };
+    let by = format!(
+        "{}#{}",
+        client_label,
+        state.connection_id.fetch_add(1, Ordering::Relaxed)
+    );
+    write_value(&mut output, &json!({"type":"hello_ok","protocol":PROTOCOL,"daemon":{"version":VERSION,"pid":std::process::id(),"startedAt":state.started_at},"capabilities":{"experimental":true,"supportedMethods":supported,"partialMethods":partial}})).await?;
     let (writer, _writer_task) = stream::Writer::start(output);
     let mut writer_closed = writer.closed();
     let mut subscriptions = subscriptions::Subscriptions::new();
     let mut daemon_stopping = false;
+    let mut responses = JoinSet::new();
     loop {
         let line = tokio::select! {
             _ = shutdown.changed() => { daemon_stopping = true; break; },
@@ -848,11 +917,56 @@ async fn connection(
             continue;
         }
         let method = request["method"].as_str().unwrap();
+        if PARTIAL.contains(&method) {
+            while responses.try_join_next().is_some() {}
+            if responses.len() >= 16 {
+                writer.response(&json!({"id":id,"error":{"code":"capacity","message":"too many concurrent session commands"}})).await?;
+                continue;
+            }
+            let reply = session_runtime_api::execute(
+                state.clone(),
+                method,
+                request.get("params").cloned().unwrap_or_else(|| json!({})),
+                client_kind,
+                &by,
+            );
+            let writer = writer.clone();
+            let id = id.clone();
+            // Read further frames while preparation runs so stop/resolve on
+            // this same socket cannot be queued behind a pending prompt.
+            responses.spawn(async move {
+                match reply.await {
+                    Ok(result) => {
+                        let response = RpcResult { id:&id, result };
+                        if serde_json::to_vec(&response).is_ok_and(|bytes|bytes.len()<MAX_LINE) {
+                            let _ = writer.response(&response).await;
+                        } else {
+                            let _ = writer.response(&json!({"id":id,"error":{"code":"capacity","message":"response exceeds frame budget; query current session state"}})).await;
+                        }
+                    },
+                    Err(error) => { let _ = writer.response(&json!({"id":id,"error":{"code":error.code,"message":error.message}})).await; },
+                }
+            });
+            continue;
+        }
         let result = match method {
             "daemon.status" => {
-                json!({"version":VERSION,"protocol":PROTOCOL,"pid":std::process::id(),"startedAt":state.started_at,"uptimeMs":state.started.elapsed().as_millis(),"home":state.home,"sock":state.home.join("run/pultd.sock"),"clients":state.clients.load(Ordering::Relaxed),"subscriptions":state.subscriptions.load(Ordering::Relaxed),"lastEventId":state.last_event_id.load(Ordering::Acquire),"mode":"on-demand","journal":{"projectionDegraded":state.projection_degraded.load(Ordering::Relaxed)},"registry":state.registry.try_lock().ok().map(|r|r.status()),"memory":memory_status(&state),"capabilities":{"experimental":true,"supportedMethods":SUPPORTED}})
+                if let Some(initialize) = request["params"].get("initializeRuntime") {
+                    let Some(initialize) = initialize.as_bool() else {
+                        writer.response(&json!({"id":id,"error":{"code":"invalid_params","message":"initializeRuntime must be a boolean"}})).await?;
+                        continue;
+                    };
+                    if initialize && runtime_state::instance(&state).await.is_err() {
+                        writer.response(&json!({"id":id,"error":{"code":"runtime_unavailable","message":"native runtime initialization failed"}})).await?;
+                        continue;
+                    }
+                }
+                json!({"version":VERSION,"protocol":PROTOCOL,"pid":std::process::id(),"startedAt":state.started_at,"uptimeMs":state.started.elapsed().as_millis(),"home":state.home,"sock":state.home.join("run/pultd.sock"),"clients":state.clients.load(Ordering::Relaxed),"subscriptions":state.subscriptions.load(Ordering::Relaxed),"lastEventId":state.last_event_id.load(Ordering::Acquire),"mode":"on-demand","journal":{"projectionDegraded":state.projection_degraded.load(Ordering::Relaxed),"executionUnavailable":runtime_state::unavailable(&state)},"registry":state.registry.try_lock().ok().map(|r|r.status()),"memory":memory_status(&state),"nativeRuntime":{"initialized":state.native_runtime.get().is_some(),"hosts":state.native_runtime.get().map_or(0, |runtime|runtime.host_count()),"activeTurns":state.driver.get().map_or(0, |driver|driver.active_count())},"capabilities":{"experimental":true,"supportedMethods":SUPPORTED,"partialMethods":PARTIAL}})
             }
-            "daemon.stop" => json!({"stopping":true}),
+            "daemon.stop" => {
+                runtime_state::begin_shutdown(&state);
+                json!({"stopping":true})
+            }
             "protocol.catalog" => catalog(),
             "events.subscribe" => {
                 match subscriptions.prepare(&state, &request["params"]) {
@@ -957,8 +1071,29 @@ async fn connection(
     Ok(())
 }
 
+struct ServeCancellation(watch::Sender<bool>);
+impl Drop for ServeCancellation {
+    fn drop(&mut self) {
+        let _ = self.0.send(true);
+    }
+}
+
+/// Cancelling the caller requests shutdown; the owned supervisor retains the
+/// daemon lease until execution cleanup finishes. It is not aborted with RPC.
 pub async fn serve(home: PathBuf) -> Result<()> {
+    let (cancel, cancellation) = watch::channel(false);
+    let _cancel_on_drop = ServeCancellation(cancel);
+    let supervisor = tokio::spawn(serve_owned(home, cancellation));
+    supervisor
+        .await
+        .map_err(|_| anyhow::anyhow!("daemon supervisor failed"))?
+}
+
+async fn serve_owned(home: PathBuf, mut cancellation: watch::Receiver<bool>) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
+    if *cancellation.borrow() {
+        return Ok(());
+    }
     let home = checked_home(&home)?;
     let started_at = Utc::now().to_rfc3339();
     let mut owner = Ownership::acquire(&home, &started_at)?;
@@ -1006,16 +1141,20 @@ pub async fn serve(home: PathBuf) -> Result<()> {
     );
     owner.write_token()?;
     let (stop, mut shutdown) = watch::channel(false);
+    let live_sessions = runtime_state::seed_live(&registry)?;
     let state = Arc::new(State {
         home,
         token: owner.token.clone(),
         started_at,
         started: Instant::now(),
         clients: AtomicUsize::new(0),
+        connection_id: AtomicU64::new(1),
+        host_jobs: Arc::default(),
+        session_commands: Arc::default(),
         stop,
         store: Mutex::new(store),
         history: Mutex::new(history::HistoryCache::default()),
-        registry: Mutex::new(registry),
+        registry: Arc::new(Mutex::new(registry)),
         memory: Mutex::new(memory),
         session_memory: Mutex::new(session_memory::SessionMemory::default()),
         last_event_id,
@@ -1024,17 +1163,37 @@ pub async fn serve(home: PathBuf) -> Result<()> {
         subscriptions: AtomicUsize::new(0),
         committed,
         live_id: AtomicU64::new(subscriptions::LIVE_BASE),
+        driver: OnceLock::new(),
+        execution_storage_failed: AtomicBool::new(false),
+        native_runtime: OnceLock::new(),
+        runtime_init: Mutex::new(()),
+        consent: Mutex::new(None),
+        live_sessions: Mutex::new(live_sessions),
     });
+    runtime_journal::initialize(&state)?;
     let permits = Arc::new(Semaphore::new(64));
     let mut tasks = JoinSet::new();
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut accept_error = None;
+    let execution_driver = state.driver.get().expect("driver initialized").clone();
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break,
             _ = terminate.recv() => break,
             _ = shutdown.changed() => break,
+            _ = cancellation.changed() => break,
+            _ = execution_driver.wait_for_storage_failure() => {
+                state.execution_storage_failed.store(true, Ordering::Release);
+                break;
+            },
             connection_result = listener.accept() => {
-                let (socket, _) = connection_result?;
+                let (socket, _) = match connection_result {
+                    Ok(connection) => connection,
+                    Err(error) => {
+                        accept_error = Some(error);
+                        break;
+                    }
+                };
                 if let Ok(permit) = permits.clone().try_acquire_owned() {
                     let state = state.clone();
                     let shutdown = shutdown.clone();
@@ -1045,6 +1204,7 @@ pub async fn serve(home: PathBuf) -> Result<()> {
         }
     }
     let _ = state.stop.send(true);
+    runtime_state::begin_shutdown(&state);
     if tokio::time::timeout(Duration::from_secs(2), async {
         while tasks.join_next().await.is_some() {}
     })
@@ -1055,8 +1215,14 @@ pub async fn serve(home: PathBuf) -> Result<()> {
         while tasks.join_next().await.is_some() {}
     }
     drop(listener);
-    drop(owner);
-    Ok(())
+    runtime_journal::shutdown(&state, owner).await;
+    match accept_error {
+        Some(error) => Err(error).context("daemon accept failed"),
+        None if runtime_state::unavailable(&state) => {
+            bail!("execution storage failed; daemon stopped after cleanup")
+        }
+        None => Ok(()),
+    }
 }
 
 pub async fn request(home: &Path, method: &str) -> Result<Box<RawValue>> {
@@ -1147,6 +1313,55 @@ mod tests {
     use super::*;
 
     #[test]
+    fn owner_cleanup_releases_guard_even_when_a_duplicate_descriptor_survives() {
+        let home = tempfile::tempdir().unwrap();
+        fs::set_permissions(home.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let owner = Ownership::acquire(home.path(), "fixture").unwrap();
+        // Model the same open-file description retained by an unrelated child
+        // between fork and exec. No sleeps or replacement-acquire retries.
+        let inherited = owner._guard.0.try_clone().unwrap();
+        let run = owner.run.clone();
+        drop(owner);
+        assert!(
+            !run.join("pultd.lock").exists(),
+            "owner cleanup must finish before release"
+        );
+        let replacement = Ownership::acquire(home.path(), "replacement")
+            .unwrap_or_else(|error| panic!("replacement with inherited guard: {error:#}"));
+        drop(replacement);
+        drop(inherited);
+    }
+
+    #[test]
+    fn owner_guard_releases_after_foreign_record_skips_owner_cleanup() {
+        let home = tempfile::tempdir().unwrap();
+        fs::set_permissions(home.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let owner = Ownership::acquire(home.path(), "fixture").unwrap();
+        let inherited = owner._guard.0.try_clone().unwrap();
+        let run = owner.run.clone();
+        fs::write(run.join("pultd.lock"), b"foreign record").unwrap();
+        drop(owner);
+        assert_eq!(fs::read(run.join("pultd.lock")).unwrap(), b"foreign record");
+        let replacement = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(run.join("rust-owner.guard"))
+            .unwrap();
+        replacement
+            .try_lock_exclusive()
+            .expect("guard release also covers early owner cleanup return");
+        drop(inherited);
+        // Closing the old description must not unlock a new owner's guard.
+        let contender = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(run.join("rust-owner.guard"))
+            .unwrap();
+        assert!(contender.try_lock_exclusive().is_err());
+        FileExt::unlock(&replacement).unwrap();
+    }
+
+    #[test]
     fn protocol_and_version_match_shared_contract() {
         let package: Value = serde_json::from_str(include_str!("../../package.json")).unwrap();
         assert_eq!(VERSION, package["version"].as_str().unwrap());
@@ -1163,5 +1378,17 @@ mod tests {
         let mut supported = SUPPORTED.to_vec();
         supported.sort_unstable();
         assert_eq!(implemented, supported);
+        let mut partial: Vec<_> = catalog["methods"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|method| method["rust"] == "partial")
+            .map(|method| method["name"].as_str().unwrap())
+            .collect();
+        partial.sort_unstable();
+        let mut advertised = PARTIAL.to_vec();
+        advertised.sort_unstable();
+        assert_eq!(partial, advertised);
+        assert!(PARTIAL.iter().all(|method| !SUPPORTED.contains(method)));
     }
 }

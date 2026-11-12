@@ -62,28 +62,11 @@ impl std::fmt::Debug for Launch {
 }
 
 impl Launch {
-    pub fn validate(&self) -> Result<()> {
+    /// Pure structural checks; safe inside the host pool's short admission lock.
+    pub(crate) fn validate_shape(&self) -> Result<()> {
         ensure!(
             self.holder.is_absolute() && self.program.is_absolute() && self.cwd.is_absolute(),
             "worker paths must be absolute"
-        );
-        ensure!(
-            std::fs::metadata(&self.holder)
-                .context("worker holder unavailable")?
-                .is_file(),
-            "worker holder must be a regular file"
-        );
-        ensure!(
-            std::fs::metadata(&self.program)
-                .context("worker program unavailable")?
-                .is_file(),
-            "worker program must be a regular file"
-        );
-        ensure!(
-            std::fs::metadata(&self.cwd)
-                .context("worker directory unavailable")?
-                .is_dir(),
-            "worker directory must be a directory"
         );
         crate::worker_env::validate(&self.env)?;
         let mut size = 0usize;
@@ -104,6 +87,28 @@ impl Launch {
                 .context("worker launch exceeds budget")?;
             ensure!(size <= MAX_FRAME, "worker launch exceeds 1 MiB budget");
         }
+        Ok(())
+    }
+    pub fn validate(&self) -> Result<()> {
+        self.validate_shape()?;
+        ensure!(
+            std::fs::metadata(&self.holder)
+                .context("worker holder unavailable")?
+                .is_file(),
+            "worker holder must be a regular file"
+        );
+        ensure!(
+            std::fs::metadata(&self.program)
+                .context("worker program unavailable")?
+                .is_file(),
+            "worker program must be a regular file"
+        );
+        ensure!(
+            std::fs::metadata(&self.cwd)
+                .context("worker directory unavailable")?
+                .is_dir(),
+            "worker directory must be a directory"
+        );
         Ok(())
     }
 }
@@ -133,6 +138,24 @@ pub struct Process {
 pub struct SpawnFailure {
     pub process: Option<Box<Process>>,
     error: anyhow::Error,
+}
+
+// The supervisor awaits this owned check through cancellation. A panic has not
+// spawned a child, so its result is a before-spawn failure, never cleanup proof
+// for an existing process. There is no production callback or fault hook.
+async fn validated_launch<F>(
+    launch: Launch,
+    validate: F,
+) -> std::result::Result<Launch, SpawnFailure>
+where
+    F: FnOnce(&Launch) -> Result<()> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        validate(&launch).map_err(SpawnFailure::before_spawn)?;
+        Ok(launch)
+    })
+    .await
+    .map_err(|_| SpawnFailure::before_spawn(anyhow::anyhow!("worker launch validation failed")))?
 }
 impl std::fmt::Debug for SpawnFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -184,7 +207,7 @@ impl Process {
         launch: Launch,
         framing: Framing,
     ) -> std::result::Result<Self, SpawnFailure> {
-        launch.validate().map_err(SpawnFailure::before_spawn)?;
+        let launch = validated_launch(launch, Launch::validate).await?;
         let mut command = Command::new(&launch.holder);
         command
             .arg(std::process::id().to_string())
@@ -504,6 +527,46 @@ async fn bounded_line<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn filesystem_launch_validation_does_not_block_runtime_heartbeat() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let arriving = entered.clone();
+        let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let checking = release.clone();
+        let (started, observed) = std::sync::mpsc::channel();
+        let (heartbeat, responsive) = std::sync::mpsc::channel();
+        let watchdog = std::thread::spawn(move || {
+            let started = observed.recv_timeout(Duration::from_secs(5)).is_ok();
+            let responsive = started && responsive.recv_timeout(Duration::from_secs(5)).is_ok();
+            *release.0.lock().unwrap() = true;
+            release.1.notify_all();
+            responsive
+        });
+        let launch = Launch {
+            holder: "/fixture/holder".into(),
+            program: "/fixture/provider".into(),
+            args: vec![],
+            cwd: "/fixture".into(),
+            env: Default::default(),
+        };
+        let validation = tokio::spawn(validated_launch(launch, move |_| {
+            let _ = started.send(());
+            arriving.notify_one();
+            let mut ready = checking.0.lock().unwrap();
+            while !*ready {
+                ready = checking.1.wait(ready).unwrap();
+            }
+            Ok(())
+        }));
+        entered.notified().await;
+        let _ = heartbeat.send(());
+        assert!(validation.await.unwrap().is_ok());
+        assert!(
+            watchdog.join().unwrap(),
+            "launch filesystem validation blocked the Tokio worker"
+        );
+    }
 
     #[tokio::test]
     async fn recovery_drains_fragmented_oversize_and_discards_unterminated_tail() {

@@ -113,7 +113,12 @@ does not start or close a worker that was never touched. Cancellation before
 the check skips it; cancellation during the check is observed again at seal.
 The old `start` remains a trusted-host library entry point for compatibility.
 
-The callback must be fast and nonblocking. The host must still refresh access
+The callback and Coordinator dispatch seal run in one owned blocking step,
+with no await between them. Cancellation remains responsive on Tokio workers;
+the step rechecks cancellation before sealing, and the Driver retains the ticket
+until any blocking check finishes. A stuck policy read cannot produce a late
+dispatch or a false successful cleanup. Provider preparation stays outside the
+callback. The host must still refresh access
 after asynchronous provider preparation and retire already running Full
 processes when consent changes. This seam does not itself supply those facts
 or make provider reuse safe. Hosts install the silent panic policy before

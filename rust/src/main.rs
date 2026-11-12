@@ -32,6 +32,10 @@ enum Action {
         #[command(subcommand)]
         action: EventsAction,
     },
+    Perm {
+        #[command(subcommand)]
+        action: PermAction,
+    },
 }
 
 /// Memory administration and read-only session access.
@@ -97,6 +101,24 @@ enum MemoryContextAction {
 
 #[derive(Subcommand)]
 enum AgentAction {
+    /// Partial metadata creation with explicit JSON settings.
+    Start {
+        #[arg(long)]
+        params: String,
+    },
+    List,
+    /// Partial ordinary Codex execution.
+    Prompt {
+        name: String,
+        text: String,
+        #[arg(long)]
+        attachments: Option<String>,
+    },
+    Stop {
+        name: String,
+        #[arg(long)]
+        turn_id: Option<String>,
+    },
     Read {
         name: String,
         #[arg(long, default_value = "0", allow_hyphen_values = true, num_args = 0..=1, default_missing_value = "")]
@@ -129,6 +151,25 @@ enum AgentAction {
 }
 
 #[derive(Subcommand)]
+enum PermAction {
+    List {
+        #[arg(long)]
+        name: Option<String>,
+    },
+    Resolve {
+        id: String,
+        #[arg(value_parser = ["allow", "deny"])]
+        decision: String,
+        #[arg(long, value_parser = ["once", "session", "rule"])]
+        scope: Option<String>,
+        #[arg(long)]
+        answers: Option<String>,
+        #[arg(long)]
+        message: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum EventsAction {
     Snapshot,
     History {
@@ -156,7 +197,11 @@ enum EventsAction {
 #[derive(Subcommand)]
 enum DaemonAction {
     Serve,
-    Status,
+    Status {
+        /// Prepare the native runtime without starting a provider or a turn.
+        #[arg(long)]
+        initialize_runtime: bool,
+    },
     Stop,
 }
 
@@ -166,13 +211,15 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     if args.skill {
         println!(
-            "Rust core protocol 1. Use an explicit private scratch --home.\nCommands: memory add|update|forget|get|list|search|history|catalog --params JSON, memory context bind|issue|revoke|status --params JSON (owner administration; no turn injection yet), daemon serve, daemon status, daemon stop, catalog, events tail, events snapshot, events history --session NAME [--before ID] [--budget BYTES], events get ID..., agent read NAME [--since N] [--format text|json], agent tree NAME [--json], agent rename NAME [TITLE] [--title TEXT], agent archive|unarchive NAME, agent seen NAME [--unread]\nPULT_MEMORY_KEY selects memory-only authentication for every RPC without reading the owner token or display config. Memory credentials allow only get/list/search/catalog; they never grant owner authority.\nOwner-token connections support memory.context.bind, memory.context.issue, memory.context.revoke, memory.context.status, memory.catalog, memory.add, memory.update, memory.forget, memory.get, memory.list, memory.search, memory.history, agent.read, agent.tree, agent.rename, agent.archive, agent.seen, daemon.status, daemon.stop, events.tail, events.subscribe, events.unsubscribe, events.snapshot, events.history, events.get and protocol.catalog.\nHistory reads per-session files, snapshots and get use the global journal.\nSubscriptions replay committed events with bounded output. live=true sends an empty-session reset.\nevents.emit requires PULT_TEST=1 and is for deterministic verification.\nJournal append is acknowledged after sync. A failed append has an unknown outcome until replay.\nOther catalogued methods return not_implemented. Legacy ask/runtime credentials remain rejected.\nPrivate sessions/config are allowed only in a marked Rust scratch home. Startup recovers sessions cold and pauses queues; no provider is started. Production migration and session execution follow later compatibility steps."
+            "Rust core protocol 1. Use an explicit private scratch --home.\nCommands: agent start --params JSON, agent list, agent prompt NAME TEXT [--attachments JSON], agent stop NAME [--turn-id ID], perm list [--name NAME], perm resolve ID allow|deny [--scope once|session|rule] [--answers JSON] [--message TEXT] (partial ordinary Codex staging), memory add|update|forget|get|list|search|history|catalog --params JSON, memory context bind|issue|revoke|status --params JSON (owner administration; no turn injection yet), daemon serve, daemon status, daemon stop, catalog, events tail, events snapshot, events history --session NAME [--before ID] [--budget BYTES], events get ID..., agent read NAME [--since N] [--format text|json], agent tree NAME [--json], agent rename NAME [TITLE] [--title TEXT], agent archive|unarchive NAME, agent seen NAME [--unread]\nPULT_MEMORY_KEY selects memory-only authentication for every RPC without reading the owner token or display config. Memory credentials allow only get/list/search/catalog; they never grant owner authority.\nOwner-token connections support memory.context.bind, memory.context.issue, memory.context.revoke, memory.context.status, memory.catalog, memory.add, memory.update, memory.forget, memory.get, memory.list, memory.search, memory.history, agent.read, agent.tree, agent.rename, agent.archive, agent.seen, daemon.status, daemon.stop, events.tail, events.subscribe, events.unsubscribe, events.snapshot, events.history, events.get and protocol.catalog.\nPartial owner methods: agent.start, agent.list, agent.prompt, agent.stop, perm.list, perm.resolve. Full queue, background and provider parity remains in progress.\nHistory reads per-session files, snapshots and get use the global journal.\nSubscriptions replay committed events with bounded output. live=true sends an empty-session reset.\nevents.emit requires PULT_TEST=1 and is for deterministic verification.\nJournal append is acknowledged after sync. A failed append has an unknown outcome until replay.\nOther catalogued methods return not_implemented. Legacy ask/runtime credentials remain rejected.\nPrivate sessions/config are allowed only in a marked Rust scratch home. Startup recovers sessions cold and pauses queues; no provider is started. Production migration and session execution follow later compatibility steps."
         );
         return Ok(());
     }
     let home = args.home.expect("clap requires home");
     let result = match args.command.unwrap_or(Action::Daemon {
-        action: DaemonAction::Status,
+        action: DaemonAction::Status {
+            initialize_runtime: false,
+        },
     }) {
         Action::Daemon {
             action: DaemonAction::Serve,
@@ -184,8 +231,19 @@ async fn main() -> Result<()> {
             return pult_core::serve(home).await;
         }
         Action::Daemon {
-            action: DaemonAction::Status,
-        } => cli_request(&home, "daemon.status", serde_json::json!({})).await?,
+            action: DaemonAction::Status { initialize_runtime },
+        } => {
+            cli_request(
+                &home,
+                "daemon.status",
+                if initialize_runtime {
+                    serde_json::json!({"initializeRuntime":true})
+                } else {
+                    serde_json::json!({})
+                },
+            )
+            .await?
+        }
         Action::Daemon {
             action: DaemonAction::Stop,
         } => cli_request(&home, "daemon.stop", serde_json::json!({})).await?,
@@ -213,6 +271,35 @@ async fn main() -> Result<()> {
         }
         Action::Agent { action } => {
             let (method, params) = match action {
+                AgentAction::Start { params } => (
+                    "agent.start",
+                    parse_cli_object(&params, "agent start --params")?,
+                ),
+                AgentAction::List => ("agent.list", serde_json::json!({})),
+                AgentAction::Prompt {
+                    name,
+                    text,
+                    attachments,
+                } => {
+                    let mut params = serde_json::json!({"name":name,"text":text});
+                    if let Some(attachments) = attachments {
+                        let attachments: serde_json::Value = serde_json::from_str(&attachments)
+                            .map_err(|_| anyhow::anyhow!("--attachments must be a JSON array"))?;
+                        anyhow::ensure!(
+                            attachments.is_array(),
+                            "--attachments must be a JSON array"
+                        );
+                        params["attachments"] = attachments;
+                    }
+                    ("agent.prompt", params)
+                }
+                AgentAction::Stop { name, turn_id } => {
+                    let mut params = serde_json::json!({"name":name});
+                    if let Some(turn_id) = turn_id {
+                        params["turnId"] = serde_json::json!(turn_id);
+                    }
+                    ("agent.stop", params)
+                }
                 AgentAction::Read {
                     name,
                     since,
@@ -301,6 +388,37 @@ async fn main() -> Result<()> {
             };
             cli_request(&home, method, params).await?
         }
+        Action::Perm { action } => {
+            let (method, params) = match action {
+                PermAction::List { name } => {
+                    let mut params = serde_json::json!({});
+                    if let Some(name) = name {
+                        params["name"] = serde_json::json!(name);
+                    }
+                    ("perm.list", params)
+                }
+                PermAction::Resolve {
+                    id,
+                    decision,
+                    scope,
+                    answers,
+                    message,
+                } => {
+                    let mut params = serde_json::json!({"id":id,"decision":decision});
+                    if let Some(scope) = scope {
+                        params["scope"] = serde_json::json!(scope);
+                    }
+                    if let Some(answers) = answers {
+                        params["answers"] = parse_cli_object(&answers, "--answers")?;
+                    }
+                    if let Some(message) = message {
+                        params["message"] = serde_json::json!(message);
+                    }
+                    ("perm.resolve", params)
+                }
+            };
+            cli_request(&home, method, params).await?
+        }
         Action::Events {
             action: EventsAction::Snapshot,
         } => cli_request(&home, "events.snapshot", serde_json::json!({})).await?,
@@ -374,6 +492,13 @@ fn cli_language(home: &std::path::Path) -> Result<&'static str> {
     pult_core::cli_locale(home)
 }
 
+fn parse_cli_object(value: &str, argument: &'static str) -> Result<serde_json::Value> {
+    let parsed: serde_json::Value = serde_json::from_str(value)
+        .map_err(|_| anyhow::anyhow!("{argument} must be a JSON object"))?;
+    anyhow::ensure!(parsed.is_object(), "{argument} must be a JSON object");
+    Ok(parsed)
+}
+
 // Node's CLI uses Number.parseInt(value, 10), while RPC accepts finite fractions.
 fn parse_cli_cursor(value: &str) -> f64 {
     let value = value.trim_start_matches(|ch: char| matches!(ch as u32, 0x0009..=0x000d | 0x0020 | 0x00a0 | 0x1680 | 0x2000..=0x200a | 0x2028 | 0x2029 | 0x202f | 0x205f | 0x3000 | 0xfeff));
@@ -394,6 +519,64 @@ fn parse_cli_cursor(value: &str) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    #[test]
+    fn partial_commands_parse_without_executing_a_provider() {
+        for command in [
+            vec!["agent", "start", "--params", "{}"],
+            vec!["agent", "list"],
+            vec!["agent", "prompt", "chat", "hello", "--attachments", "[]"],
+            vec!["agent", "stop", "chat", "--turn-id", "public-id"],
+            vec!["perm", "list", "--name", "chat"],
+            vec![
+                "perm",
+                "resolve",
+                "request-id",
+                "allow",
+                "--scope",
+                "session",
+                "--answers",
+                "{}",
+            ],
+            vec![
+                "perm",
+                "resolve",
+                "request-id",
+                "deny",
+                "--message",
+                "denied",
+            ],
+        ] {
+            let mut args = vec!["pultd-rust", "--home", "/private/scratch"];
+            args.extend(command);
+            assert!(Args::try_parse_from(args).is_ok());
+        }
+        for decision in ["approve", "ALLOW", ""] {
+            assert!(
+                Args::try_parse_from([
+                    "pultd-rust",
+                    "--home",
+                    "/private/scratch",
+                    "perm",
+                    "resolve",
+                    "id",
+                    decision
+                ])
+                .is_err()
+            );
+        }
+    }
+    #[test]
+    fn partial_json_objects_reject_arrays_scalars_and_malformed_values() {
+        assert_eq!(
+            parse_cli_object("{}", "--params").unwrap(),
+            serde_json::json!({})
+        );
+        for input in ["[]", "null", "false", "5", "invalid", "\"private text\""] {
+            let error = parse_cli_object(input, "--params").unwrap_err().to_string();
+            assert_eq!(error, "--params must be a JSON object");
+        }
+    }
     #[test]
     fn read_cli_cursor_matches_node_parse_int() {
         for (input, expected) in [

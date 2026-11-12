@@ -165,11 +165,12 @@ impl Drop for Connection {
 }
 
 /// Starts an owned task synchronously, before the caller can await/cancel ready.
-/// An explicitly validated host Launch is required; no command RPC is exposed.
+/// A trusted host Launch is required; no command RPC is exposed. Pure shape
+/// checks are synchronous; filesystem validation is owned by the startup task.
 pub fn start(launch: Launch, timeouts: Timeouts) -> Result<Connection, Error> {
     let runtime = tokio::runtime::Handle::try_current().map_err(|_| Error::RuntimeUnavailable)?;
     timeouts.validate()?;
-    launch.validate().map_err(|_| Error::Launch)?;
+    launch.validate_shape().map_err(|_| Error::Launch)?;
     let (wire, peer) = codex_rpc::memory_wire(2);
     let (client, events) =
         codex_rpc::spawn(wire, codex_rpc::Limits::default()).map_err(|_| Error::InvalidOptions)?;

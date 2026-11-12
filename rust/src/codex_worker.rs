@@ -24,7 +24,7 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
 };
-use std::task::Poll;
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::task::JoinSet;
@@ -230,6 +230,61 @@ impl ScopedResponder {
         .await
     }
 }
+impl ScopedResponder {
+    /// The check and first enqueue poll share one blocking step. Its Job guard
+    /// survives an aborted approval waiter, so cleanup cannot abandon policy IO.
+    pub(crate) async fn respond_checked(
+        self,
+        gate: Arc<dyn DispatchGate>,
+        snapshot: TurnSnapshot,
+        expected: Approval,
+        answer: Result<Value, crate::codex_rpc::ResponseError>,
+    ) -> Result<(), RpcError> {
+        let io = CheckGuard::new(&self.job);
+        let checked = tokio::task::spawn_blocking(move || {
+            let _io = io;
+            if *self.job.approval_closed.borrow() {
+                return Err(RpcError::InvalidPermit);
+            }
+            let decision = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                gate.check(&self.job.ticket, &snapshot)
+            }))
+            .unwrap_or(DispatchDecision::Deny);
+            let effective = match decision {
+                DispatchDecision::Allow => snapshot.settings.approval,
+                DispatchDecision::Restrict(mode) => mode,
+                DispatchDecision::Deny => return Err(RpcError::InvalidPermit),
+            };
+            if effective != expected {
+                return Err(RpcError::InvalidPermit);
+            }
+            // respond rechecks the revocable scope and synchronously enqueues
+            // on its first poll, without external callbacks under its guard.
+            Ok(first_poll(Box::pin(self.respond(answer))))
+        })
+        .await
+        .map_err(|_| RpcError::InvalidPermit)??;
+        checked.finish().await
+    }
+}
+struct FirstPoll<T> {
+    future: Task<T>,
+    result: Poll<T>,
+}
+fn first_poll<T>(mut future: Task<T>) -> FirstPoll<T> {
+    let result = future
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()));
+    FirstPoll { future, result }
+}
+impl<T> FirstPoll<T> {
+    async fn finish(self) -> T {
+        match self.result {
+            Poll::Ready(result) => result,
+            Poll::Pending => self.future.await,
+        }
+    }
+}
 impl Drop for ScopedResponder {
     fn drop(&mut self) {
         drop(self.permit.take());
@@ -333,10 +388,38 @@ struct Job {
     cancel: watch::Sender<bool>,
     approval_closed: watch::Sender<bool>,
     responders: AtomicUsize,
+    checks: AtomicUsize,
     event_stop: watch::Sender<bool>,
     closed: watch::Sender<Closed>,
     changed: Notify,
     persistence: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+// Only synchronous checks consume blocking-pool threads. A guard is registered
+// before spawn and moved into its closure; async cancellation cannot detach IO
+// from the Job's final cleanup proof.
+struct CheckGuard(Arc<Job>);
+impl CheckGuard {
+    fn new(job: &Arc<Job>) -> Self {
+        job.checks.fetch_add(1, Ordering::AcqRel);
+        Self(job.clone())
+    }
+}
+impl Drop for CheckGuard {
+    fn drop(&mut self) {
+        self.0.checks.fetch_sub(1, Ordering::AcqRel);
+        self.0.changed.notify_waiters();
+    }
+}
+async fn wait_checks(job: &Job) {
+    loop {
+        let changed = job.changed.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        if job.checks.load(Ordering::Acquire) == 0 {
+            return;
+        }
+        changed.await;
+    }
 }
 struct Envelope {
     event: Event,
@@ -653,6 +736,7 @@ fn begin(
         cancel,
         approval_closed,
         responders: AtomicUsize::new(0),
+        checks: AtomicUsize::new(0),
         event_stop,
         closed,
         changed: Notify::new(),
@@ -1478,15 +1562,22 @@ async fn prepare(
             )
         })?;
     let workspace = workspace_config(&config)?;
-    let mut input = prompt_attachments::codex_prompt_input(
-        &PromptAttachmentScope {
-            home: &spec.home,
-            session_id: &spec.key.name,
-        },
-        &text,
-        &spec.attachments,
-    )
-    .map_err(|_| error("invalid_params", "Codex prompt attachment is unavailable"))?;
+    let checking_spec = spec.clone();
+    let io = CheckGuard::new(&job);
+    let mut input = tokio::task::spawn_blocking(move || {
+        let _io = io;
+        prompt_attachments::codex_prompt_input(
+            &PromptAttachmentScope {
+                home: &checking_spec.home,
+                session_id: &checking_spec.key.name,
+            },
+            &text,
+            &checking_spec.attachments,
+        )
+        .map_err(|_| error("invalid_params", "Codex prompt attachment is unavailable"))
+    })
+    .await
+    .map_err(|_| unavailable())??;
     // A previous terminal status must not survive into a newly dispatched turn.
     // Persist before the final fresh gate and before any native permission event:
     // writing after turn/start could overwrite an early blocked-permission state.
@@ -1496,69 +1587,56 @@ async fn prepare(
         "kind":"status.changed","data":{"status":"working","turnId":job.public_id}}),
     )
     .await?;
-    let decision = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        shared.services.fresh_gate.check(&job.ticket, &snapshot)
-    }))
-    .unwrap_or(DispatchDecision::Deny);
-    let effective = match decision {
-        DispatchDecision::Allow => initial,
-        DispatchDecision::Restrict(mode) if narrowing(initial, mode) => mode,
-        _ => {
-            return Err(error(
-                "access_denied",
-                "fresh Codex authority check denied dispatch",
-            ));
+    let checking = shared.clone();
+    let checking_job = job.clone();
+    let io = CheckGuard::new(&job);
+    // This blocking step contains the fresh host check, policy selection and
+    // first request poll. There is no await between authorization and enqueue.
+    let sealed = tokio::task::spawn_blocking(move || {
+        let _io = io;
+        if *checking_job.cancel.borrow() || checking.storage_failed.load(Ordering::Acquire) {
+            return Err(error("interrupted", "Codex start cancelled"));
         }
-    };
-    if *job.cancel.borrow() {
-        return Err(error("interrupted", "Codex start cancelled"));
-    }
-    let (sandbox, approval) = policy(effective, spec.broker);
-    let target_type = match sandbox {
-        "read-only" => "readOnly",
-        "danger-full-access" => "dangerFullAccess",
-        _ => "workspaceWrite",
-    };
-    let effective_sandbox = if actual["type"] == target_type {
-        actual
-    } else if target_type == "workspaceWrite" {
-        workspace
-    } else {
-        json!({"type":target_type})
-    };
-    input.push(json!({"type":"text","text":approval_context(effective,spec.broker)}));
-    let mut params = json!({"threadId":thread,"input":input,"serviceTier":snapshot.settings.service_tier.map(|v|v.as_str()).unwrap_or("default"),"approvalPolicy":approval,"sandboxPolicy":effective_sandbox});
-    if let Some(model) = &snapshot.settings.model {
-        params["model"] = json!(model);
-    }
-    if let Some(effort) = &snapshot.settings.effort {
-        params["effort"] = json!(effort);
-    }
-    job.info.lock().expect("Codex job").effective = effective;
-    let mut request = std::pin::pin!(client.request("turn/start", params, shared.timeouts.control));
-    let mut first = true;
-    let reply = poll_fn(|cx| {
-        let state = shared.state.lock().expect("Codex host state");
-        let cancellation = job.cancel.borrow();
-        if *cancellation
-            || (first
-                && (state.status != HostStatus::Ready
-                    || shared.storage_failed.load(Ordering::Acquire)))
+        let decision = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            checking.services.fresh_gate.check(&checking_job.ticket, &snapshot)
+        })).unwrap_or(DispatchDecision::Deny);
+        let effective = match decision {
+            DispatchDecision::Allow => initial,
+            DispatchDecision::Restrict(mode) if narrowing(initial, mode) => mode,
+            _ => return Err(error("access_denied", "fresh Codex authority check denied dispatch")),
+        };
+        let (sandbox, approval) = policy(effective, spec.broker);
+        let target_type = match sandbox {
+            "read-only" => "readOnly",
+            "danger-full-access" => "dangerFullAccess",
+            _ => "workspaceWrite",
+        };
+        let effective_sandbox = if actual["type"] == target_type { actual }
+            else if target_type == "workspaceWrite" { workspace }
+            else { json!({"type":target_type}) };
+        input.push(json!({"type":"text","text":approval_context(effective,spec.broker)}));
+        let mut params = json!({"threadId":thread,"input":input,"serviceTier":snapshot.settings.service_tier.map(|v|v.as_str()).unwrap_or("default"),"approvalPolicy":approval,"sandboxPolicy":effective_sandbox});
+        if let Some(model) = &snapshot.settings.model { params["model"] = json!(model); }
+        if let Some(effort) = &snapshot.settings.effort { params["effort"] = json!(effort); }
+        let timeout = checking.timeouts.control;
+        let request = Box::pin(async move { client.request("turn/start", params, timeout).await });
+        let state = checking.state.lock().expect("Codex host state");
+        let cancellation = checking_job.cancel.borrow();
+        if *cancellation || state.status != HostStatus::Ready || checking.storage_failed.load(Ordering::Acquire) {
+            return Err(error("interrupted", "Codex start cancelled"));
+        }
+        checking_job.execution.store(EXECUTING, Ordering::Release);
         {
-            return Poll::Ready(Err(RpcError::Shutdown));
+            let mut info = checking_job.info.lock().expect("Codex job");
+            info.effective = effective;
+            info.dispatched = true;
+            info.dispatch_started = Some(Instant::now());
         }
-        if first {
-            job.execution.store(EXECUTING, Ordering::Release);
-            {
-                let mut info = job.info.lock().expect("Codex job");
-                info.dispatched = true;
-                info.dispatch_started = Some(Instant::now());
-            }
-            first = false;
-        }
-        request.as_mut().poll(cx)
-    })
-    .await;
+        // Client.request enqueues synchronously before its first await. Never
+        // replace this with merely constructing an unpolled request future.
+        Ok(first_poll(request))
+    }).await.map_err(|_| unavailable())??;
+    let reply = sealed.finish().await;
     let reply = match reply {
         Ok(reply) => reply,
         Err(_) if *job.cancel.borrow() => {
@@ -2054,6 +2132,9 @@ async fn run_job(
         cancel_job(&job);
     }
     cleanup_job(&shared, &job).await;
+    // Revoke/interrupt/stop above before waiting on policy IO. A stopped OS
+    // process alone cannot prove a detached host filesystem check has finished.
+    wait_checks(&job).await;
     // Removing the only route sender closes the per-ticket queue in order. Its
     // owner drains queued terminal/tail frames and joins all approval tasks.
     {
@@ -2084,6 +2165,31 @@ async fn run_job(
     job.closed.send_replace(Closed::Confirmed);
     shared.changed.notify_waiters();
 }
+async fn wait_provider_terminal(
+    info: &Mutex<Info>,
+    changed: &Notify,
+    shared_changed: &Notify,
+    #[cfg(test)] mut after_false: Option<Box<dyn FnOnce() + Send>>,
+) {
+    loop {
+        // Register both wakeups before checking the predicate. The router can
+        // publish terminal + notify_waiters from another runtime worker.
+        let changed = changed.notified();
+        let shared_changed = shared_changed.notified();
+        tokio::pin!(changed, shared_changed);
+        changed.as_mut().enable();
+        shared_changed.as_mut().enable();
+        if info.lock().expect("Codex job").provider_terminal {
+            return;
+        }
+        #[cfg(test)]
+        if let Some(hook) = after_false.take() {
+            hook();
+        }
+        tokio::select! {_=changed=>{},_=shared_changed=>{}}
+    }
+}
+
 async fn cleanup_job(shared: &Shared, job: &Job) {
     // Never release the ticket/daemon ownership while its durable write can
     // still mutate the registry. Preparation cancellation cannot detach this IO.
@@ -2134,12 +2240,14 @@ async fn cleanup_job(shared: &Shared, job: &Job) {
                         timeout,
                     )
                     .await;
-                loop {
-                    if job.info.lock().expect("Codex job").provider_terminal {
-                        return;
-                    }
-                    tokio::select! {_=job.changed.notified()=>{},_=shared.changed.notified()=>{}}
-                }
+                wait_provider_terminal(
+                    &job.info,
+                    &job.changed,
+                    &shared.changed,
+                    #[cfg(test)]
+                    None,
+                )
+                .await;
             };
             let _ = tokio::time::timeout(timeout, wait).await;
         }
@@ -2211,4 +2319,259 @@ fn approval_context(mode: Approval, broker: bool) -> String {
     lines.push("При отказе доступа или ответе вложенной CLI «Not logged in» сначала различай ограничения текущего процесса и состояние входа пользователя. Сообщай наблюдаемый факт и источник ограничения; такой ответ сам по себе не доказывает, что пользователь вышел из аккаунта. Повторный вход предлагай после подтверждения проблемы авторизации вне ограниченного процесса.".into());
     lines.push("</pult_runtime_context>".into());
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod blocking_check_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancelled_approval_waiter_retains_blocked_check_until_it_finishes() {
+        let snapshot = TurnSnapshot {
+            key: SessionKey {
+                name: "fixture".into(),
+                created_at: "fixture".into(),
+            },
+            provider: Provider::Codex,
+            cwd: "/fixture".into(),
+            settings: Default::default(),
+        };
+        let ticket = crate::turn_coordinator::Coordinator::new(Default::default())
+            .unwrap()
+            .reserve(snapshot.clone())
+            .unwrap();
+        let job = Arc::new(Job {
+            ticket,
+            public_id: "fixture".into(),
+            info: Mutex::new(Info {
+                thread: None,
+                native: None,
+                model: None,
+                effective: snapshot.settings.approval,
+                thread_inflight: false,
+                dispatched: false,
+                acknowledged: true,
+                uncertain_start: false,
+                dispatch_started: None,
+                provider_terminal: false,
+                unsupported: false,
+                open_tools: HashSet::new(),
+            }),
+            execution: AtomicU8::new(EXECUTING),
+            cancel: watch::channel(false).0,
+            approval_closed: watch::channel(false).0,
+            responders: AtomicUsize::new(1),
+            checks: AtomicUsize::new(0),
+            event_stop: watch::channel(false).0,
+            closed: watch::channel(Closed::Pending).0,
+            changed: Notify::new(),
+            persistence: Mutex::new(None),
+        });
+        let (wire, mut peer) = crate::codex_rpc::memory_wire(2);
+        let (client, mut events) = crate::codex_rpc::spawn(wire, Default::default()).unwrap();
+        peer.outbound
+            .send(Ok(json!({"id":"approval","method":"approve","params":{}})))
+            .await
+            .unwrap();
+        let Event::ServerRequest { permit, .. } = events.recv().await.unwrap() else {
+            panic!("server request");
+        };
+        let responder = ScopedResponder {
+            client: client.clone(),
+            permit: Some(permit),
+            job: job.clone(),
+        };
+        let entered = Arc::new(Notify::new());
+        let arriving = entered.clone();
+        let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let barrier = release.clone();
+        let gate = Arc::new(move |_: &Ticket, _: &TurnSnapshot| {
+            arriving.notify_one();
+            let (lock, changed) = &*barrier;
+            let mut released = lock.lock().unwrap();
+            while !*released {
+                released = changed.wait(released).unwrap();
+            }
+            DispatchDecision::Allow
+        });
+        let expected = snapshot.settings.approval;
+        let task = tokio::spawn(responder.respond_checked(
+            gate,
+            snapshot,
+            expected,
+            Ok(json!({"decision":"allow"})),
+        ));
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .unwrap();
+        cancel_job(&job);
+        task.abort();
+        let _ = task.await;
+        let retained = job.checks.load(Ordering::Acquire) == 1;
+        let mut waiting = Box::pin(wait_checks(&job));
+        let pending = waiting
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending();
+        *release.0.lock().unwrap() = true;
+        release.1.notify_all();
+        tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .unwrap();
+        let frame = tokio::time::timeout(Duration::from_secs(5), peer.inbound.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            retained && pending,
+            "cancelled handler detached an unfinished policy check"
+        );
+        assert!(
+            frame.get("error").is_some(),
+            "revoked check sent a late native allow"
+        );
+        assert_eq!(job.responders.load(Ordering::Acquire), 0);
+        client.shutdown();
+    }
+
+    #[tokio::test]
+    async fn first_poll_enqueues_request_and_response_before_async_wait() {
+        let (wire, mut peer) = crate::codex_rpc::memory_wire(2);
+        let (client, mut events) = crate::codex_rpc::spawn(wire, Default::default()).unwrap();
+        let request_client = client.clone();
+        let request = first_poll(Box::pin(async move {
+            request_client
+                .request("fixture", json!({}), Duration::from_secs(5))
+                .await
+        }));
+        assert!(request.result.is_pending());
+        // Never repoll the request until the peer observes its enqueued frame.
+        let frame = tokio::time::timeout(Duration::from_secs(5), peer.inbound.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        peer.outbound
+            .send(Ok(json!({"id":frame["id"],"result":{}})))
+            .await
+            .unwrap();
+        request.finish().await.unwrap();
+        peer.outbound
+            .send(Ok(json!({"id":"fixture","method":"approve","params":{}})))
+            .await
+            .unwrap();
+        let Event::ServerRequest { permit, .. } = events.recv().await.unwrap() else {
+            panic!("server request");
+        };
+        let response_client = client.clone();
+        let response = first_poll(Box::pin(async move {
+            response_client
+                .respond(permit, Ok(json!({"decision":"deny"})))
+                .await
+        }));
+        let frame = tokio::time::timeout(Duration::from_secs(5), peer.inbound.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(frame["id"], "fixture");
+        assert_eq!(frame["result"]["decision"], "deny");
+        response.finish().await.unwrap();
+        client.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod terminal_wait_tests {
+    use super::*;
+    fn info() -> Arc<Mutex<Info>> {
+        Arc::new(Mutex::new(Info {
+            thread: None,
+            native: None,
+            model: None,
+            effective: Approval::ReadOnly,
+            thread_inflight: false,
+            dispatched: true,
+            acknowledged: true,
+            uncertain_start: false,
+            dispatch_started: None,
+            provider_terminal: false,
+            unsupported: false,
+            open_tools: HashSet::new(),
+        }))
+    }
+    #[tokio::test]
+    async fn terminal_between_false_read_and_wait_registration_is_never_lost() {
+        for job_notification in [true, false] {
+            let info = info();
+            let changed = Arc::new(Notify::new());
+            let shared_changed = Arc::new(Notify::new());
+            let publishing = info.clone();
+            let notify = if job_notification {
+                changed.clone()
+            } else {
+                shared_changed.clone()
+            };
+            let mut waiting = Box::pin(wait_provider_terminal(
+                &info,
+                &changed,
+                &shared_changed,
+                Some(Box::new(move || {
+                    publishing.lock().unwrap().provider_terminal = true;
+                    notify.notify_waiters();
+                })),
+            ));
+            assert!(
+                waiting
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_ready(),
+                "known terminal plus notification was lost between predicate and wait; job_notification={job_notification}"
+            );
+        }
+    }
+    #[tokio::test]
+    async fn unrelated_notification_does_not_confirm_a_nonterminal_turn() {
+        let info = info();
+        let changed = Arc::new(Notify::new());
+        let shared_changed = Arc::new(Notify::new());
+        let unrelated = shared_changed.clone();
+        let mut waiting = Box::pin(wait_provider_terminal(
+            &info,
+            &changed,
+            &shared_changed,
+            Some(Box::new(move || unrelated.notify_waiters())),
+        ));
+        assert!(
+            waiting
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        info.lock().unwrap().provider_terminal = true;
+        changed.notify_waiters();
+        assert!(
+            waiting
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_ready()
+        );
+    }
+    #[tokio::test]
+    async fn already_terminal_needs_no_notification() {
+        let info = info();
+        info.lock().unwrap().provider_terminal = true;
+        let changed = Notify::new();
+        let shared_changed = Notify::new();
+        let mut waiting = Box::pin(wait_provider_terminal(
+            &info,
+            &changed,
+            &shared_changed,
+            None,
+        ));
+        assert!(
+            waiting
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_ready()
+        );
+    }
 }

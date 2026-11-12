@@ -44,8 +44,46 @@ fn fields(params: &Value, allowed: &[&str]) -> Result<(), MemoryError> {
     }
     Ok(())
 }
-fn active_record(state: &crate::State, name: &str) -> Result<Record, MemoryError> {
+fn execution_available(state: &crate::State) -> Result<(), MemoryError> {
+    if crate::runtime_state::unavailable(state) {
+        return Err(err("forbidden", "memory execution context is unavailable"));
+    }
+    Ok(())
+}
+fn registry_available(registry: &crate::registry::Registry) -> Result<(), MemoryError> {
+    if registry.write_poisoned() {
+        return Err(err("forbidden", "session registry requires recovery"));
+    }
+    Ok(())
+}
+fn lock_registry(
+    state: &crate::State,
+) -> Result<std::sync::MutexGuard<'_, crate::registry::Registry>, MemoryError> {
+    execution_available(state)?;
+    #[cfg(test)]
+    fault_tests::before_registry_lock();
     let registry = state.registry.lock().map_err(|e| err("internal", e))?;
+    registry_available(&registry)?;
+    // Registry acquisition may wait while a journal/Driver fault is latched.
+    execution_available(state)?;
+    Ok(registry)
+}
+fn lock_credentials(
+    state: &crate::State,
+) -> Result<std::sync::MutexGuard<'_, session_memory::SessionMemory>, MemoryError> {
+    #[cfg(test)]
+    fault_tests::before_credentials_lock();
+    let credentials = state
+        .session_memory
+        .lock()
+        .map_err(|e| err("internal", e))?;
+    // Registry -> credentials -> Driver is the final authority check. Driver
+    // never calls Registry or credentials while holding its own mutex.
+    execution_available(state)?;
+    Ok(credentials)
+}
+fn active_record(state: &crate::State, name: &str) -> Result<Record, MemoryError> {
+    let registry = lock_registry(state)?;
     let record = registry
         .find(name)
         .ok_or_else(|| err("not_found", "session not found"))?;
@@ -77,7 +115,9 @@ pub(crate) async fn execute(
     method: String,
     params: Value,
 ) -> Result<Value, MemoryError> {
+    let host_job = state.host_jobs.track();
     tokio::task::spawn_blocking(move || {
+        let _host_job = host_job;
         fields(
             &params,
             if method == "memory.context.bind" {
@@ -112,7 +152,7 @@ pub(crate) async fn execute(
             };
             let project = project(&record)?;
             // Filesystem discovery may be slow. Recheck the exact session before publishing.
-            let registry = state.registry.lock().map_err(|e| err("internal", e))?;
+            let registry = lock_registry(&state)?;
             let current = registry
                 .find(name)
                 .ok_or_else(|| err("not_found", "session not found"))?;
@@ -124,13 +164,9 @@ pub(crate) async fn execute(
                     "session changed during registration; retry bind",
                 ));
             }
-            state
-                .session_memory
-                .lock()
-                .map_err(|e| err("internal", e))?
-                .bind(name, fingerprint, project, enabled)
+            lock_credentials(&state)?.bind(name, fingerprint, project, enabled)
         } else {
-            let registry = state.registry.lock().map_err(|e| err("internal", e))?;
+            let registry = lock_registry(&state)?;
             let current = registry
                 .find(name)
                 .ok_or_else(|| err("not_found", "session not found"))?;
@@ -142,11 +178,7 @@ pub(crate) async fn execute(
                     "session changed during credential issuance",
                 ));
             }
-            state
-                .session_memory
-                .lock()
-                .map_err(|e| err("internal", e))?
-                .issue(name, &fingerprint)
+            lock_credentials(&state)?.issue(name, &fingerprint)
         }
     })
     .await
@@ -154,18 +186,14 @@ pub(crate) async fn execute(
 }
 
 fn registered(state: &crate::State, name: &str) -> Result<Arc<MemoryLease>, MemoryError> {
-    let registry = state.registry.lock().map_err(|e| err("internal", e))?;
+    let registry = lock_registry(state)?;
     let record = registry
         .find(name)
         .ok_or_else(|| err("not_found", "session not found"))?;
     if record.get("archived").is_some_and(|v| v.get() == "true") {
         return Err(err("forbidden", "session is archived"));
     }
-    state
-        .session_memory
-        .lock()
-        .map_err(|e| err("internal", e))?
-        .registration(name, &session_memory::fingerprint(record)?)
+    lock_credentials(state)?.registration(name, &session_memory::fingerprint(record)?)
 }
 
 pub(crate) async fn read(
@@ -175,7 +203,9 @@ pub(crate) async fn read(
     lease: Option<Arc<MemoryLease>>,
 ) -> Result<Value, MemoryError> {
     let scoped = lease.is_some();
+    let host_job = state.host_jobs.track();
     let result = tokio::task::spawn_blocking(move || {
+        let _host_job = host_job;
         let bound = if let Some(lease) = lease {
             if !READ_METHODS.contains(&method.as_str()) {
                 return Err(err("forbidden", "memory credential is read-only"));
@@ -217,12 +247,20 @@ pub(crate) async fn read(
         let memory = memory
             .as_mut()
             .map_err(|e| err("internal", format!("memory unavailable: {e}")))?;
-        if method == "memory.catalog" {
+        let result = if method == "memory.catalog" {
             let page = memory.execute("memory.list", &json!({"limit":50}), &context)?;
-            crate::memory_catalog::build(page, bound.public_context())
+            crate::memory_catalog::build(page, bound.public_context())?
         } else {
-            memory.execute(&method, &params, &context)
+            memory.execute(&method, &params, &context)?
+        };
+        // A credential/source revoked while database IO ran cannot publish its
+        // result. Owner repair reads use the separate unscoped memory API.
+        let current = active_record(&state, &bound.session)?;
+        session_memory::validate_record(&current, &bound)?;
+        if !bound.is_valid() {
+            return Err(err("forbidden", "memory credential was revoked"));
         }
+        Ok(result)
     })
     .await
     .map_err(|e| err("internal", e))
@@ -234,4 +272,213 @@ pub(crate) async fn read(
             failure
         }
     })
+}
+
+#[cfg(test)]
+mod fault_tests {
+    use super::*;
+
+    thread_local! {
+        static BEFORE_REGISTRY: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = Default::default();
+        static BEFORE_CREDENTIALS: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = Default::default();
+    }
+    pub(super) fn before_registry_lock() {
+        let hook = BEFORE_REGISTRY.with(|slot| slot.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    pub(super) fn before_credentials_lock() {
+        let hook = BEFORE_CREDENTIALS.with(|slot| slot.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    #[tokio::test]
+    async fn execution_fault_during_credential_wait_cannot_publish_authority() {
+        for direct_driver in [false, true] {
+            let (_home, state, _lease) = fixture().await;
+            let credentials = state.session_memory.lock().unwrap();
+            let waiting = state.clone();
+            let (entered, passed_precheck) = std::sync::mpsc::channel();
+            let task = std::thread::spawn(move || {
+                BEFORE_CREDENTIALS.with(|slot| {
+                    *slot.borrow_mut() = Some(Box::new(move || {
+                        entered.send(()).unwrap();
+                    }))
+                });
+                registered(&waiting, "chat").map(|_| ())
+            });
+            passed_precheck
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            if direct_driver {
+                state.driver.get().unwrap().report_storage_failure();
+            } else {
+                state.execution_storage_failed();
+            }
+            drop(credentials);
+            assert!(
+                task.join().unwrap().is_err(),
+                "credential wait ignored execution fault: driver={direct_driver}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn execution_fault_during_registry_wait_cannot_publish_authority() {
+        for direct_driver in [false, true] {
+            for registration in [false, true] {
+                let (_home, state, _lease) = fixture().await;
+                let registry = state.registry.lock().unwrap();
+                let waiting = state.clone();
+                let (entered, passed_precheck) = std::sync::mpsc::channel();
+                let task = std::thread::spawn(move || {
+                    BEFORE_REGISTRY.with(|slot| {
+                        *slot.borrow_mut() = Some(Box::new(move || {
+                            entered.send(()).unwrap();
+                        }))
+                    });
+                    if registration {
+                        registered(&waiting, "chat").map(|_| ())
+                    } else {
+                        active_record(&waiting, "chat").map(|_| ())
+                    }
+                });
+                passed_precheck
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                if direct_driver {
+                    state.driver.get().unwrap().report_storage_failure();
+                } else {
+                    state.execution_storage_failed();
+                }
+                drop(registry);
+                assert!(
+                    task.join().unwrap().is_err(),
+                    "fault after initial check still authorized memory: driver={direct_driver}, registration={registration}"
+                );
+            }
+        }
+    }
+
+    async fn fixture() -> (tempfile::TempDir, Arc<crate::State>, Arc<MemoryLease>) {
+        let (home, state, _sink) = crate::runtime_journal::tests::fixture();
+        let mut record = Record::default();
+        for (field, value) in [
+            ("name", "chat"),
+            ("createdAt", "2026-11-12T00:00:00Z"),
+            ("provider", "codex"),
+            ("scope", "general"),
+            ("cwd", state.home.to_str().unwrap()),
+        ] {
+            record.set_string(field, value);
+        }
+        state.registry.lock().unwrap().insert(record).unwrap();
+        *state.memory.lock().unwrap() = Ok(crate::memory::MemoryStore::open(&state.home).unwrap());
+        execute(
+            state.clone(),
+            "memory.context.bind".into(),
+            json!({"session":"chat","enabled":true}),
+        )
+        .await
+        .unwrap();
+        let issued = execute(
+            state.clone(),
+            "memory.context.issue".into(),
+            json!({"session":"chat"}),
+        )
+        .await
+        .unwrap();
+        let lease = state
+            .session_memory
+            .lock()
+            .unwrap()
+            .lookup(issued["key"].as_str().unwrap())
+            .unwrap();
+        read(
+            state.clone(),
+            "memory.list".into(),
+            json!({}),
+            Some(lease.clone()),
+        )
+        .await
+        .unwrap();
+        (home, state, lease)
+    }
+
+    #[tokio::test]
+    async fn uncertain_archive_cannot_authorize_memory_with_stale_registration() {
+        let (_home, state, lease) = fixture().await;
+        state
+            .registry
+            .lock()
+            .unwrap()
+            .fail_next_commit_for_test(true);
+        assert!(
+            crate::session_api::execute(
+                state.clone(),
+                crate::session_api::Command::Archive {
+                    name: "chat".into(),
+                    archived: true,
+                }
+            )
+            .await
+            .is_err()
+        );
+        assert!(state.registry.lock().unwrap().write_poisoned());
+        assert!(
+            read(state.clone(), "memory.list".into(), json!({}), Some(lease))
+                .await
+                .is_err(),
+            "uncertain archived metadata still authorized an agent memory credential"
+        );
+        assert!(
+            execute(
+                state,
+                "memory.context.issue".into(),
+                json!({"session":"chat"})
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn global_execution_fault_blocks_agent_memory_but_preserves_owner_repair_access() {
+        let (_home, state, lease) = fixture().await;
+        state.execution_storage_failed();
+        assert!(!state.registry.lock().unwrap().write_poisoned());
+        assert!(
+            read(state.clone(), "memory.list".into(), json!({}), Some(lease))
+                .await
+                .is_err(),
+            "agent memory read survived global execution fault"
+        );
+        assert!(
+            execute(
+                state.clone(),
+                "memory.context.issue".into(),
+                json!({"session":"chat"})
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            execute(
+                state.clone(),
+                "memory.context.revoke".into(),
+                json!({"session":"chat"})
+            )
+            .await
+            .is_ok()
+        );
+        assert!(
+            crate::memory_api::execute(state, "memory.list".into(), json!({}))
+                .await
+                .is_ok()
+        );
+    }
 }

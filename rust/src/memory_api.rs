@@ -79,7 +79,9 @@ pub(crate) async fn execute(
     if method == "memory.catalog" {
         return crate::session_memory_api::read(state, method, params, None).await;
     }
+    let host_job = state.host_jobs.track();
     tokio::task::spawn_blocking(move || {
+        let _host_job = host_job;
         // Copy the trusted session context before filesystem IO and the memory lock.
         // Release registry before acquiring memory; scoped reads use memory -> registry.
         // Never add a registry -> memory nesting here.

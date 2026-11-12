@@ -58,6 +58,68 @@ describe('RPC catalog generation and source drift', () => {
     })
   })
 
+  it('keeps partial schemas separate from the 27 fully implemented methods', () => {
+    const catalog = JSON.parse(readFileSync(catalogSource, 'utf8')) as Catalog
+    const implemented = catalog.methods.filter((method) => method.rust === 'implemented').map((method) => method.name)
+    const partial = catalog.methods.filter((method) => method.rust === 'partial')
+    assert.equal(implemented.length, 27)
+    assert.equal(catalog.methods.length, 98)
+    assert.equal(catalog.methods.filter((method) => method.node === 'implemented').length, 85)
+    assert.deepEqual(partial.map((method) => method.name), ['agent.list', 'agent.prompt', 'agent.start', 'agent.stop', 'perm.list', 'perm.resolve'])
+    assert.ok(partial.every((method) => method.paramsSchema && method.resultSchema))
+    fixture((paths) => {
+      const generated = generate(paths)
+      assert.equal(generated.status, 0, generated.stderr)
+      const output = readFileSync(paths.out, 'utf8')
+      const foundation = output.match(/^export type RustFoundationMethod = (.+)$/m)?.[1]
+      assert.ok(foundation)
+      assert.deepEqual(foundation.split(' | ').map((name) => JSON.parse(name) as string), implemented)
+      const partialUnion = output.match(/^export type RustPartialMethod = (.+)$/m)?.[1]
+      assert.ok(partialUnion)
+      assert.deepEqual(partialUnion.split(' | ').map((name) => JSON.parse(name) as string), partial.map((method) => method.name))
+      assert.match(output, /export interface RustPartialParams/)
+      assert.match(output, /export interface RustPartialResults/)
+    })
+  })
+
+  it('requires both schemas and supported schema types for partial methods', () => {
+    for (const mutation of ['params', 'results', 'unsupported-schema'] as const) {
+      fixture((paths) => {
+        changeCatalog(paths.catalog, (catalog) => {
+          const partial = catalog.methods.find((method) => method.rust === 'partial')
+          assert.ok(partial)
+          if (mutation === 'params') partial.paramsSchema = null
+          else if (mutation === 'results') partial.resultSchema = null
+          else partial.paramsSchema = { type: 'invented' }
+        })
+        const result = generate(paths)
+        assert.equal(result.status, 1)
+        assert.match(result.stderr, mutation === 'unsupported-schema' ? /Unsupported schema type/ : /requires both schemas/)
+      })
+    }
+  })
+
+  it('rejects unknown Rust states and permits an empty partial union', () => {
+    fixture((paths) => {
+      changeCatalog(paths.catalog, (catalog) => { (catalog.methods[0] as CatalogMethod).rust = 'complete-ish' })
+      const invalid = generate(paths)
+      assert.equal(invalid.status, 1)
+      assert.match(invalid.stderr, /Invalid implementation state/)
+    })
+    fixture((paths) => {
+      changeCatalog(paths.catalog, (catalog) => {
+        for (const method of catalog.methods) if (method.rust === 'partial') {
+          method.rust = 'unported'
+          method.paramsSchema = null
+          method.resultSchema = null
+        }
+      })
+      const generated = generate(paths)
+      assert.equal(generated.status, 0, generated.stderr)
+      assert.match(readFileSync(paths.out, 'utf8'), /export type RustPartialMethod = never/)
+    })
+  })
+
   it('detects a newly added Node route until the canonical catalog records it', () => {
     fixture((paths) => {
       writeFileSync(paths.source, readFileSync(paths.source, 'utf8') + "\nswitch (method) { case 'future.action': break }\n")
