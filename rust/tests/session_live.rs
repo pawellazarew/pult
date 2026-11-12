@@ -214,6 +214,7 @@ fn metadata_only_events_advance_order_guard_without_changing_status_receipt() {
 #[test]
 fn unknown_sessions_do_not_allocate_slots_or_retain_payloads() {
     let (mut c, k) = cache();
+    assert!(c.can_register());
     for id in 1..1000 {
         assert!(
             c.note(
@@ -226,10 +227,18 @@ fn unknown_sessions_do_not_allocate_slots_or_retain_payloads() {
         );
     }
     assert!(c.seed(key("second", "created"), Status::Idle, 0).is_ok());
+    assert!(!c.can_register());
     assert_eq!(
         c.seed(key("third", "created"), Status::Cold, 0),
         Err(Error::Capacity)
     );
+    assert!(
+        c.seed(key("second", "replacement"), Status::Idle, 0)
+            .is_ok()
+    );
+    assert!(!c.can_register());
+    assert!(c.remove(&key("second", "replacement")));
+    assert!(c.can_register());
     assert_eq!(c.view(&k).unwrap().status, Status::Cold);
     assert!(!format!("{c:?}").contains("private"));
     assert!(!format!("{c:?}").contains("chat"));
