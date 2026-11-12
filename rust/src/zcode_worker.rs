@@ -1010,10 +1010,21 @@ async fn classify(inner: &Inner, job: &Job, bytes: &[u8]) -> Result<(), WorkerEr
                 json!({"changes":{},"notice":"ZCode could not find the native conversation; automatic retry is disabled"}),
             ),
         };
+        let notify = || {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                (inner.services.provider_signal)(signal)
+            }));
+        };
+        // Admission must fail-stop before an externally visible blocked event
+        // or a slow sink can let another input through. This is diagnostic
+        // authentication evidence, never a confirmed-account/logout claim.
+        if signal == ProviderSignal::Authentication {
+            notify();
+        }
         append(inner,job,json!({"sessionId":inner.config.session.name,"provider":"zcode","kind":kind,"data":data})).await?;
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            (inner.services.provider_signal)(signal)
-        }));
+        if signal != ProviderSignal::Authentication {
+            notify();
+        }
         return Err(error(
             if signal == ProviderSignal::MissingSession {
                 "native_session_missing"
