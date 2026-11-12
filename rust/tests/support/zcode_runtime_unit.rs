@@ -163,6 +163,10 @@ impl Unit {
         self.runtime.inner.shared.state.lock().unwrap().insert(
             self.key.clone(),
             Entry {
+                worker: None,
+                expected_resume: None,
+                recovery_slot: None,
+                recovering: None,
                 source: Some(source.clone()),
                 attempt,
                 nonce: source.nonce.clone(),
@@ -218,6 +222,10 @@ async fn old_auth_source_cannot_block_replacement_or_relatched_after_reset() {
     f.runtime.inner.shared.state.lock().unwrap().insert(
         f.key.clone(),
         Entry {
+            worker: None,
+            expected_resume: None,
+            recovery_slot: None,
+            recovering: None,
             source: Some(new_source.clone()),
             attempt: None,
             nonce: new_source.nonce.clone(),

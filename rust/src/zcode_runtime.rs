@@ -7,22 +7,26 @@ use crate::registry::Registry;
 use crate::runtime_config::RuntimeConfig;
 use crate::turn_coordinator::Ticket;
 use crate::turn_driver::{
-    DispatchGate, Driver, EventSink, Handle, Input, Progress, Task, WorkerError,
+    DispatchGate, Driver, EventSink, Handle, Input, Progress, Task, Terminal, WorkerError,
 };
 use crate::turn_snapshot::{Provider, SessionKey, TurnSnapshot};
 use crate::worker_env::{self, Environment};
 use crate::worker_process::{Launch, SpawnDenied, SpawnGate, SpawnPermit};
-use crate::zcode_host_services::{Attempt, Error as OwnerError, ZcodeOwner};
+use crate::zcode_host_services::{
+    Attempt, Error as OwnerError, IdleRecoveryPermit, MissingAfterJoin, OwnerConfirmedRecovery,
+    RecoveryWarningReceipt, ZcodeOwner,
+};
 use crate::zcode_launch::{self, ContextLanguage};
 use crate::zcode_worker::{Config, ProviderSignal, Services, ZcodeWorker};
 use serde_json::Value;
 use std::{
     collections::HashMap,
     ffi::OsString,
+    ops::{Deref, DerefMut},
     path::PathBuf,
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -93,12 +97,124 @@ impl std::fmt::Display for RuntimeError {
     }
 }
 impl std::error::Error for RuntimeError {}
+const RECOVERY_CAPACITY: usize = 256;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecoveryState {
+    Available,
+    Recovering,
+    Unconfirmed,
+}
+impl RecoveryState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::Recovering => "recovering",
+            Self::Unconfirmed => "unconfirmed",
+        }
+    }
+}
+/// Read-only selector/diagnostic. Native identity and marker are never authority
+/// supplied by JSON. This descriptor does not initialize a provider or account.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecoveryDescriptor {
+    pub recovery_id: String,
+    pub session: SessionKey,
+    pub state: RecoveryState,
+    pub may_have_executed: bool,
+}
+impl RecoveryDescriptor {
+    pub fn value(&self) -> Value {
+        serde_json::json!({"recoveryId":self.recovery_id,"sessionId":self.session.name,"createdAt":self.session.created_at,"state":self.state.as_str(),"mayHaveExecuted":true})
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecoveryResult {
+    pub requested_event_id: u64,
+    pub committed_event_id: u64,
+    pub may_have_executed: bool,
+}
+/// Construct only after the host has authenticated an explicit owner action.
+/// Not Clone/Deserialize; scoped MCP/model JSON is not this authority.
+#[allow(dead_code)] // Consumed by the authenticated owner RPC facade in the next slice.
+pub(crate) struct OwnerRecoveryAction {
+    key: SessionKey,
+    id: String,
+}
+impl OwnerRecoveryAction {
+    #[allow(dead_code)] // The constructor is deliberately unavailable to model/scoped roles.
+    pub(crate) fn from_authenticated_owner(
+        key: SessionKey,
+        id: String,
+    ) -> Result<Self, RuntimeError> {
+        key.validate().map_err(|_| RuntimeError::Invalid)?;
+        if !id.starts_with("zr-")
+            || id.len() > 128
+            || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        {
+            return Err(RuntimeError::Invalid);
+        }
+        Ok(Self { key, id })
+    }
+}
+struct RecoveryReservation {
+    id: String,
+    expected_resume: String,
+}
+#[derive(Clone)]
+struct CachedRecovery {
+    id: String,
+    proof: Option<Arc<MissingAfterJoin>>,
+    terminal: Option<Terminal>,
+    state: RecoveryState,
+}
+struct RecoveryOperation {
+    cached: CachedRecovery,
+    permit: Arc<IdleRecoveryPermit>,
+    io_uncertain: AtomicBool,
+}
+#[derive(Default)]
+struct RuntimeState {
+    entries: HashMap<SessionKey, Entry>,
+    recoveries: HashMap<SessionKey, CachedRecovery>,
+}
+impl Deref for RuntimeState {
+    type Target = HashMap<SessionKey, Entry>;
+    fn deref(&self) -> &Self::Target {
+        &self.entries
+    }
+}
+impl DerefMut for RuntimeState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.entries
+    }
+}
+fn recovery_id() -> Result<String, RuntimeError> {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let serial = NEXT
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |v| v.checked_add(1))
+        .map_err(|_| RuntimeError::Capacity)?;
+    let mut random = [0u8; 16];
+    getrandom::fill(&mut random).map_err(|_| RuntimeError::Capacity)?;
+    let left = random[..8]
+        .iter()
+        .map(|v| format!("{v:02x}"))
+        .collect::<String>();
+    let right = random[8..]
+        .iter()
+        .map(|v| format!("{v:02x}"))
+        .collect::<String>();
+    Ok(format!("zr-{serial}-{left}-{right}"))
+}
 struct Source {
     key: SessionKey,
     nonce: Arc<()>,
     attempt: OnceLock<Attempt>,
 }
 struct Entry {
+    worker: Option<Arc<ZcodeWorker>>,
+    expected_resume: Option<Option<String>>,
+    recovery_slot: Option<RecoveryReservation>,
+    recovering: Option<Arc<RecoveryOperation>>,
     attempt: Option<Attempt>,
     source: Option<Arc<Source>>,
     nonce: Arc<()>,
@@ -109,7 +225,7 @@ struct Entry {
     progress: Option<watch::Receiver<Progress>>,
 }
 struct Shared {
-    state: Mutex<HashMap<SessionKey, Entry>>,
+    state: Mutex<RuntimeState>,
     closed: watch::Sender<bool>,
     changed: Notify,
     guard: Arc<NetworkGuard>,
@@ -131,7 +247,9 @@ impl Shared {
             let Some(entry) = entries.get_mut(ticket.session()) else {
                 return false;
             };
-            if *entry.cancel.borrow() || entry.ticket.as_ref().is_some_and(|bound| bound != ticket)
+            if entry.recovering.is_some()
+                || *entry.cancel.borrow()
+                || entry.ticket.as_ref().is_some_and(|bound| bound != ticket)
             {
                 return false;
             }
@@ -215,7 +333,7 @@ impl ZcodeRuntime {
         .validate_shape()
         .map_err(|_| RuntimeError::Invalid)?;
         let shared = Arc::new(Shared {
-            state: Mutex::new(HashMap::new()),
+            state: Mutex::new(RuntimeState::default()),
             closed: watch::channel(false).0,
             changed: Notify::new(),
             guard,
@@ -235,6 +353,70 @@ impl ZcodeRuntime {
                 runtime,
             }),
         })
+    }
+    /// Read-only existing-slot query. No provider/account initialization or IO.
+    pub fn pending_recovery(&self, key: &SessionKey) -> Option<RecoveryDescriptor> {
+        let mut state = self.inner.shared.state.lock().expect("ZCode runtime");
+        let changed = reap_finished(&mut state);
+        let descriptor = state
+            .recoveries
+            .get(key)
+            .map(|cached| RecoveryDescriptor {
+                recovery_id: cached.id.clone(),
+                session: key.clone(),
+                state: cached.state,
+                may_have_executed: true,
+            })
+            .or_else(|| {
+                state
+                    .get(key)
+                    .and_then(|entry| entry.recovering.as_ref())
+                    .map(|operation| RecoveryDescriptor {
+                        recovery_id: operation.cached.id.clone(),
+                        session: key.clone(),
+                        state: if state.get(key).is_some_and(|entry| entry.quarantined) {
+                            RecoveryState::Unconfirmed
+                        } else {
+                            RecoveryState::Recovering
+                        },
+                        may_have_executed: true,
+                    })
+            });
+        drop(state);
+        if changed {
+            self.inner.shared.changed.notify_waiters();
+        }
+        descriptor
+    }
+    /// Metadata only, after an explicitly authenticated owner acknowledgement.
+    /// Caller drop does not cancel the owned operation or its IO.
+    #[allow(dead_code)] // Owner RPC wiring is intentionally outside this consumer slice.
+    pub(crate) fn confirm_missing_for_next_turn(
+        &self,
+        action: OwnerRecoveryAction,
+    ) -> Task<Result<RecoveryResult, RuntimeError>> {
+        let admission = reserve_recovery(&self.inner, &action);
+        let (send, receive) = oneshot::channel();
+        match admission {
+            Ok((reservation, operation)) => {
+                let inner = self.inner.clone();
+                self.inner.runtime.spawn(async move {
+                    let result = run_recovery(inner.clone(), reservation, operation.clone()).await;
+                    let _ = send.send(result);
+                    if operation.io_uncertain.load(Ordering::Acquire) {
+                        // No trusted completion capability exists for a callback
+                        // that panicked after starting arbitrary external IO.
+                        let hold = (inner, operation);
+                        std::future::pending::<()>().await;
+                        drop(hold);
+                    }
+                });
+            }
+            Err(error) => {
+                let _ = send.send(Err(error));
+            }
+        }
+        Box::pin(async move { receive.await.unwrap_or(Err(RuntimeError::Storage)) })
     }
     pub fn execute(&self, key: SessionKey, input: Input) -> Task<Result<Handle, RuntimeError>> {
         self.submit(key, input, false)
@@ -325,6 +507,9 @@ impl ZcodeRuntime {
             return Ok(false);
         }
         entry.cancel.send_replace(true);
+        if let Some(operation) = &entry.recovering {
+            operation.permit.cancel();
+        }
         let ticket = entry.ticket.clone();
         drop(entries);
         if let Some(ticket) = ticket {
@@ -419,6 +604,9 @@ fn close(shared: &Shared) {
             .values()
             .filter_map(|entry| {
                 entry.cancel.send_replace(true);
+                if let Some(operation) = &entry.recovering {
+                    operation.permit.cancel();
+                }
                 entry.ticket.clone()
             })
             .collect()
@@ -459,28 +647,91 @@ struct Reservation {
     cancel: watch::Receiver<bool>,
 }
 fn remove(shared: &Shared, key: &SessionKey, nonce: &Arc<()>) {
-    let mut entries = shared.state.lock().expect("ZCode runtime");
-    if entries
-        .get(key)
-        .is_some_and(|entry| Arc::ptr_eq(&entry.nonce, nonce))
-    {
-        entries.remove(key);
+    let mut state = shared.state.lock().expect("ZCode runtime");
+    let _ = reap_finished(&mut state);
+    if state.get(key).is_some_and(|entry| {
+        Arc::ptr_eq(&entry.nonce, nonce) && entry.progress.is_none() && entry.recovering.is_none()
+    }) {
+        state.remove(key);
     }
-    drop(entries);
+    drop(state);
     shared.changed.notify_waiters();
 }
 // The progress owner can be runnable but not yet scheduled. A Driver Finished
 // value is cleanup proof; Quarantined or an absent active-ticket lookup is not.
-fn reap_finished(entries: &mut HashMap<SessionKey, Entry>) -> bool {
-    let before = entries.len();
-    entries.retain(|_, entry| {
-        !entry
-            .progress
+// Every synchronous reap path performs this exact proof handoff before it
+// drops the finished Worker. No filesystem, owner initialization or callbacks.
+fn reap_finished(state: &mut RuntimeState) -> bool {
+    let finished = state
+        .entries
+        .iter()
+        .filter_map(|(key, entry)| {
+            if entry.recovering.is_some() {
+                return None;
+            }
+            let Progress::Finished(result) = entry.progress.as_ref()?.borrow().clone() else {
+                return None;
+            };
+            Some((key.clone(), result))
+        })
+        .collect::<Vec<_>>();
+    let changed = !finished.is_empty();
+    for (key, result) in finished {
+        let Some(mut entry) = state.entries.remove(&key) else {
+            continue;
+        };
+        let proof = entry
+            .ticket
             .as_ref()
-            .is_some_and(|progress| matches!(*progress.borrow(), Progress::Finished(_)))
-    });
-    before != entries.len()
+            .and_then(|ticket| {
+                entry
+                    .worker
+                    .as_ref()
+                    .and_then(|worker| worker.take_missing_recovery(ticket))
+            })
+            .map(Arc::new);
+        if let Some(slot) = entry.recovery_slot.take() {
+            match result {
+                Ok(terminal) => {
+                    if let Some(proof) = proof {
+                        let qualified = proof.session() == &key
+                            && entry.ticket.as_ref() == Some(&terminal.turn.ticket)
+                            && terminal.turn.provider_turn_id.is_none()
+                            && terminal
+                                .terminal_event_id
+                                .is_some_and(|id| id > 0 && id <= 9_007_199_254_740_991);
+                        state.recoveries.insert(
+                            key,
+                            CachedRecovery {
+                                id: slot.id,
+                                proof: Some(proof),
+                                terminal: qualified.then_some(terminal),
+                                state: if qualified {
+                                    RecoveryState::Available
+                                } else {
+                                    RecoveryState::Unconfirmed
+                                },
+                            },
+                        );
+                    }
+                }
+                Err(_) => {
+                    state.recoveries.insert(
+                        key,
+                        CachedRecovery {
+                            id: slot.id,
+                            proof,
+                            terminal: None,
+                            state: RecoveryState::Unconfirmed,
+                        },
+                    );
+                }
+            }
+        }
+    }
+    changed
 }
+
 fn reserve(
     inner: &Inner,
     key: &SessionKey,
@@ -533,6 +784,9 @@ fn reserve(
     if inner.shared.blocked.load(Ordering::Acquire) {
         return Err(RuntimeError::ObservedAuthBlocked);
     }
+    if entries.recoveries.contains_key(key) {
+        return Err(RuntimeError::Owner(OwnerError::Uncertain));
+    }
     if entries.keys().any(|other| other.name == key.name)
         || inner.deps.driver.active_ticket(key).is_some()
     {
@@ -546,6 +800,10 @@ fn reserve(
     entries.insert(
         key.clone(),
         Entry {
+            worker: None,
+            expected_resume: None,
+            recovery_slot: None,
+            recovering: None,
             nonce: nonce.clone(),
             cancel,
             ticket: None,
@@ -621,7 +879,7 @@ async fn prepare(
     let authority = owner.clone();
     let metadata = input.metadata.attachments.clone();
     let input_text = input.text.clone();
-    let (snapshot, attachments) = tokio::task::spawn_blocking(move || {
+    let (snapshot, attachments, expected_resume) = tokio::task::spawn_blocking(move || {
         let before = reading
             .deps
             .registry
@@ -710,7 +968,7 @@ async fn prepare(
             effort: snapshot.settings.effort.as_deref(),
         })
         .map_err(|_| RuntimeError::Invalid)?;
-        Ok((snapshot, attachments))
+        Ok((snapshot, attachments, native))
     })
     .await
     .map_err(|_| RuntimeError::Storage)??;
@@ -752,6 +1010,10 @@ async fn prepare(
         if *cancellation.borrow() || *building.shared.closed.borrow() {
             return Err(RuntimeError::Cancelled);
         }
+        let slot = expected_resume
+            .as_ref()
+            .map(|_| recovery_id())
+            .transpose()?;
         let source = Arc::new(Source {
             key: key_for_build.clone(),
             nonce: reservation_nonce.clone(),
@@ -759,10 +1021,32 @@ async fn prepare(
         });
         {
             let mut entries = building.shared.state.lock().expect("ZCode runtime");
-            let entry = entries
+            entries
                 .get_mut(&key_for_build)
                 .filter(|e| Arc::ptr_eq(&e.nonce, &reservation_nonce) && !*e.cancel.borrow())
                 .ok_or(RuntimeError::Cancelled)?;
+            if let Some(id) = slot {
+                let occupied = entries.recoveries.len()
+                    + entries
+                        .values()
+                        .filter(|entry| entry.recovery_slot.is_some() || entry.recovering.is_some())
+                        .count();
+                if occupied >= RECOVERY_CAPACITY {
+                    return Err(RuntimeError::Capacity);
+                }
+                // Borrow again after counting; the reservation already exists.
+                let entry = entries
+                    .get_mut(&key_for_build)
+                    .ok_or(RuntimeError::Cancelled)?;
+                entry.recovery_slot = Some(RecoveryReservation {
+                    id,
+                    expected_resume: expected_resume.clone().expect("eligible resume"),
+                });
+            }
+            let entry = entries
+                .get_mut(&key_for_build)
+                .ok_or(RuntimeError::Cancelled)?;
+            entry.expected_resume = Some(expected_resume.clone());
             entry.source = Some(source.clone());
         }
         let weak = Arc::downgrade(&building.shared);
@@ -831,6 +1115,14 @@ async fn prepare(
         .map_err(|_| RuntimeError::Invalid)?;
         if *cancellation.borrow() || *building.shared.closed.borrow() {
             return Err(RuntimeError::Cancelled);
+        }
+        {
+            let mut entries = building.shared.state.lock().expect("ZCode runtime");
+            let entry = entries
+                .get_mut(&source.key)
+                .filter(|e| Arc::ptr_eq(&e.nonce, &source.nonce))
+                .ok_or(RuntimeError::Cancelled)?;
+            entry.worker = Some(worker.clone());
         }
         building
             .deps
@@ -906,19 +1198,26 @@ mod lifecycle_tests {
             created_at: "2026-11-12T00:00:00Z".into(),
         };
         let (sender, progress) = watch::channel(Progress::Starting);
-        let mut entries = HashMap::from([(
-            key.clone(),
-            Entry {
-                source: None,
-                attempt: None,
-                nonce: Arc::new(()),
-                cancel: watch::channel(false).0,
-                ticket: None,
-                route: None,
-                quarantined: false,
-                progress: Some(progress),
-            },
-        )]);
+        let mut entries = RuntimeState {
+            entries: HashMap::from([(
+                key.clone(),
+                Entry {
+                    worker: None,
+                    expected_resume: None,
+                    recovery_slot: None,
+                    recovering: None,
+                    source: None,
+                    attempt: None,
+                    nonce: Arc::new(()),
+                    cancel: watch::channel(false).0,
+                    ticket: None,
+                    route: None,
+                    quarantined: false,
+                    progress: Some(progress),
+                },
+            )]),
+            ..Default::default()
+        };
         assert!(!reap_finished(&mut entries));
         sender.send_replace(Progress::Quarantined(
             crate::turn_coordinator::Outcome::Interrupted,
@@ -968,6 +1267,14 @@ fn bind_source(
     if *shared.closed.borrow()
         || shared.blocked.load(Ordering::Acquire)
         || !source_entry(entry, source, attempt)
+        || entry.expected_resume.as_ref().map(|id| id.as_deref())
+            != Some(attempt.resume_session_id())
+        || attempt.resume_session_id().is_some_and(|id| {
+            entry
+                .recovery_slot
+                .as_ref()
+                .is_none_or(|slot| slot.expected_resume != id)
+        })
     {
         return Err(RuntimeError::Cancelled);
     }
@@ -995,7 +1302,7 @@ struct RuntimeSpawn {
     initial: TurnSnapshot,
 }
 struct RuntimePermit<'a> {
-    _admission: std::sync::MutexGuard<'a, HashMap<SessionKey, Entry>>,
+    _admission: std::sync::MutexGuard<'a, RuntimeState>,
 }
 impl SpawnPermit for RuntimePermit<'_> {}
 impl SpawnGate for RuntimeSpawn {
@@ -1055,6 +1362,9 @@ fn observe_signal(shared: &Arc<Shared>, source: &Arc<Source>, signal: ProviderSi
                     return None;
                 }
                 entry.cancel.send_replace(true);
+                if let Some(operation) = &entry.recovering {
+                    operation.permit.cancel();
+                }
                 entry.ticket.clone()
             })
             .collect::<Vec<_>>()
@@ -1068,3 +1378,299 @@ fn observe_signal(shared: &Arc<Shared>, source: &Arc<Source>, signal: ProviderSi
 #[cfg(test)]
 #[path = "../tests/support/zcode_runtime_unit.rs"]
 mod tests;
+
+fn reserve_recovery(
+    inner: &Arc<Inner>,
+    action: &OwnerRecoveryAction,
+) -> Result<(Reservation, Arc<RecoveryOperation>), RuntimeError> {
+    if inner.deps.driver.storage_failed() {
+        return Err(RuntimeError::Storage);
+    }
+    let mut state = inner.shared.state.lock().expect("ZCode runtime");
+    if *inner.shared.closed.borrow() {
+        return Err(RuntimeError::Closed);
+    }
+    let _ = reap_finished(&mut state);
+    if state.keys().any(|key| key.name == action.key.name)
+        || inner
+            .deps
+            .driver
+            .active_ticket_for_name(&action.key.name)
+            .is_some()
+    {
+        return Err(RuntimeError::Busy);
+    }
+    if state.len() >= inner.limits.turns {
+        return Err(RuntimeError::Capacity);
+    }
+    let cached = state
+        .recoveries
+        .get(&action.key)
+        .filter(|cached| cached.id == action.id)
+        .ok_or(RuntimeError::Invalid)?;
+    if cached.state != RecoveryState::Available {
+        return Err(RuntimeError::Owner(OwnerError::Uncertain));
+    }
+    let proof = cached
+        .proof
+        .clone()
+        .ok_or(RuntimeError::Owner(OwnerError::Uncertain))?;
+    let terminal = cached
+        .terminal
+        .as_ref()
+        .ok_or(RuntimeError::Owner(OwnerError::Uncertain))?;
+    let permit = IdleRecoveryPermit::from_finished_idle(
+        proof,
+        terminal,
+        std::time::Instant::now() + inner.limits.start_timeout,
+    )
+    .map_err(RuntimeError::Owner)?;
+    let cached = state
+        .recoveries
+        .remove(&action.key)
+        .expect("validated recovery cache");
+    let operation = Arc::new(RecoveryOperation {
+        cached,
+        permit,
+        io_uncertain: AtomicBool::new(false),
+    });
+    let nonce = Arc::new(());
+    let (cancel, receiver) = watch::channel(false);
+    state.insert(
+        action.key.clone(),
+        Entry {
+            worker: None,
+            expected_resume: None,
+            recovery_slot: None,
+            recovering: Some(operation.clone()),
+            attempt: None,
+            source: None,
+            nonce: nonce.clone(),
+            cancel,
+            ticket: None,
+            route: None,
+            quarantined: false,
+            progress: None,
+        },
+    );
+    Ok((
+        Reservation {
+            key: action.key.clone(),
+            nonce,
+            cancel: receiver,
+        },
+        operation,
+    ))
+}
+fn recovery_alive(inner: &Inner, reservation: &Reservation) -> Result<(), RuntimeError> {
+    if inner.deps.driver.storage_failed() {
+        return Err(RuntimeError::Storage);
+    }
+    if *inner.shared.closed.borrow() {
+        return Err(RuntimeError::Closed);
+    }
+    if *reservation.cancel.borrow() {
+        return Err(RuntimeError::Cancelled);
+    }
+    if !inner
+        .shared
+        .state
+        .lock()
+        .expect("ZCode runtime")
+        .get(&reservation.key)
+        .is_some_and(|entry| {
+            Arc::ptr_eq(&entry.nonce, &reservation.nonce) && entry.recovering.is_some()
+        })
+    {
+        return Err(RuntimeError::Cancelled);
+    }
+    Ok(())
+}
+fn quarantine_recovery(shared: &Shared, reservation: &Reservation) {
+    if let Some(entry) = shared
+        .state
+        .lock()
+        .expect("ZCode runtime")
+        .get_mut(&reservation.key)
+        .filter(|entry| Arc::ptr_eq(&entry.nonce, &reservation.nonce))
+    {
+        entry.quarantined = true;
+        if let Some(operation) = &entry.recovering {
+            operation.permit.cancel();
+        }
+    }
+    shared.changed.notify_waiters();
+}
+async fn recovery_append(
+    inner: &Inner,
+    operation: &RecoveryOperation,
+    draft: Value,
+) -> Result<crate::turn_driver::Receipt, RuntimeError> {
+    let sink = inner.deps.sink.clone();
+    match tokio::spawn(async move { sink.append(draft).await }).await {
+        Ok(Ok(receipt))
+            if receipt.id > 0
+                && receipt.id <= 9_007_199_254_740_991
+                && !receipt.ts.is_empty()
+                && receipt.ts.len() <= 128
+                && !receipt.ts.chars().any(char::is_control) =>
+        {
+            Ok(receipt)
+        }
+        Err(_) => {
+            operation.io_uncertain.store(true, Ordering::Release);
+            inner.deps.driver.report_storage_failure();
+            Err(RuntimeError::Storage)
+        }
+        _ => {
+            inner.deps.driver.report_storage_failure();
+            Err(RuntimeError::Storage)
+        }
+    }
+}
+fn recovery_notice(key: &SessionKey, id: &str, phase: &str, text: &str) -> Value {
+    serde_json::json!({"sessionId":key.name,"provider":"zcode","kind":"session.configured","data":{"recovery":{"id":id,"phase":phase},"notice":text,"mayHaveExecuted":true}})
+}
+async fn recovery_core(
+    inner: Arc<Inner>,
+    reservation: Reservation,
+    operation: Arc<RecoveryOperation>,
+) -> Result<RecoveryResult, RuntimeError> {
+    recovery_alive(&inner, &reservation)?;
+    let requested=recovery_append(&inner,&operation,recovery_notice(&reservation.key,&operation.cached.id,"requested","Запрошено начало нового native-разговора ZCode. Предыдущая реплика могла выполниться. Автоматического повтора и возобновления очереди не будет.")).await?;
+    let attempt = async {
+        recovery_alive(&inner, &reservation)?;
+        let warning = RecoveryWarningReceipt::from_owned_requested_append(
+            &operation.permit,
+            requested.clone(),
+        )
+        .map_err(RuntimeError::Owner)?;
+        let authority = owner(&inner).await?;
+        recovery_alive(&inner, &reservation)?;
+        let permit = operation.permit.clone();
+        let confirmed = OwnerConfirmedRecovery::from_owner_confirmation(&permit);
+        let result = tokio::task::spawn_blocking(move || {
+            authority.confirm_missing_for_next_turn(permit, confirmed, warning)
+        })
+        .await;
+        match result {
+            Ok(Ok(receipt))
+                if receipt.matches(&operation.permit)
+                    && receipt.session() == &reservation.key
+                    && receipt.warning_event_id() == requested.id =>
+            {
+                Ok(())
+            }
+            Ok(Ok(_)) => {
+                inner.deps.driver.report_storage_failure();
+                Err(RuntimeError::Storage)
+            }
+            Ok(Err(error)) => {
+                if error == OwnerError::Storage {
+                    inner.deps.driver.report_storage_failure();
+                }
+                Err(RuntimeError::Owner(error))
+            }
+            Err(_) => {
+                operation.io_uncertain.store(true, Ordering::Release);
+                inner.deps.driver.report_storage_failure();
+                Err(RuntimeError::Storage)
+            }
+        }
+    }
+    .await;
+    match attempt {
+        Ok(()) => {
+            // Cancellation after seal cannot be reported as rollback. This
+            // already-known metadata commit still needs owned durable evidence.
+            let committed=recovery_append(&inner,&operation,recovery_notice(&reservation.key,&operation.cached.id,"committed","Привязка native-разговора ZCode снята. История в Пульте сохранена; очередь остаётся на паузе. Только следующая явно отправленная реплика начнёт новый разговор; предыдущая могла выполниться.")).await?;
+            if committed.id <= requested.id {
+                inner.deps.driver.report_storage_failure();
+                return Err(RuntimeError::Storage);
+            }
+            Ok(RecoveryResult {
+                requested_event_id: requested.id,
+                committed_event_id: committed.id,
+                may_have_executed: true,
+            })
+        }
+        Err(error) => {
+            if !matches!(
+                error,
+                RuntimeError::Storage | RuntimeError::Owner(OwnerError::Storage)
+            ) {
+                recovery_append(&inner,&operation,recovery_notice(&reservation.key,&operation.cached.id,"failed","Восстановление не подтверждено. Новая реплика не отправлялась, очередь не возобновлялась; предыдущая реплика могла выполниться.")).await?;
+            }
+            Err(error)
+        }
+    }
+}
+async fn run_recovery(
+    inner: Arc<Inner>,
+    reservation: Reservation,
+    operation: Arc<RecoveryOperation>,
+) -> Result<RecoveryResult, RuntimeError> {
+    let mut cancel = reservation.cancel.clone();
+    let mut closed = inner.shared.closed.subscribe();
+    let core_reservation = Reservation {
+        key: reservation.key.clone(),
+        nonce: reservation.nonce.clone(),
+        cancel: reservation.cancel.clone(),
+    };
+    let mut task = tokio::spawn(recovery_core(
+        inner.clone(),
+        core_reservation,
+        operation.clone(),
+    ));
+    let result = tokio::select! {
+        result=&mut task=>result,
+        _=cancel.changed()=>{quarantine_recovery(&inner.shared,&reservation);task.await},
+        _=closed.changed()=>{quarantine_recovery(&inner.shared,&reservation);task.await},
+        _=inner.deps.driver.wait_for_storage_failure()=>{quarantine_recovery(&inner.shared,&reservation);task.await},
+    };
+    let result = match result {
+        Ok(result) => result,
+        Err(_) => {
+            operation.io_uncertain.store(true, Ordering::Release);
+            Err(RuntimeError::Storage)
+        }
+    };
+    if operation.io_uncertain.load(Ordering::Acquire) {
+        quarantine_recovery(&inner.shared, &reservation);
+        inner.deps.driver.report_storage_failure();
+        return Err(RuntimeError::Storage);
+    }
+    if matches!(
+        result,
+        Err(RuntimeError::Storage | RuntimeError::Owner(OwnerError::Storage))
+    ) {
+        inner.deps.driver.report_storage_failure();
+    }
+    {
+        let mut state = inner.shared.state.lock().expect("ZCode runtime");
+        if state
+            .get(&reservation.key)
+            .is_some_and(|entry| Arc::ptr_eq(&entry.nonce, &reservation.nonce))
+        {
+            state.remove(&reservation.key);
+            if result.is_err() {
+                let mut cached = operation.cached.clone();
+                if matches!(
+                    result,
+                    Err(RuntimeError::Storage
+                        | RuntimeError::Owner(OwnerError::Storage)
+                        | RuntimeError::Owner(OwnerError::Uncertain))
+                ) {
+                    cached.state = RecoveryState::Unconfirmed;
+                }
+                state.recoveries.insert(reservation.key.clone(), cached);
+            }
+        }
+    }
+    inner.shared.changed.notify_waiters();
+    result
+}
+
+#[cfg(test)]
+#[path = "../tests/support/zcode_recovery_consumer_unit.rs"]
+mod recovery_tests;

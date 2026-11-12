@@ -14,8 +14,8 @@ use crate::{
     },
     zcode_events::{self, HostBinding, Normalizer, Signal, TrustedCallback},
     zcode_host_services::{
-        Attempt, Error as StoreError, JoinedCleanup, ReserveRequest, SessionStore,
-        TurnStartedEvidence,
+        Attempt, Error as StoreError, JoinedCleanup, MissingAfterJoin, ReserveRequest,
+        SessionStore, TurnStartedEvidence,
     },
     zcode_launch::{self, ContextLanguage},
 };
@@ -102,6 +102,7 @@ enum Closed {
     Unconfirmed,
 }
 struct State {
+    recovery: Option<(Ticket, MissingAfterJoin)>,
     active: Option<Arc<Job>>,
     used: bool,
 }
@@ -131,6 +132,10 @@ struct Job {
     unknown_io: AtomicBool,
     // Sticky: a failed task cannot prove completion of IO it may have started.
     uncertain_io: AtomicBool,
+    saw_matching_native_started: AtomicBool,
+    natural_stdout_eof: AtomicBool,
+    native_io_complete: AtomicBool,
+    observed_missing: AtomicBool,
 }
 impl Job {
     fn cancel(&self) {
@@ -178,6 +183,7 @@ impl ZcodeWorker {
             config,
             services,
             state: Mutex::new(State {
+                recovery: None,
                 active: None,
                 used: false,
             }),
@@ -187,6 +193,20 @@ impl ZcodeWorker {
     /// explicit input. This is neither native identity nor process cleanup proof.
     pub fn is_retired(&self) -> bool {
         self.0.state.lock().expect("ZCode state").used
+    }
+    /// A one-shot diagnostic+joined capability, never nonexecution proof.
+    /// Trusted controller consumes this only after exact Driver Finished.
+    pub fn take_missing_recovery(&self, ticket: &Ticket) -> Option<MissingAfterJoin> {
+        let mut state = self.0.state.lock().expect("ZCode state");
+        if state
+            .recovery
+            .as_ref()
+            .is_some_and(|(bound, _)| bound == ticket)
+        {
+            state.recovery.take().map(|(_, proof)| proof)
+        } else {
+            None
+        }
     }
     pub fn begin_shutdown(&self) {
         let active = {
@@ -268,6 +288,10 @@ impl Worker for ZcodeWorker {
             }),
             unknown_io: AtomicBool::new(false),
             uncertain_io: AtomicBool::new(false),
+            saw_matching_native_started: AtomicBool::new(false),
+            natural_stdout_eof: AtomicBool::new(false),
+            native_io_complete: AtomicBool::new(false),
+            observed_missing: AtomicBool::new(false),
         });
         {
             let mut state = self.0.state.lock().expect("ZCode state");
@@ -493,6 +517,7 @@ async fn run(
     };
     cleanup(&inner, &job).await;
     let attempt = job.attempt.lock().expect("ZCode attempt").clone();
+    let recovery_attempt = attempt.clone();
     if let Some(attempt) = attempt {
         let proof = JoinedCleanup::from_owned_join(&attempt);
         let cleared = if attempt.spawn_action().never_sent() {
@@ -512,7 +537,27 @@ async fn run(
         job.closed.send_replace(Closed::Unconfirmed);
         job.retry.notified().await;
     }
-    inner.state.lock().expect("ZCode state").active = None;
+    let recovery = if job.observed_missing.load(Ordering::Acquire)
+        && job.natural_stdout_eof.load(Ordering::Acquire)
+        && job.native_io_complete.load(Ordering::Acquire)
+        && !job.saw_matching_native_started.load(Ordering::Acquire)
+    {
+        recovery_attempt.as_ref().and_then(|attempt| {
+            MissingAfterJoin::from_owned_missing_after_join(
+                attempt,
+                JoinedCleanup::from_owned_join(attempt),
+                job.saw_matching_native_started.load(Ordering::Acquire),
+            )
+            .ok()
+        })
+    } else {
+        None
+    };
+    {
+        let mut state = inner.state.lock().expect("ZCode state");
+        state.active = None;
+        state.recovery = recovery.map(|proof| (job.ticket.clone(), proof));
+    }
     job.closed.send_replace(Closed::Confirmed);
     let outcome = match result {
         Ok(outcome) => outcome,
@@ -765,12 +810,34 @@ async fn turn(
     loop {
         let grace = terminal_deadline
             .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(86_400));
-        let frame = tokio::select! {_=cancel.changed()=>return Err(interrupted()),_=deadline.as_mut(),if !accepted=>return Err(error("start_unknown","ZCode input acceptance was not confirmed")),_=tokio::time::sleep_until(grace),if terminal_deadline.is_some()=>break,frame=output.recv()=>match frame{None=>{natural_eof=true;break},Some(Err(_))=>return Err(error("protocol_error","ZCode output stream failed")),Some(Ok(v))=>v}};
+        let frame = tokio::select! {_=cancel.changed()=>return Err(interrupted()),_=deadline.as_mut(),if !accepted=>return Err(error("start_unknown","ZCode input acceptance was not confirmed")),_=tokio::time::sleep_until(grace),if terminal_deadline.is_some()=>break,frame=output.recv()=>match frame{None=>{natural_eof=true;job.natural_stdout_eof.store(true,Ordering::Release);break},Some(Err(_))=>return Err(error("protocol_error","ZCode output stream failed")),Some(Ok(v))=>v}};
         if job.cancelled() {
             return Err(interrupted());
         }
         if !accepted {
             start_live(&inner, &job)?;
+        }
+        // Observe the actual native acceptance before ANY identity/accept IO.
+        // Published Started is later and must not be used as an absence claim.
+        if frame["type"] == "turn.started" {
+            let native_sid = frame
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .filter(|id| native_id(id));
+            let native_tid = frame
+                .get("turnId")
+                .and_then(Value::as_str)
+                .filter(|id| native_id(id));
+            if let (Some(ns), Some(nt)) = (native_sid, native_tid)
+                && sid.as_deref().is_none_or(|known| known == ns)
+                && tid.as_deref().is_none_or(|known| known == nt)
+                && attempt
+                    .resume_session_id()
+                    .is_none_or(|expected| expected == ns)
+            {
+                job.saw_matching_native_started
+                    .store(true, Ordering::Release);
+            }
         }
         for (field, known) in [("sessionId", &mut sid), ("turnId", &mut tid)] {
             if let Some(value) = frame.get(field) {
@@ -918,9 +985,14 @@ async fn turn(
                 "ZCode process cleanup is unconfirmed",
             )
         })?;
-        process
+        let output_clean = process.output_finished_cleanly();
+        let tail = process
             .take_private_stderr()
-            .map_err(|_| error("worker_io_failed", "ZCode stderr completion is unavailable"))?
+            .map_err(|_| error("worker_io_failed", "ZCode stderr completion is unavailable"))?;
+        if natural_eof && output_clean {
+            job.native_io_complete.store(true, Ordering::Release);
+        }
+        tail
     };
     if job.cancelled() {
         return Err(interrupted());
@@ -996,6 +1068,9 @@ async fn classify(inner: &Inner, job: &Job, bytes: &[u8]) -> Result<(), WorkerEr
         missing.then_some(ProviderSignal::MissingSession)
     };
     if let Some(signal) = signal {
+        if signal == ProviderSignal::MissingSession {
+            job.observed_missing.store(true, Ordering::Release);
+        }
         let (kind, data) = match signal {
             ProviderSignal::Authentication => (
                 "provider.blocked",
