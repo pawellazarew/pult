@@ -166,6 +166,190 @@ async fn durable_publication_and_resolution_preserve_raw_input_only_for_provider
     bounded(rig.broker.drain()).await;
 }
 #[tokio::test]
+async fn resolution_from_stored_requested_event_waits_for_its_known_receipt() {
+    let mut rig = rig(Options::default());
+    let mut handle = rig
+        .broker
+        .request(request("Bash", json!({"command":"true"})))
+        .unwrap();
+    let pending = next(&mut rig).await;
+    let id = pending.draft["data"]["id"].as_str().unwrap();
+    let first = rig
+        .broker
+        .resolve(id, Decision::allow(Scope::Once), "first")
+        .unwrap();
+    // FIFO duplicate acknowledgement proves that the first command was consumed.
+    let duplicate = rig
+        .broker
+        .resolve(id, Decision::deny(), "duplicate")
+        .unwrap();
+    assert!(!bounded(duplicate.wait()).await.unwrap());
+    let mut waiting = Box::pin(first.wait());
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(
+        waiting.as_mut().poll(&mut context).is_pending(),
+        "early resolution must await requested receipt"
+    );
+    assert!(rig.calls.try_recv().is_err());
+    pending.commit();
+    let resolved = next(&mut rig).await;
+    assert_eq!(resolved.draft["kind"], "permission.resolved");
+    assert_eq!(resolved.draft["data"]["decision"], "allow");
+    let mut decision = Box::pin(handle.decision());
+    assert!(decision.as_mut().poll(&mut context).is_pending());
+    resolved.commit();
+    assert!(matches!(
+        bounded(decision).await,
+        Decision::Allow {
+            scope: Scope::Once,
+            ..
+        }
+    ));
+    assert!(bounded(waiting).await.unwrap());
+    bounded(rig.broker.drain()).await;
+    assert!(rig.calls.try_recv().is_err());
+}
+#[tokio::test]
+async fn deferred_resolution_fails_explicitly_when_requested_receipt_is_unknown() {
+    let mut rig = rig(Options::default());
+    let mut handle = rig.broker.request(request("Bash", json!({}))).unwrap();
+    let pending = next(&mut rig).await;
+    let id = pending.draft["data"]["id"].as_str().unwrap();
+    let resolution = rig
+        .broker
+        .resolve(id, Decision::allow(Scope::Once), "human")
+        .unwrap();
+    assert!(
+        !bounded(
+            rig.broker
+                .resolve(id, Decision::deny(), "duplicate")
+                .unwrap()
+                .wait()
+        )
+        .await
+        .unwrap()
+    );
+    pending.fail();
+    assert_eq!(
+        bounded(resolution.wait()).await,
+        Err(BrokerError::StorageUnavailable)
+    );
+    assert!(matches!(
+        bounded(handle.decision()).await,
+        Decision::Deny { .. }
+    ));
+    bounded(rig.broker.drain()).await;
+    assert!(rig.broker.storage_failed());
+    assert!(rig.calls.try_recv().is_err());
+}
+#[tokio::test]
+async fn cancellation_shutdown_and_deadline_clear_deferred_choice_without_dropping_owned_io() {
+    for reason in ["provider_gone", "shutdown", "timeout"] {
+        let mut rig = rig(Options {
+            timeout: if reason == "timeout" {
+                Duration::from_secs(1)
+            } else {
+                DEFAULT_TIMEOUT
+            },
+            ..Default::default()
+        });
+        let mut handle = rig.broker.request(request("Bash", json!({}))).unwrap();
+        let pending = next(&mut rig).await;
+        let id = pending.draft["data"]["id"].as_str().unwrap();
+        let resolution = rig
+            .broker
+            .resolve(id, Decision::allow(Scope::Once), "human")
+            .unwrap();
+        assert!(
+            !bounded(
+                rig.broker
+                    .resolve(id, Decision::deny(), "duplicate")
+                    .unwrap()
+                    .wait()
+            )
+            .await
+            .unwrap()
+        );
+        match reason {
+            "provider_gone" => {
+                rig.broker.provider_gone("chat");
+            }
+            "shutdown" => {
+                rig.broker.shutdown();
+            }
+            _ => {}
+        }
+        assert!(matches!(
+            bounded(handle.decision()).await,
+            Decision::Deny { .. }
+        ));
+        assert!(!bounded(resolution.wait()).await.unwrap());
+        assert_eq!(rig.broker.reserved_count(), 1);
+        assert!(rig.calls.try_recv().is_err());
+        pending.commit();
+        let denied = next(&mut rig).await;
+        assert_eq!(denied.draft["data"]["decision"], "deny");
+        assert_eq!(denied.draft["data"]["by"], reason);
+        denied.commit();
+        bounded(rig.broker.drain()).await;
+        assert!(rig.calls.try_recv().is_err());
+        assert!(!rig.broker.storage_failed());
+    }
+}
+#[tokio::test]
+async fn invalid_early_answers_leave_choice_open_and_only_first_valid_answer_is_kept() {
+    let mut rig = rig(Options::default());
+    let mut handle=rig.broker.request(request("requestUserInput",json!({"questions":[{"id":"q","question":"Pick","options":[{"label":"A"},{"label":"B"}]}]}))).unwrap();
+    let pending = next(&mut rig).await;
+    let id = pending.draft["data"]["id"].as_str().unwrap();
+    let choose = |label: &str| Decision::Allow {
+        scope: Scope::Once,
+        updated_input: None,
+        answers: Some(json!({"q":{"answers":[label]}})),
+    };
+    assert_eq!(
+        bounded(
+            rig.broker
+                .resolve(id, choose("C"), "invalid")
+                .unwrap()
+                .wait()
+        )
+        .await,
+        Err(BrokerError::InvalidAnswers)
+    );
+    let first = rig
+        .broker
+        .resolve(id, choose("A"), "PRIVATE human")
+        .unwrap();
+    assert!(
+        !bounded(
+            rig.broker
+                .resolve(id, choose("B"), "second")
+                .unwrap()
+                .wait()
+        )
+        .await
+        .unwrap()
+    );
+    assert!(rig.calls.try_recv().is_err());
+    pending.commit();
+    let resolved = next(&mut rig).await;
+    assert_eq!(resolved.draft["data"]["by"], "[redacted] human");
+    assert_eq!(resolved.draft["data"]["decision"], "allow");
+    resolved.commit();
+    let Decision::Allow {
+        answers: Some(answers),
+        ..
+    } = bounded(handle.decision()).await
+    else {
+        panic!("expected first answer");
+    };
+    assert_eq!(answers["q"]["answers"], json!(["A"]));
+    assert!(bounded(first.wait()).await.unwrap());
+    bounded(rig.broker.drain()).await;
+    assert!(rig.calls.try_recv().is_err());
+}
+#[tokio::test]
 async fn secret_rule_is_removed_and_unoffered_scope_keeps_question_pending() {
     let mut rig = rig(Options::default());
     let mut req = request("Bash", json!({"command":"ok"}));

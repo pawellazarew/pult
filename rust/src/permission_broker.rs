@@ -228,7 +228,15 @@ struct Entry {
     deadline: Instant,
     asker: Option<oneshot::Sender<Decision>>,
     stage: Stage,
+    // An event observer may answer before the actor receives Requested's
+    // receipt. Keep only its first validated choice; start no resolved IO yet.
+    pending_choice: Option<PendingChoice>,
     _slot: OwnedSemaphorePermit,
+}
+struct PendingChoice {
+    decision: Decision,
+    by: String,
+    reply: oneshot::Sender<Result<bool, BrokerError>>,
 }
 enum Stage {
     Requesting,
@@ -430,6 +438,7 @@ impl Broker {
             deadline: created + shared.timeout,
             asker: Some(asker),
             stage: Stage::Requesting,
+            pending_choice: None,
             _slot: slot,
         };
         shared
@@ -568,6 +577,11 @@ impl Broker {
 fn answer(entry: &mut Entry, decision: Decision) {
     if let Some(asker) = entry.asker.take() {
         let _ = asker.send(decision);
+    }
+}
+fn reject_pending(entry: &mut Entry, result: Result<bool, BrokerError>) {
+    if let Some(choice) = entry.pending_choice.take() {
+        let _ = choice.reply.send(result);
     }
 }
 fn close(shared: &Shared) {
@@ -843,12 +857,14 @@ async fn run(shared: Arc<Shared>, mut commands: mpsc::Receiver<Command>, sink: A
             if failed {
                 hide(entry);
                 answer(entry, storage_deny());
+                reject_pending(entry, Err(BrokerError::StorageUnavailable));
                 if matches!(entry.stage, Stage::Visible) {
                     remove_ids.push(entry.id.clone());
                 }
             } else if reason != 0 {
                 hide(entry);
                 answer(entry, cancellation_deny(reason));
+                reject_pending(entry, Ok(false));
                 if matches!(entry.stage, Stage::Visible) {
                     let by = match reason {
                         2 => "shutdown",
@@ -894,7 +910,7 @@ async fn run(shared: Arc<Shared>, mut commands: mpsc::Receiver<Command>, sink: A
                 if result.is_err() {storage_fault(&shared);}
                 let Some(entry)=entries.get_mut(&id) else {continue;};
                 if shared.failed.load(Ordering::SeqCst) {
-                    answer(entry,storage_deny());if let Stage::Resolving {reply:Some(reply),..}=std::mem::replace(&mut entry.stage,Stage::Visible) {let _=reply.send(Err(BrokerError::StorageUnavailable));}
+                    answer(entry,storage_deny());reject_pending(entry,Err(BrokerError::StorageUnavailable));if let Stage::Resolving {reply:Some(reply),..}=std::mem::replace(&mut entry.stage,Stage::Visible) {let _=reply.send(Err(BrokerError::StorageUnavailable));}
                     remove(&shared,&mut entries,&id);continue;
                 }
                 if shared.closed.load(Ordering::SeqCst) {cancel(&entry.control,2);}
@@ -903,7 +919,13 @@ async fn run(shared: Arc<Shared>, mut commands: mpsc::Receiver<Command>, sink: A
                 match phase {
                     Phase::Requested=>{
                         entry.stage=Stage::Visible;
-                        if reason==0 {*entry.control.public.lock().expect("permission public")=Some(entry.card.clone());}
+                        if reason==0 {
+                            if let Some(choice)=entry.pending_choice.take() {
+                                // The requested write is now known. Only now may
+                                // its first validated choice start resolved IO.
+                                finish_begin(entry,choice.decision,choice.by,Some(choice.reply),&shared,&sink,&mut tasks);
+                            } else {*entry.control.public.lock().expect("permission public")=Some(entry.card.clone());}
+                        } else {reject_pending(entry,Ok(false));}
                         // Cancellation is handled at the top before any next command.
                     },
                     Phase::Resolved=>{
@@ -939,10 +961,14 @@ async fn run(shared: Arc<Shared>, mut commands: mpsc::Receiver<Command>, sink: A
                     },
                     Command::Resolve {id,decision,by,reply}=>{
                         if shared.failed.load(Ordering::SeqCst) {let _=reply.send(Err(BrokerError::StorageUnavailable));continue;}
-                        let Some(entry)=entries.get_mut(&id).filter(|e|matches!(e.stage,Stage::Visible) && e.control.cancelled.load(Ordering::SeqCst)==0) else {let _=reply.send(Ok(false));continue;};
+                        let Some(entry)=entries.get_mut(&id).filter(|e|matches!(e.stage,Stage::Visible|Stage::Requesting) && e.pending_choice.is_none() && e.control.cancelled.load(Ordering::SeqCst)==0) else {let _=reply.send(Ok(false));continue;};
                         let chosen=validate(entry,decision,&shared);let by=public_string(&shared,&by);
                         match (chosen,by) {
-                            (Ok(decision),Ok(by)) if by.len()<=4096=>finish_begin(entry,decision,by,Some(reply),&shared,&sink,&mut tasks),
+                            (Ok(decision),Ok(by)) if by.len()<=4096=>{
+                                if matches!(entry.stage,Stage::Requesting) {
+                                    entry.pending_choice=Some(PendingChoice{decision,by,reply});
+                                } else {finish_begin(entry,decision,by,Some(reply),&shared,&sink,&mut tasks);}
+                            },
                             (Err(error),_)=>{let _=reply.send(Err(error));},
                             _=>{let _=reply.send(Err(BrokerError::Invalid));},
                         }
