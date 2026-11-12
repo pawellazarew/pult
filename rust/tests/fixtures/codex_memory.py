@@ -140,7 +140,7 @@ def work(thread, turn, instruction):
                 outcome['unknownStructuralId'] = unknown
                 outcome['ordinaryStructuralId'] = ordinary
         record('result', **outcome)
-        finish(thread, turn, text='fixture key echo ' + mcp.key if instruction.get('echoKey') and mcp else 'local fixture completed')
+        finish(thread, turn, text='fixture key echo ' + mcp.key if instruction.get('echoKey') and mcp else 'local fixture completed', status=instruction.get('status', 'completed'))
     except Exception as error:
         # Type only; never reflect untrusted tool/config payloads into public IO.
         record('fixture-error', error=type(error).__name__, run=instruction.get('run'))
@@ -190,7 +190,7 @@ for line in sys.stdin:
         thread = params['threadId']
         turn = 'native-turn-%s-%s' % (os.getpid(), sequence)
         texts = [item['text'] for item in params['input'] if item['type'] == 'text']
-        instruction = json.loads(texts[0])
+        instruction = json.JSONDecoder().raw_decode(texts[0])[0]
         records = json.loads((pult / 'sessions.json').read_text())['sessions']
         session = next(value for value in records if value.get('providerSessionId') == thread)
         journal = [json.loads(value) for value in (pult / 'events/journal.jsonl').read_text().splitlines()]
@@ -203,8 +203,26 @@ for line in sys.stdin:
         record('dispatch', run=instruction['run'], session=session['name'], thread=thread, turn=turn, texts=texts)
         active[thread] = turn
         notice('turn/started', thread, turn, turn={'id': turn, 'status': 'inProgress'})
+        if instruction.get('unknown'):
+            record('unknown-start', run=instruction['run'], thread=thread, turn=turn)
+            # No ACK and no invented input receipt. The real supervisor must
+            # reclaim the actual MCP descendant after this app-server exits.
+            os._exit(0)
         # Critical ordering: ACK before a separate thread waits for human approval.
         send({'id': frame['id'], 'result': {'turn': {'id': turn, 'status': 'inProgress'}}})
+        if instruction.get('mode') != 'hold':
+            threading.Thread(target=work, args=(thread, turn, instruction), daemon=True).start()
+    elif method == 'turn/steer':
+        thread = params['threadId']
+        turn = params['expectedTurnId']
+        assert active.get(thread) == turn, 'steer reached a stale/wrong host or native turn'
+        texts = [item['text'] for item in params['input'] if item['type'] == 'text']
+        instruction = json.JSONDecoder().raw_decode(texts[0])[0]
+        if instruction.get('reject'):
+            send({'id': frame['id'], 'error': {'code': -32602, 'message': 'fixture steering rejected'}})
+            continue
+        record('steer', run=instruction['run'], thread=thread, turn=turn, expectedTurnId=params['expectedTurnId'], texts=texts)
+        send({'id': frame['id'], 'result': {'turnId': turn}})
         if instruction.get('mode') != 'hold':
             threading.Thread(target=work, args=(thread, turn, instruction), daemon=True).start()
     elif method == 'turn/interrupt':
