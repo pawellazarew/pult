@@ -2165,6 +2165,31 @@ async fn run_job(
     job.closed.send_replace(Closed::Confirmed);
     shared.changed.notify_waiters();
 }
+async fn wait_provider_terminal(
+    info: &Mutex<Info>,
+    changed: &Notify,
+    shared_changed: &Notify,
+    #[cfg(test)] mut after_false: Option<Box<dyn FnOnce() + Send>>,
+) {
+    loop {
+        // Register both wakeups before checking the predicate. The router can
+        // publish terminal + notify_waiters from another runtime worker.
+        let changed = changed.notified();
+        let shared_changed = shared_changed.notified();
+        tokio::pin!(changed, shared_changed);
+        changed.as_mut().enable();
+        shared_changed.as_mut().enable();
+        if info.lock().expect("Codex job").provider_terminal {
+            return;
+        }
+        #[cfg(test)]
+        if let Some(hook) = after_false.take() {
+            hook();
+        }
+        tokio::select! {_=changed=>{},_=shared_changed=>{}}
+    }
+}
+
 async fn cleanup_job(shared: &Shared, job: &Job) {
     // Never release the ticket/daemon ownership while its durable write can
     // still mutate the registry. Preparation cancellation cannot detach this IO.
@@ -2215,12 +2240,14 @@ async fn cleanup_job(shared: &Shared, job: &Job) {
                         timeout,
                     )
                     .await;
-                loop {
-                    if job.info.lock().expect("Codex job").provider_terminal {
-                        return;
-                    }
-                    tokio::select! {_=job.changed.notified()=>{},_=shared.changed.notified()=>{}}
-                }
+                wait_provider_terminal(
+                    &job.info,
+                    &job.changed,
+                    &shared.changed,
+                    #[cfg(test)]
+                    None,
+                )
+                .await;
             };
             let _ = tokio::time::timeout(timeout, wait).await;
         }
@@ -2449,5 +2476,102 @@ mod blocking_check_tests {
         assert_eq!(frame["result"]["decision"], "deny");
         response.finish().await.unwrap();
         client.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod terminal_wait_tests {
+    use super::*;
+    fn info() -> Arc<Mutex<Info>> {
+        Arc::new(Mutex::new(Info {
+            thread: None,
+            native: None,
+            model: None,
+            effective: Approval::ReadOnly,
+            thread_inflight: false,
+            dispatched: true,
+            acknowledged: true,
+            uncertain_start: false,
+            dispatch_started: None,
+            provider_terminal: false,
+            unsupported: false,
+            open_tools: HashSet::new(),
+        }))
+    }
+    #[tokio::test]
+    async fn terminal_between_false_read_and_wait_registration_is_never_lost() {
+        for job_notification in [true, false] {
+            let info = info();
+            let changed = Arc::new(Notify::new());
+            let shared_changed = Arc::new(Notify::new());
+            let publishing = info.clone();
+            let notify = if job_notification {
+                changed.clone()
+            } else {
+                shared_changed.clone()
+            };
+            let mut waiting = Box::pin(wait_provider_terminal(
+                &info,
+                &changed,
+                &shared_changed,
+                Some(Box::new(move || {
+                    publishing.lock().unwrap().provider_terminal = true;
+                    notify.notify_waiters();
+                })),
+            ));
+            assert!(
+                waiting
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_ready(),
+                "known terminal plus notification was lost between predicate and wait; job_notification={job_notification}"
+            );
+        }
+    }
+    #[tokio::test]
+    async fn unrelated_notification_does_not_confirm_a_nonterminal_turn() {
+        let info = info();
+        let changed = Arc::new(Notify::new());
+        let shared_changed = Arc::new(Notify::new());
+        let unrelated = shared_changed.clone();
+        let mut waiting = Box::pin(wait_provider_terminal(
+            &info,
+            &changed,
+            &shared_changed,
+            Some(Box::new(move || unrelated.notify_waiters())),
+        ));
+        assert!(
+            waiting
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        info.lock().unwrap().provider_terminal = true;
+        changed.notify_waiters();
+        assert!(
+            waiting
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_ready()
+        );
+    }
+    #[tokio::test]
+    async fn already_terminal_needs_no_notification() {
+        let info = info();
+        info.lock().unwrap().provider_terminal = true;
+        let changed = Notify::new();
+        let shared_changed = Notify::new();
+        let mut waiting = Box::pin(wait_provider_terminal(
+            &info,
+            &changed,
+            &shared_changed,
+            None,
+        ));
+        assert!(
+            waiting
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_ready()
+        );
     }
 }
