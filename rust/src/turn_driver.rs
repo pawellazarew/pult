@@ -223,6 +223,7 @@ impl Handle {
 struct Control {
     cancel: watch::Sender<bool>,
     progress: watch::Sender<Progress>,
+    spawn_sealed: std::sync::atomic::AtomicBool,
 }
 struct State {
     core: Coordinator,
@@ -257,6 +258,59 @@ impl MemoryAction {
             std::sync::atomic::Ordering::AcqRel,
             std::sync::atomic::Ordering::Acquire,
         );
+    }
+    fn seal(&self) -> bool {
+        if std::time::Instant::now() >= self.deadline {
+            return false;
+        }
+        self.state
+            .compare_exchange(
+                0,
+                1,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    }
+}
+
+/// Trusted-host admission for one exact ticket's Route A process spawn.
+/// No native IDs, callbacks, filesystem work or OS process are stored here.
+/// A successful seal is irreversible: cancellation afterwards may observe a
+/// new PID and must stop/join it; it is never proof that nothing was spawned.
+/// This capability is deliberately neither Debug nor Serialize nor Clone.
+pub struct SpawnAction {
+    ticket: Ticket,
+    deadline: std::time::Instant,
+    state: std::sync::atomic::AtomicU8,
+}
+impl SpawnAction {
+    pub fn new(ticket: Ticket, deadline: std::time::Instant) -> Self {
+        Self {
+            ticket,
+            deadline,
+            state: std::sync::atomic::AtomicU8::new(0),
+        }
+    }
+    /// Wins only before seal. Repeating cancellation preserves NeverSent;
+    /// cancellation after a successful seal cannot erase possible dispatch.
+    pub fn cancel(&self) -> bool {
+        self.state
+            .compare_exchange(
+                0,
+                2,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    }
+    pub fn sealed(&self) -> bool {
+        self.state.load(std::sync::atomic::Ordering::Acquire) == 1
+    }
+    /// This proves no successful Driver seal, not completion of owned IO.
+    /// It cannot by itself authorize clearing durable markers/releasing leases.
+    pub fn never_sent(&self) -> bool {
+        self.state.load(std::sync::atomic::Ordering::Acquire) == 2
     }
     fn seal(&self) -> bool {
         if std::time::Instant::now() >= self.deadline {
@@ -381,7 +435,11 @@ impl Driver {
             })?;
         let (cancel, _) = watch::channel(false);
         let (progress, receiver) = watch::channel(Progress::Starting);
-        let control = Arc::new(Control { cancel, progress });
+        let control = Arc::new(Control {
+            cancel,
+            progress,
+            spawn_sealed: std::sync::atomic::AtomicBool::new(false),
+        });
         state.jobs.insert(ticket.clone(), control.clone());
         drop(state);
         let (accepted, accepted_rx) = oneshot::channel();
@@ -492,6 +550,47 @@ impl Driver {
             return None;
         }
         Some(accepted)
+    }
+    /// Bounded in-memory linearization against Driver cancel/fault/shutdown.
+    /// Host policy/filesystem callbacks and launch validation must finish first.
+    /// Only the exact Dispatching snapshot can seal; even a new SpawnAction
+    /// cannot grant a second spawn for the same ticket. No IO/callback/OS spawn
+    /// occurs under this mutex. Invoke from Process's actual SpawnGate frontier;
+    /// after true, retain process/IO ownership through cancellation and failure.
+    pub fn seal_spawn(
+        &self,
+        ticket: &Ticket,
+        expected: &TurnSnapshot,
+        action: &SpawnAction,
+    ) -> bool {
+        let state = self.inner.state.lock().expect("driver state mutex");
+        if state.closed || state.storage_failed || &action.ticket != ticket {
+            return false;
+        }
+        let Some(active) = state.core.active(ticket) else {
+            return false;
+        };
+        if active.phase() != crate::turn_coordinator::Phase::Dispatching
+            || active.cancel_requested()
+            || active.snapshot() != expected
+        {
+            return false;
+        }
+        let Some(control) = state.jobs.get(ticket) else {
+            return false;
+        };
+        if *control.cancel.borrow()
+            || control
+                .spawn_sealed
+                .load(std::sync::atomic::Ordering::Relaxed)
+            || !action.seal()
+        {
+            return false;
+        }
+        control
+            .spawn_sealed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        true
     }
     pub async fn wait_for_storage_failure(&self) {
         loop {
