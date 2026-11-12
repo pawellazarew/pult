@@ -86,8 +86,29 @@ or user receipt. The fixtures use an isolated private account and local programs
 not installed providers or real network requests. A pending permission remains
 `blocked_permission`, rather than being overwritten by a late working status.
 
-The full local all-targets run passed 566 tests across 40 binaries; the explicitly
-opt-in installed-Codex smoke test remains ignored. Clippy all-targets with warnings
+The full local all-targets run passed 577 tests across 40 binaries; the explicitly
+opt-in installed-Codex smoke test remains ignored in the default run. A separate
+installed-binary initialize/shutdown smoke also passed with an isolated HOME; it
+performed no model turn or authentication operation. Clippy all-targets with warnings
 as errors and the repository's 13-rule leak guard also pass. These checks establish
 this experimental slice; they do not prove real-account compatibility, production
 cutover, queue/steering parity, or the completed Rust migration.
+
+## Blocking IO and uncertain storage
+
+Fresh policy/registry/filesystem checks run in owned blocking steps. The final
+check and dispatch seal (or native enqueue) share one step; moving IO off Tokio
+must not add an authorization gap. Stop revokes dispatch and requests process
+shutdown before waiting for outstanding host IO. Cleanup retains the turn/daemon
+owner until those checks finish, including an aborted approval waiter.
+
+An uncertain Registry commit latches global execution failure, even when a later
+mutation would be a no-op. Foundation metadata mutations propagate the same
+fault. Scoped agent memory reads and credential issuance deny poisoned or failed
+execution contexts; reads revalidate their session and lease after database IO.
+Unscoped owner repair reads and credential revocation remain available.
+
+The daemon explicitly unlocks its private owner guard only after metadata cleanup.
+A duplicated open-file description must not extend ownership after that cleanup;
+a separate regression covers replacement ownership while the duplicate remains
+open.
