@@ -13,11 +13,13 @@ use std::sync::{
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-pub(crate) const METHODS: [&str; 10] = [
+pub(crate) const METHODS: [&str; 12] = [
     "agent.start",
     "agent.list",
     "agent.prompt",
     "agent.stop",
+    "agent.recovery.get",
+    "agent.recovery.confirm",
     "agent.queue.send",
     "agent.queue.resume",
     "agent.queue.remove",
@@ -78,6 +80,18 @@ impl Gate {
                 } else {
                     Some(self.reserve(&name(params)?, params["interrupt"] == true)?)
                 }
+            }
+            "agent.recovery.confirm" => {
+                crate::session_recovery_api::fields(
+                    params,
+                    &["name", "recoveryId", "acknowledgePossibleExecution"],
+                )?;
+                if params["acknowledgePossibleExecution"] != true
+                    || !params["recoveryId"].is_string()
+                {
+                    return Err(invalid());
+                }
+                Some(self.reserve(&name(params)?, false)?)
             }
             "agent.stop" => {
                 fields(params, &["name", "turnId"])?;
@@ -182,7 +196,7 @@ impl Gate {
     }
 }
 impl CommandGuard {
-    fn check(&self) -> Result<()> {
+    pub(crate) fn check(&self) -> Result<()> {
         if self.token.cancelled.load(Ordering::Acquire) {
             Err(error("cancelled", "session command was stopped"))
         } else {
@@ -210,6 +224,36 @@ impl CommandGuard {
         self.check()?;
         // execute reserves synchronously; stop cannot miss the handoff.
         Ok(runtime.execute(key, input))
+    }
+    /// The outer authenticated owner dispatcher and explicit acknowledgement
+    /// are checked before this handoff. Token validation and Runtime's memory
+    /// reservation share this short lock, so a later stop cannot miss it.
+    pub(crate) fn submit_recovery(
+        &self,
+        runtime: &crate::zcode_runtime::ZcodeRuntime,
+        key: SessionKey,
+        id: String,
+    ) -> Result<
+        crate::turn_driver::Task<
+            std::result::Result<
+                crate::zcode_runtime::RecoveryResult,
+                crate::zcode_runtime::RuntimeError,
+            >,
+        >,
+    > {
+        let gate = self.gate.upgrade().ok_or_else(storage)?;
+        let entries = gate.entries.lock().map_err(|_| storage())?;
+        if self.name != key.name
+            || !entries
+                .get(&self.name)
+                .is_some_and(|token| Arc::ptr_eq(token, &self.token))
+        {
+            return Err(error("cancelled", "recovery command was stopped"));
+        }
+        self.check()?;
+        let action = crate::zcode_runtime::OwnerRecoveryAction::from_authenticated_owner(key, id)
+            .map_err(|e| error(e.code(), "invalid recovery selector"))?;
+        Ok(runtime.confirm_missing_for_next_turn(action))
     }
 }
 impl Drop for CommandGuard {
@@ -298,13 +342,26 @@ pub(crate) async fn lookup(state: Arc<State>, name: String) -> Result<(SessionKe
     .map_err(|_| storage())?
 }
 pub(crate) fn available(state: &State) -> Result<()> {
-    if *state.stop.borrow() {
-        return Err(error("closed", "daemon is stopping"));
-    }
+    diagnostic_available(state)?;
     if runtime_state::unavailable(state) {
         return Err(storage());
     }
     Ok(())
+}
+/// A read-only recovery snapshot must remain reachable when execution is
+/// faulted, including an unconfirmed metadata write. Never admit it at shutdown.
+pub(crate) fn diagnostic_available(state: &State) -> Result<()> {
+    if *state.stop.borrow() {
+        return Err(error("closed", "daemon is stopping"));
+    }
+    Ok(())
+}
+fn method_available(state: &State, method: &str) -> Result<()> {
+    if method == "agent.recovery.get" {
+        diagnostic_available(state)
+    } else {
+        available(state)
+    }
 }
 
 async fn create(state: Arc<State>, params: Value, client: ClientKind) -> Result<Box<RawValue>> {
@@ -611,7 +668,7 @@ async fn execute_owned(
     command: Option<CommandGuard>,
     revoked: Arc<tokio::sync::watch::Sender<bool>>,
 ) -> Result<Box<RawValue>> {
-    available(&state)?;
+    method_available(&state, method)?;
     match method {
         "agent.start" => create(state, params, client).await,
         "agent.list" => list(state, params).await,
@@ -620,6 +677,10 @@ async fn execute_owned(
             crate::session_queue::request(state, method, params, by, revoked).await
         }
         "agent.stop" => stop(state, params, command).await,
+        "agent.recovery.get" => crate::session_recovery_api::get(state, params).await,
+        "agent.recovery.confirm" => {
+            crate::session_recovery_api::confirm(state, params, command).await
+        }
         "perm.list" => {
             fields(&params, &["name"])?;
             let name = params
@@ -644,11 +705,12 @@ pub(crate) fn execute(
 ) -> crate::turn_driver::Task<Result<Box<RawValue>>> {
     // Reserve before spawning so frame admission order, not task scheduling,
     // determines which earlier prompt an unconditional stop revokes.
-    let admission =
-        match available(&state).and_then(|_| state.session_commands.admit(method, &params)) {
-            Ok(admission) => admission,
-            Err(error) => return Box::pin(async move { Err(error) }),
-        };
+    let admission = match method_available(&state, method)
+        .and_then(|_| state.session_commands.admit(method, &params))
+    {
+        Ok(admission) => admission,
+        Err(error) => return Box::pin(async move { Err(error) }),
+    };
     let job = state.host_jobs.track();
     let method = method.to_owned();
     let by = by.to_owned();
@@ -759,6 +821,31 @@ pub(crate) mod tests {
             revoked,
             "earlier admitted prompt was invisible to stop before task polling"
         );
+        assert!(state.native_runtime.get().is_none());
+        assert_eq!(state.last_event_id.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn stop_revokes_unpolled_owner_recovery_before_lookup_or_runtime_init() {
+        let (_home, state) = fixture();
+        let confirm = execute(
+            state.clone(),
+            "agent.recovery.confirm",
+            json!({"name":"chat", "recoveryId":"zr-fixture", "acknowledgePossibleExecution":true}),
+            ClientKind::Other,
+            "fixture",
+        );
+        let stop = execute(
+            state.clone(),
+            "agent.stop",
+            json!({"name":"chat"}),
+            ClientKind::Other,
+            "fixture",
+        );
+        assert_eq!(confirm.await.unwrap_err().code, "cancelled");
+        assert_eq!(stop.await.unwrap_err().code, "not_found");
+        state.host_jobs.wait().await;
+        assert!(state.zcode_runtime.get().is_none());
         assert!(state.native_runtime.get().is_none());
         assert_eq!(state.last_event_id.load(Ordering::Acquire), 0);
     }

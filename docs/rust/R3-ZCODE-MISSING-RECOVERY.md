@@ -1,6 +1,6 @@
 # ZCode: явное восстановление после missing native session
 
-Этот шаг добавляет Worker/Runtime consumers типизированного Owner proof. RPC и UI подтверждения подключаются отдельно. Это не доказательство отсутствия выполнения и не полный parity/recovery после перезапуска.
+Этот шаг добавляет Worker/Runtime consumers типизированного Owner proof и owner-only RPC подтверждения. UI подключается отдельно. Это не доказательство отсутствия выполнения и не полный parity/recovery после перезапуска.
 
 ## Когда появляется предложение
 
@@ -24,6 +24,15 @@ Crate-private `OwnerRecoveryAction::from_authenticated_owner` предназна
 Никаких prompt, автоматического повторения, queue pop/resume или model calls. Следующий явно отправленный input проходит обычные свежие policy/network gates и начинает новый native conversation. После cancel до seal сброса нет; после seal отмена не объявляется rollback. Stop/auth cancellation синхронно отзывает permit. Shutdown не возвращает Stopped при pending owned IO: известная незавершённая попытка остаётся quarantined, после её завершения можно повторить cleanup. Callback panic/неизвестное IO публикует storage fault и сохраняет permanent quarantine, поскольку trusted completion seam для произвольного внешнего IO отсутствует.
 
 ## Границы и проверка
+
+### Owner RPC
+
+- `agent.recovery.get({name})` читает только существующий Runtime. Ответ содержит `provider`, nullable `recovery`, `deliveryUnknown` и `executionUnavailable`. Без Runtime proof возвращается `null`, даже если metadata marker есть. Чтение не обнаруживает CLI, не запускает провайдера и доступно при execution/storage fault для диагностики; остановка демона закрывает и этот запрос. Ошибка чтения Registry не скрывается как отсутствие проблемы. Снимок может измениться между чтением и действием.
+- `agent.recovery.confirm({name,recoveryId,acknowledgePossibleExecution:true})` требует owner-аутентификацию сокета и явное признание возможного предыдущего выполнения. JSON `true` сам по себе не даёт полномочий: memory/read/turn и Claude ask credentials не попадают в этот dispatcher. Неизвестные поля запрещены. Холодный Runtime не создаётся; чужой, устаревший или использованный selector не разрешает сброс.
+- Confirm занимает тот же per-session command gate, что prompt/stop. Передача в Runtime и проверка cancellation сериализованы с stop: отмена ранее принятой команды не теряется до handoff. Owned IO продолжается при потере клиентского ответа, поэтому результат проверяют повторным чтением, а не автоповтором задачи.
+- Успешный ответ содержит `requestedEventId`, `committedEventId`, `reset:true`, `mayHaveExecuted:true`, `queuePaused:true`, `startsNewConversation:true`. Это результат metadata reset; команда не отправляет реплику и не возобновляет очередь. Последующие отдельные owner-команды могут изменить паузу. При ошибке ответ не обещает откат уже начавшегося IO.
+
+В Node эти два имени отмечены как extension, без нового обработчика и без молчаливого fallback. Rust публикует их в supported capabilities. Управление через установленное окно и совместимость рабочего переключения проверяются отдельно.
 
 Proof существует только в текущем Owner/Runtime lifetime. После cold restart marker остаётся блокирующим; capability нельзя восстановить из JSON/regex. Нужны отдельные manual inspection/import/recovery semantics; произвольный установленный старый Node backend не объявляется совместимым с новыми markers. Existing source-controlled Node rollback guard сохраняется.
 

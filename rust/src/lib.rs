@@ -53,6 +53,7 @@ mod session_memory_api;
 mod session_model;
 mod session_queue;
 mod session_read;
+mod session_recovery_api;
 mod session_runtime_api;
 mod session_tree;
 mod snapshot;
@@ -113,9 +114,11 @@ pub const PARTIAL: [&str; 11] = [
     "perm.request",
     "perm.resolve",
 ];
-pub const SUPPORTED: [&str; 28] = [
+pub const SUPPORTED: [&str; 30] = [
     "agent.archive",
     "agent.read",
+    "agent.recovery.confirm",
+    "agent.recovery.get",
     "agent.rename",
     "agent.seen",
     "agent.tree",

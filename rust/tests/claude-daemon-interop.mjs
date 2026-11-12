@@ -5,6 +5,7 @@ import { mkdtempSync, mkdirSync, chmodSync, writeFileSync, readFileSync, existsS
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import net from 'node:net'
+import { createInterface } from 'node:readline'
 const { connectClient } = await import('../../dist/cli/client.js')
 const { layout } = await import('../../dist/core/paths.js')
 const root = fileURLToPath(new URL('../../', import.meta.url))
@@ -52,6 +53,31 @@ async function rejectedPurpose(key, purpose) {
     const response = await frame
     assert.equal(response.type, 'error')
   } finally { socket.destroy() }
+}
+async function askCannotRecover(key) {
+  const socket = net.createConnection(paths.sock)
+  socket.on('error', () => {})
+  const lines = createInterface({ input: socket }), frames = lines[Symbol.asyncIterator]()
+  async function exchange(value) {
+    let timer
+    const pending = frames.next()
+    socket.write(JSON.stringify(value) + '\n')
+    try {
+      const frame = await Promise.race([pending, new Promise((_, reject) => { timer = setTimeout(() => reject(Error('scoped recovery deadline')), 4000) })])
+      assert.equal(frame.done, false)
+      return JSON.parse(frame.value)
+    } finally { clearTimeout(timer) }
+  }
+  try {
+    await new Promise((resolve, reject) => { socket.once('connect', resolve); socket.once('error', reject) })
+    const hello = await exchange({ type: 'hello', protocol: 1, client: 'mcp-ask', ask: key })
+    assert.equal(hello.type, 'hello_ok')
+    assert.deepEqual(hello.capabilities.supportedMethods, ['perm.request'])
+    for (const [id, method] of ['agent.recovery.get', 'agent.recovery.confirm'].entries()) {
+      const result = await exchange({ id, method, params: { name: 'ask', recoveryId: 'zr-forged', acknowledgePossibleExecution: true } })
+      assert.equal(result.error.code, 'forbidden')
+    }
+  } finally { lines.close(); socket.destroy() }
 }
 async function revokedHelper(server) {
   const helper = spawn(server.command, server.args ?? [], { env: { HOME: account, PATH: '/usr/bin:/bin', ...server.env }, stdio: ['pipe', 'pipe', 'pipe'] })
@@ -119,6 +145,7 @@ try {
     liveScope = scope('ask')
     await rejectedPurpose(liveScope.server.env.PULT_ASK_KEY, 'token')
     await rejectedPurpose(liveScope.server.env.PULT_ASK_KEY, 'memory')
+    await askCannotRecover(liveScope.server.env.PULT_ASK_KEY)
     await assert.rejects(client.request('perm.resolve', { id: card.id, decision: 'allow', updatedInput: { command: 'rewritten' } }), error => error.code === 'invalid_params')
     assert.equal((await client.request('perm.list', { name: 'ask' })).pending.length, 1)
     assert.equal((await client.request('perm.resolve', { id: card.id, decision: 'allow', scope: 'once' })).resolved, true)

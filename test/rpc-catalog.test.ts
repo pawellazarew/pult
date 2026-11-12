@@ -59,12 +59,12 @@ describe('RPC catalog generation and source drift', () => {
     })
   })
 
-  it('keeps partial schemas separate from the 28 fully implemented methods', () => {
+  it('keeps partial schemas separate from the 30 fully implemented methods', () => {
     const catalog = JSON.parse(readFileSync(catalogSource, 'utf8')) as Catalog
     const implemented = catalog.methods.filter((method) => method.rust === 'implemented').map((method) => method.name)
     const partial = catalog.methods.filter((method) => method.rust === 'partial')
-    assert.equal(implemented.length, 28)
-    assert.equal(catalog.methods.length, 99)
+    assert.equal(implemented.length, 30)
+    assert.equal(catalog.methods.length, 101)
     assert.equal(catalog.methods.filter((method) => method.node === 'implemented').length, 85)
     assert.deepEqual(partial.map((method) => method.name), ['agent.list', 'agent.prompt', 'agent.queue.move', 'agent.queue.remove', 'agent.queue.resume', 'agent.queue.send', 'agent.start', 'agent.stop', 'perm.list', 'perm.request', 'perm.resolve'])
     assert.ok(partial.every((method) => method.paramsSchema && method.resultSchema))
@@ -140,6 +140,53 @@ describe('RPC catalog generation and source drift', () => {
         assert.equal(entry.paramsSchema.properties[field], undefined)
       }
     }
+  })
+
+  it('describes owner-only ZCode recovery extensions without provider initialization or boolean authority', () => {
+    const catalog = JSON.parse(readFileSync(catalogSource, 'utf8'))
+    const methods = catalog.methods.filter((entry: { name: string }) => entry.name.startsWith('agent.recovery.'))
+    assert.deepEqual(methods.map((entry: { name: string }) => entry.name), ['agent.recovery.confirm', 'agent.recovery.get'])
+    for (const method of methods) {
+      assert.equal(method.node, 'extension')
+      assert.equal(method.rust, 'implemented')
+      assert.equal(method.access, 'owner')
+      assert.equal(method.testOnly, false)
+      assert.match(method.description, /ZCode/)
+      assert.match(method.description, /without initializing a provider or sending input/)
+      assert.equal(method.paramsSchema.additionalProperties, false)
+      assert.equal(method.resultSchema.additionalProperties, false)
+      assert.deepEqual(method.resultSchema.properties.provider.enum, ['zcode'])
+    }
+    const [confirm, get] = methods
+    assert.deepEqual(get.paramsSchema.required, ['name'])
+    assert.deepEqual(Object.keys(get.paramsSchema.properties), ['name'])
+    assert.deepEqual(get.resultSchema.required, ['provider', 'recovery', 'deliveryUnknown', 'executionUnavailable'])
+    assert.deepEqual(get.resultSchema.properties.executionUnavailable, { type: 'boolean' })
+    const faultDiagnostic = { provider: 'zcode', recovery: { recoveryId: 'recovery-fixture', sessionId: 'zcode-fixture', createdAt: '2026-11-13T00:00:00Z', state: 'unconfirmed', mayHaveExecuted: true }, deliveryUnknown: true, executionUnavailable: true }
+    const availableDiagnostic = { provider: 'zcode', recovery: null, deliveryUnknown: false, executionUnavailable: false }
+    for (const example of [faultDiagnostic, availableDiagnostic]) {
+      assert.deepEqual(Object.keys(example), get.resultSchema.required)
+      assert.equal(typeof example.executionUnavailable, get.resultSchema.properties.executionUnavailable.type)
+    }
+    const recovery = get.resultSchema.properties.recovery
+    assert.deepEqual(recovery.type, ['object', 'null'])
+    assert.equal(recovery.additionalProperties, false)
+    assert.deepEqual(recovery.required, ['recoveryId', 'sessionId', 'createdAt', 'state', 'mayHaveExecuted'])
+    assert.deepEqual(recovery.properties.state.enum, ['available', 'recovering', 'unconfirmed'])
+    assert.deepEqual(recovery.properties.mayHaveExecuted.enum, [true])
+    assert.deepEqual(confirm.paramsSchema.required, ['name', 'recoveryId', 'acknowledgePossibleExecution'])
+    assert.deepEqual(confirm.paramsSchema.properties.acknowledgePossibleExecution, { type: 'boolean', enum: [true] })
+    assert.match(confirm.description, /acknowledgement JSON alone grants no authority/)
+    assert.deepEqual(confirm.resultSchema.required, ['provider', 'reset', 'mayHaveExecuted', 'requestedEventId', 'committedEventId', 'queuePaused', 'startsNewConversation'])
+    for (const field of ['reset', 'mayHaveExecuted', 'queuePaused', 'startsNewConversation']) assert.deepEqual(confirm.resultSchema.properties[field], { type: 'boolean', enum: [true] })
+    for (const field of ['requestedEventId', 'committedEventId']) assert.deepEqual(confirm.resultSchema.properties[field], { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER })
+    fixture((paths) => {
+      const generated = generate(paths)
+      assert.equal(generated.status, 0, generated.stderr)
+      const output = readFileSync(paths.out, 'utf8')
+      assert.match(output, /"acknowledgePossibleExecution": true/)
+      assert.match(output, /"recovery": .* \| null/)
+    })
   })
 
   it('requires both schemas and supported schema types for partial methods', () => {

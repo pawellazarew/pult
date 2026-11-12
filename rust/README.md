@@ -6,10 +6,14 @@
 `events.subscribe`, `events.unsubscribe`, `events.snapshot`, `events.history`, `events.get`,
 `agent.rename`, `agent.archive`, `agent.seen`, `agent.read`, `agent.tree` и `protocol.catalog`. Также добавлены M1-хранилище памяти и read-only ключи доверенных сессий с каталогом;
 договоры — [M1-MEMORY](../docs/rust/M1-MEMORY.md) и
-[M2-READ-CONTEXT](../docs/rust/M2-READ-CONTEXT.md). Всего Rust поддерживает 28 методов
-из 99; ещё 11 экспериментальных partial RPC включают обычные Claude/Codex turns,
+[M2-READ-CONTEXT](../docs/rust/M2-READ-CONTEXT.md). Всего Rust поддерживает 30 методов
+из 101; ещё 11 экспериментальных partial RPC включают обычные Claude/Codex/ZCode turns,
 общую очередь и Codex steering. Интеграция провайдеров —
 [R3-NATIVE-PROVIDERS](../docs/rust/R3-NATIVE-PROVIDERS.md). Журнал использует нынешний формат `events/journal.jsonl`.
+Owner-only `agent.recovery.get/confirm` позволяют осмотреть и явно сбросить
+привязку к отсутствующей native ZCode-сессии после joined cleanup текущего
+Runtime, без повторной отправки. Ограничения и договор —
+[R3-ZCODE-MISSING-RECOVERY](../docs/rust/R3-ZCODE-MISSING-RECOVERY.md).
 
 Полный список методов берётся из `../protocol/methods.json`. В `hello_ok` и статусе
 публикуются `capabilities.experimental` и `supportedMethods`. Каталог отмечает остальные

@@ -90,8 +90,8 @@ try {
   await check('catalog and unavailable methods', async () => {
     const catalog = await client.request('protocol.catalog')
     assert.equal(catalog.protocolVersion, 1)
-    assert.equal(catalog.methods.length, 99)
-    assert.equal(catalog.methods.filter((m) => m.rust === 'implemented').length, 28)
+    assert.equal(catalog.methods.length, 101)
+    assert.equal(catalog.methods.filter((m) => m.rust === 'implemented').length, 30)
     assert.equal(catalog.methods.filter((m) => m.node === 'implemented').length, 85)
     assert.equal(catalog.methods.find((m) => m.name === 'memory.configure').access, 'owner')
     assert.deepEqual(catalog.methods.filter((m) => m.access === 'owner-or-turn-memory').map((m) => m.name), ['memory.add', 'memory.forget', 'memory.update'])
