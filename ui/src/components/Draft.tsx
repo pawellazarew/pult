@@ -7,6 +7,8 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { DragEvent, KeyboardEvent as ReactKeyboardEvent, ReactElement, ReactNode, RefObject } from 'react'
 import { t } from '../lib/i18n.js'
+import { useSlashMenu } from './SlashMenu.js'
+import type { SlashLoader } from './SlashMenu.js'
 import { ProviderIcon } from './ProviderIcon.js'
 import type { ApprovalMode } from '../../../src/adapters/types.js'
 import type { SavedAttachment } from '../../../shell/src/contract.js'
@@ -84,6 +86,9 @@ export interface DraftViewProps {
   /** Уровень доступа из меню: полный без согласия — диалог согласия у вызывающего. */
   onApproval(a: ApprovalMode): void
   onSend(files: DraftFiles | null): void
+  commands?: SlashLoader | null
+  onClose?(dirty: boolean): void
+  onDirtyChange?(dirty: boolean): void
   onDiscard(): void
   onCheckProviders(): void
   onClaim(): void
@@ -157,7 +162,7 @@ function ChipMenu({ anchor, onClose, label, testId, children, footer }: {
   // Esc закрывает меню, где бы ни был фокус, — раньше горячих клавиш окна (там Esc убрал бы пустой черновик).
   useEffect(() => {
     const h = (e: KeyboardEvent): void => {
-      if (e.key !== 'Escape' || document.querySelector('[aria-modal="true"]')) return
+      if (e.key !== 'Escape' || e.isComposing || e.keyCode === 229 || document.querySelector('[aria-modal="true"]')) return
       e.preventDefault()
       e.stopImmediatePropagation()
       onClose()
@@ -214,6 +219,9 @@ export function DraftView(p: DraftViewProps): ReactElement {
   const [menu, setMenu] = useState<MenuKind | null>(p.initialMenu ?? null)
   const firstReset = useRef(p.menuReset)
   const box = useRef<HTMLTextAreaElement>(null)
+  const commandsRef = useRef(p.commands); commandsRef.current = p.commands
+  const loadCommands = useCallback((force?: boolean) => commandsRef.current!(force), [])
+  const slash = useSlashMenu({ ta: box, text: d.text, setText: p.onText, load: p.commands ? loadCommands : null, scope: `${d.id}:${d.provider}:${d.scope}:${d.cwd ?? ''}` })
   const refs = {
     folder: useRef<HTMLButtonElement>(null), model: useRef<HTMLButtonElement>(null), effort: useRef<HTMLButtonElement>(null),
     access: useRef<HTMLButtonElement>(null), speed: useRef<HTMLButtonElement>(null), more: useRef<HTMLButtonElement>(null),
@@ -274,7 +282,19 @@ export function DraftView(p: DraftViewProps): ReactElement {
   const branchErr = d.worktree ? branchError(d.branch) : null
   const blocked = !p.online || p.foreign || !!refusal || !!branchErr || readinessBlocks(readiness) || files.pending > 0
   const hasText = !!d.text.trim() || files.items.length > 0
-  const empty = draftEmpty(d, files.items.length)
+  const empty = draftEmpty(d, files.items.length) && files.pending === 0
+  useEffect(() => { p.onDirtyChange?.(!empty) }, [empty, p.onDirtyChange])
+  const close = (): void => {
+    if (p.sending || p.obstructed) return
+    if (p.onClose) p.onClose(!empty)
+    else if (empty) p.onDiscard()
+  }
+  const onDraftKey = (e: ReactKeyboardEvent<HTMLElement>): void => {
+    if (e.key !== 'Escape' || e.nativeEvent.isComposing || e.keyCode === 229 || e.defaultPrevented) return
+    e.preventDefault(); e.stopPropagation()
+    if (menu) closeMenu()
+    else close()
+  }
   const send = (): void => {
     if (dictating) return
     const decision = submitDecision({ composing: false, repeat: false, busy: p.sending, linkLocked: Date.now() < armedAt, hasFolder: !!d.cwd, scope: d.scope, hasText, blocked })
@@ -284,11 +304,12 @@ export function DraftView(p: DraftViewProps): ReactElement {
     p.onSend(files.items.length ? { count: files.items.length, finalize: (name) => files.finalize(name) } : null)
   }
   const onKey = (e: ReactKeyboardEvent<HTMLTextAreaElement>): void => {
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return
+    if (slash.onKeyDown(e)) return
     if (e.key === 'Escape') {
-      const what = escDecision({ menuOpen: menu !== null, dialogOpen: false, empty })
-      if (what === 'menu') { e.preventDefault(); e.stopPropagation(); closeMenu() }
-      // Пустой черновик — Esc убирает его (дальше обработает окно); с текстом Esc ничего не делает и в окно не идёт.
-      else if (what !== 'discard') { e.preventDefault(); e.stopPropagation() }
+      e.preventDefault(); e.stopPropagation()
+      if (escDecision({ menuOpen: menu !== null, dialogOpen: p.obstructed, empty }) === 'menu') closeMenu()
+      else close()
       return
     }
     if (e.key !== 'Enter' || e.shiftKey || e.altKey) return
@@ -554,7 +575,7 @@ export function DraftView(p: DraftViewProps): ReactElement {
   const noFolder = !d.cwd
 
   return (
-    <section className="conv draft-view" aria-label={t('Новый чат')} data-testid="draft" data-draft={d.id} {...drag} data-drop={folderOver ? '1' : undefined}>
+    <section className="conv draft-view" aria-label={t('Новый чат')} data-testid="draft" data-draft={d.id} onKeyDown={onDraftKey} {...drag} data-drop={folderOver ? '1' : undefined}>
       <header className="conv-head">
         <div className="conv-title"><div className="top">
           <h2 className="draft-title" data-testid="draft-title">{t('Новый чат')}</h2>
@@ -576,11 +597,12 @@ export function DraftView(p: DraftViewProps): ReactElement {
           </div>
           <div className="draft-compose">
             <div className={`draft-box${full ? ' full' : ''}${files.over ? ' attachment-over' : ''}`} data-access-full={full ? '1' : undefined}>
+              {slash.menu && <div className="slash-anchor">{slash.menu}</div>}
               <AttachmentStrip items={files.items} previews={files.previews} pending={files.pending} onRemove={files.remove} />
               <textarea ref={box} rows={3} value={d.text} data-testid="draft-input" aria-label={t('Первая реплика нового чата')}
                 placeholder={general ? t('Напиши сообщение…') : t('Опиши задачу')}
                 readOnly={p.sending}
-                onChange={(e) => p.onText(e.target.value)} onKeyDown={onKey}
+                onChange={(e) => p.onText(e.target.value)} onKeyDown={onKey} onSelect={slash.onCaret} {...slash.aria}
                 onPaste={files.onPaste} onDragEnter={files.onDragEnter} onDragOver={files.onDragOver} onDragLeave={files.onDragLeave} onDrop={files.onDrop} />
               <div className="draft-tb">
                 {files.enabled && <AttachButton disabled={p.sending || files.pending > 0} onFiles={files.addFiles} />}

@@ -5,7 +5,7 @@ import { basename, dirname, join } from 'node:path'
 import { tr } from '../i18n/shared.js'
 import { SESSION_NAME_RE } from './registry.js'
 
-function rootFor(home: string): string {
+export function generalWorkspaceRoot(home: string): string {
   const root = join(home, 'conversations')
   try { mkdirSync(root, { mode: 0o700 }) } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e
@@ -20,7 +20,7 @@ function rootFor(home: string): string {
 
 export function createGeneralWorkspace(home: string, name: string): string {
   if (!SESSION_NAME_RE.test(name)) throw new Error(tr('неверное имя разговора'))
-  const path = mkdtempSync(join(rootFor(home), `${name}-`))
+  const path = mkdtempSync(join(generalWorkspaceRoot(home), `${name}-`))
   chmodSync(path, 0o700)
   validateGeneralWorkspace(home, name, path)
   return path

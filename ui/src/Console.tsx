@@ -105,6 +105,7 @@ declare global {
 }
 
 type Modal = null | { type: 'maintenance' } | { type: 'external' } | { type: 'doctor' } | { type: 'mcp' } | { type: 'stop'; name: string } | { type: 'rm'; name: string } | { type: 'hide'; path: string; sessions: readonly string[]; busy: readonly string[] } | { type: 'rename'; name: string } | { type: 'help' } | { type: 'search' }
+  | { type: 'discard-draft'; id: string }
   | { type: 'temporary-end'; identity: TemporaryIdentity }
   | { type: 'settings'; section?: import('./components/Settings.js').SettingsSection } | { type: 'configure'; name: string; pick: SettingsPick; reason: 'misfit'; text?: string }
   /** Шаг A: полный доступ без согласия — один диалог на всё время; после «Разрешить» смена уходит сама. */
@@ -378,6 +379,9 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   }, [bridge])
   // «/» в поле ввода (docs/19): скиллы и команды папки чата у демона. Старая оболочка отвечает `method_not_allowed` —
   // меню говорит «после обновления».
+  const draftDirty = useRef<Record<string, boolean>>({})
+  const draftCommands = useCallback((provider: string, scope: string, cwd: string | null, force?: boolean): Promise<SlashListing> =>
+    bridge.call('agent.commands', { provider, ...(scope === 'general' ? { scope } : { cwd }), ...(force ? { force: true } : {}) }) as Promise<SlashListing>, [bridge])
   const slashCommands = useCallback((name: string, force?: boolean): Promise<SlashListing> =>
     bridge.call('agent.commands', { name, ...(force ? { force: true } : {}) }) as Promise<SlashListing>, [bridge])
   const refreshSettings = useCallback(async (): Promise<void> => {
@@ -1010,6 +1014,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   openDraftRef.current = openDraft
   const discardDraft = (id: string): void => {
     const d = draftsRef.current.find((x) => x.id === id)
+    delete draftDirty.current[id]
     setDrafts((ds) => ds.filter((x) => x.id !== id))
     if (activeDraftRef.current === id) setActiveDraft(null)
     setDraftState((m) => { const n = { ...m }; delete n[id]; return n })
@@ -1552,8 +1557,8 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         const info = document.querySelector<HTMLDetailsElement>('.chat-info[open], .health-menu[open]')
         if (!modal && info) { e.preventDefault(); const fromInfo = info.contains(document.activeElement); info.open = false; if (fromInfo) info.querySelector('summary')?.focus(); return }
         if (modal) { e.preventDefault(); setModal(null); return }
-        // Esc в черновике (§3.5): меню и поле разбираются сами; сюда доходит только пустой — он исчезает.
-        if (draft && draftEmpty(draft) && !draftState[draft.id]?.sending) { e.preventDefault(); discardDraft(draft.id); return }
+        // Меню и поле обрабатывают Esc первыми; здесь закрытие при фокусе вне черновика.
+        if (draft && !draftState[draft.id]?.sending) { e.preventDefault(); if (draftDirty.current[draft.id] ?? !draftEmpty(draft)) setModal({ type: 'discard-draft', id: draft.id }); else discardDraft(draft.id); return }
         if (runtimeOpen) { e.preventDefault(); setRuntimeOpen(false); return }
         if (filesOpen) { e.preventDefault(); closeFiles(); return }
         if (current && statusView(current.status).busy) { e.preventDefault(); setModal({ type: 'stop', name: current.name }) }
@@ -1563,6 +1568,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   }
   useEffect(() => {
     const h = (e: KeyboardEvent): void => {
+      if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return
       const a = hotkeyAction(e, IS_MAC)
       if (a) onHot.current(a, e)
     }
@@ -1691,6 +1697,9 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
           <DraftView key={draft.id} headerActions={workspaceActions} draft={draft} env={envFor(draft.cwd)} catalog={providers} checking={providersChecking} now={now}
             recent={recent} projects={groups.filter((g) => g.scope !== 'general').map((g) => g.path)} sending={!!draftState[draft.id]?.sending} error={draftState[draft.id]?.error ?? null}
             online={conn.state === 'up'} foreign={foreignDrafts.has(draft.id)} obstructed={modal !== null} filePaths={filePaths}
+            commands={draft.scope === 'general' || draft.cwd ? (force) => draftCommands(draft.provider, draft.scope, draft.cwd, force) : null}
+            onDirtyChange={(dirty) => { draftDirty.current[draft.id] = dirty }}
+            onClose={(dirty) => { if (dirty) setModal({ type: 'discard-draft', id: draft.id }); else discardDraft(draft.id) }}
             noAutoFocus={quietDrafts.has(draft.id)} menuReset={draftMenuReset}
             onAttachments={(items) => updateDraft(draft.id, (x) => ({ ...x, attachments: items }))}
             onRestoreText={(text) => { updateDraft(draft.id, (x) => ({ ...x, text })) }}
@@ -1776,6 +1785,9 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         <McpServersDialog listing={mcp.listing} loading={mcp.loading} error={mcp.error} saving={mcp.saving}
           onSave={saveMcp} onClose={() => setModal({ type: 'doctor' })} />
       )}
+      {modal?.type === 'discard-draft' && <Confirm title={tr('Закрыть новый чат?')} testId="confirm-discard-draft" action={tr('Закрыть чат')} danger cancelFirst
+        text={tr('Сообщение и вложения будут удалены.')} onCancel={() => { setModal(null); requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('[data-testid="draft-input"]')?.focus()) }}
+        onOk={() => { discardDraft(modal.id); setModal(null) }} />}
       {modal?.type === 'stop' && (
         <Confirm title={tr("Остановить ход?")} testId="confirm-stop" action={tr("Остановить")} danger
           text={<>{tr("Сессия ")}{whoIs(modal.name)}{tr(" прервёт текущий ход. Разговор сохранится — можно продолжить новой репликой.")}</>}
