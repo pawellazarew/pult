@@ -127,6 +127,20 @@ pub struct McpContext {
 pub trait ScopedMcp: Send + Sync + 'static {
     /// All resources remain owned by exact ticket/generation even on panic.
     fn prepare(&self, context: McpContext) -> Task<Result<PathBuf, WorkerError>>;
+    /// Optional per-turn data catalog. Never provider system instructions or
+    /// user journal text; implementations bind the exact ticket/generation.
+    fn catalog(
+        &self,
+        _ticket: Ticket,
+        _generation: u64,
+    ) -> Task<Result<Option<String>, WorkerError>> {
+        Box::pin(async { Ok(None) })
+    }
+    /// Fresh synchronous, bounded in-memory authority check at first input poll.
+    /// Implementations must not perform filesystem IO or wait for other tasks.
+    fn check(&self, _ticket: &Ticket, _generation: u64) -> bool {
+        true
+    }
     /// Synchronous in-memory revocation only; never waits for filesystem IO.
     fn revoke(&self, ticket: &Ticket, generation: u64);
     fn cleanup(&self, ticket: Ticket, generation: u64) -> Task<Result<(), WorkerError>>;
