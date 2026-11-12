@@ -24,6 +24,7 @@ pub mod redaction;
 pub mod registry;
 pub mod runtime_config;
 mod session_api;
+pub mod session_live;
 mod session_memory;
 mod session_memory_api;
 mod session_model;
