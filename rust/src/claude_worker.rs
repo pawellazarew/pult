@@ -1188,7 +1188,11 @@ mod vault_tests {
         HOOK.call_once(|| {
             std::panic::set_hook(Box::new(|info| {
                 if let Some(location) = info.location() {
-                    eprintln!("[fixture-lifecycle] panic {}:{}", location.file(), location.line());
+                    eprintln!(
+                        "[fixture-lifecycle] panic {}:{}",
+                        location.file(),
+                        location.line()
+                    );
                 }
             }))
         });
