@@ -1,6 +1,6 @@
 //! Current core/log.ts string/value filtering, without a logger or IO.
 //!
-//! Order matters: the email rule precedes URL userinfo. Patterns deliberately
+//! Email addresses remain visible. Patterns deliberately
 //! retain JavaScript's ASCII word boundaries and non-Unicode /i behavior; Rust's
 //! default Unicode boundary/case folding would change which strings are hidden.
 //! The URL rule uses ECMAScript whitespace (BOM included, NEL excluded).
@@ -24,7 +24,6 @@ fn rules() -> &'static [Rule] {
         let non_space = r"[^\x{0009}-\x{000D}\x{0020}\x{00A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}/@]";
         let url = format!("([A-Za-z][A-Za-z0-9+.-]*://){non_space}+:{non_space}+@");
         [
-            (r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}", "<email>"),
             (r"sk-ant-[A-Za-z0-9_-]{8,}", "<token>"),
             (r"(?-u:\b)sk-[A-Za-z0-9]{16,}", "<token>"),
             (r"(?-u:\b)sk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{16,}", "<token>"),

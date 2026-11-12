@@ -151,33 +151,35 @@ fn ascii_word_boundaries_match_node_next_to_unicode_words_and_punctuation() {
     check_strings(cases);
 }
 #[test]
-fn email_rules_keep_node_partial_and_non_idna_behavior() {
-    check_strings(
-        [
-            concat!("a@", "b.co"),
-            "first.last+tag%route@sub-domain.example.test",
-            "a@b.c",
-            "a@host",
-            "a@localhost",
-            "a@b.123",
-            concat!("a@", "b.coé"),
-            "Жa@b.testЖ",
-            "é@domain.test",
-            "name@домен.рф",
-            concat!("x@", "y.co/second@y.test"),
-            "a@b..test",
-            "a@b-.test",
-            "<a@b.test>",
-            "A_B@EXAMPLE.TEST",
-            "a@b.test\nsecond@x.test",
-        ]
-        .into_iter()
-        .map(str::to_owned)
-        .collect(),
-    );
+fn email_addresses_remain_visible_including_unicode_and_partial_forms() {
+    let cases = [
+        concat!("a@", "b.co"),
+        "first.last+tag%route@sub-domain.example.test",
+        "a@b.c",
+        "a@host",
+        "a@localhost",
+        "a@b.123",
+        concat!("a@", "b.coé"),
+        "Жa@b.testЖ",
+        "é@domain.test",
+        "name@домен.рф",
+        concat!("x@", "y.co/second@y.test"),
+        "a@b..test",
+        "a@b-.test",
+        "<a@b.test>",
+        "A_B@EXAMPLE.TEST",
+        "a@b.test\nsecond@x.test",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<Vec<_>>();
+    for email in &cases {
+        assert_eq!(redact_string(email), *email);
+    }
+    check_strings(cases);
 }
 #[test]
-fn replacement_order_is_exactly_node_email_before_url_and_key_before_bearer() {
+fn replacement_order_keeps_key_before_bearer_and_masks_url_credentials() {
     let cases = vec![
         "http://user:password@proxy.example:80/path".into(),
         "http://user:password@127.0.0.1:80/path".into(),
@@ -189,7 +191,7 @@ fn replacement_order_is_exactly_node_email_before_url_and_key_before_bearer() {
     check_strings(cases);
     assert_eq!(
         redact_string("http://user:password@proxy.example:80/path"),
-        "http://user:<email>:80/path"
+        "http://<redacted>@proxy.example:80/path"
     );
     assert_eq!(
         redact_string("http://user:password@127.0.0.1:80/path"),
@@ -313,4 +315,25 @@ fn json_scalars_and_structure_are_preserved_without_debug_or_input_mutation() {
         json!(0.25),
         json!("a@b.test"),
     ]);
+}
+
+#[test]
+fn visible_email_does_not_disable_token_password_or_url_credential_filters() {
+    let text = format!("mail@host.test sk-ant-{}", "Z".repeat(8));
+    assert_eq!(redact_string(&text), "mail@host.test <token>");
+    let input = json!({
+        "email":"mail@host.test",
+        "nested":[{"message":text,"API_TOKEN":"synthetic-value","password":"mail@host.test"}],
+        "url":"https://user:password@proxy.example.test/path"
+    });
+    assert_eq!(
+        redact(&input),
+        json!({
+            "email":"mail@host.test",
+            "nested":[{"message":"mail@host.test <token>","API_TOKEN":"<redacted>","password":"<redacted>"}],
+            "url":"https://<redacted>@proxy.example.test/path"
+        })
+    );
+    check_strings(vec![text]);
+    check_values(vec![input]);
 }

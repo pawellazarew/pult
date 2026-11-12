@@ -7,7 +7,11 @@ case-insensitive secret field names, and the depth-eight limit. It accepts JSON
 values; real JavaScript Error objects and unpaired UTF-16 require their separate
 host decoding/normalization boundaries.
 
-Ten interoperability tests compare roughly 900 synthetic adversarial inputs
+Email addresses remain visible in ordinary text and nested values. Known tokens,
+secret-named field values and URL credentials continue to be filtered. Repository
+privacy checks keep their existing email and credential rules.
+
+Eleven interoperability tests compare roughly 900 synthetic adversarial inputs
 against the actual Node source functions and regex rules, including lengths,
 Unicode adjacency, URL credentials, ordering, nested keys and prototype fields.
 The oracle has a ten-second watchdog and bounded input/output; no live secrets,
