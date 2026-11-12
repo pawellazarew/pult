@@ -413,17 +413,23 @@ case!(
             .unwrap();
         let accepted = handle.accepted().await.unwrap();
         let ticket = handle.ticket().clone();
-        assert_eq!(f.driver.snapshot_for_dispatch(&ticket), Some(snapshot));
+        assert_eq!(
+            f.driver.snapshot_for_dispatch(&ticket),
+            Some(snapshot.clone())
+        );
+        assert_eq!(f.driver.execution_snapshot(&ticket), Some(snapshot.clone()));
         assert_eq!(f.driver.public_turn_id(&ticket), Some(accepted.turn_id));
         assert_eq!(f.driver.active_ticket(&f.key), Some(ticket.clone()));
         assert!(f.driver.cancel(&ticket));
         assert!(f.driver.snapshot_for_dispatch(&ticket).is_none());
+        assert_eq!(f.driver.execution_snapshot(&ticket), Some(snapshot));
         assert_eq!(f.driver.active_ticket(&f.key), Some(ticket.clone()));
         assert_eq!(
             handle.wait().await.unwrap().turn.outcome,
             Outcome::Interrupted
         );
         assert!(f.driver.active_ticket(&f.key).is_none());
+        assert!(f.driver.execution_snapshot(&ticket).is_none());
         assert!(f.driver.public_turn_id(&ticket).is_none());
         host.shutdown().await.unwrap();
     }

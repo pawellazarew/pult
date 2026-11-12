@@ -156,7 +156,11 @@ enum EventsAction {
 #[derive(Subcommand)]
 enum DaemonAction {
     Serve,
-    Status,
+    Status {
+        /// Prepare the native runtime without starting a provider or a turn.
+        #[arg(long)]
+        initialize_runtime: bool,
+    },
     Stop,
 }
 
@@ -172,7 +176,9 @@ async fn main() -> Result<()> {
     }
     let home = args.home.expect("clap requires home");
     let result = match args.command.unwrap_or(Action::Daemon {
-        action: DaemonAction::Status,
+        action: DaemonAction::Status {
+            initialize_runtime: false,
+        },
     }) {
         Action::Daemon {
             action: DaemonAction::Serve,
@@ -184,8 +190,19 @@ async fn main() -> Result<()> {
             return pult_core::serve(home).await;
         }
         Action::Daemon {
-            action: DaemonAction::Status,
-        } => cli_request(&home, "daemon.status", serde_json::json!({})).await?,
+            action: DaemonAction::Status { initialize_runtime },
+        } => {
+            cli_request(
+                &home,
+                "daemon.status",
+                if initialize_runtime {
+                    serde_json::json!({"initializeRuntime":true})
+                } else {
+                    serde_json::json!({})
+                },
+            )
+            .await?
+        }
         Action::Daemon {
             action: DaemonAction::Stop,
         } => cli_request(&home, "daemon.stop", serde_json::json!({})).await?,

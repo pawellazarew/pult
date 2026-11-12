@@ -553,10 +553,14 @@
       "rust": "implemented",
       "access": "owner",
       "testOnly": false,
-      "description": "Read daemon identity and current counters.",
+      "description": "Read daemon identity and current counters. Experimental Rust-only initializeRuntime prepares the native owner without starting a provider or turn; omitted/false remains read-only.",
       "paramsSchema": {
         "type": "object",
-        "properties": {},
+        "properties": {
+          "initializeRuntime": {
+            "type": "boolean"
+          }
+        },
         "additionalProperties": true
       },
       "resultSchema": {
@@ -611,6 +615,26 @@
               "service",
               "on-demand"
             ]
+          },
+          "nativeRuntime": {
+            "type": "object",
+            "required": [
+              "initialized",
+              "hosts",
+              "activeTurns"
+            ],
+            "properties": {
+              "initialized": {
+                "type": "boolean"
+              },
+              "hosts": {
+                "type": "integer"
+              },
+              "activeTurns": {
+                "type": "integer"
+              }
+            },
+            "additionalProperties": false
           }
         },
         "additionalProperties": true

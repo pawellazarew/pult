@@ -1593,3 +1593,32 @@ async fn javascript_trim_preserves_next_line_character_as_nonempty_text() {
     next(&mut worker.closes).await.reply.send(Ok(())).unwrap();
     bounded(handle.wait()).await.unwrap();
 }
+
+#[tokio::test]
+async fn synchronous_stop_barrier_prevents_dispatch_before_async_cleanup_is_polled() {
+    let fixture = Fixture::new();
+    let driver = fixture.driver();
+    let mut worker = WorkerControl::new();
+    driver.begin_shutdown();
+    assert!(matches!(
+        driver.start(snapshot(), "fixture".into(), worker.worker.clone()),
+        Err(DriverError::Closed)
+    ));
+    assert_eq!(fixture.store.lock().unwrap().last_id(), 0);
+    assert!(worker.starts.try_recv().is_err());
+    assert!(!driver.storage_failed());
+    bounded(driver.shutdown(Duration::from_secs(1)))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn storage_fault_wakes_the_daemon_observer_without_a_job_completion() {
+    let fixture = Fixture::new();
+    let driver = fixture.driver();
+    let waiting = driver.wait_for_storage_failure();
+    tokio::pin!(waiting);
+    assert_pending(waiting.as_mut());
+    driver.report_storage_failure();
+    bounded(waiting).await;
+}

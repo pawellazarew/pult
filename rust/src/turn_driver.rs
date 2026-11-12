@@ -382,6 +382,28 @@ impl Driver {
             .filter(|turn| !turn.cancel_requested())
             .map(|turn| turn.snapshot().clone())
     }
+    /// Diagnostic snapshot includes cancellation until cleanup is proved. Never
+    /// use it for dispatch authority; snapshot_for_dispatch revokes that scope.
+    pub fn execution_snapshot(&self, ticket: &Ticket) -> Option<TurnSnapshot> {
+        self.inner
+            .state
+            .lock()
+            .expect("driver state mutex")
+            .core
+            .active(ticket)
+            .map(|turn| turn.snapshot().clone())
+    }
+    pub async fn wait_for_storage_failure(&self) {
+        loop {
+            let changed = self.inner.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.storage_failed() {
+                return;
+            }
+            changed.await;
+        }
+    }
     /// Includes cancelling jobs so stop/archive can address the exact incarnation.
     pub fn active_ticket(&self, key: &crate::turn_snapshot::SessionKey) -> Option<Ticket> {
         let state = self.inner.state.lock().expect("driver state mutex");
@@ -422,8 +444,12 @@ impl Driver {
             .result(ticket)
             .cloned()
     }
-    pub async fn shutdown(&self, timeout: Duration) -> Result<(), DriverError> {
+    /// Synchronous stop barrier; no new dispatch is authorized after return.
+    pub fn begin_shutdown(&self) {
         close_admission(&self.inner);
+    }
+    pub async fn shutdown(&self, timeout: Duration) -> Result<(), DriverError> {
+        self.begin_shutdown();
         tokio::time::timeout(timeout, async {
             loop {
                 let notified = self.inner.changed.notified();
@@ -478,6 +504,8 @@ fn latch_storage(inner: &Inner) {
         control.progress.send_replace(Progress::Closing);
         control.cancel.send_replace(true);
     }
+    drop(state);
+    inner.changed.notify_waiters();
 }
 fn redact(inner: &Inner, text: &str) -> Option<String> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (inner.redactor)(text))).ok()

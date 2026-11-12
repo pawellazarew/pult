@@ -28,6 +28,7 @@ pub mod registry;
 pub mod runtime_bootstrap;
 pub mod runtime_config;
 mod runtime_journal;
+mod runtime_state;
 mod session_api;
 pub mod session_create;
 pub mod session_live;
@@ -487,7 +488,7 @@ struct State {
     stop: watch::Sender<bool>,
     store: Mutex<journal::EventStore>,
     history: Mutex<history::HistoryCache>,
-    registry: Mutex<registry::Registry>,
+    registry: Arc<Mutex<registry::Registry>>,
     memory: Mutex<std::result::Result<memory::MemoryStore, String>>,
     session_memory: Mutex<session_memory::SessionMemory>,
     last_event_id: AtomicU64,
@@ -498,6 +499,10 @@ struct State {
     live_id: AtomicU64,
     driver: OnceLock<Arc<turn_driver::Driver>>,
     execution_storage_failed: AtomicBool,
+    native_runtime: OnceLock<Arc<codex_runtime::CodexRuntime>>,
+    runtime_init: Mutex<()>,
+    consent: Mutex<Option<runtime_state::Consent>>,
+    live_sessions: Mutex<session_live::Cache>,
 }
 
 fn memory_status(state: &State) -> Value {
@@ -586,10 +591,17 @@ async fn journal_request(
                 }
             };
             let result = store.append(draft);
+            let projected = result
+                .as_ref()
+                .map_or(Ok(()), |event| runtime_state::project(&state, event));
             let last = store.last_id();
             let degraded = store.projection_error().is_some();
             drop(store);
             state.publish_commit(last, degraded);
+            if projected.is_err() {
+                state.execution_storage_failed();
+                bail!("live projection persistence unconfirmed");
+            }
             let event = match result {
                 Ok(event) => event,
                 Err(error) => {
@@ -864,9 +876,22 @@ async fn connection(
         let method = request["method"].as_str().unwrap();
         let result = match method {
             "daemon.status" => {
-                json!({"version":VERSION,"protocol":PROTOCOL,"pid":std::process::id(),"startedAt":state.started_at,"uptimeMs":state.started.elapsed().as_millis(),"home":state.home,"sock":state.home.join("run/pultd.sock"),"clients":state.clients.load(Ordering::Relaxed),"subscriptions":state.subscriptions.load(Ordering::Relaxed),"lastEventId":state.last_event_id.load(Ordering::Acquire),"mode":"on-demand","journal":{"projectionDegraded":state.projection_degraded.load(Ordering::Relaxed),"executionUnavailable":state.execution_storage_failed.load(Ordering::Acquire)},"registry":state.registry.try_lock().ok().map(|r|r.status()),"memory":memory_status(&state),"capabilities":{"experimental":true,"supportedMethods":SUPPORTED}})
+                if let Some(initialize) = request["params"].get("initializeRuntime") {
+                    let Some(initialize) = initialize.as_bool() else {
+                        writer.response(&json!({"id":id,"error":{"code":"invalid_params","message":"initializeRuntime must be a boolean"}})).await?;
+                        continue;
+                    };
+                    if initialize && runtime_state::instance(&state).await.is_err() {
+                        writer.response(&json!({"id":id,"error":{"code":"runtime_unavailable","message":"native runtime initialization failed"}})).await?;
+                        continue;
+                    }
+                }
+                json!({"version":VERSION,"protocol":PROTOCOL,"pid":std::process::id(),"startedAt":state.started_at,"uptimeMs":state.started.elapsed().as_millis(),"home":state.home,"sock":state.home.join("run/pultd.sock"),"clients":state.clients.load(Ordering::Relaxed),"subscriptions":state.subscriptions.load(Ordering::Relaxed),"lastEventId":state.last_event_id.load(Ordering::Acquire),"mode":"on-demand","journal":{"projectionDegraded":state.projection_degraded.load(Ordering::Relaxed),"executionUnavailable":runtime_state::unavailable(&state)},"registry":state.registry.try_lock().ok().map(|r|r.status()),"memory":memory_status(&state),"nativeRuntime":{"initialized":state.native_runtime.get().is_some(),"hosts":state.native_runtime.get().map_or(0, |runtime|runtime.host_count()),"activeTurns":state.driver.get().map_or(0, |driver|driver.active_count())},"capabilities":{"experimental":true,"supportedMethods":SUPPORTED}})
             }
-            "daemon.stop" => json!({"stopping":true}),
+            "daemon.stop" => {
+                runtime_state::begin_shutdown(&state);
+                json!({"stopping":true})
+            }
             "protocol.catalog" => catalog(),
             "events.subscribe" => {
                 match subscriptions.prepare(&state, &request["params"]) {
@@ -1041,6 +1066,7 @@ async fn serve_owned(home: PathBuf, mut cancellation: watch::Receiver<bool>) -> 
     );
     owner.write_token()?;
     let (stop, mut shutdown) = watch::channel(false);
+    let live_sessions = runtime_state::seed_live(&registry)?;
     let state = Arc::new(State {
         home,
         token: owner.token.clone(),
@@ -1050,7 +1076,7 @@ async fn serve_owned(home: PathBuf, mut cancellation: watch::Receiver<bool>) -> 
         stop,
         store: Mutex::new(store),
         history: Mutex::new(history::HistoryCache::default()),
-        registry: Mutex::new(registry),
+        registry: Arc::new(Mutex::new(registry)),
         memory: Mutex::new(memory),
         session_memory: Mutex::new(session_memory::SessionMemory::default()),
         last_event_id,
@@ -1061,18 +1087,27 @@ async fn serve_owned(home: PathBuf, mut cancellation: watch::Receiver<bool>) -> 
         live_id: AtomicU64::new(subscriptions::LIVE_BASE),
         driver: OnceLock::new(),
         execution_storage_failed: AtomicBool::new(false),
+        native_runtime: OnceLock::new(),
+        runtime_init: Mutex::new(()),
+        consent: Mutex::new(None),
+        live_sessions: Mutex::new(live_sessions),
     });
     runtime_journal::initialize(&state)?;
     let permits = Arc::new(Semaphore::new(64));
     let mut tasks = JoinSet::new();
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut accept_error = None;
+    let execution_driver = state.driver.get().expect("driver initialized").clone();
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break,
             _ = terminate.recv() => break,
             _ = shutdown.changed() => break,
             _ = cancellation.changed() => break,
+            _ = execution_driver.wait_for_storage_failure() => {
+                state.execution_storage_failed.store(true, Ordering::Release);
+                break;
+            },
             connection_result = listener.accept() => {
                 let (socket, _) = match connection_result {
                     Ok(connection) => connection,
@@ -1091,6 +1126,7 @@ async fn serve_owned(home: PathBuf, mut cancellation: watch::Receiver<bool>) -> 
         }
     }
     let _ = state.stop.send(true);
+    runtime_state::begin_shutdown(&state);
     if tokio::time::timeout(Duration::from_secs(2), async {
         while tasks.join_next().await.is_some() {}
     })
@@ -1104,6 +1140,9 @@ async fn serve_owned(home: PathBuf, mut cancellation: watch::Receiver<bool>) -> 
     runtime_journal::shutdown(&state, owner).await;
     match accept_error {
         Some(error) => Err(error).context("daemon accept failed"),
+        None if runtime_state::unavailable(&state) => {
+            bail!("execution storage failed; daemon stopped after cleanup")
+        }
         None => Ok(()),
     }
 }

@@ -57,7 +57,14 @@ pub(crate) fn initialize(state: &Arc<State>) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(crate) async fn shutdown(state: &State, owner: crate::Ownership) {
+pub(crate) async fn shutdown(state: &Arc<State>, owner: crate::Ownership) {
+    crate::runtime_state::await_initialization(state).await;
+    if let Some(runtime) = state.native_runtime.get() {
+        while runtime.shutdown().await.is_err() {
+            eprintln!("native runtime cleanup is unconfirmed; daemon ownership retained");
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
     retain_owner_until_stopped(
         state.driver.get().expect("driver initialized"),
         owner,
@@ -105,10 +112,12 @@ impl EventSink for HostSink {
                         id: event["id"].as_u64().ok_or_else(unavailable)?,
                         ts: event["ts"].as_str().ok_or_else(unavailable)?.to_owned(),
                     };
+                    let projected = crate::runtime_state::project(&state, &event);
                     let last = store.last_id();
                     let degraded = store.projection_error().is_some();
                     drop(store);
                     state.publish_commit(last, degraded);
+                    projected.map_err(|_| unavailable())?;
                     Ok(receipt)
                 }))
                 .unwrap_or_else(|_| Err(unavailable()));
@@ -159,7 +168,7 @@ mod tests {
             stop,
             store: Mutex::new(store),
             history: Mutex::new(Default::default()),
-            registry: Mutex::new(registry),
+            registry: Arc::new(Mutex::new(registry)),
             memory: Mutex::new(Err("fixture disabled".into())),
             session_memory: Mutex::new(Default::default()),
             last_event_id: AtomicU64::new(0),
@@ -170,6 +179,10 @@ mod tests {
             live_id: AtomicU64::new(1),
             driver: OnceLock::new(),
             execution_storage_failed: AtomicBool::new(false),
+            native_runtime: OnceLock::new(),
+            runtime_init: Mutex::new(()),
+            consent: Mutex::new(None),
+            live_sessions: Mutex::new(crate::session_live::Cache::new(65536).unwrap()),
         });
         initialize(&state).unwrap();
         let sink = HostSink(Arc::downgrade(&state));
@@ -233,6 +246,48 @@ mod tests {
         // A later successful append cannot clear the global execution latch.
         sink.append(draft()).await.unwrap();
         assert!(state.execution_storage_failed.load(Ordering::Acquire));
+    }
+    #[tokio::test]
+    async fn stop_barrier_seals_initialization_before_response_or_cleanup_is_polled() {
+        let (_home, state, _sink) = fixture();
+        crate::runtime_state::begin_shutdown(&state);
+        assert!(
+            *state.stop.borrow(),
+            "stop admission was not sealed synchronously"
+        );
+        let error = crate::runtime_state::instance(&state).await.err().unwrap();
+        assert_eq!(error.to_string(), "native execution is unavailable");
+        assert!(state.native_runtime.get().is_none());
+        assert!(state.consent.lock().unwrap().is_none());
+        assert!(!state.home.join("consent.json").exists());
+    }
+    #[tokio::test]
+    async fn shutdown_retains_ownership_until_runtime_initialization_quiesces() {
+        let (_home, state, _sink) = fixture();
+        let owner = crate::Ownership::acquire(&state.home, "fixture").unwrap();
+        state.stop.send_replace(true);
+        let (entered, started) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let initializing = state.clone();
+        let initializer = std::thread::spawn(move || {
+            let _initialization = initializing.runtime_init.lock().unwrap();
+            entered.send(()).unwrap();
+            let _ = released.recv();
+        });
+        started.recv_timeout(Duration::from_secs(2)).unwrap();
+        let mut stopping = Box::pin(shutdown(&state, owner));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(
+            stopping.as_mut().poll(&mut context).is_pending(),
+            "ownership released during initialization"
+        );
+        assert!(crate::Ownership::acquire(&state.home, "fixture").is_err());
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), stopping)
+            .await
+            .unwrap();
+        initializer.join().unwrap();
+        assert!(crate::Ownership::acquire(&state.home, "fixture").is_ok());
     }
     #[tokio::test]
     async fn shutdown_retains_daemon_ownership_through_unconfirmed_cleanup() {

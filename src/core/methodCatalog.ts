@@ -556,10 +556,14 @@ export const RPC_CATALOG = {
       "rust": "implemented",
       "access": "owner",
       "testOnly": false,
-      "description": "Read daemon identity and current counters.",
+      "description": "Read daemon identity and current counters. Experimental Rust-only initializeRuntime prepares the native owner without starting a provider or turn; omitted/false remains read-only.",
       "paramsSchema": {
         "type": "object",
-        "properties": {},
+        "properties": {
+          "initializeRuntime": {
+            "type": "boolean"
+          }
+        },
         "additionalProperties": true
       },
       "resultSchema": {
@@ -614,6 +618,26 @@ export const RPC_CATALOG = {
               "service",
               "on-demand"
             ]
+          },
+          "nativeRuntime": {
+            "type": "object",
+            "required": [
+              "initialized",
+              "hosts",
+              "activeTurns"
+            ],
+            "properties": {
+              "initialized": {
+                "type": "boolean"
+              },
+              "hosts": {
+                "type": "integer"
+              },
+              "activeTurns": {
+                "type": "integer"
+              }
+            },
+            "additionalProperties": false
           }
         },
         "additionalProperties": true
@@ -2818,7 +2842,7 @@ export interface RustFoundationParams {
   "agent.rename": { "name": string; "title": string; [key: string]: unknown }
   "agent.seen": { "name": string; "unread"?: boolean; "upTo"?: number; [key: string]: unknown }
   "agent.tree": { "name": string }
-  "daemon.status": { [key: string]: unknown }
+  "daemon.status": { "initializeRuntime"?: boolean; [key: string]: unknown }
   "daemon.stop": { [key: string]: unknown }
   "events.emit": { "kind": "session.started" | "session.ended" | "message.delta" | "message.done" | "message.user" | "tool.called" | "tool.finished" | "agent.spawned" | "agent.finished" | "permission.requested" | "permission.resolved" | "question.asked" | "usage.updated" | "context.updated" | "limit.hit" | "net.blocked" | "provider.blocked" | "provider.restarted" | "background.changed" | "status.changed" | "turn.stalled" | "browser.install" | "runtime.changed" | "session.configured" | "queue.updated" | "rule.revoked" | "daemon.started" | "daemon.stopping"; "count"?: number; "sessionId"?: string; "provider"?: string; "parentId"?: string; "data"?: { [key: string]: unknown }; [key: string]: unknown }
   "events.get": { "ids": Array<number>; [key: string]: unknown }
@@ -2848,7 +2872,7 @@ export interface RustFoundationResults {
   "agent.rename": { "name": string; "provider": string; "cwd": string; "mode": string; "createdAt": string; "lastStatus": string; "lastEventId": number; [key: string]: unknown }
   "agent.seen": { "name": string; "provider": string; "cwd": string; "mode": string; "createdAt": string; "lastStatus": string; "lastEventId": number; [key: string]: unknown }
   "agent.tree": { "roots": Array<{ [key: string]: unknown }>; "orphans": number; "text": string }
-  "daemon.status": { "version": string; "protocol": number; "pid": number; "startedAt": string; "uptimeMs": number; "home": string; "sock": string; "clients": number; "subscriptions": number; "lastEventId": number; "mode": "service" | "on-demand"; [key: string]: unknown }
+  "daemon.status": { "version": string; "protocol": number; "pid": number; "startedAt": string; "uptimeMs": number; "home": string; "sock": string; "clients": number; "subscriptions": number; "lastEventId": number; "mode": "service" | "on-demand"; "nativeRuntime"?: { "initialized": boolean; "hosts": number; "activeTurns": number }; [key: string]: unknown }
   "daemon.stop": { "stopping": true }
   "events.emit": { "ids": Array<number>; "lastEventId": number; [key: string]: unknown }
   "events.get": { "events": Array<{ "id": number; "ts": string; "sessionId": string; "parentId"?: string; "provider": string; "kind": string; "data": { [key: string]: unknown }; [key: string]: unknown }>; "truncated"?: boolean; [key: string]: unknown }
