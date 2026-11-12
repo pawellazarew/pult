@@ -66,13 +66,16 @@ import a confirmed conversation into a **new** chat/incarnation, retaining the o
 uncertain history. Same-chat owner-confirmed recovery is still a required later
 session-contract step; no generic JSON clear-marker capability is added here.
 
-## Remaining Worker integration boundary
+## Worker integration boundary
 
-The base Worker rejects some wider/malformed init modes before calling the store.
-Such a candidate remains uncertain even if a native ID was observed. The owner
-supports retaining diagnostic identity before rejecting permission evidence;
-reordering that Worker callback is a separate Root-owned change. This does not
-claim that Full safety can erase work a provider performed before reporting init.
+The Worker now sends valid matching native-init identity/mode evidence to this
+store before denying its launch policy. An init persistence error or mode denial
+retires that facade; recreation requires checked Owner state after Driver cleanup
+and an explicit next input, without replay or old private parent reuse. See
+[R3-CLAUDE-WORKER.md](R3-CLAUDE-WORKER.md) for that contract and the synthetic
+process acceptance. Malformed mode presence remains a protocol error and cannot
+be persisted as an omitted legacy mode. This does not claim that Full safety can
+erase work performed before a provider reported init.
 
 ## Acceptance scope
 

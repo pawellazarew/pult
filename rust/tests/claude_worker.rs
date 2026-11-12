@@ -200,6 +200,11 @@ async fn scenario(mode: &str, panic_final_gate: bool) {
     ) {
         assert!(worker.is_retired());
     }
+    if matches!(mode, "malformed-mode" | "control-mode" | "null-mode") {
+        assert!(
+            matches!(&terminal.turn.outcome,Outcome::Failure{code,..} if code=="protocol_error")
+        );
+    }
     let stages = stages.lock().unwrap();
     if mode == "wide-mode" {
         assert!(

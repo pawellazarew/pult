@@ -474,6 +474,26 @@ struct FirstInput {
     future: Task<Result<(), WorkerError>>,
     result: Poll<Result<(), WorkerError>>,
 }
+#[cfg(test)]
+struct PollFault {
+    panic_on: usize,
+    polls: Arc<std::sync::atomic::AtomicUsize>,
+}
+#[cfg(test)]
+fn simulate_poll_panic(
+    mut retained: Task<Result<(), WorkerError>>,
+    fault: PollFault,
+) -> Task<Result<(), WorkerError>> {
+    Box::pin(std::future::poll_fn(move |cx| {
+        // Keep the real send future and its owned Process guard in this future.
+        // Only the poll result is synthetic: this does not exercise write_all.
+        let _keep_guard = &mut retained;
+        let poll = fault.polls.fetch_add(1, Ordering::AcqRel) + 1;
+        assert!(poll != fault.panic_on, "synthetic native stdin poll panic");
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    }))
+}
 async fn checked_send(
     gate: Arc<dyn DispatchGate>,
     job: Arc<Job>,
@@ -481,6 +501,7 @@ async fn checked_send(
     approval: Approval,
     process: &mut Option<Process>,
     frame: PreparedInput,
+    #[cfg(test)] poll_fault: Option<PollFault>,
 ) -> Result<(), WorkerError> {
     let vault = Arc::new(tokio::sync::Mutex::new(Some(
         process.take().ok_or_else(unavailable)?,
@@ -515,7 +536,7 @@ async fn checked_send(
         // This private, fresh vault has no other locker. Avoid async lock/coop
         // before the first input poll after the final check and cancellation CAS.
         let mut guard = writing.try_lock_owned().map_err(|_| unavailable())?;
-        let mut future: Task<Result<(), WorkerError>> = Box::pin(async move {
+        let future: Task<Result<(), WorkerError>> = Box::pin(async move {
             guard
                 .as_mut()
                 .ok_or_else(unavailable)?
@@ -523,6 +544,12 @@ async fn checked_send(
                 .await
                 .map_err(|_| error("unknown_send", "Claude input delivery is unknown"))
         });
+        #[cfg(test)]
+        let future = match poll_fault {
+            Some(fault) => simulate_poll_panic(future, fault),
+            None => future,
+        };
+        let mut future = future;
         let result = future
             .as_mut()
             .poll(&mut Context::from_waker(Waker::noop()));
@@ -847,6 +874,8 @@ async fn turn(
         approval,
         process,
         frame,
+        #[cfg(test)]
+        None,
     )
     .await?;
     let callback = claude_events::TrustedCallback {
@@ -1042,5 +1071,100 @@ async fn turn(
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod vault_tests {
+    use super::*;
+    use crate::{turn_coordinator::Coordinator, turn_snapshot::TurnSettings};
+    use std::{collections::BTreeMap, sync::atomic::AtomicUsize};
+    async fn panic_retains_process(panic_on: usize) {
+        crate::panic_guard::install();
+        let temp = tempfile::tempdir().unwrap();
+        // Cargo integration-test targets build this real supervisor. Running
+        // this module alone also requires `cargo build --bin pult-worker-holder`.
+        let holder = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("pult-worker-holder");
+        assert!(
+            holder.is_file(),
+            "build the real pult-worker-holder before vault unit tests"
+        );
+        let mut process=Some(Process::spawn_owned(Launch {
+            holder, program:"/usr/bin/python3".into(),
+            args:vec!["-u".into(),"-c".into(),"import json,os,sys;print(json.dumps({'pid':os.getpid()}),flush=True);sys.stdin.read()".into()],
+            cwd:temp.path().into(),env:BTreeMap::from([("PATH".into(),"/usr/bin:/bin".into()),("HOME".into(),temp.path().as_os_str().to_owned())]),
+        },Framing::claude()).await.unwrap_or_else(|_|panic!("synthetic process startup failed")));
+        let holder = process.as_ref().unwrap().pid();
+        let child = process.as_mut().unwrap().recv().await.unwrap().unwrap()["pid"]
+            .as_i64()
+            .unwrap() as i32;
+        let signal = process.as_ref().unwrap().stop_signal();
+        let snapshot = TurnSnapshot {
+            key: SessionKey {
+                name: "vault".into(),
+                created_at: "2026-11-12T00:00:00Z".into(),
+            },
+            provider: Provider::Claude,
+            cwd: temp.path().into(),
+            settings: TurnSettings::default(),
+        };
+        let mut coordinator = Coordinator::new(Default::default()).unwrap();
+        let ticket = coordinator.reserve(snapshot.clone()).unwrap();
+        let job = Arc::new(Job {
+            ticket,
+            generation: 1,
+            public_id: "vault-public".into(),
+            input_id: "vault-input".into(),
+            cancel: watch::channel(false).0,
+            closed: watch::channel(Closed::Pending).0,
+            retry: Notify::new(),
+            signal: Mutex::new(Some(signal.clone())),
+            dispatch: AtomicU8::new(0),
+        });
+        let polls = Arc::new(AtomicUsize::new(0));
+        let frame = Framing::claude().encode(&json!({"fixture":true})).unwrap();
+        let result = checked_send(
+            Arc::new(|_: &Ticket, _: &TurnSnapshot| DispatchDecision::Allow),
+            job.clone(),
+            snapshot,
+            Approval::Ask,
+            &mut process,
+            frame,
+            Some(PollFault {
+                panic_on,
+                polls: polls.clone(),
+            }),
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(polls.load(Ordering::Acquire), panic_on);
+        assert_eq!(job.dispatch.load(Ordering::Acquire), 1);
+        let mut retained = process.expect("panic lost cleanup ownership from the private vault");
+        assert_eq!(retained.pid(), holder);
+        assert!(
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(child), None).is_ok(),
+            "the proof must retain a still-live provider until explicit stop"
+        );
+        retained.stop().await.unwrap();
+        assert!(nix::sys::signal::kill(nix::unistd::Pid::from_raw(child), None).is_err());
+        assert!(!signal.request_stop());
+    }
+    #[tokio::test]
+    async fn first_poll_join_error_retains_real_process_until_proven_cleanup() {
+        tokio::time::timeout(Duration::from_secs(10), panic_retains_process(1))
+            .await
+            .unwrap();
+    }
+    #[tokio::test]
+    async fn later_poll_join_error_retains_real_process_until_proven_cleanup() {
+        tokio::time::timeout(Duration::from_secs(10), panic_retains_process(2))
+            .await
+            .unwrap();
     }
 }

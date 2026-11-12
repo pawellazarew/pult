@@ -175,3 +175,14 @@ while init persistence is held. They prove the old facade cannot send again and
 an explicitly rebuilt facade resumes the confirmed child instead of the parent.
 Malformed mode presence still returns protocol error and is never persisted as
 legacy omission. No installed native version, live model or account is exercised.
+
+### Synthetic poll-panic vault proof
+
+Two test-only poll adapters retain the real send future and its owned Process
+guard, then panic on the first poll or after one Pending poll. They exercise the
+blocking JoinError and later owned-task JoinError recovery paths with a real
+supervised Python process: Process returns from the vault, remains alive until
+explicit stop, and only that stop proves PID cleanup. No production fault option
+or public send API is added. These simulations do not test write_all internals or
+claim that a real OS write naturally panics at those exact points. Targeted vault
+unit tests require building pult-worker-holder (also built by integration targets).
