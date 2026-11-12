@@ -119,9 +119,9 @@ export interface SessionRecord {
    * то есть тише и шире, чем просил человек. На этом же поле стоит мини-сессия Ф5.
    */
   settingSources?: string
-  /** Идентификатор сессии на стороне провайдера: у Claude — uuid для `--resume`. */
   /** Rust native input reserved before init: opaque unknown-send evidence, never execution authority. */
   claudeReservedSessionId?: unknown
+  /** Идентификатор сессии на стороне провайдера: у Claude — uuid для `--resume`. */
   providerSessionId?: string
   /** Copy an imported Claude conversation on its first resumed turn. */
   forkOnResume?: boolean
