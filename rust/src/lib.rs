@@ -306,12 +306,22 @@ fn holder_live(bytes: &[u8]) -> bool {
     }
 }
 
+// Release the open-file-description lock explicitly after owner cleanup. An
+// unrelated child between fork and exec may still hold a duplicate descriptor;
+// waiting for its last close would extend daemon ownership beyond this owner.
+struct OwnershipGuard(std::fs::File);
+impl Drop for OwnershipGuard {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.0);
+    }
+}
+
 struct Ownership {
     run: PathBuf,
     record: Vec<u8>,
     token: String,
     socket: Option<(u64, u64)>,
-    _guard: std::fs::File,
+    _guard: OwnershipGuard,
     token_published: bool,
 }
 
@@ -349,6 +359,7 @@ impl Ownership {
         guard
             .try_lock_exclusive()
             .context("another Rust daemon owns this home")?;
+        let guard = OwnershipGuard(guard);
         let pid = std::process::id();
         let record = serde_json::to_vec(
             &json!({"pid":pid,"startedAt":started_at,"started":ps_start(pid).context("cannot identify this process")?,"cmd":"pultd-rust"}),
@@ -1300,6 +1311,55 @@ pub async fn request_with_locale(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owner_cleanup_releases_guard_even_when_a_duplicate_descriptor_survives() {
+        let home = tempfile::tempdir().unwrap();
+        fs::set_permissions(home.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let owner = Ownership::acquire(home.path(), "fixture").unwrap();
+        // Model the same open-file description retained by an unrelated child
+        // between fork and exec. No sleeps or replacement-acquire retries.
+        let inherited = owner._guard.0.try_clone().unwrap();
+        let run = owner.run.clone();
+        drop(owner);
+        assert!(
+            !run.join("pultd.lock").exists(),
+            "owner cleanup must finish before release"
+        );
+        let replacement = Ownership::acquire(home.path(), "replacement")
+            .unwrap_or_else(|error| panic!("replacement with inherited guard: {error:#}"));
+        drop(replacement);
+        drop(inherited);
+    }
+
+    #[test]
+    fn owner_guard_releases_after_foreign_record_skips_owner_cleanup() {
+        let home = tempfile::tempdir().unwrap();
+        fs::set_permissions(home.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let owner = Ownership::acquire(home.path(), "fixture").unwrap();
+        let inherited = owner._guard.0.try_clone().unwrap();
+        let run = owner.run.clone();
+        fs::write(run.join("pultd.lock"), b"foreign record").unwrap();
+        drop(owner);
+        assert_eq!(fs::read(run.join("pultd.lock")).unwrap(), b"foreign record");
+        let replacement = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(run.join("rust-owner.guard"))
+            .unwrap();
+        replacement
+            .try_lock_exclusive()
+            .expect("guard release also covers early owner cleanup return");
+        drop(inherited);
+        // Closing the old description must not unlock a new owner's guard.
+        let contender = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(run.join("rust-owner.guard"))
+            .unwrap();
+        assert!(contender.try_lock_exclusive().is_err());
+        FileExt::unlock(&replacement).unwrap();
+    }
 
     #[test]
     fn protocol_and_version_match_shared_contract() {

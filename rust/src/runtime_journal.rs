@@ -303,7 +303,9 @@ pub(crate) mod tests {
         assert!(retained, "replacement daemon acquired ownership during IO");
         assert_eq!(state.last_event_id.load(Ordering::Acquire), 1);
         assert_eq!(state.host_jobs.active(), 0);
-        assert!(crate::Ownership::acquire(&state.home, "replacement").is_ok());
+        let replacement = crate::Ownership::acquire(&state.home, "replacement")
+            .unwrap_or_else(|error| panic!("replacement acquisition after IO shutdown: {error:#}"));
+        drop(replacement);
     }
 
     #[tokio::test]
