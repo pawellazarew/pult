@@ -11,6 +11,16 @@ route generation/configuration/environment equality, not a hash. Per-session
 leases are privately nonce-bound and rechecked before native-ID persistence and
 model dispatch. Fresh worker facades freeze each turn's validated attachments.
 
+Snapshot/consent reads, attachment validation and resume-ID registry reads run
+in owned blocking tasks. The preparation reservation remains until those tasks
+finish even when stop or shutdown arrives. Driver admission stays synchronous
+as a public API; the runtime invokes it on the blocking pool. Fresh authority
+checks and their dispatch/enqueue seals are a single blocking step, preserving
+the no-await authorization boundary without occupying Tokio workers during IO.
+Shutdown synchronously seals Driver admission and requests host stop before
+waiting for preparation IO. A blocked Registry check retains final ownership
+without keeping an otherwise stoppable warm process alive.
+
 Native permission requests cross the typed mapper and real broker. Durable
 resolution and a current owner/ScopedResponder check precede permission replies.
 Late journal failures remain observed after handler cancellation and close all
@@ -22,7 +32,7 @@ process and Job/IO proofs, drains broker receipts and owned curl operations.
 Successful terminal publication is monotonic even during concurrent repeated
 shutdown. Stale public turn IDs return false and cannot interrupt a reused turn.
 
-Validation: 14 runtime and 35 Driver tests use real private registry/journal
+Validation: 15 runtime and 38 Driver tests use real private registry/journal
 files, supervised Python fixtures and scripted probes. Tests cover shared hosts,
 blocked routes, image replacement, durable grants, late cancellation/faults,
 lease generations, folder pins, dropped callers, concurrent shutdown and IO.

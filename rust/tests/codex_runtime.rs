@@ -21,6 +21,100 @@ use std::sync::{
 };
 use std::time::Duration;
 const WAIT: Duration = Duration::from_secs(20);
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_stops_warm_process_before_waiting_for_owned_registry_check() {
+    pult_core::panic_guard::install();
+    let mut f = Fixture::new();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let arriving = entered.clone();
+    let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+    struct Release(Arc<(Mutex<bool>, std::sync::Condvar)>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            *self.0.0.lock().unwrap() = true;
+            self.0.1.notify_all();
+        }
+    }
+    let unblock = Release(release.clone());
+    let barrier = release.clone();
+    let registry = f.registry.clone();
+    f.driver = Arc::new(
+        Driver::new(
+            f.sink.clone(),
+            Arc::new(move |text| {
+                if text == "block-admission" {
+                    let _registry = registry.lock().unwrap();
+                    arriving.notify_one();
+                    let (lock, changed) = &*barrier;
+                    let mut released = lock.lock().unwrap();
+                    while !*released {
+                        released = changed.wait(released).unwrap();
+                    }
+                }
+                pult_core::redaction::redact_string(text)
+            }),
+            Options::default(),
+        )
+        .unwrap(),
+    );
+    let (runtime, _) = f.runtime(probe("US"), RuntimeConfig::default());
+    let mut first = runtime.execute(key("one"), input("normal")).await.unwrap();
+    first.wait().await.unwrap();
+    let pids: Vec<u32> =
+        serde_json::from_slice(&std::fs::read(f.home.join("pids.json")).unwrap()).unwrap();
+    let preparation = runtime.execute(key("one"), input("block-admission"));
+    tokio::time::timeout(WAIT, entered.notified())
+        .await
+        .unwrap();
+    let mut stopping = runtime.shutdown();
+    let stopped_before_release = tokio::time::timeout(
+        Duration::from_secs(3),
+        until(|| {
+            pids.iter().all(|pid| {
+                nix::sys::signal::kill(nix::unistd::Pid::from_raw(*pid as i32), None).is_err()
+            })
+        }),
+    )
+    .await
+    .is_ok();
+    let retained = stopping
+        .as_mut()
+        .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+        .is_pending();
+    drop(unblock);
+    let rejected = tokio::time::timeout(WAIT, preparation)
+        .await
+        .unwrap()
+        .is_err();
+    tokio::time::timeout(WAIT, stopping).await.unwrap().unwrap();
+    eprintln!(
+        "stop_before_release={stopped_before_release}; check_retained={retained}; preparation_rejected={rejected}"
+    );
+    assert!(
+        stopped_before_release,
+        "shutdown delayed process stop behind owned registry IO"
+    );
+    assert!(
+        retained,
+        "shutdown abandoned a still-blocked registry check"
+    );
+    assert!(rejected, "stopped preparation was still admitted to Driver");
+    assert_eq!(
+        f.logs()
+            .iter()
+            .filter(|row| row["method"] == "turn/start")
+            .count(),
+        1
+    );
+    assert_eq!(
+        f.journal()
+            .iter()
+            .filter(|row| row["kind"] == "message.user")
+            .count(),
+        1
+    );
+}
 macro_rules! case {($name:ident,$body:block)=>{#[tokio::test]async fn $name(){pult_core::panic_guard::install();tokio::time::timeout(WAIT,async $body).await.expect("runtime watchdog");}};}
 struct ScriptProbe {
     loc: &'static str,
