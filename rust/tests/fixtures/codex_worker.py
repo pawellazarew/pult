@@ -113,6 +113,8 @@ for line in sys.stdin:
             notification('brand/new/unknown', thread, turn, text='UNKNOWN_SECRET')
         with state:
             active[thread] = {'turn': turn, 'text': text, 'mode': behavior}
+        if behavior == 'lost-ack':
+            os._exit(7)
         if behavior == 'unknown':
             continue
         notification('turn/started', thread, turn, turn={'id': turn, 'status': 'inProgress'})
@@ -143,6 +145,19 @@ for line in sys.stdin:
             finish(thread, text='unsupported background')
         else:
             finish(thread)
+    elif method == 'turn/steer':
+        thread = params['threadId']
+        with state:
+            item = active.get(thread)
+        text = next((item['text'] for item in params['input'] if item['type'] == 'text'), '')
+        if not item or item['turn'] != params['expectedTurnId'] or text == 'reject-steer':
+            send({'id': frame['id'], 'error': {'code': -32000, 'message': 'stale or rejected steering'}})
+        elif text == 'unknown-steer':
+            continue
+        else:
+            send({'id': frame['id'], 'result': {'turnId': item['turn']}})
+            if text == 'complete-steer':
+                finish(thread)
     elif method == 'turn/interrupt':
         thread = params['threadId']
         send({'id': frame['id'], 'result': {}})

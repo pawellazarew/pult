@@ -1696,3 +1696,125 @@ async fn storage_fault_wakes_the_daemon_observer_without_a_job_completion() {
     driver.report_storage_failure();
     bounded(waiting).await;
 }
+
+struct ReleaseSink {
+    inner: Arc<dyn EventSink>,
+    releases: mpsc::UnboundedSender<(pult_core::turn_driver::Completion, oneshot::Sender<bool>)>,
+}
+impl EventSink for ReleaseSink {
+    fn append(&self, draft: Value) -> Task<Result<Receipt, SinkError>> {
+        self.inner.append(draft)
+    }
+    fn before_release(
+        &self,
+        completion: pult_core::turn_driver::Completion,
+    ) -> Task<Result<(), SinkError>> {
+        let releases = self.releases.clone();
+        Box::pin(async move {
+            let (reply, wait) = oneshot::channel();
+            assert!(releases.send((completion, reply)).is_ok());
+            if wait.await.unwrap_or(false) {
+                Ok(())
+            } else {
+                Err(SinkError {
+                    message: "owned completion persistence is unknown".into(),
+                })
+            }
+        })
+    }
+}
+#[tokio::test]
+async fn typed_before_release_is_owned_after_terminal_commit_and_keeps_ticket_reserved() {
+    let fixture = Fixture::new();
+    let (send, mut releases) = mpsc::unbounded_channel();
+    let driver = fixture.with_sink(Arc::new(ReleaseSink {
+        inner: fixture.sink.clone(),
+        releases: send,
+    }));
+    let mut worker = WorkerControl::new();
+    let (handle, done, _) = running(&driver, &mut worker, "input").await;
+    let ticket = handle.ticket().clone();
+    done.send(Outcome::Failure {
+        code: "fixture".into(),
+        message: "failed".into(),
+    })
+    .unwrap();
+    next(&mut worker.closes).await.reply.send(Ok(())).unwrap();
+    let (completion, release) = next(&mut releases).await;
+    assert_eq!(completion.ticket(), &ticket);
+    assert!(matches!(completion.outcome(), Outcome::Failure { .. }));
+    assert_eq!(terminal_status(&fixture.rows()), "failed");
+    assert_eq!(driver.active_count(), 1);
+    assert!(matches!(
+        driver.start(snapshot(), "late".into(), worker.worker.clone()),
+        Err(DriverError::Busy)
+    ));
+    drop(handle);
+    assert_eq!(
+        bounded(driver.shutdown(Duration::from_millis(20))).await,
+        Err(DriverError::CleanupUnconfirmed)
+    );
+    assert_eq!(driver.active_count(), 1);
+    release.send(true).unwrap();
+    bounded(driver.wait_ticket(&ticket)).await;
+    assert_eq!(driver.active_count(), 0);
+}
+#[tokio::test]
+async fn failed_before_release_latches_storage_before_freeing_slot() {
+    let fixture = Fixture::new();
+    let (send, mut releases) = mpsc::unbounded_channel();
+    let driver = fixture.with_sink(Arc::new(ReleaseSink {
+        inner: fixture.sink.clone(),
+        releases: send,
+    }));
+    let mut worker = WorkerControl::new();
+    let (mut handle, done, _) = running(&driver, &mut worker, "input").await;
+    done.send(Outcome::Failure {
+        code: "fixture".into(),
+        message: "failed".into(),
+    })
+    .unwrap();
+    next(&mut worker.closes).await.reply.send(Ok(())).unwrap();
+    next(&mut releases).await.1.send(false).unwrap();
+    assert_eq!(
+        bounded(handle.wait()).await,
+        Err(DriverError::StorageUnavailable)
+    );
+    assert!(driver.storage_failed());
+    assert_eq!(driver.active_count(), 0);
+    assert!(matches!(
+        driver.start(snapshot(), "late".into(), worker.worker.clone()),
+        Err(DriverError::StorageUnavailable)
+    ));
+}
+
+#[tokio::test]
+async fn before_release_construction_panic_is_caught_and_closes_admission() {
+    struct PanicRelease(Arc<dyn EventSink>);
+    impl EventSink for PanicRelease {
+        fn append(&self, draft: Value) -> Task<Result<Receipt, SinkError>> {
+            self.0.append(draft)
+        }
+        fn before_release(
+            &self,
+            _: pult_core::turn_driver::Completion,
+        ) -> Task<Result<(), SinkError>> {
+            panic!("static fixture hook panic")
+        }
+    }
+    let fixture = Fixture::new();
+    let driver = fixture.with_sink(Arc::new(PanicRelease(fixture.sink.clone())));
+    let mut worker = WorkerControl::new();
+    let (mut handle, done, _) = running(&driver, &mut worker, "input").await;
+    done.send(Outcome::Success).unwrap();
+    next(&mut worker.closes).await.reply.send(Ok(())).unwrap();
+    assert_eq!(
+        bounded(handle.wait()).await,
+        Err(DriverError::StorageUnavailable)
+    );
+    assert!(driver.storage_failed());
+    assert!(matches!(
+        driver.start(snapshot(), "late".into(), worker.worker.clone()),
+        Err(DriverError::StorageUnavailable)
+    ));
+}

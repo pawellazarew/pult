@@ -100,6 +100,16 @@ fn unavailable() -> SinkError {
 }
 
 impl EventSink for HostSink {
+    fn before_release(
+        &self,
+        completion: crate::turn_driver::Completion,
+    ) -> Task<Result<(), SinkError>> {
+        let weak = self.0.clone();
+        Box::pin(async move {
+            let state = weak.upgrade().ok_or_else(unavailable)?;
+            crate::session_queue::before_release(state, completion).await
+        })
+    }
     fn append(&self, draft: Value) -> Task<Result<Receipt, SinkError>> {
         let weak = self.0.clone();
         Box::pin(async move {

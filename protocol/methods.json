@@ -244,7 +244,7 @@
       "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Partial Rust ordinary Codex prompt dispatch with durable user receipts. Queue, interrupt, steer, Claude, ZCode and background flows remain unsupported.",
+      "description": "Owner ordinary Codex input, queue/FIFO lifecycle, interrupt-and-send and same-turn steering. Queue identity metadata stays host-owned; asynchronous question-answer protocol remains unsupported.",
       "paramsSchema": {
         "type": "object",
         "properties": {
@@ -290,22 +290,13 @@
             }
           },
           "queue": {
-            "type": "boolean",
-            "enum": [
-              false
-            ]
+            "type": "boolean"
           },
           "interrupt": {
-            "type": "boolean",
-            "enum": [
-              false
-            ]
+            "type": "boolean"
           },
           "steer": {
-            "type": "boolean",
-            "enum": [
-              false
-            ]
+            "type": "boolean"
           }
         },
         "required": [
@@ -315,16 +306,39 @@
         "additionalProperties": false
       },
       "resultSchema": {
-        "type": "object",
-        "properties": {
-          "turnId": {
-            "type": "string"
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "turnId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "turnId"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "queued": {
+                "type": "boolean",
+                "enum": [
+                  true
+                ]
+              },
+              "id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "queued",
+              "id"
+            ],
+            "additionalProperties": false
           }
-        },
-        "required": [
-          "turnId"
-        ],
-        "additionalProperties": false
+        ]
       }
     },
     {
@@ -340,42 +354,395 @@
     {
       "name": "agent.queue.move",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.queue.move.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Durable ordinary-message queue lifecycle; selected mid-turn sending uses Codex steering. Unknown delivery remains paused and requires explicit resolution.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "to": {
+            "type": "integer"
+          },
+          "hold": {
+            "type": "boolean"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "queue": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                },
+                "at": {
+                  "type": "string"
+                },
+                "attachments": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "mime": {
+                        "type": "string"
+                      },
+                      "bytes": {
+                        "type": "integer"
+                      },
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "file",
+                          "directory"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "path",
+                      "name",
+                      "mime",
+                      "bytes",
+                      "kind"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "id",
+                "text",
+                "at"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "queuePaused": {
+            "type": "boolean"
+          },
+          "edit": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "holdMs": {
+                "type": "integer"
+              },
+              "attachments": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "mime": {
+                      "type": "string"
+                    },
+                    "bytes": {
+                      "type": "integer"
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "file",
+                        "directory"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "name",
+                    "mime",
+                    "bytes",
+                    "kind"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "id",
+              "text",
+              "holdMs"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "name",
+          "queue",
+          "queuePaused"
+        ],
+        "additionalProperties": false
+      }
     },
     {
       "name": "agent.queue.remove",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.queue.remove.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Durable ordinary-message queue lifecycle; selected mid-turn sending uses Codex steering. Unknown delivery remains paused and requires explicit resolution.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "queue": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                },
+                "at": {
+                  "type": "string"
+                },
+                "attachments": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "mime": {
+                        "type": "string"
+                      },
+                      "bytes": {
+                        "type": "integer"
+                      },
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "file",
+                          "directory"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "path",
+                      "name",
+                      "mime",
+                      "bytes",
+                      "kind"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "id",
+                "text",
+                "at"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "queuePaused": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "queue",
+          "queuePaused"
+        ],
+        "additionalProperties": false
+      }
     },
     {
       "name": "agent.queue.resume",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.queue.resume.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Durable ordinary-message queue lifecycle; selected mid-turn sending uses Codex steering. Unknown delivery remains paused and requires explicit resolution.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "queue": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                },
+                "at": {
+                  "type": "string"
+                },
+                "attachments": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "mime": {
+                        "type": "string"
+                      },
+                      "bytes": {
+                        "type": "integer"
+                      },
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "file",
+                          "directory"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "path",
+                      "name",
+                      "mime",
+                      "bytes",
+                      "kind"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "id",
+                "text",
+                "at"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "queuePaused": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "queue",
+          "queuePaused"
+        ],
+        "additionalProperties": false
+      }
     },
     {
       "name": "agent.queue.send",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.queue.send.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Durable ordinary-message queue lifecycle; selected mid-turn sending uses Codex steering. Unknown delivery remains paused and requires explicit resolution.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "turnId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "turnId"
+        ],
+        "additionalProperties": false
+      }
     },
     {
       "name": "agent.read",

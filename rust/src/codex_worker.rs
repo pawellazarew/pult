@@ -552,6 +552,37 @@ impl CodexHost {
             spec: Arc::new(spec),
         }))
     }
+    /// Adds input to one confirmed active ticket. Native identities never leave
+    /// this host. Authorization and the first RPC poll share a blocking step;
+    /// dropping the waiter cannot abandon a send or its durable receipt.
+    pub(crate) fn steer(
+        &self,
+        ticket: Ticket,
+        snapshot: TurnSnapshot,
+        home: std::path::PathBuf,
+        input: crate::turn_driver::Input,
+        cancelled: Option<watch::Receiver<bool>>,
+    ) -> Task<Result<String, WorkerError>> {
+        let shared = self.shared.clone();
+        let job = shared
+            .state
+            .lock()
+            .expect("Codex host state")
+            .jobs
+            .get(&ticket)
+            .cloned();
+        let Some(job) = job else {
+            return Box::pin(async { Err(error("invalid_params", "no active Codex turn")) });
+        };
+        let io = CheckGuard::new(&job);
+        let (send, receive) = oneshot::channel();
+        tokio::spawn(async move {
+            let _io = io;
+            let result = steer_owned(shared, job, snapshot, home, input, cancelled).await;
+            let _ = send.send(result);
+        });
+        Box::pin(async move { receive.await.unwrap_or_else(|_| Err(unavailable())) })
+    }
     /// The owned router performs cleanup even if this waiting future is dropped.
     pub fn shutdown(&self) -> Task<Result<(), WorkerError>> {
         retire(&self.shared, true);
@@ -1670,6 +1701,122 @@ async fn prepare(
     job.changed.notify_waiters();
     Ok(())
 }
+async fn steer_owned(
+    shared: Arc<Shared>,
+    job: Arc<Job>,
+    snapshot: TurnSnapshot,
+    home: std::path::PathBuf,
+    input: crate::turn_driver::Input,
+    cancelled: Option<watch::Receiver<bool>>,
+) -> Result<String, WorkerError> {
+    if input.text.chars().count() > 50_000
+        || input.text.len() > 200_000
+        || (input.text.chars().all(js_space) && input.metadata.attachments.is_empty())
+    {
+        return Err(error("invalid_params", "empty steering input"));
+    }
+    let checking = shared.clone();
+    let checking_job = job.clone();
+    let metadata = input.metadata.clone();
+    let (sealed, public_text) = tokio::task::spawn_blocking(move || {
+        let mut redact = redactor(&checking)?;
+        let safe = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            redact.redact(&json!(input.text))
+        }))
+        .map_err(|_| error("redaction_failed", "steering redaction failed"))?
+        .map_err(|_| error("redaction_failed", "steering redaction failed"))?;
+        let public_text = safe
+            .as_str()
+            .filter(|s| s.len() <= 200_000)
+            .ok_or_else(|| error("redaction_failed", "invalid steering redaction"))?
+            .to_owned();
+        let blocks = prompt_attachments::codex_prompt_input(
+            &PromptAttachmentScope {
+                home: &home,
+                session_id: &checking_job.ticket.session().name,
+            },
+            &input.text,
+            &input.metadata.attachments,
+        )
+        .map_err(|_| error("invalid_params", "steering attachment unavailable"))?;
+        let decision = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            checking
+                .services
+                .fresh_gate
+                .check(&checking_job.ticket, &snapshot)
+        }))
+        .unwrap_or(DispatchDecision::Deny);
+        // Steering cannot mutate the sandbox of the active turn. A newly
+        // narrowed policy must stop the old turn instead of granting its input.
+        let effective = checking_job.info.lock().expect("Codex job").effective;
+        if !matches!(decision, DispatchDecision::Allow)
+            && decision != DispatchDecision::Restrict(effective)
+        {
+            return Err(error("access_denied", "fresh steering authority denied"));
+        }
+        let client = checking.client.borrow().clone().ok_or_else(unavailable)?;
+        let cancellation = cancelled.as_ref().map(|cancel| cancel.borrow());
+        if cancellation.as_ref().is_some_and(|v| **v) {
+            return Err(error("interrupted", "steering command was stopped"));
+        }
+        let state = checking.state.lock().expect("Codex host state");
+        let cancelled = checking_job.cancel.borrow();
+        let info = checking_job.info.lock().expect("Codex job");
+        if state.status != HostStatus::Ready
+            || *cancelled
+            || info.provider_terminal
+            || !info.acknowledged
+            || checking.storage_failed.load(Ordering::Acquire)
+        {
+            return Err(error("interrupted", "steering scope is closed"));
+        }
+        let thread = info.thread.clone().ok_or_else(unavailable)?;
+        let native = info.native.clone().ok_or_else(unavailable)?;
+        let params = json!({"threadId":thread,"expectedTurnId":native,"input":blocks});
+        let timeout = checking.timeouts.control;
+        Ok((
+            first_poll(Box::pin(async move {
+                let expected = params["expectedTurnId"].as_str().map(str::to_owned);
+                let reply = client.request("turn/steer", params, timeout).await?;
+                if reply["turnId"].as_str() != expected.as_deref() {
+                    return Err(RpcError::InvalidFrame);
+                }
+                Ok(reply)
+            })),
+            public_text,
+        ))
+    })
+    .await
+    .map_err(|_| unavailable())??;
+    match sealed.finish().await {
+        Ok(_) => {}
+        Err(RpcError::Remote(_)) => return Err(error("invalid_params", "Codex rejected steering")),
+        Err(_) => {
+            cancel_job(&job);
+            return Err(error(
+                "send_unknown",
+                "steering outcome is unknown; do not retry automatically",
+            ));
+        }
+    }
+    let mut data = json!({"text":public_text,"steering":true,"turnId":job.public_id});
+    if !metadata.attachments.is_empty() {
+        data["attachments"] = json!(
+            metadata
+                .attachments
+                .iter()
+                .map(|a| a.value())
+                .collect::<Vec<_>>()
+        );
+    }
+    if let Some(id) = metadata.queue_item_id {
+        data["queueItemId"] = json!(id);
+        data["queueItemAt"] = json!(metadata.queue_item_at);
+    }
+    append(&shared,json!({"sessionId":job.ticket.session().name,"provider":"codex","kind":"message.user","data":data})).await?;
+    Ok(job.public_id.clone())
+}
+
 async fn append(shared: &Shared, draft: Value) -> Result<(), WorkerError> {
     if shared.storage_failed.load(Ordering::Acquire) {
         return Err(error("storage_unavailable", "Codex journal is unavailable"));
