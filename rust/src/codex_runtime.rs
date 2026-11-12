@@ -10,8 +10,7 @@ use crate::permission_broker::{self, Broker, Decision, Resolution};
 use crate::registry::Registry;
 use crate::runtime_config::RuntimeConfig;
 use crate::turn_driver::{
-    self, DispatchDecision, DispatchGate, Driver, EventSink, Handle, Input, Progress, Receipt,
-    SinkError, Task,
+    self, DispatchGate, Driver, EventSink, Handle, Input, Progress, Receipt, SinkError, Task,
 };
 use crate::turn_snapshot::{Provider, SessionKey, TurnSnapshot};
 use crate::worker_env::{self, Environment};
@@ -461,27 +460,44 @@ async fn execute(
     mut input: Input,
     mut cancelled: watch::Receiver<bool>,
 ) -> Result<Handle, RuntimeError> {
-    let snapshot = inner
-        .owner
-        .snapshot(&key)
-        .map_err(|_| RuntimeError::Session)?;
-    if snapshot.settings.browser.is_some() {
-        return Err(RuntimeError::Unsupported);
-    }
-    let values = Value::Array(
-        input
-            .metadata
-            .attachments
-            .iter()
-            .map(|a| a.value())
-            .collect(),
-    );
-    input.metadata.attachments = crate::prompt_attachments::validate_owned_prompt_attachments(
-        &inner.deps.home,
-        &key.name,
-        Some(&values),
-    )
-    .map_err(|_| RuntimeError::Invalid)?;
+    let preparing = inner.clone();
+    let checking = key.clone();
+    let cancellation = cancelled.clone();
+    // Reservation ownership remains on this task until the blocking read and
+    // attachment validation finish, even if stop or caller cancellation arrives.
+    let (snapshot, attachments) = tokio::task::spawn_blocking(move || {
+        if *cancellation.borrow() {
+            return Err(RuntimeError::Cancelled);
+        }
+        if *preparing.shared.closed.borrow() {
+            return Err(RuntimeError::Closed);
+        }
+        let snapshot = preparing
+            .owner
+            .snapshot(&checking)
+            .map_err(|_| RuntimeError::Session)?;
+        if snapshot.settings.browser.is_some() {
+            return Err(RuntimeError::Unsupported);
+        }
+        let values = Value::Array(
+            input
+                .metadata
+                .attachments
+                .iter()
+                .map(|a| a.value())
+                .collect(),
+        );
+        let attachments = crate::prompt_attachments::validate_owned_prompt_attachments(
+            &preparing.deps.home,
+            &checking.name,
+            Some(&values),
+        )
+        .map_err(|_| RuntimeError::Invalid)?;
+        Ok((snapshot, attachments))
+    })
+    .await
+    .map_err(|_| RuntimeError::Storage)??;
+    input.metadata.attachments = attachments;
     let mut closed = inner.shared.closed.subscribe();
     if *cancelled.borrow() {
         return Err(RuntimeError::Cancelled);
@@ -552,16 +568,22 @@ async fn execute(
             host
         }
     };
-    let resume_id = {
-        let registry = inner
+    let reading = inner.clone();
+    let session = key.clone();
+    let resume_id = tokio::task::spawn_blocking(move || {
+        let registry = reading
             .deps
             .registry
             .lock()
             .map_err(|_| RuntimeError::Storage)?;
-        registry
-            .find(&key.name)
-            .and_then(|r| r.scalar("providerSessionId"))
-    };
+        Ok::<_, RuntimeError>(
+            registry
+                .find(&session.name)
+                .and_then(|r| r.scalar("providerSessionId")),
+        )
+    })
+    .await
+    .map_err(|_| RuntimeError::Storage)??;
     let worker = host
         .worker(SessionSpec {
             key: key.clone(),
@@ -593,13 +615,18 @@ async fn execute(
         .owner
         .services(inner.deps.sink.clone(), None)
         .fresh_gate;
-    let handle = match inner.deps.driver.start_input(snapshot, input, worker, gate) {
-        Ok(handle) => handle,
-        Err(error) => {
+    let driver = inner.deps.driver.clone();
+    let handle = match tokio::task::spawn_blocking(move || {
+        driver.start_input(snapshot, input, worker, gate)
+    })
+    .await
+    {
+        Ok(Ok(handle)) => handle,
+        result => {
             remove_lease(&inner.shared, &key, &nonce);
-            return Err(match error {
-                turn_driver::DriverError::Busy => RuntimeError::Busy,
-                turn_driver::DriverError::StorageUnavailable => RuntimeError::Storage,
+            return Err(match result {
+                Ok(Err(turn_driver::DriverError::Busy)) => RuntimeError::Busy,
+                Ok(Err(turn_driver::DriverError::StorageUnavailable)) => RuntimeError::Storage,
                 _ => RuntimeError::Invalid,
             });
         }
@@ -693,18 +720,13 @@ impl ApprovalHandler for Approvals {
             let Some(snapshot) = inner.deps.driver.snapshot_for_dispatch(&context.ticket) else {
                 return;
             };
-            let effective = match gate.check(&context.ticket, &snapshot) {
-                DispatchDecision::Allow => snapshot.settings.approval,
-                DispatchDecision::Restrict(mode) => mode,
-                DispatchDecision::Deny => return,
-            };
-            if effective != context.effective_approval {
-                return;
-            }
             let answer = prepared
                 .resolve(&owner, decision)
                 .map_err(|error| error.response_error());
-            let _ = context.responder.respond(answer).await;
+            let _ = context
+                .responder
+                .respond_checked(gate, snapshot, context.effective_approval, answer)
+                .await;
         })
     }
 }

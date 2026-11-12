@@ -17,6 +17,14 @@ normal close preserves the warm thread. Unknown ownership retires the host,
 blocks new starts and preserves other active turns until they finish; cleanup
 remains unconfirmed until process supervision proves it stopped.
 
+Filesystem attachment checks and the final authority check run in owned blocking
+tasks. The final check and first native request enqueue occur in one synchronous
+step, with cancellation rechecked before enqueue. Job guards retain blocked
+checks even if their async preparation or approval waiter is aborted. Revocation,
+interrupt and process stop happen before the final wait for these checks; an OS
+stop alone does not prove that host policy IO has finished. Blocking threads are
+not retained while waiting for network responses or human permission decisions.
+
 Permission handlers receive a single-use scoped responder. Cancellation and
 native terminal notifications revoke it; its private client and response permit
 cannot escape. Retained raw parameters retain their byte reservation. Default

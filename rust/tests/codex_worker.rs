@@ -11,6 +11,7 @@ use pult_core::turn_snapshot::{
 use pult_core::worker_process::Launch;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex,
@@ -18,6 +19,67 @@ use std::sync::{
 };
 use std::time::Duration;
 const WAIT: Duration = Duration::from_secs(20);
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn blocked_final_gate_survives_prepare_abort_without_late_send_or_false_cleanup() {
+    pult_core::panic_guard::install();
+    let home = tempfile::tempdir().unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+    let arriving = entered.clone();
+    let barrier = release.clone();
+    let gate = Arc::new(move |_: &Ticket, _: &TurnSnapshot| {
+        arriving.notify_one();
+        let (lock, changed) = &*barrier;
+        let mut ready = lock.lock().unwrap();
+        while !*ready {
+            ready = changed.wait(ready).unwrap();
+        }
+        DispatchDecision::Allow
+    });
+    let host = CodexHost::start(
+        config(home.path()),
+        services(Arc::new(MemorySink::default()), gate, Arc::new(|| {})),
+    )
+    .unwrap();
+    let snapshot = snapshot(home.path(), "blocked", Approval::ReadOnly);
+    let ticket = ticket(&snapshot);
+    let worker = worker(&host, home.path(), &snapshot, None, true);
+    let starting =
+        tokio::spawn(async move { worker.start(ticket, snapshot, "normal".into()).await });
+    tokio::time::timeout(WAIT, entered.notified())
+        .await
+        .unwrap();
+    let mut stopping = host.shutdown();
+    let mut cleanup = host.cleanup();
+    let stopped_os = tokio::time::timeout(Duration::from_secs(5), cleanup.finished()).await;
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    let retained = stopping.as_mut().poll(&mut context).is_pending();
+    *release.0.lock().unwrap() = true;
+    release.1.notify_all();
+    assert!(
+        tokio::time::timeout(WAIT, starting)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
+    tokio::time::timeout(WAIT, stopping).await.unwrap().unwrap();
+    assert_eq!(
+        stopped_os.unwrap(),
+        pult_core::codex_process::CleanupStatus::Stopped
+    );
+    assert!(
+        retained,
+        "OS stop was mistaken for completed host policy IO"
+    );
+    assert!(
+        logs(home.path())
+            .iter()
+            .all(|row| row["method"] != "turn/start")
+    );
+    assert_gone(home.path());
+}
 macro_rules! case {($name:ident,$body:block)=>{#[tokio::test]async fn $name(){pult_core::panic_guard::install();tokio::time::timeout(WAIT,async $body).await.expect("worker watchdog");}};}
 #[derive(Default)]
 struct MemorySink {

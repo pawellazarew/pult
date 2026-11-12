@@ -92,7 +92,9 @@ pub enum DispatchDecision {
 }
 /// Fresh, synchronous host check immediately before dispatch seals. Ordinary
 /// input is already durable; queue/question receipts follow the start checkpoint.
-/// Must return promptly; provider preparation belongs outside this callback.
+/// Runs in an owned blocking step, including its dispatch seal. Registry and
+/// filesystem checks may block; provider preparation belongs outside this callback.
+/// Cancellation revokes dispatch but retains the ticket until the check returns.
 /// The initial snapshot is immutable;
 /// only Coordinator's permitted approval restrictions can change dispatched data.
 /// Install panic_guard at host startup to suppress callback panic payloads.
@@ -728,7 +730,7 @@ async fn run(
         &mut accepted,
         &mut user_event_id,
         text,
-        gate.as_deref(),
+        gate,
         &snapshot,
         deferred_draft,
     )
@@ -756,7 +758,7 @@ async fn execute(
     accepted: &mut Option<oneshot::Sender<Result<Accepted, DriverError>>>,
     user_event_id: &mut Option<u64>,
     text: String,
-    gate: Option<&dyn DispatchGate>,
+    gate: Option<Arc<dyn DispatchGate>>,
     initial: &TurnSnapshot,
     deferred_draft: Option<Value>,
 ) -> End {
@@ -767,48 +769,72 @@ async fn execute(
             touched: false,
         };
     }
-    // No await between the fresh check, applying its restriction and sealing.
-    // Call outside the driver mutex: host callbacks must not poison its state.
-    let decision = match gate {
-        Some(gate) => {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| gate.check(ticket, initial)))
-                .unwrap_or(DispatchDecision::Deny)
-        }
-        None => DispatchDecision::Allow,
-    };
-    let dispatch = {
-        let mut state = inner.state.lock().expect("driver state mutex");
-        if state.storage_failed {
-            return End {
-                outcome: failure("journal_unknown", "execution paused"),
-                error: Some(DriverError::StorageUnavailable),
-                touched: false,
-            };
-        }
-        if *cancel.borrow_and_update() {
-            return End {
+    // The owned run waits for this check even after cancellation. It retains
+    // the ticket until blocking policy IO ends; the callback and seal have no
+    // await between them, and no external callback runs under the driver lock.
+    let owner = inner.clone();
+    let scope = ticket.clone();
+    let initial = initial.clone();
+    let cancellation = control.cancel.subscribe();
+    let checked = tokio::task::spawn_blocking(move || {
+        if *cancellation.borrow() {
+            return Err(End {
                 outcome: Outcome::Interrupted,
                 error: Some(DriverError::Cancelled),
                 touched: false,
-            };
+            });
+        }
+        let decision = match gate {
+            Some(gate) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                gate.check(&scope, &initial)
+            }))
+            .unwrap_or(DispatchDecision::Deny),
+            None => DispatchDecision::Allow,
+        };
+        let mut state = owner.state.lock().expect("driver state mutex");
+        if state.storage_failed {
+            return Err(End {
+                outcome: failure("journal_unknown", "execution paused"),
+                error: Some(DriverError::StorageUnavailable),
+                touched: false,
+            });
+        }
+        if *cancellation.borrow() {
+            return Err(End {
+                outcome: Outcome::Interrupted,
+                error: Some(DriverError::Cancelled),
+                touched: false,
+            });
         }
         let denied = match decision {
             DispatchDecision::Allow => false,
             DispatchDecision::Deny => true,
             DispatchDecision::Restrict(approval) => !matches!(
-                state.core.restrict_before_start(ticket, approval),
+                state.core.restrict_before_start(&scope, approval),
                 Ok(crate::turn_coordinator::Change::Applied
                     | crate::turn_coordinator::Change::Unchanged)
             ),
         };
         if denied {
-            return End {
+            return Err(End {
                 outcome: failure("access_denied", "turn access denied before dispatch"),
                 error: Some(DriverError::AccessDenied),
                 touched: false,
+            });
+        }
+        Ok(state.core.dispatch_start(&scope))
+    })
+    .await;
+    let dispatch = match checked {
+        Ok(Ok(dispatch)) => dispatch,
+        Ok(Err(end)) => return end,
+        Err(_) => {
+            return End {
+                outcome: failure("worker_panic", "dispatch check failed"),
+                error: Some(DriverError::WorkerFailed),
+                touched: false,
             };
         }
-        state.core.dispatch_start(ticket)
     };
     let snapshot = match dispatch {
         Ok(DispatchAction::Proceed(snapshot)) => snapshot,
