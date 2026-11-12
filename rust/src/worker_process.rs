@@ -127,12 +127,64 @@ pub struct Process {
     discarded: Arc<AtomicU64>,
 }
 
+/// Startup failed. A retained process still requires confirmed cleanup, even
+/// when the holder did not acknowledge launch. No process means spawn never
+/// succeeded. Diagnostics deliberately omit launch arguments and IO details.
+pub struct SpawnFailure {
+    pub process: Option<Box<Process>>,
+    error: anyhow::Error,
+}
+impl std::fmt::Debug for SpawnFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpawnFailure")
+            .field("retained_process", &self.process.is_some())
+            .finish_non_exhaustive()
+    }
+}
+impl SpawnFailure {
+    fn before_spawn(error: anyhow::Error) -> Self {
+        Self {
+            process: None,
+            error,
+        }
+    }
+    fn after_spawn(process: Process, error: anyhow::Error) -> Self {
+        Self {
+            process: Some(Box::new(process)),
+            error,
+        }
+    }
+}
+
 impl Process {
     pub async fn spawn(launch: Launch) -> Result<Self> {
         Self::spawn_with_framing(launch, Framing::strict()).await
     }
     pub async fn spawn_with_framing(launch: Launch, framing: Framing) -> Result<Self> {
-        launch.validate()?;
+        match Self::spawn_owned(launch, framing).await {
+            Ok(process) => Ok(process),
+            Err(mut failure) => {
+                if let Some(process) = &mut failure.process
+                    && process.stop().await.is_err()
+                {
+                    return Err(failure
+                        .error
+                        .context("worker startup failed; cleanup unconfirmed"));
+                }
+                Err(failure.error.context("worker startup failed"))
+            }
+        }
+    }
+
+    /// Owned supervisors use this entry point: errors after OS spawn return the
+    /// process for stop/retry/quarantine instead of reducing it to an error.
+    /// Keep this future inside an owned task; dropping it only sends TERM via
+    /// Process::drop and cannot serve as proof that cleanup completed.
+    pub async fn spawn_owned(
+        launch: Launch,
+        framing: Framing,
+    ) -> std::result::Result<Self, SpawnFailure> {
+        launch.validate().map_err(SpawnFailure::before_spawn)?;
         let mut command = Command::new(&launch.holder);
         command
             .arg(std::process::id().to_string())
@@ -146,7 +198,10 @@ impl Process {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(false)
             .process_group(0);
-        let child = command.spawn().context("worker holder spawn failed")?;
+        let child = command
+            .spawn()
+            .context("worker holder spawn failed")
+            .map_err(SpawnFailure::before_spawn)?;
         let (sender, output) = mpsc::channel(if framing.recover { 1 } else { QUEUE });
         let discarded = Arc::new(AtomicU64::new(0));
         let stderr_bytes = Arc::new(AtomicU64::new(0));
@@ -165,16 +220,18 @@ impl Process {
             discarded: discarded.clone(),
         };
         process.stdin = process.child.stdin.take();
-        let stdout = process
-            .child
-            .stdout
-            .take()
-            .context("worker stdout unavailable")?;
-        let mut stderr = process
-            .child
-            .stderr
-            .take()
-            .context("worker stderr unavailable")?;
+        let Some(stdout) = process.child.stdout.take() else {
+            return Err(SpawnFailure::after_spawn(
+                process,
+                anyhow::anyhow!("worker stdout unavailable"),
+            ));
+        };
+        let Some(mut stderr) = process.child.stderr.take() else {
+            return Err(SpawnFailure::after_spawn(
+                process,
+                anyhow::anyhow!("worker stderr unavailable"),
+            ));
+        };
         process.readers.push(Some(tokio::spawn(async move {
             let mut bytes = [0u8; 8192];
             while let Ok(count) = stderr.read(&mut bytes).await {
@@ -206,12 +263,7 @@ impl Process {
         }
         .await;
         if let Err(error) = ready {
-            // Failure is never an acknowledgement of cleanup. stop retains its
-            // child until wait completes; Drop remains a final TERM fallback.
-            if process.stop().await.is_err() {
-                return Err(error.context("worker startup failed; cleanup unconfirmed"));
-            }
-            return Err(error.context("worker startup failed"));
+            return Err(SpawnFailure::after_spawn(process, error));
         }
         process.readers.push(Some(tokio::spawn(async move {
             loop {
