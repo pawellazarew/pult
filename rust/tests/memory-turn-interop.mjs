@@ -1,3 +1,4 @@
+import { readCompleteJsonl } from './support/complete-jsonl.mjs'
 import assert from 'node:assert/strict'
 import { spawn, execFileSync } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -21,7 +22,7 @@ const env = { ...process.env, HOME: account, PULT_TEST: '1', PULT_CODEX_BIN: joi
 for (const key of ['PULT_MEMORY_KEY', 'PULT_MEMORY_TURN_KEY', 'PULT_HOLDER_BIN']) delete env[key]
 const paths = layout(home)
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms))
-const jsonl = path => existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : []
+const jsonl = readCompleteJsonl
 const evidence = () => jsonl(join(native, 'memory-fixture.jsonl'))
 const journal = () => jsonl(join(home, 'events/journal.jsonl'))
 const records = () => JSON.parse(readFileSync(join(home, 'sessions.json'), 'utf8')).sessions

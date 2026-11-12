@@ -23,5 +23,5 @@ async fn queued_memory_uses_real_receipts_exact_hosts_and_durable_pause() {
         String::from_utf8_lossy(&output.stderr)
     );
     println!("{}", String::from_utf8_lossy(&output.stdout));
-    assert!(String::from_utf8_lossy(&output.stdout).contains("queue memory composed passed 9"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("queue memory composed passed 10"));
 }

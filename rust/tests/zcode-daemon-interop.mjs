@@ -1,3 +1,4 @@
+import { readCompleteJsonl } from './support/complete-jsonl.mjs'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { mkdtempSync, mkdirSync, chmodSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs'
@@ -30,8 +31,8 @@ async function until(check, label, timeoutMs = 10000) {
     await pause(10)
   }
 }
-const launches = () => existsSync(join(native, 'launches.jsonl')) ? readFileSync(join(native, 'launches.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : []
-const journal = () => existsSync(join(home, 'events/journal.jsonl')) ? readFileSync(join(home, 'events/journal.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : []
+const launches = () => readCompleteJsonl(join(native, 'launches.jsonl'))
+const journal = () => readCompleteJsonl(join(home, 'events/journal.jsonl'))
 const record = name => JSON.parse(readFileSync(join(home, 'sessions.json'), 'utf8')).sessions.find(row => row.name === name)
 const row = async name => (await client.request('agent.list')).sessions.find(row => row.name === name)
 async function done(name) {
