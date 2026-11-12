@@ -15,6 +15,8 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Action {
+    /// Private scoped permission MCP helper; never reads owner credentials.
+    McpAsk,
     Daemon {
         #[command(subcommand)]
         action: DaemonAction,
@@ -231,6 +233,14 @@ async fn main() -> Result<()> {
             initialize_runtime: false,
         },
     }) {
+        Action::McpAsk => {
+            return pult_core::ask_mcp::run(
+                home,
+                std::env::var("PULT_ASK_SESSION").ok(),
+                std::env::var("PULT_ASK_KEY").ok(),
+            )
+            .await;
+        }
         Action::Daemon {
             action: DaemonAction::Serve,
         } => {

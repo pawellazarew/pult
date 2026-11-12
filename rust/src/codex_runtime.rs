@@ -119,6 +119,7 @@ impl PoolKey {
     }
 }
 struct Lease {
+    ticket: Option<crate::turn_coordinator::Ticket>,
     host: Weak<CodexHost>,
     nonce: Arc<()>,
     check: Check,
@@ -195,7 +196,11 @@ impl Shared {
             state
                 .leases
                 .get(ticket.session())
-                .filter(|l| !*l.cancelled.borrow() && l.host.upgrade().is_some())
+                .filter(|l| {
+                    !*l.cancelled.borrow()
+                        && l.host.upgrade().is_some()
+                        && l.ticket.as_ref().is_none_or(|owned| owned == ticket)
+                })
                 .map(|l| (l.check.clone(), l.key.clone()))
         };
         lease.is_some_and(|(check, key)| {
@@ -215,6 +220,7 @@ struct Inner {
     shared: Arc<Shared>,
     owner: Arc<CodexOwner>,
     broker: Broker,
+    owns_globals: bool,
     memory: Option<Arc<dyn crate::memory_turn::TurnMemory>>,
     owned_curl: Option<Arc<CurlProbe>>,
     runtime: tokio::runtime::Handle,
@@ -243,6 +249,43 @@ impl CodexRuntime {
         network: Network,
         limits: Limits,
         memory: Option<Arc<dyn crate::memory_turn::TurnMemory>>,
+    ) -> Result<Arc<Self>, RuntimeError> {
+        Self::construct(deps, config, command, parent, network, limits, memory, None)
+    }
+    /// Daemon-owned Driver/Broker/SharedNetwork outlive this provider runtime.
+    #[allow(dead_code)] // State integration follows this isolated lifecycle slice.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_daemon(
+        deps: Dependencies,
+        config: RuntimeConfig,
+        command: TrustedCommand,
+        parent: Environment,
+        network: Network,
+        limits: Limits,
+        memory: Option<Arc<dyn crate::memory_turn::TurnMemory>>,
+        broker: Broker,
+    ) -> Result<Arc<Self>, RuntimeError> {
+        Self::construct(
+            deps,
+            config,
+            command,
+            parent,
+            network,
+            limits,
+            memory,
+            Some(broker),
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn construct(
+        deps: Dependencies,
+        config: RuntimeConfig,
+        command: TrustedCommand,
+        parent: Environment,
+        network: Network,
+        limits: Limits,
+        memory: Option<Arc<dyn crate::memory_turn::TurnMemory>>,
+        broker: Option<Broker>,
     ) -> Result<Arc<Self>, RuntimeError> {
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| RuntimeError::Invalid)?;
         if limits.hosts == 0 || limits.hosts > 16 || limits.preparing == 0 || limits.preparing > 256
@@ -311,16 +354,20 @@ impl CodexRuntime {
             }),
             ..deps
         };
-        let broker = Broker::new(
-            deps.sink.clone(),
-            permission_broker::Redactors {
-                value: Arc::new(crate::redaction::redact),
-                string: Arc::new(crate::redaction::redact_string),
-            },
-            permission_broker::Options::from_timeout_ms(config.perm_timeout_ms)
-                .map_err(|_| RuntimeError::Invalid)?,
-        )
-        .map_err(|_| RuntimeError::Invalid)?;
+        let owns_globals = broker.is_none();
+        let broker = match broker {
+            Some(broker) => broker,
+            None => Broker::new(
+                deps.sink.clone(),
+                permission_broker::Redactors {
+                    value: Arc::new(crate::redaction::redact),
+                    string: Arc::new(crate::redaction::redact_string),
+                },
+                permission_broker::Options::from_timeout_ms(config.perm_timeout_ms)
+                    .map_err(|_| RuntimeError::Invalid)?,
+            )
+            .map_err(|_| RuntimeError::Invalid)?,
+        };
         Ok(Arc::new(Self {
             inner: Arc::new(Inner {
                 deps,
@@ -330,6 +377,7 @@ impl CodexRuntime {
                 shared,
                 owner,
                 broker,
+                owns_globals,
                 memory,
                 owned_curl,
                 runtime,
@@ -412,6 +460,9 @@ impl CodexRuntime {
             let snapshot = inner.deps.driver.snapshot_for_dispatch(&ticket)?;
             let state = inner.shared.state.lock().expect("Codex runtime");
             let lease = state.leases.get(key)?;
+            if lease.ticket.as_ref() != Some(&ticket) {
+                return None;
+            }
             let host = lease.host.upgrade()?;
             Some((ticket, snapshot, host))
         });
@@ -429,17 +480,12 @@ impl CodexRuntime {
             })
         })
     }
+    #[allow(dead_code)] // Used by the daemon's shared permission-state transition.
+    pub(crate) fn permission_broker(&self) -> Broker {
+        self.inner.broker.clone()
+    }
     pub fn list_permissions(&self, session: Option<&str>) -> Vec<Value> {
         self.inner.broker.list(session)
-    }
-    pub(crate) fn request_memory_permission(
-        &self,
-        request: permission_broker::PermissionRequest,
-    ) -> Result<permission_broker::RequestHandle, permission_broker::BrokerError> {
-        if *self.inner.shared.closed.borrow() || self.inner.deps.driver.storage_failed() {
-            return Err(permission_broker::BrokerError::StorageUnavailable);
-        }
-        self.inner.broker.request(request)
     }
     pub fn resolve_permission(
         &self,
@@ -480,6 +526,30 @@ impl CodexRuntime {
         key: &SessionKey,
         public_turn_id: Option<&str>,
     ) -> Result<bool, RuntimeError> {
+        if !self.inner.owns_globals {
+            let (ticket, preparing) = {
+                let state = self.inner.shared.state.lock().expect("Codex runtime");
+                (
+                    state.leases.get(key).and_then(|lease| lease.ticket.clone()),
+                    state.preparing.get(key).cloned(),
+                )
+            };
+            if let Some(ticket) = ticket {
+                if public_turn_id.is_some_and(|id| {
+                    self.inner.deps.driver.public_turn_id(&ticket).as_deref() != Some(id)
+                }) {
+                    return Ok(false);
+                }
+                return Ok(self.inner.deps.driver.cancel(&ticket));
+            }
+            if public_turn_id.is_none()
+                && let Some(preparing) = preparing
+            {
+                preparing.send_replace(true);
+                return Ok(true);
+            }
+            return Ok(false);
+        }
         let ticket = self.inner.deps.driver.active_ticket(key);
         let Some(ticket) = ticket else {
             if public_turn_id.is_some() {
@@ -841,6 +911,7 @@ async fn execute(
         state.leases.insert(
             key.clone(),
             Lease {
+                ticket: None,
                 host: Arc::downgrade(&host),
                 nonce: nonce.clone(),
                 check,
@@ -870,6 +941,16 @@ async fn execute(
             });
         }
     };
+    {
+        let mut state = inner.shared.state.lock().expect("Codex runtime");
+        if let Some(lease) = state
+            .leases
+            .get_mut(&key)
+            .filter(|lease| Arc::ptr_eq(&lease.nonce, &nonce))
+        {
+            lease.ticket = Some(handle.ticket().clone());
+        }
+    }
     // A synchronous Driver redactor can reenter stop/shutdown before the
     // ticket becomes visible. Reconcile cancellation after reservation.
     if *cancelled.borrow() || *closed.borrow() {
@@ -884,7 +965,8 @@ async fn execute(
                 break;
             }
             if progress.changed().await.is_err() {
-                break;
+                // Lost progress is not proof of Finished. Retain the lease.
+                return;
             }
         }
         if let Some(shared) = shared.upgrade() {
@@ -909,20 +991,37 @@ struct Approvals {
     inner: Weak<Inner>,
     gate: Arc<dyn DispatchGate>,
 }
+/// Dropping the caller cancels only its exact question. The owned task retains
+/// response and policy-IO guards until the Broker's journal work is drained.
+struct ApprovalCancel(watch::Sender<bool>);
+impl Drop for ApprovalCancel {
+    fn drop(&mut self) {
+        self.0.send_replace(true);
+    }
+}
 impl ApprovalHandler for Approvals {
     fn handle(&self, context: ApprovalContext) -> Task<()> {
-        let inner = self.inner.upgrade();
+        let Some(inner) = self.inner.upgrade() else {
+            return Box::pin(async {});
+        };
         let gate = self.gate.clone();
-        Box::pin(async move {
-            let Some(inner) = inner else {
-                return;
-            };
-            if !matches!(
-                context.method.as_str(),
-                "item/commandExecution/requestApproval"
-                    | "item/fileChange/requestApproval"
-                    | "item/tool/requestUserInput"
-            ) {
+        let (cancelled, mut cancellation) = watch::channel(false);
+        let cancel_on_drop = ApprovalCancel(cancelled);
+        // Registration happens before the caller can drop/abort even an
+        // unpolled handler future. Holding only the responder count is not
+        // sufficient: process retirement can bypass that bounded wait.
+        let policy_io = context.responder.retain_policy_io();
+        let runtime = inner.runtime.clone();
+        let owned = runtime.spawn(async move {
+            let _policy_io = policy_io;
+            if *cancellation.borrow()
+                || !matches!(
+                    context.method.as_str(),
+                    "item/commandExecution/requestApproval"
+                        | "item/fileChange/requestApproval"
+                        | "item/tool/requestUserInput"
+                )
+            {
                 return;
             }
             let owner = TrustedOwner {
@@ -939,10 +1038,15 @@ impl ApprovalHandler for Approvals {
             ) {
                 Ok(prepared) => prepared,
                 Err(error) => {
-                    let _ = context.responder.respond(Err(error.response_error())).await;
+                    if !*cancellation.borrow() {
+                        let _ = context.responder.respond(Err(error.response_error())).await;
+                    }
                     return;
                 }
             };
+            if *cancellation.borrow() {
+                return;
+            }
             let mut request = match inner.broker.request(prepared.request()) {
                 Ok(request) => request,
                 Err(_) => {
@@ -952,26 +1056,72 @@ impl ApprovalHandler for Approvals {
                     return;
                 }
             };
-            let decision = request.decision().await;
+            let decision = {
+                // One waiter only: dropping/recreating DecisionWait on another
+                // notification would itself cancel the question.
+                let decision = request.decision();
+                tokio::pin!(decision);
+                if *cancellation.borrow() {
+                    None
+                } else {
+                    tokio::select! { biased;
+                        _ = cancellation.changed() => None,
+                        decision = &mut decision => Some(decision),
+                    }
+                }
+            };
+            request.cancel();
+            // This owner is not the outer cancellable handler. A hung requested
+            // or resolved append keeps policy_io and the exact Ticket alive.
+            request.drained().await;
             if inner.broker.storage_failed() {
                 inner.deps.driver.report_storage_failure();
                 return;
             }
+            if *cancellation.borrow() || *inner.shared.closed.borrow() {
+                return;
+            }
+            let Some(decision) = decision else {
+                return;
+            };
             let Some(snapshot) = inner.deps.driver.snapshot_for_dispatch(&context.ticket) else {
                 return;
             };
             let answer = prepared
                 .resolve(&owner, decision)
                 .map_err(|error| error.response_error());
+            let response_cancellation = cancellation.clone();
+            let gate = Arc::new(
+                move |ticket: &crate::turn_coordinator::Ticket, snapshot: &TurnSnapshot| {
+                    if *response_cancellation.borrow() {
+                        return turn_driver::DispatchDecision::Deny;
+                    }
+                    let decision = gate.check(ticket, snapshot);
+                    if *response_cancellation.borrow() {
+                        turn_driver::DispatchDecision::Deny
+                    } else {
+                        decision
+                    }
+                },
+            );
             let _ = context
                 .responder
                 .respond_checked(gate, snapshot, context.effective_approval, answer)
                 .await;
+        });
+        Box::pin(async move {
+            let _cancel_on_drop = cancel_on_drop;
+            let _ = owned.await;
         })
     }
 }
+
 fn begin_shutdown(inner: Arc<Inner>) {
     inner.shared.closed.send_replace(true);
+    if !inner.owns_globals {
+        begin_daemon_shutdown(inner);
+        return;
+    }
     inner.broker.shutdown();
     inner.deps.driver.begin_shutdown();
     let hosts = {
@@ -1083,6 +1233,129 @@ fn begin_shutdown(inner: Arc<Inner>) {
         }
     });
 }
+// Snapshot identities under the runtime lock, then invoke Driver/hosts outside
+// it. No name/latest-session lookup establishes shutdown ownership.
+fn cancel_daemon_work(
+    inner: &Inner,
+) -> (Vec<crate::turn_coordinator::Ticket>, Vec<Arc<CodexHost>>) {
+    let (tickets, hosts) = {
+        let state = inner.shared.state.lock().expect("Codex runtime");
+        for preparing in state.preparing.values() {
+            preparing.send_replace(true);
+        }
+        (
+            state
+                .leases
+                .values()
+                .filter_map(|lease| lease.ticket.clone())
+                .collect::<Vec<_>>(),
+            state
+                .pool
+                .iter()
+                .map(|entry| entry.host.clone())
+                .chain(state.dedicated.iter().map(|entry| entry.host.clone()))
+                .collect::<Vec<_>>(),
+        )
+    };
+    for ticket in &tickets {
+        inner.deps.driver.cancel(ticket);
+    }
+    for host in &hosts {
+        host.retry_cleanup();
+        drop(host.shutdown());
+    }
+    (tickets, hosts)
+}
+async fn daemon_checkpoint(inner: &Inner) -> Result<(), RuntimeError> {
+    if let Some(curl) = &inner.owned_curl {
+        curl.shutdown().await;
+    }
+    loop {
+        let changed = inner.shared.changed.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        if inner
+            .shared
+            .state
+            .lock()
+            .expect("Codex runtime")
+            .preparing
+            .is_empty()
+        {
+            break;
+        }
+        changed.await;
+    }
+    let (tickets, hosts) = cancel_daemon_work(inner);
+    for host in hosts {
+        host.shutdown()
+            .await
+            .map_err(|_| RuntimeError::CleanupUnconfirmed)?;
+        inner
+            .shared
+            .state
+            .lock()
+            .expect("Codex runtime")
+            .dedicated
+            .retain(|entry| !Arc::ptr_eq(&entry.host, &host));
+    }
+    for ticket in tickets {
+        inner.deps.driver.wait_ticket(&ticket).await;
+    }
+    loop {
+        let changed = inner.shared.changed.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        let quiet = {
+            let state = inner.shared.state.lock().expect("Codex runtime");
+            state.preparing.is_empty() && state.leases.is_empty()
+        };
+        if quiet {
+            return Ok(());
+        }
+        changed.await;
+    }
+}
+fn begin_daemon_shutdown(inner: Arc<Inner>) {
+    cancel_daemon_work(&inner);
+    {
+        let mut phase = inner.shared.shutdown.lock().expect("Codex shutdown");
+        match *phase {
+            ShutdownPhase::Idle => *phase = ShutdownPhase::Running,
+            ShutdownPhase::Running | ShutdownPhase::Complete => return,
+            ShutdownPhase::WaitingRetry => {
+                *phase = ShutdownPhase::Running;
+                inner.shared.finished.send_replace(None);
+                inner.shared.retry.notify_one();
+                return;
+            }
+        }
+    }
+    inner.runtime.clone().spawn(async move {
+        loop {
+            // Dropping checkpoint waiters aborts no owned preparation/process IO.
+            // Unknown cleanup retains leases and can be retried by shutdown().
+            let result = tokio::time::timeout(Duration::from_secs(1), daemon_checkpoint(&inner))
+                .await
+                .unwrap_or(Err(RuntimeError::CleanupUnconfirmed));
+            let good = result.is_ok();
+            {
+                let mut phase = inner.shared.shutdown.lock().expect("Codex shutdown");
+                *phase = if good {
+                    ShutdownPhase::Complete
+                } else {
+                    ShutdownPhase::WaitingRetry
+                };
+                inner.shared.finished.send_replace(Some(result));
+            }
+            if good {
+                break;
+            }
+            inner.shared.retry.notified().await;
+        }
+    });
+}
+
 struct FaultSink {
     sink: Arc<dyn EventSink>,
     driver: Weak<Driver>,
@@ -1131,3 +1404,7 @@ fn wait_shutdown(shared: &Shared) -> Task<Result<(), RuntimeError>> {
         }
     })
 }
+
+#[cfg(test)]
+#[path = "codex_runtime_daemon_tests.rs"]
+mod daemon_tests;

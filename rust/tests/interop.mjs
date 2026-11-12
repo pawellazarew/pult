@@ -18,7 +18,7 @@ const paths = layout(home)
 const pause = (ms) => new Promise((r) => setTimeout(r, ms))
 let daemon
 let client
-const partialMethods = ['agent.list', 'agent.prompt', 'agent.queue.move', 'agent.queue.remove', 'agent.queue.resume', 'agent.queue.send', 'agent.start', 'agent.stop', 'perm.list', 'perm.resolve']
+const partialMethods = ['agent.list', 'agent.prompt', 'agent.queue.move', 'agent.queue.remove', 'agent.queue.resume', 'agent.queue.send', 'agent.start', 'agent.stop', 'perm.list', 'perm.request', 'perm.resolve']
 let passed = 0
 async function check(name, run) { await run(); passed++; console.log(`pass ${name}`) }
 function launch(directory = home) {

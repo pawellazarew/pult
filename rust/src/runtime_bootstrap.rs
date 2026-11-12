@@ -69,6 +69,29 @@ impl fmt::Debug for Bootstrap {
             .finish_non_exhaustive()
     }
 }
+/// Selected-provider Claude startup snapshot. No Codex executable is resolved.
+/// Settings paths describe the actual filtered child HOME and Node's platform
+/// managed directory; this loader never reads native settings or auth files.
+pub struct ClaudeBootstrap {
+    pub config: RuntimeConfig,
+    pub parent: Environment,
+    pub holder: PathBuf,
+    pub claude: PathBuf,
+    pub prefix_args: Vec<OsString>,
+    pub curl: PathBuf,
+    pub child_home: PathBuf,
+    pub managed_directory: PathBuf,
+    warning_codes: Vec<WarningCode>,
+}
+impl fmt::Debug for ClaudeBootstrap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ClaudeBootstrap")
+            .field("parent_variables", &self.parent.len())
+            .field("prefix_arguments", &self.prefix_args.len())
+            .field("configuration_warnings", &self.warning_codes.len())
+            .finish_non_exhaustive()
+    }
+}
 #[derive(Eq, PartialEq)]
 struct Identity {
     dev: u64,
@@ -219,6 +242,25 @@ fn codex(parent: &Environment, filtered: &Environment) -> Result<PathBuf, Static
     }
     Err(StaticError::ExecutableUnavailable)
 }
+/// Checked configuration only: independent of every provider executable, PATH,
+/// runtime holder and curl. Caller owns this blocking filesystem operation.
+pub fn configuration(home: &Path) -> Result<runtime_config::Parsed, StaticError> {
+    absolute(home)?;
+    let home = fs::canonicalize(home).map_err(|_| StaticError::UnsafeHome)?;
+    let before = home_metadata(&home)?;
+    let bytes = config_bytes(&home)?;
+    let raw = bytes
+        .as_deref()
+        .map(serde_json::from_slice::<serde_json::Value>)
+        .transpose()
+        .map_err(|_| StaticError::ConfigInvalid)?;
+    let parsed = runtime_config::parse(raw.as_ref().unwrap_or(&serde_json::json!({})));
+    let after = home_metadata(&home)?;
+    if (before.dev(), before.ino()) != (after.dev(), after.ino()) {
+        return Err(StaticError::UnsafeHome);
+    }
+    Ok(parsed)
+}
 /// Loads config and resolves trusted executables without spawning any of them.
 /// Only a missing config defaults; malformed JSON (including lone UTF-16
 /// surrogates), unsafe files and unreadable/changed files refuse bootstrap.
@@ -235,13 +277,7 @@ pub fn load(
     let before = home_metadata(&home)?;
     let filtered = worker_env::from_parent(parent, &Environment::new())
         .map_err(|_| StaticError::Environment)?;
-    let bytes = config_bytes(&home)?;
-    let raw = bytes
-        .as_deref()
-        .map(serde_json::from_slice::<serde_json::Value>)
-        .transpose()
-        .map_err(|_| StaticError::ConfigInvalid)?;
-    let parsed = runtime_config::parse(raw.as_ref().unwrap_or(&serde_json::json!({})));
+    let parsed = configuration(&home)?;
     executable(current_exe)?;
     let test = parent
         .get(OsStr::new("PULT_TEST"))
@@ -274,6 +310,83 @@ pub fn load(
         codex,
         prefix_args: vec![OsString::from("app-server")],
         curl,
+        warning_codes: parsed.warnings.into_iter().map(|w| w.code).collect(),
+    })
+}
+
+/// Loads only the selected Claude provider. Call from owned blocking startup
+/// under the daemon's Pult-home ownership lease. No executable is invoked.
+/// PULT_CLAUDE_BIN is an absolute trusted-host override, with no error fallback;
+/// fixture holder/curl overrides require exact PULT_TEST=1 as in Codex load().
+/// Native settings/auth files and directory listings are deliberately untouched.
+pub fn load_claude(
+    home: &Path,
+    current_exe: &Path,
+    parent: &Environment,
+) -> Result<ClaudeBootstrap, StaticError> {
+    absolute(home)?;
+    absolute(current_exe)?;
+    let home = fs::canonicalize(home).map_err(|_| StaticError::UnsafeHome)?;
+    let before = home_metadata(&home)?;
+    let filtered = worker_env::from_parent(parent, &Environment::new())
+        .map_err(|_| StaticError::Environment)?;
+    let child_home = filtered
+        .get(OsStr::new("HOME"))
+        .map(PathBuf::from)
+        .ok_or(StaticError::Environment)?;
+    absolute(&child_home)?;
+    // Keep the source bytes: canonicalizing HOME here could silently change
+    // which native settings the later child/resolver actually observes.
+    let managed_directory = if cfg!(target_os = "macos") {
+        PathBuf::from("/Library/Application Support/ClaudeCode")
+    } else {
+        PathBuf::from("/etc/claude-code")
+    };
+    let parsed = configuration(&home)?;
+    executable(current_exe)?;
+    let test = parent
+        .get(OsStr::new("PULT_TEST"))
+        .is_some_and(|v| v == "1");
+    let holder = if test {
+        parent
+            .get(OsStr::new("PULT_WORKER_HOLDER_BIN"))
+            .map(PathBuf::from)
+    } else {
+        None
+    }
+    .unwrap_or_else(|| current_exe.with_file_name("pult-worker-holder"));
+    let curl = if test {
+        parent.get(OsStr::new("PULT_CURL_BIN")).map(PathBuf::from)
+    } else {
+        None
+    }
+    .unwrap_or_else(|| PathBuf::from("/usr/bin/curl"));
+    let holder = executable(&holder)?;
+    let curl = executable(&curl)?;
+    let claude = if let Some(path) = parent.get(OsStr::new("PULT_CLAUDE_BIN")) {
+        executable(Path::new(path))?
+    } else {
+        let paths = filtered
+            .get(OsStr::new("PATH"))
+            .ok_or(StaticError::Environment)?;
+        std::env::split_paths(paths)
+            .filter(|path| path.is_absolute())
+            .find_map(|path| executable(&path.join("claude")).ok())
+            .ok_or(StaticError::ExecutableUnavailable)?
+    };
+    let after = home_metadata(&home)?;
+    if (before.dev(), before.ino()) != (after.dev(), after.ino()) {
+        return Err(StaticError::UnsafeHome);
+    }
+    Ok(ClaudeBootstrap {
+        config: parsed.config,
+        parent: filtered,
+        holder,
+        claude,
+        prefix_args: vec![],
+        curl,
+        child_home,
+        managed_directory,
         warning_codes: parsed.warnings.into_iter().map(|w| w.code).collect(),
     })
 }

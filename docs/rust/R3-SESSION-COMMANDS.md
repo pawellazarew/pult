@@ -1,21 +1,24 @@
-# R3 session commands — partial ordinary Codex staging
+# R3 session commands — partial ordinary Claude/Codex execution
 
-The owner daemon exposes ten experimental partial methods alongside the 27 fully
-implemented Rust foundation methods. `protocol.catalog` marks these ten entries
+The daemon catalog contains eleven experimental partial methods alongside the 28 fully
+implemented Rust foundation methods. `protocol.catalog` marks these eleven entries
 `rust: "partial"` and includes their parameter/result schemas. Owner hello and
 `daemon.status` advertise them in `capabilities.partialMethods`. They stay separate
-from `supportedMethods`. Memory-scoped connections advertise an empty partial list.
-The catalog retains 98 entries, including the existing 85 Node routes and 13
-extensions. This stage advances ordinary Codex execution while the broader R3
+from `supportedMethods`. Scoped connections advertise only their permitted methods,
+with an empty partial list. `perm.request` is ask-only: owner tokens cannot call
+it or impersonate a provider.
+The catalog retains 99 entries, including the existing 85 Node routes and 14
+extensions. This stage advances ordinary Claude/Codex execution while the broader R3
 migration continues.
 
 | Method | Current slice |
 | --- | --- |
 | `agent.start` | Create cold metadata with explicit settings and fresh consent/cwd checks. Returns a public record. |
 | `agent.list` | Return `{sessions}` with public records, reduced `status`, integer `pendingPermissions` and nullable `liveApproval`. |
-| `agent.prompt` | Send ordinary input, queue it, interrupt-and-send, or steer an active Codex turn. Returns `{turnId}` or `{queued:true,id}`. |
+| `agent.prompt` | Send ordinary Claude/Codex input, queue it or interrupt-and-send; steer an active Codex turn. Returns `{turnId}` or `{queued:true,id}`. |
 | `agent.queue.send/resume/remove/move` | Full queue lifecycle, selected sending, reordering, connection-owned edit holds and edits. |
 | `agent.stop` | Stop `{name,turnId?}` and return `{stopped}`. A cold stop records interruption. |
+| `perm.request` | Scoped ordinary Claude question; only an exact host-issued ask credential may call. |
 | `perm.list` | Return redacted `{pending}` cards, optionally filtered by `{name}`. |
 | `perm.resolve` | Durably resolve an offered decision and return `{resolved:true,id,decision,scope?}`. Scope appears for allow. |
 
@@ -32,8 +35,8 @@ existing confirmation/consent policy. Shell clients cannot request `cli-once`.
 Inherited defaults, active browsers, worktrees, request IDs, drafts and start prompts
 require later stages. Unsupported feature parameters fail before creation.
 
-Native prompting currently requires Codex. Queue, interrupt-and-send and steering
-are described in [R3-SESSION-QUEUE](R3-SESSION-QUEUE.md), including durable unknown
+Selected-provider dispatch is described in [R3-NATIVE-PROVIDERS](R3-NATIVE-PROVIDERS.md).
+Queue, interrupt-and-send and Codex steering are described in [R3-SESSION-QUEUE](R3-SESSION-QUEUE.md), including durable unknown
 send markers and rollback behavior. Explicit `false` flags preserve ordinary
 prompting. Full Claude/ZCode,
 background/subagent, attention, context, phase and detailed access projections are

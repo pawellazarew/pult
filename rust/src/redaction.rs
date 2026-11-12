@@ -14,7 +14,7 @@ use serde_json::Value;
 use std::borrow::Cow;
 use std::sync::OnceLock;
 
-const MEMORY_TURN_PATTERN: &str = r"(?i-u:mt_[0-9a-f]{64})";
+const MEMORY_TURN_PATTERN: &str = r"(?i-u:(?:mt|pa)_[0-9a-f]{64})";
 
 struct Rule {
     pattern: Regex,

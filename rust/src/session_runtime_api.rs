@@ -129,12 +129,12 @@ impl Gate {
     fn submit_advanced(
         &self,
         token: &tokio::sync::watch::Sender<bool>,
-        runtime: &crate::codex_runtime::CodexRuntime,
+        runtime: &crate::provider_runtime::Runtime,
         key: SessionKey,
         input: crate::turn_driver::Input,
     ) -> Result<
         crate::turn_driver::Task<
-            std::result::Result<crate::turn_driver::Handle, crate::codex_runtime::RuntimeError>,
+            std::result::Result<crate::turn_driver::Handle, crate::provider_runtime::Error>,
         >,
     > {
         let _admission = self.advanced.lock().map_err(|_| storage())?;
@@ -191,12 +191,12 @@ impl CommandGuard {
     }
     fn submit(
         &self,
-        runtime: &crate::codex_runtime::CodexRuntime,
+        runtime: &crate::provider_runtime::Runtime,
         key: SessionKey,
         input: crate::turn_driver::Input,
     ) -> Result<
         crate::turn_driver::Task<
-            std::result::Result<crate::turn_driver::Handle, crate::codex_runtime::RuntimeError>,
+            std::result::Result<crate::turn_driver::Handle, crate::provider_runtime::Error>,
         >,
     > {
         let gate = self.gate.upgrade().ok_or_else(storage)?;
@@ -396,9 +396,7 @@ async fn list(state: Arc<State>, params: Value) -> Result<Box<RawValue>> {
                 .and_then(|ticket| driver.execution_snapshot(&ticket));
             let mut public = record.clone();
             public.set_string("status", status);
-            let pending = state.native_runtime.get().map_or(0, |runtime| {
-                runtime.list_permissions(Some(record.name())).len()
-            });
+            let pending = crate::permission_state::list(&state, Some(record.name())).len();
             public.set_number("pendingPermissions", pending as f64);
             public.set_raw(
                 "liveApproval",
@@ -442,11 +440,8 @@ pub(crate) async fn ordinary(
             "session incarnation changed before dispatch",
         ));
     }
-    if provider != "codex" {
-        return Err(error(
-            "unsupported",
-            "native execution currently supports Codex ordinary turns only",
-        ));
+    if !matches!(provider.as_str(), "codex" | "claude") {
+        return Err(error("unsupported", "provider execution is unsupported"));
     }
     let checking = state.clone();
     let job = state.host_jobs.track();
@@ -465,7 +460,7 @@ pub(crate) async fn ordinary(
     if let Some(command) = &command {
         command.check()?;
     }
-    let runtime = runtime_state::instance(&state)
+    let runtime = runtime_state::for_key(&state, &session)
         .await
         .map_err(|_| error("runtime_unavailable", "native runtime is unavailable"))?;
     let input = crate::turn_driver::Input {
@@ -482,9 +477,14 @@ pub(crate) async fn ordinary(
             .session_commands
             .submit_advanced(&revoked, &runtime, session.clone(), input)?
     };
-    let mut handle = pending
-        .await
-        .map_err(|e| error(e.code(), "turn was not accepted"))?;
+    let mut handle = pending.await.map_err(|e| {
+        let message = if e.code() == "start_unknown" {
+            crate::owner_trust::UNCERTAIN_MESSAGE
+        } else {
+            "turn was not accepted"
+        };
+        error(e.code(), message)
+    })?;
     let progress = handle.subscribe_progress();
     crate::session_queue::observe(state.clone(), session, progress);
     let accepted = handle.accepted().await.map_err(|e| {
@@ -516,25 +516,18 @@ async fn stop(
         .transpose()?;
     // Cancel a submitted/preparing turn before any Registry IO can block.
     let mut stopped = if command.is_some() {
-        state
-            .native_runtime
-            .get()
-            .map(|runtime| runtime.stop_name(&name))
-            .transpose()
+        runtime_state::stop_name(&state, &name)
             .map_err(|e| error(e.code(), "stop request failed"))?
-            .unwrap_or(false)
     } else {
         false
     };
     let (key, provider) = lookup(state.clone(), name).await?;
-    if let Some(runtime) = state.native_runtime.get() {
-        stopped |= if turn_id.is_none() {
-            runtime.stop_name(&key.name)
-        } else {
-            runtime.stop(&key, turn_id)
-        }
-        .map_err(|e| error(e.code(), "stop request failed"))?;
+    stopped |= if turn_id.is_none() {
+        runtime_state::stop_name(&state, &key.name)
+    } else {
+        runtime_state::stop(&state, &key, turn_id)
     }
+    .map_err(|e| error(e.code(), "stop request failed"))?;
     if turn_id.is_none() || stopped {
         crate::session_queue::pause(state.clone(), key.clone()).await?;
         // Interrupted describes the user's stop intent. Native close proof and
@@ -581,13 +574,11 @@ async fn resolve(state: Arc<State>, params: Value, by: &str) -> Result<Box<RawVa
         },
         _ => return Err(invalid()),
     };
-    let runtime = state
-        .native_runtime
-        .get()
-        .ok_or_else(|| error("not_found", "permission is not pending"))?;
-    let resolution = runtime
-        .resolve_permission(id, decision, by)
-        .map_err(broker_error)?;
+    if crate::permission_state::current(&state).is_none() {
+        return Err(error("not_found", "permission is not pending"));
+    }
+    let resolution =
+        crate::permission_state::resolve(&state, id, decision, by).map_err(broker_error)?;
     if !resolution.wait().await.map_err(broker_error)? {
         return Err(error("not_found", "permission is not pending"));
     }
@@ -635,10 +626,7 @@ async fn execute_owned(
                 .get("name")
                 .map(|v| v.as_str().ok_or_else(invalid))
                 .transpose()?;
-            let pending = state
-                .native_runtime
-                .get()
-                .map_or_else(Vec::new, |runtime| runtime.list_permissions(name));
+            let pending = crate::permission_state::list(&state, name);
             raw(json!({"pending":pending}))
         }
         "perm.resolve" => resolve(state, params, by).await,
@@ -723,6 +711,9 @@ pub(crate) mod tests {
             session_commands: Arc::default(),
             native_runtime: OnceLock::new(),
             memory_turns: OnceLock::new(),
+            claude_asks: OnceLock::new(),
+            permissions: OnceLock::new(),
+            claude_runtime: OnceLock::new(),
             runtime_init: Mutex::new(()),
             consent: Mutex::new(None),
             live_sessions: Mutex::new(crate::session_live::Cache::new(65536).unwrap()),

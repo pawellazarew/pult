@@ -341,7 +341,7 @@ fn visible_email_does_not_disable_token_password_or_url_credential_filters() {
 #[test]
 fn turn_memory_capabilities_match_real_node_in_embedded_text_and_nested_property_names() {
     let mut cases = Vec::new();
-    for prefix in ["mt_", "MT_", "mT_"] {
+    for prefix in ["mt_", "MT_", "mT_", "pa_", "PA_", "pA_"] {
         for length in [63, 64, 65] {
             for hex in ["a", "F"] {
                 let key = format!("{prefix}{}", hex.repeat(length));

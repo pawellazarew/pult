@@ -244,7 +244,7 @@
       "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Owner ordinary Codex input, queue/FIFO lifecycle, interrupt-and-send and same-turn steering. Queue identity metadata stays host-owned; asynchronous question-answer protocol remains unsupported.",
+      "description": "Partial Rust ordinary Claude/Codex input, durable queue and interrupt-and-send; live steering is Codex-only. Warm Claude, background/questions and other providers remain unsupported.",
       "paramsSchema": {
         "type": "object",
         "properties": {
@@ -3273,12 +3273,77 @@
     {
       "name": "perm.request",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "partial",
       "access": "ask",
       "testOnly": false,
-      "description": "Migration inventory for perm.request.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Partial scoped ordinary-Claude permission question, issued by the trusted daemon for an exact active Ticket/generation/public turn. Only ask credentials may call; owner tokens are forbidden. Tool names are nonempty/control-free and bounded to 256 UTF-8 bytes; optional toolUseId is null or nonempty/control-free and bounded to 512 bytes. Optional sessionId must match the captured session. General runtime questions/elicitation and full provider parity remain unsupported.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "toolName": {
+            "type": "string"
+          },
+          "input": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "toolUseId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessionId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "toolName",
+          "input"
+        ],
+        "additionalProperties": true
+      },
+      "resultSchema": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "behavior": {
+                "type": "string",
+                "enum": [
+                  "allow"
+                ]
+              },
+              "updatedInput": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            },
+            "required": [
+              "behavior"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "behavior": {
+                "type": "string",
+                "enum": [
+                  "deny"
+                ]
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "behavior"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      }
     },
     {
       "name": "perm.resolve",
@@ -3286,7 +3351,7 @@
       "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Partial Rust durable resolution of offered ordinary Codex permission scopes and structured answers. Input substitution and persistent rule storage remain unsupported.",
+      "description": "Partial Rust durable resolution of offered permission scopes and structured answers in the daemon-owned Inbox. Ordinary Claude offers once only. Input substitution and persistent rule storage remain unsupported.",
       "paramsSchema": {
         "type": "object",
         "properties": {
