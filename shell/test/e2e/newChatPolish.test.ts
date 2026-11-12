@@ -131,3 +131,126 @@ describe('new chat composer and compact draft sidebar', () => {
     await h.shot('many-drafts-900-after-polish')
   })
 })
+
+async function holdFirstDraftPut(h: Harness): Promise<void> {
+  await h.app.evaluate(({ ipcMain }) => {
+    // Electron fixture only: delay the IPC reply, after the daemon has committed the write.
+    const handlers = (ipcMain as unknown as { _invokeHandlers: Map<string, (...args: unknown[]) => unknown> })._invokeHandlers
+    const original = handlers.get('pult:call')
+    if (!original) throw new Error('missing pult:call IPC handler')
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const state = { held: false, committed: false, puts: [] as Array<{ baseRev: number | undefined }>, removes: [] as Array<string | undefined>, release, restore: () => { ipcMain.removeHandler('pult:call'); ipcMain.handle('pult:call', original) } }
+    ;(globalThis as unknown as { __heldDraftPut: typeof state }).__heldDraftPut = state
+    ipcMain.removeHandler('pult:call')
+    ipcMain.handle('pult:call', async (...args: unknown[]) => {
+      if (args[1] === 'draft.put') state.puts.push({ baseRev: (args[2] as { baseRev?: number }).baseRev })
+      if (args[1] === 'draft.remove') state.removes.push((args[2] as { owner?: string }).owner)
+      const hold = args[1] === 'draft.put' && !state.held
+      if (hold) state.held = true
+      const result = await original(...args)
+      if (hold) { state.committed = true; await gate }
+      return result
+    })
+  })
+}
+
+describe('discard while the first draft save acknowledgement is pending', () => {
+  it('does not restore a discarded draft after a committed first put returns late', async () => {
+    const h = await launch({ name: 'new-chat-pending-save' })
+    try {
+      assert.ok(await waitFor(async () => await h.win.getAttribute('.app', 'data-conn') === 'up'))
+      await holdFirstDraftPut(h)
+      await h.win.getByTestId('new-agent').click()
+      const input = h.win.getByTestId('draft-input')
+      await input.fill('A committed draft whose first ACK is still in flight')
+      const id = await h.win.getByTestId('draft').getAttribute('data-draft')
+      assert.ok(id)
+      assert.ok(await waitFor(() => h.app.evaluate(() => (globalThis as unknown as { __heldDraftPut: { committed: boolean } }).__heldDraftPut.committed), 5000), 'first put must have committed before Escape')
+      const client = await h.client()
+      const saved = await client.request('draft.get', { id }) as { draft: { rev: number; data: { text: string } } }
+      assert.equal(saved.draft.rev, 1)
+      assert.equal(saved.draft.data.text, await input.inputValue())
+      await input.press('Escape')
+      await h.win.getByTestId('confirm-discard-draft').getByTestId('confirm-ok').click()
+      await h.win.getByTestId('draft').waitFor({ state: 'detached' })
+      await h.app.evaluate(() => (globalThis as unknown as { __heldDraftPut: { release(): void } }).__heldDraftPut.release())
+      await h.win.reload()
+      assert.ok(await waitFor(async () => await h.win.getAttribute('.app', 'data-conn') === 'up'))
+      assert.ok(await waitFor(async () => {
+        const list = await client.request('draft.list', {}) as { drafts: Array<{ id: string }> }
+        return !list.drafts.some((draft) => draft.id === id)
+      }, 2000), 'discarded draft must be removed even when its first save ACK returns late')
+      assert.equal(await h.win.locator(`[data-testid="draft-row"][data-draft="${id}"]`).count(), 0, 'reload must not resurrect the discarded draft')
+    } finally {
+      await h.app.evaluate(() => {
+        const state = (globalThis as unknown as { __heldDraftPut?: { release(): void; restore(): void } }).__heldDraftPut
+        state?.release(); state?.restore()
+      }).catch(() => {})
+      await h.close()
+    }
+  })
+
+  it('saves edits made during the pending ACK with the acknowledged base revision', async () => {
+    const h = await launch({ name: 'new-chat-save-followup' })
+    try {
+      assert.ok(await waitFor(async () => await h.win.getAttribute('.app', 'data-conn') === 'up'))
+      await holdFirstDraftPut(h)
+      await h.win.getByTestId('new-agent').click()
+      const input = h.win.getByTestId('draft-input')
+      await input.fill('first version')
+      const id = await h.win.getByTestId('draft').getAttribute('data-draft')
+      assert.ok(id)
+      assert.ok(await waitFor(() => h.app.evaluate(() => (globalThis as unknown as { __heldDraftPut: { committed: boolean } }).__heldDraftPut.committed), 5000))
+      await input.fill('second version typed while the first ACK was pending')
+      // Let the edit's debounce expire while the first write is still awaiting its reply.
+      await h.win.waitForTimeout(500)
+      assert.deepEqual(await h.app.evaluate(() => (globalThis as unknown as { __heldDraftPut: { puts: Array<{ baseRev: number }> } }).__heldDraftPut.puts), [{ baseRev: 0 }])
+      await h.app.evaluate(() => (globalThis as unknown as { __heldDraftPut: { release(): void } }).__heldDraftPut.release())
+      const client = await h.client()
+      assert.ok(await waitFor(async () => {
+        const saved = await client.request('draft.get', { id }) as { draft: { rev: number; data: { text: string } } }
+        return saved.draft.rev === 2 && saved.draft.data.text === 'second version typed while the first ACK was pending'
+      }, 5000), 'pending edits must save with the new revision after the first ACK')
+      assert.deepEqual(await h.app.evaluate(() => (globalThis as unknown as { __heldDraftPut: { puts: Array<{ baseRev: number }> } }).__heldDraftPut.puts), [{ baseRev: 0 }, { baseRev: 1 }])
+    } finally {
+      await h.app.evaluate(() => {
+        const state = (globalThis as unknown as { __heldDraftPut?: { release(): void; restore(): void } }).__heldDraftPut
+        state?.release(); state?.restore()
+      }).catch(() => {})
+      await h.close()
+    }
+  })
+
+
+  it('keeps owner checks when a discarded pending draft was claimed by another window', async () => {
+    const h = await launch({ name: 'new-chat-save-owner' })
+    try {
+      assert.ok(await waitFor(async () => await h.win.getAttribute('.app', 'data-conn') === 'up'))
+      await holdFirstDraftPut(h)
+      await h.win.getByTestId('new-agent').click()
+      const input = h.win.getByTestId('draft-input')
+      await input.fill('draft claimed by another window')
+      const id = await h.win.getByTestId('draft').getAttribute('data-draft')
+      assert.ok(id)
+      assert.ok(await waitFor(() => h.app.evaluate(() => (globalThis as unknown as { __heldDraftPut: { committed: boolean } }).__heldDraftPut.committed), 5000))
+      const client = await h.client()
+      const before = await client.request('draft.get', { id }) as { draft: { owner: string } }
+      const claimed = await client.request('draft.claim', { id, owner: 'other-window' }) as { draft: unknown }
+      await input.press('Escape')
+      await h.win.getByTestId('confirm-ok').click()
+      await h.app.evaluate(() => (globalThis as unknown as { __heldDraftPut: { release(): void } }).__heldDraftPut.release())
+      assert.ok(await waitFor(async () => await h.app.evaluate(() => (globalThis as unknown as { __heldDraftPut: { removes: unknown[] } }).__heldDraftPut.removes.length) === 2), 'immediate and late cleanup must both run')
+      assert.deepEqual(await h.app.evaluate(() => (globalThis as unknown as { __heldDraftPut: { removes: unknown[] } }).__heldDraftPut.removes), [before.draft.owner, before.draft.owner])
+      const after = await client.request('draft.get', { id }) as { draft: unknown }
+      assert.deepEqual(after.draft, claimed.draft, 'cleanup must preserve another live owner and its revision')
+    } finally {
+      await h.app.evaluate(() => {
+        const state = (globalThis as unknown as { __heldDraftPut?: { release(): void; restore(): void } }).__heldDraftPut
+        state?.release(); state?.restore()
+      }).catch(() => {})
+      await h.close()
+    }
+  })
+
+})

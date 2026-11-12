@@ -224,6 +224,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   const [recent, setRecent] = useState<RecentFolder[] | null>(null)
   /** Демон и оболочка знают `draft.*`; старая оболочка — черновики только в памяти окна. */
   const draftsRemote = useRef(true)
+  const draftPuts = useRef(new Map<string, { discarded: boolean }>())
   /**
    * Окно — владелец своих черновиков у демона. id свой у каждого окна (ревью Codex 8): `sessionStorage` переживает
    * перезагрузку страницы, но не делится между окнами. Новое окно видит черновики прежнего «открытыми в другом окне»,
@@ -1012,9 +1013,14 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     leaveDraft(); setDrafts(ds => [d, ...ds]); setActiveDraft(d.id); setMobileNavOpen(false); focusDraftInput()
   }
   openDraftRef.current = openDraft
+  const removeDraftRemote = (id: string): void => {
+    if (draftsRemote.current) bridge.call('draft.remove', { id, owner: windowId }).catch(() => { /* уже нет или недоступен */ })
+  }
   const discardDraft = (id: string): void => {
     const d = draftsRef.current.find((x) => x.id === id)
     delete draftDirty.current[id]
+    const pendingPut = draftPuts.current.get(id)
+    if (pendingPut) pendingPut.discarded = true
     setDrafts((ds) => ds.filter((x) => x.id !== id))
     if (activeDraftRef.current === id) setActiveDraft(null)
     setDraftState((m) => { const n = { ...m }; delete n[id]; return n })
@@ -1023,7 +1029,8 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     finalized.current.delete(id)
     const timer = saveTimers.current.get(id)
     if (timer !== undefined) { clearTimeout(timer); saveTimers.current.delete(id) }
-    if (d && d.rev > 0 && draftsRemote.current) bridge.call('draft.remove', { id, owner: windowId }).catch(() => { /* уже нет */ })
+    // Первая запись уже могла сохраниться у демона, хотя её ACK ещё не принёс локальную rev.
+    if ((d?.rev ?? 0) > 0 || pendingPut) removeDraftRemote(id)
     savedDrafts.current.delete(id)
   }
   const setDraftFolder = (id: string, cwd: string | null): void => {
@@ -1205,19 +1212,24 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   const putDraft = (id: string): void => {
     const d = draftsRef.current.find((x) => x.id === id)
     // Не во время отправки (ревью m9: запись с baseRev 0 воскрешала убранный демоном черновик) и не копию ушедшего.
-    if (!d || draftEmpty(d) || !draftsRemote.current || draftStateRef.current[id]?.sending || goneDrafts.has(id)) return
+    if (!d || draftEmpty(d) || !draftsRemote.current || draftStateRef.current[id]?.sending || goneDrafts.has(id) || draftPuts.current.has(id)) return
     const json = JSON.stringify(draftSnapshot(d))
+    const pendingPut = { discarded: false }
+    draftPuts.current.set(id, pendingPut)
     bridge.call('draft.put', { id, data: draftSnapshot(d), baseRev: d.rev, owner: windowId }).then((r) => {
+      // Закрытие владеет результатом записи: поздний ACK не восстанавливает ни ревизию, ни кэш.
+      if (pendingPut.discarded) { removeDraftRemote(id); return }
       const rev = (r as { draft: { rev: number } }).draft.rev
       savedDrafts.current.set(id, json)
       setDrafts((ds) => ds.map((x) => (x.id === id ? { ...x, rev } : x)))
     }, (e: unknown) => {
+      if (pendingPut.discarded) { removeDraftRemote(id); return }
       if (!isBridgeError(e)) return
       if (e.code === 'method_not_allowed' || e.code === 'not_found') { draftsRemote.current = false; return }
       if (e.code === 'draft_owned') { setForeignDrafts((f) => new Set(f).add(id)); return }
       // Чужая запись между нашими — не затирать её (ревью Codex 9): перечитать и показать расхождение.
       if (e.code === 'draft_conflict') void rereadDraft(id)
-    })
+    }).finally(() => { draftPuts.current.delete(id) })
   }
   useEffect(() => {
     if (conn.state !== 'up' || !draftsRemote.current) return
