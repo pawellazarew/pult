@@ -308,7 +308,14 @@ async fn session_alias_uses_actual_agent_rpc_and_help_preserves_preview_boundary
     let mut implicit = command(&[]);
     implicit.arg("--home").arg(log.0.path());
     let implicit = output(implicit).await;
-    let status: serde_json::Value = serde_json::from_str(ok(&implicit)).unwrap();
+    assert!(ok(&implicit).starts_with("pultd "));
+    let mut explicit = command(&[]);
+    explicit
+        .arg("--home")
+        .arg(log.0.path())
+        .args(["daemon", "status", "--json"]);
+    let explicit = output(explicit).await;
+    let status: serde_json::Value = serde_json::from_str(ok(&explicit)).unwrap();
     assert_eq!(status["pid"].as_u64(), daemon.id().map(u64::from));
     assert_eq!(status["nativeRuntime"]["initialized"], false);
     let mut outputs = Vec::new();

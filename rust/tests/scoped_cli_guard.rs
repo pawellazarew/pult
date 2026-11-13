@@ -239,8 +239,8 @@ async fn ordinary_owner_and_both_scoped_memory_routes_keep_their_authentication(
             None,
             "token",
             "a".repeat(64),
-            "daemon.status",
-            vec!["daemon", "status"],
+            "protocol.catalog",
+            vec!["catalog"],
         ),
         (
             Some("PULT_MEMORY_KEY"),

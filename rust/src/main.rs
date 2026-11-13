@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 mod cli_client;
+mod cli_daemon_status;
 mod cli_logs;
+mod cli_service;
 mod cli_wait;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -258,6 +260,8 @@ enum EventsAction {
 enum DaemonAction {
     Serve,
     Status {
+        #[arg(long)]
+        json: bool,
         /// Prepare the native runtime without starting a provider or a turn.
         #[arg(long)]
         initialize_runtime: bool,
@@ -291,6 +295,7 @@ async fn main() -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("--home is required for this command"))?;
     let result = match args.command.unwrap_or(Action::Daemon {
         action: DaemonAction::Status {
+            json: false,
             initialize_runtime: false,
         },
     }) {
@@ -320,8 +325,28 @@ async fn main() -> Result<()> {
             return pult_core::serve(home).await;
         }
         Action::Daemon {
-            action: DaemonAction::Status { initialize_runtime },
+            action:
+                DaemonAction::Status {
+                    initialize_runtime,
+                    json,
+                },
         } => {
+            reject_helper_credentials()?;
+            anyhow::ensure!(
+                std::env::var_os("PULT_MEMORY_KEY").is_none()
+                    && std::env::var_os("PULT_MEMORY_TURN_KEY").is_none(),
+                "service status requires owner authentication"
+            );
+            if !initialize_runtime {
+                let code = match cli_daemon_status::run(&home, json).await {
+                    Ok(code) => code,
+                    Err(error) => {
+                        let _ = cli_client::emit(format!("Error: {error}\n"), true).await;
+                        1
+                    }
+                };
+                std::process::exit(code);
+            }
             cli_request(
                 &home,
                 "daemon.status",

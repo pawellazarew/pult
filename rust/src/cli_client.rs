@@ -265,6 +265,9 @@ async fn owner_connection(home: &Path) -> Result<(BufReader<UnixStream>, &'stati
         message: "event subscription requires a private Rust scratch home",
     })?;
     let locale = pult_core::cli_locale(&home).map_err(|_| io_error())?;
+    Ok((owner_connection_at(&home).await?, locale))
+}
+async fn owner_connection_at(home: &Path) -> Result<BufReader<UnixStream>, Error> {
     let mut token = String::new();
     std::fs::File::open(home.join("run/token"))
         .map_err(|_| io_error())?
@@ -291,7 +294,7 @@ async fn owner_connection(home: &Path) -> Result<(BufReader<UnixStream>, &'stati
     {
         return Err(invalid());
     }
-    Ok((reader, locale))
+    Ok(reader)
 }
 
 pub(super) struct RpcError {
@@ -328,7 +331,7 @@ pub(super) struct OwnerClient {
     next_id: u64,
 }
 impl OwnerClient {
-    pub async fn connect(home: &Path) -> Result<Self, RpcError> {
+    fn owner_purpose() -> Result<(), RpcError> {
         if [
             "PULT_MEMORY_KEY",
             "PULT_MEMORY_TURN_KEY",
@@ -343,12 +346,47 @@ impl OwnerClient {
                 "agent wait requires owner authentication",
             ));
         }
+        Ok(())
+    }
+    pub async fn connect(home: &Path) -> Result<Self, RpcError> {
+        Self::owner_purpose()?;
         let (reader, locale) = owner_connection(home).await?;
         Ok(Self {
             reader,
             locale,
             next_id: 1,
         })
+    }
+    /// Status-only observation: local validation stays fatal; only the
+    /// token/socket/handshake/ordinary RPC stage can be an offline result.
+    pub async fn status(
+        home: &Path,
+    ) -> Result<(std::path::PathBuf, &'static str, Option<Box<RawValue>>), RpcError> {
+        Self::owner_purpose()?;
+        let home = pult_core::checked_home(home).map_err(|_| {
+            RpcError::local(
+                "invalid_home",
+                "service status requires a private Rust scratch home",
+            )
+        })?;
+        let locale = pult_core::cli_locale(&home).map_err(|_| {
+            RpcError::local("invalid_config", "service status locale is unavailable")
+        })?;
+        let reply = match owner_connection_at(&home).await {
+            Ok(reader) => {
+                let mut client = Self {
+                    reader,
+                    locale,
+                    next_id: 1,
+                };
+                client
+                    .request("daemon.status", json!({}), ResponsePolicy::Ordinary)
+                    .await
+                    .ok()
+            }
+            Err(_) => None,
+        };
+        Ok((home, locale, reply))
     }
     pub async fn request(
         &mut self,
