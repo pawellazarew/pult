@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 mod cli_agent;
+mod cli_browser_status;
 mod cli_client;
 mod cli_daemon_status;
 mod cli_logs;
@@ -32,6 +33,13 @@ enum Action {
     Version,
     /// Private scoped permission MCP helper; never reads owner credentials.
     McpAsk,
+    /// Observe the local browser package and Chrome; never installs or launches.
+    Browser {
+        #[command(subcommand)]
+        action: Option<BrowserAction>,
+        #[arg(long, global = true)]
+        json: bool,
+    },
     Daemon {
         #[command(subcommand)]
         action: DaemonAction,
@@ -54,6 +62,11 @@ enum Action {
         #[command(subcommand)]
         action: PermAction,
     },
+}
+
+#[derive(Subcommand)]
+enum BrowserAction {
+    Status,
 }
 
 /// Memory administration and read-only session access.
@@ -315,6 +328,16 @@ async fn main() -> Result<()> {
         },
     }) {
         Action::Version => unreachable!("version returns before home access"),
+        Action::Browser { action: _, json } => {
+            let code = match cli_browser_status::run(&home, json).await {
+                Ok(code) => code,
+                Err(error) => {
+                    let _ = cli_client::emit(format!("Error: {error}\n"), true).await;
+                    1
+                }
+            };
+            std::process::exit(code);
+        }
         Action::Daemon {
             action: DaemonAction::Logs { n, lines },
         } => {
