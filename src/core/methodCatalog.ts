@@ -1422,12 +1422,81 @@ export const RPC_CATALOG = {
     {
       "name": "agent.wait",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.wait.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Owner-only bounded wait for current session status or qualified daemon-epoch completion. Partial Rust profile: explicit unavailable for unqualified outcomes; no restart rehydration or native background qualification.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "until": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "timeoutMs": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": true
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "cold",
+              "idle",
+              "working",
+              "blocked_permission",
+              "blocked_question",
+              "limited",
+              "interrupted",
+              "failed",
+              "done"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "matched",
+              "timeout"
+            ]
+          },
+          "turnId": {
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "errorCode": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "status",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
     },
     {
       "name": "daemon.status",
@@ -4104,7 +4173,7 @@ export interface RustFoundationResults {
   "protocol.catalog": { "catalogVersion": 1; "protocolVersion": 1; "methods": Array<{ "name": string; "node": "implemented" | "reserved" | "extension"; "rust": "implemented" | "partial" | "unported"; "access": "owner" | "ask" | "owner-or-runtime" | "owner-shell" | "owner-or-memory" | "owner-or-turn-memory"; "testOnly": boolean; "description": string; "paramsSchema": { [key: string]: unknown } | null; "resultSchema": { [key: string]: unknown } | null }> }
 }
 
-export type RustPartialMethod = "agent.list" | "agent.prompt" | "agent.queue.move" | "agent.queue.remove" | "agent.queue.resume" | "agent.queue.send" | "agent.start" | "agent.stop" | "perm.list" | "perm.request" | "perm.resolve"
+export type RustPartialMethod = "agent.list" | "agent.prompt" | "agent.queue.move" | "agent.queue.remove" | "agent.queue.resume" | "agent.queue.send" | "agent.start" | "agent.stop" | "agent.wait" | "perm.list" | "perm.request" | "perm.resolve"
 
 export interface RustPartialParams {
   "agent.list": Record<string, never>
@@ -4115,6 +4184,7 @@ export interface RustPartialParams {
   "agent.queue.send": { "name": string; "id": string }
   "agent.start": { "kind"?: "claude" | "codex" | "zcode"; "name"?: string; "cwd"?: string; "scope"?: "project" | "general"; "title"?: string; "model"?: string; "effort"?: string; "serviceTier"?: "default" | "fast"; "approval"?: "read-only" | "ask" | "workspace" | "full"; "confirm"?: boolean; "consentRev"?: number; "grant"?: "cli-once"; "mode"?: "turn" | "warm"; "browser"?: false | null; "memory"?: { "read"?: boolean; "write"?: "off" | "ask" } }
   "agent.stop": { "name": string; "turnId"?: string }
+  "agent.wait": { "name": string; "until"?: Array<string>; "timeoutMs"?: number; [key: string]: unknown }
   "perm.list": { "name"?: string }
   "perm.request": { "toolName": string; "input": { [key: string]: unknown }; "toolUseId"?: string | null; "sessionId"?: string; [key: string]: unknown }
   "perm.resolve": { "id": string; "decision": "allow" | "deny"; "scope"?: "once" | "session" | "rule"; "answers"?: { [key: string]: unknown }; "message"?: string }
@@ -4129,6 +4199,7 @@ export interface RustPartialResults {
   "agent.queue.send": { "turnId": string }
   "agent.start": { "name": string; "provider": string; "cwd": string; "mode": string; "createdAt": string; "lastStatus": string; "lastEventId": number; "memory"?: { "read": boolean; "write": "off" | "ask" }; [key: string]: unknown }
   "agent.stop": { "stopped": boolean }
+  "agent.wait": { "name": string; "status": "cold" | "idle" | "working" | "blocked_permission" | "blocked_question" | "limited" | "interrupted" | "failed" | "done"; "reason": "matched" | "timeout"; "turnId"?: string; "ok"?: boolean; "errorCode"?: string; "message"?: string; "text"?: string }
   "perm.list": { "pending": Array<{ [key: string]: unknown }> }
   "perm.request": { "behavior": "allow"; "updatedInput"?: { [key: string]: unknown } } | { "behavior": "deny"; "message"?: string }
   "perm.resolve": { "resolved": true; "id": string; "decision": "allow" | "deny"; "scope"?: "once" | "session" | "rule" }

@@ -277,30 +277,51 @@ async fn exchange(
     name: &str,
     options: &Options,
     prompt: Option<Value>,
-) -> Result<(Box<RawValue>, &'static str, bool), RpcError> {
+    follow: bool,
+) -> Result<(Box<RawValue>, &'static str, Reply), RpcError> {
     let mut client = OwnerClient::connect(home).await?;
     if let Some(prompt) = prompt {
         let started = client
             .request("agent.prompt", prompt, ResponsePolicy::Ordinary)
             .await?;
-        if fields(&started)?.contains_key("queued") {
-            return Ok((started, client.locale, true));
+        let f = fields(&started)?;
+        if f.contains_key("queued") {
+            return Ok((started, client.locale, Reply::Queued));
+        }
+        // A successful start must carry an actual nonempty string identity.
+        // Node incidentally coerces malformed ACKs; never invent success here.
+        prompt_turn(&f)?;
+        if !follow {
+            return Ok((started, client.locale, Reply::Started));
         }
     }
     let response = client
         .request("agent.wait", params(name, options), ResponsePolicy::Wait)
         .await?;
-    Ok((response, client.locale, false))
+    Ok((response, client.locale, Reply::Wait))
+}
+
+enum Reply {
+    Wait,
+    Queued,
+    Started,
+}
+fn prompt_turn(f: &Fields) -> Result<&RawValue, RpcError> {
+    f.get("turnId")
+        .map(|raw| &**raw)
+        .filter(|raw| raw.get().starts_with('"') && raw.get() != "\"\"")
+        .ok_or_else(|| RpcError::local("invalid_response", "invalid agent prompt response"))
 }
 async fn execute(
     home: &Path,
     name: &str,
     options: Options,
     prompt: Option<Value>,
+    follow: bool,
 ) -> Result<i32, RpcError> {
-    let (raw, locale, queued) = exchange(home, name, &options, prompt).await?;
+    let (raw, locale, reply) = exchange(home, name, &options, prompt, follow).await?;
     // exchange has dropped its socket before formatting/output can block.
-    if queued {
+    if matches!(reply, Reply::Queued) {
         if options.json {
             emit(raw.get().into(), false).await?;
         } else {
@@ -321,11 +342,51 @@ async fn execute(
             .await?;
         }
         Ok(0)
+    } else if matches!(reply, Reply::Started) {
+        let f = fields(&raw)?;
+        let turn = prompt_turn(&f)?;
+        if options.json {
+            emit(
+                format!("{{\"turnId\":{},\"waiting\":false}}", turn.get()),
+                false,
+            )
+            .await?;
+        } else {
+            let turn = pult_core::display_string(turn).map_err(|_| invalid())?;
+            emit(
+                if locale == "ru" {
+                    format!("ход {turn} запущен")
+                } else {
+                    format!("Turn {turn} started")
+                },
+                false,
+            )
+            .await?;
+        }
+        Ok(0)
     } else {
         render(&raw, locale, options.json).await
     }
 }
 pub async fn run(home: &Path, name: &str, options: Options, prompt: Option<Value>) -> i32 {
+    run_inner(home, name, options, prompt, true).await
+}
+pub async fn run_prompt(
+    home: &Path,
+    name: &str,
+    options: Options,
+    prompt: Value,
+    wait: bool,
+) -> i32 {
+    run_inner(home, name, options, Some(prompt), wait).await
+}
+async fn run_inner(
+    home: &Path,
+    name: &str,
+    options: Options,
+    prompt: Option<Value>,
+    follow: bool,
+) -> i32 {
     let mut interrupt =
         match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()) {
             Ok(signal) => signal,
@@ -333,7 +394,7 @@ pub async fn run(home: &Path, name: &str, options: Options, prompt: Option<Value
         };
     let result = tokio::select! {
         _=interrupt.recv()=>return 130,
-        result=execute(home,name,options,prompt)=>result,
+        result=execute(home,name,options,prompt,follow)=>result,
     };
     match result {
         Ok(code) => code,

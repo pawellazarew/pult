@@ -1,11 +1,12 @@
 # R4: private agent wait CLI composition
 
-Этот slice готовит CLI protocol-1 composition и форматирование. **Backend `agent.wait`
-ещё не квалифицирован:** команда скрыта из обычной help, public catalog/capabilities
-остаются без изменений. Успех fake-daemon теста не означает, что установленный daemon
-поддерживает wait. Не меняются daemon, State, Driver, Runtime, Worker и service/cutover.
+CLI доступен в Rust preview с явным private scratch `--home`: `agent wait` и
+`agent prompt --wait` показываются в help и `--skill`. Backend объявлен **partial**,
+после State/socket и сквозной CLI-приёмки с контролируемыми peers. Неподтверждённые
+completion-профили дают явную ошибку; это не полный паритет native providers или
+переключение рабочей установки. [Приёмка CLI→daemon](R4-WAIT-E2E.md).
 
-Приватные preview-вызовы для последующей backend qualification:
+Примеры preview-вызовов:
 
 ```sh
 pultd-rust --home /absolute/private-scratch agent wait chat --until idle,blocked,done --timeout 600000 --json
@@ -33,10 +34,11 @@ queue/interrupt/steer flags. Если ответ содержит queued receipt
 посылается по **имени сессии**, без скрытого turnId pin и без дополнительного prompt.
 Смена активного хода/queue auto-drain остаётся ответственностью backend контракта.
 
-Bare prompt без `--wait` сохраняет прежний Rust preview JSON reply. Он не стал
-полностью эквивалентен TS строке `Turn … started` / `{turnId,waiting:false}`.
+Bare prompt без `--wait` теперь использует TS started format:
+`ход … запущен` / `Turn … started`, либо `{turnId,waiting:false}` при `--json`.
 `--until`/`--timeout` без `--wait` не добавляют полей в prompt RPC и не вызывают wait.
-Эта отдельная разница формата сохранена явно, а не названа закрытой parity.
+Queued receipt использует тот же renderer с `--wait` и без него. Details и
+malformed-ACK граница — в [R4-CLI-PROMPT.md](R4-CLI-PROMPT.md).
 
 ## Result / exit / locale
 
@@ -92,7 +94,8 @@ typed RPC errors, EOF/wrong-ID/malformed/oversized responses, queue receipt бе
 один prompt + wait по имени, scoped credential priority и Ctrl-C/socket close.
 Regression suite events tail проверяет общий handshake/output путь отдельно.
 
-Это CLI qualification. Public backend acceptance ещё должна доказать actual
-Driver cleanup/outcomes/answer projection, statuses, remembered latest outcome,
-incarnation protection, queue races, permissions и bounded concurrent waits.
+Эта отдельная CLI qualification дополнена State/socket-проверками и сквозной
+приёмкой Driver cleanup/outcomes, latest result, incarnation и bounded waits.
+Native permissions/questions/background и неподтверждённые error-профили остаются
+отдельной работой; метод объявлен partial, а не полностью поддержанным.
 Ни native provider, ни реальный аккаунт/installed service в этом slice не используются.

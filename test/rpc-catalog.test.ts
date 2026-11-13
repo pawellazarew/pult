@@ -66,7 +66,7 @@ describe('RPC catalog generation and source drift', () => {
     assert.equal(implemented.length, 30)
     assert.equal(catalog.methods.length, 101)
     assert.equal(catalog.methods.filter((method) => method.node === 'implemented').length, 85)
-    assert.deepEqual(partial.map((method) => method.name), ['agent.list', 'agent.prompt', 'agent.queue.move', 'agent.queue.remove', 'agent.queue.resume', 'agent.queue.send', 'agent.start', 'agent.stop', 'perm.list', 'perm.request', 'perm.resolve'])
+    assert.deepEqual(partial.map((method) => method.name), ['agent.list', 'agent.prompt', 'agent.queue.move', 'agent.queue.remove', 'agent.queue.resume', 'agent.queue.send', 'agent.start', 'agent.stop', 'agent.wait', 'perm.list', 'perm.request', 'perm.resolve'])
     assert.ok(partial.every((method) => method.paramsSchema && method.resultSchema))
     fixture((paths) => {
       const generated = generate(paths)
