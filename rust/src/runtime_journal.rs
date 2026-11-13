@@ -109,6 +109,34 @@ fn unavailable() -> SinkError {
 }
 
 impl EventSink for HostSink {
+    fn read_completion(
+        &self,
+        reference: crate::turn_completion::CompletionRef,
+    ) -> Task<
+        Result<
+            crate::turn_completion::CompletedAnswer,
+            crate::turn_completion::CompletionReadError,
+        >,
+    > {
+        let weak = self.0.clone();
+        Box::pin(async move {
+            let state = weak
+                .upgrade()
+                .ok_or(crate::turn_completion::CompletionReadError::Storage)?;
+            let host_job = state.host_jobs.track();
+            tokio::task::spawn_blocking(move || {
+                let _host_job = host_job;
+                let mut store = state
+                    .store
+                    .lock()
+                    .map_err(|_| crate::turn_completion::CompletionReadError::Storage)?;
+                crate::turn_completion_store::read(&mut store, &reference)
+            })
+            .await
+            .map_err(|_| crate::turn_completion::CompletionReadError::Storage)?
+        })
+    }
+
     fn before_release(
         &self,
         completion: crate::turn_driver::Completion,

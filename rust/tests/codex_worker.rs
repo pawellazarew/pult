@@ -374,7 +374,7 @@ case!(
             }
             store.release.add_permits(1);
             let started = future.await.unwrap();
-            assert_eq!(started.done.await, Outcome::Success);
+            assert_eq!(started.done.await.outcome().clone(), Outcome::Success);
             worker.close(key).await.unwrap();
         }
         assert_eq!(store.records.lock().unwrap().len(), 2);
@@ -731,7 +731,7 @@ case!(worker_empty_text_matches_javascript_trim, {
         .start(ticket.clone(), snapshot, "\u{0085}".into())
         .await
         .unwrap();
-    assert_eq!(started.done.await, Outcome::Success);
+    assert_eq!(started.done.await.outcome().clone(), Outcome::Success);
     worker.close(ticket).await.unwrap();
     let turns: Vec<_> = logs(home.path())
         .into_iter()
@@ -762,7 +762,7 @@ case!(
             token_rule.replace_all(&started.turn_id, "<token>"),
             started.turn_id
         );
-        assert_eq!(started.done.await, Outcome::Success);
+        assert_eq!(started.done.await.outcome().clone(), Outcome::Success);
         worker.close(first).await.unwrap();
         assert!(
             sink.events
@@ -789,7 +789,7 @@ case!(
             .start(next.clone(), snapshot, "normal".into())
             .await
             .unwrap();
-        assert_eq!(started.done.await, Outcome::Success);
+        assert_eq!(started.done.await.outcome().clone(), Outcome::Success);
         worker.close(next).await.unwrap();
         assert_eq!(
             logs(home.path())
@@ -823,7 +823,7 @@ case!(
             .start(ticket.clone(), snapshot, "early".into())
             .await
             .unwrap();
-        assert_eq!(started.done.await, Outcome::Success);
+        assert_eq!(started.done.await.outcome().clone(), Outcome::Success);
         worker.close(ticket).await.unwrap();
         {
             let events = sink.events.lock().unwrap();
@@ -854,12 +854,15 @@ case!(
         let sa = a.start(ta.clone(), one, "hold".into()).await.unwrap();
         let sb = b.start(tb.clone(), two, "hold".into()).await.unwrap();
         a.close(ta).await.unwrap();
-        assert_eq!(sa.done.await, Outcome::Interrupted);
+        assert_eq!(sa.done.await.outcome().clone(), Outcome::Interrupted);
         assert_eq!(host.status(), HostStatus::Ready);
         let mut other = tokio::spawn(sb.done);
         assert!(!other.is_finished());
         std::fs::write(home.path().join("release"), "yes").unwrap();
-        assert_eq!((&mut other).await.unwrap(), Outcome::Success);
+        assert_eq!(
+            (&mut other).await.unwrap().outcome().clone(),
+            Outcome::Success
+        );
         b.close(tb).await.unwrap();
         let interrupts: Vec<_> = logs(home.path())
             .into_iter()
@@ -887,7 +890,7 @@ case!(default_approval_handler_drops_permission_as_denial, {
         .start(ticket.clone(), snapshot, "permit".into())
         .await
         .unwrap();
-    assert_eq!(started.done.await, Outcome::Success);
+    assert_eq!(started.done.await.outcome().clone(), Outcome::Success);
     worker.close(ticket).await.unwrap();
     assert!(
         sink.events
@@ -920,7 +923,7 @@ case!(
             let w = worker(&host, home.path(), &s, None, broker);
             let ticket = ticket(&s);
             let started = w.start(ticket.clone(), s, "normal".into()).await.unwrap();
-            assert_eq!(started.done.await, Outcome::Success);
+            assert_eq!(started.done.await.outcome().clone(), Outcome::Success);
             w.close(ticket).await.unwrap();
             let frames = logs(home.path());
             let thread = frames
@@ -1000,7 +1003,10 @@ case!(
                         .any(|f| f["method"] == "turn/start")
                 );
             } else {
-                assert_eq!(started.unwrap().done.await, Outcome::Success);
+                assert_eq!(
+                    started.unwrap().done.await.outcome().clone(),
+                    Outcome::Success
+                );
                 let frames = logs(home.path());
                 let turn = frames.iter().find(|f| f["method"] == "turn/start").unwrap();
                 assert_eq!(turn["params"]["sandboxPolicy"], json!({"type":"readOnly"}));
@@ -1033,7 +1039,7 @@ case!(
             .start(key.clone(), snapshot.clone(), "normal".into())
             .await
             .unwrap();
-        assert_eq!(started.done.await, Outcome::Success);
+        assert_eq!(started.done.await.outcome().clone(), Outcome::Success);
         worker.close(key).await.unwrap();
         let frames = logs(home.path());
         let resumed = frames
@@ -1103,7 +1109,7 @@ case!(
             1
         );
         std::fs::write(home.path().join("release"), "yes").unwrap();
-        assert_eq!(held.await.unwrap(), Outcome::Success);
+        assert_eq!(held.await.unwrap().outcome().clone(), Outcome::Success);
         b.close(tb).await.unwrap();
         a.close(ta).await.unwrap();
         until(|| host.status() == HostStatus::Stopped).await;
@@ -1141,7 +1147,7 @@ case!(
         let c = worker(&host, home.path(), &barrier, None, true);
         let tc = ticket(&barrier);
         let sc = c.start(tc.clone(), barrier, "normal".into()).await.unwrap();
-        assert_eq!(sc.done.await, Outcome::Success);
+        assert_eq!(sc.done.await.outcome().clone(), Outcome::Success);
         c.close(tc).await.unwrap();
         assert_only_host_working(&sink, "one");
         a.close(ta).await.unwrap();
@@ -1150,7 +1156,7 @@ case!(
         let held = tokio::spawn(held.done);
         assert!(!held.is_finished());
         std::fs::write(home.path().join("release"), "yes").unwrap();
-        assert_eq!(held.await.unwrap(), Outcome::Success);
+        assert_eq!(held.await.unwrap().outcome().clone(), Outcome::Success);
         b.close(tb).await.unwrap();
         host.shutdown().await.unwrap();
     }
@@ -1181,11 +1187,11 @@ case!(
         let active = tokio::spawn(active.done);
         assert!(!active.is_finished());
         std::fs::write(home.path().join("release"), "yes").unwrap();
-        assert_eq!(active.await.unwrap(), Outcome::Success);
+        assert_eq!(active.await.unwrap().outcome().clone(), Outcome::Success);
         b.close(tb).await.unwrap();
         close.await.unwrap().unwrap();
         assert!(matches!(
-            unknown.done.await,
+            unknown.done.await.outcome().clone(),
             Outcome::Interrupted | Outcome::Failure { .. }
         ));
         assert_gone(home.path());
@@ -1223,7 +1229,7 @@ case!(
         let tc = ticket(&three);
         if let Ok(started) = c.start(tc.clone(), three, "normal".into()).await {
             assert!(matches!(
-                started.done.await,
+                started.done.await.outcome().clone(),
                 Outcome::Failure { .. } | Outcome::Interrupted
             ));
         }
@@ -1231,8 +1237,8 @@ case!(
         a.close(ta).await.unwrap();
         b.close(tb).await.unwrap();
         c.close(tc).await.unwrap();
-        assert!(!matches!(sa.done.await, Outcome::Success));
-        assert!(!matches!(sb.done.await, Outcome::Success));
+        assert!(!matches!(sa.done.await.outcome().clone(), Outcome::Success));
+        assert!(!matches!(sb.done.await.outcome().clone(), Outcome::Success));
         assert_eq!(faults.load(Ordering::Acquire), 1);
         host.shutdown().await.unwrap();
         assert_gone(home.path());
@@ -1316,7 +1322,7 @@ case!(
                 .start(key.clone(), snapshot.clone(), text.into())
                 .await
                 .unwrap();
-            assert_eq!(started.done.await, Outcome::Success);
+            assert_eq!(started.done.await.outcome().clone(), Outcome::Success);
             w.close(key).await.unwrap();
         }
         assert_eq!(
@@ -1346,7 +1352,7 @@ case!(
             .unwrap();
         assert!(!String::from_utf8_lossy(&args.stdout).contains("SECRET_PROMPT_NOT_ARGV"));
         w.close(key).await.unwrap();
-        assert_eq!(started.done.await, Outcome::Interrupted);
+        assert_eq!(started.done.await.outcome().clone(), Outcome::Interrupted);
         host.shutdown().await.unwrap();
     }
 );
@@ -1360,7 +1366,7 @@ case!(
         let w = worker(&host, home.path(), &s, Some("missing-resume"), true);
         let key = ticket(&s);
         let started = w.start(key.clone(), s, "normal".into()).await.unwrap();
-        assert_eq!(started.done.await, Outcome::Success);
+        assert_eq!(started.done.await.outcome().clone(), Outcome::Success);
         w.close(key).await.unwrap();
         let frames = logs(home.path());
         assert_eq!(
@@ -1416,7 +1422,7 @@ case!(
         let start = w.start(key.clone(), s, "background".into()).await;
         if let Ok(started) = start {
             assert!(
-                matches!(started.done.await,Outcome::Failure{code,..} if code=="unsupported_background")
+                matches!(started.done.await.outcome().clone(),Outcome::Failure{code,..} if code=="unsupported_background")
             );
         }
         w.close(key).await.unwrap();
@@ -1467,7 +1473,7 @@ case!(
             until(|| stash.lock().unwrap().is_some()).await;
             if terminal {
                 std::fs::write(home.path().join("terminal"), "yes").unwrap();
-                assert_eq!(started.done.await, Outcome::Success);
+                assert_eq!(started.done.await.outcome().clone(), Outcome::Success);
                 let reply = stash.lock().unwrap().take().unwrap();
                 assert!(
                     reply
@@ -1491,7 +1497,10 @@ case!(
                         .is_err()
                 );
                 close.await.unwrap().unwrap();
-                assert!(!matches!(started.done.await, Outcome::Success));
+                assert!(!matches!(
+                    started.done.await.outcome().clone(),
+                    Outcome::Success
+                ));
             }
             assert!(
                 !logs(home.path())
@@ -1616,7 +1625,7 @@ case!(
             .start(first_key.clone(), s.clone(), "normal".into())
             .await
             .unwrap();
-        assert_eq!(first_started.done.await, Outcome::Success);
+        assert_eq!(first_started.done.await.outcome().clone(), Outcome::Success);
         first.close(first_key).await.unwrap();
         let png=base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/jt0AAAAASUVORK5CYII=").unwrap();
         let path = home.path().join("attachments/one/day/image.png");
@@ -1641,7 +1650,7 @@ case!(
             .unwrap();
         let key = ticket(&s);
         let started = w.start(key.clone(), s, String::new()).await.unwrap();
-        assert_eq!(started.done.await, Outcome::Success);
+        assert_eq!(started.done.await.outcome().clone(), Outcome::Success);
         w.close(key).await.unwrap();
         let frames = logs(home.path());
         let turn = frames
@@ -1698,7 +1707,7 @@ case!(
         let w = worker(&host, home.path(), &s, None, true);
         let key = ticket(&s);
         let started = w.start(key.clone(), s, "permit".into()).await.unwrap();
-        assert_eq!(started.done.await, Outcome::Success);
+        assert_eq!(started.done.await.outcome().clone(), Outcome::Success);
         w.close(key).await.unwrap();
         assert_eq!(
             logs(home.path())
@@ -1728,7 +1737,7 @@ case!(
                 .start(ta.clone(), one.clone(), "normal".into())
                 .await
                 .unwrap();
-            assert_eq!(completed.done.await, Outcome::Success);
+            assert_eq!(completed.done.await.outcome().clone(), Outcome::Success);
             if !leave_route {
                 a.close(ta.clone()).await.unwrap();
             }
@@ -1754,7 +1763,7 @@ case!(
                     .unwrap();
             assert!(running(pids[1]));
             std::fs::write(home.path().join("release"), "yes").unwrap();
-            assert_eq!(held.await.unwrap(), Outcome::Success);
+            assert_eq!(held.await.unwrap().outcome().clone(), Outcome::Success);
             b.close(tb).await.unwrap();
             a.close(ta).await.unwrap();
             until(|| host.status() == HostStatus::Stopped).await;
@@ -1799,7 +1808,9 @@ case!(
         let held = b.start(tb.clone(), two, "hold".into()).await.unwrap();
         let storm = a.start(ta.clone(), one, "storm".into()).await.unwrap();
         let public = storm.turn_id.clone();
-        assert!(matches!(storm.done.await,Outcome::Failure{code,..} if code=="blocked_network"));
+        assert!(
+            matches!(storm.done.await.outcome().clone(),Outcome::Failure{code,..} if code=="blocked_network")
+        );
         a.close(ta).await.unwrap();
         assert_eq!(host.status(), HostStatus::Ready);
         {
@@ -1821,7 +1832,7 @@ case!(
         let held = tokio::spawn(held.done);
         assert!(!held.is_finished());
         std::fs::write(home.path().join("release"), "yes").unwrap();
-        assert_eq!(held.await.unwrap(), Outcome::Success);
+        assert_eq!(held.await.unwrap().outcome().clone(), Outcome::Success);
         b.close(tb).await.unwrap();
         assert_eq!(
             logs(home.path())
@@ -1846,7 +1857,7 @@ case!(
         match result {
             Err(error) => assert_eq!(error.code, "start_unknown"),
             Ok(started) => assert!(
-                matches!(started.done.await,Outcome::Failure{code,..} if code=="start_unknown")
+                matches!(started.done.await.outcome().clone(),Outcome::Failure{code,..} if code=="start_unknown")
             ),
         }
         w.close(key).await.unwrap();
@@ -1901,7 +1912,7 @@ case!(
         let b = worker(&host, home.path(), &barrier, None, true);
         let tb = ticket(&barrier);
         let done = b.start(tb.clone(), barrier, "normal".into()).await.unwrap();
-        assert_eq!(done.done.await, Outcome::Success);
+        assert_eq!(done.done.await.outcome().clone(), Outcome::Success);
         b.close(tb).await.unwrap();
         assert_eq!(calls.load(Ordering::Acquire), 0);
         assert_only_host_working(&sink, "one");

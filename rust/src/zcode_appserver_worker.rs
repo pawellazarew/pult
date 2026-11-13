@@ -1,4 +1,5 @@
 //! Dedicated Route B execution. No Runtime activation or production memory wiring.
+use crate::turn_completion::{CompletionUnavailable, WorkerCompletion};
 use crate::{
     memory_policy::Policy,
     prompt_attachments::{self, PromptAttachment},
@@ -639,9 +640,9 @@ async fn supervise(
         let _ = sender.send(Err(result.err().unwrap_or_else(unavailable)));
     } else {
         let _ = done.send(if job.cancelled() {
-            Outcome::Interrupted
+            Outcome::Interrupted.into()
         } else {
-            result.unwrap_or_else(|e| failure(&e))
+            result.unwrap_or_else(|e| failure(&e).into())
         });
     }
 }
@@ -1106,8 +1107,8 @@ async fn turn(
     snapshot: TurnSnapshot,
     text: String,
     start: StartReply,
-    done: oneshot::Receiver<Outcome>,
-) -> Result<Outcome, WorkerError> {
+    done: oneshot::Receiver<WorkerCompletion>,
+) -> Result<WorkerCompletion, WorkerError> {
     live(&inner, &job)?;
     let checking = inner.clone();
     let scope = job.clone();
@@ -1546,7 +1547,7 @@ async fn turn(
                     done: Box::pin(async move {
                         await_owned(completion, closed)
                             .await
-                            .unwrap_or_else(|error| failure(&error))
+                            .unwrap_or_else(|error| failure(&error).into())
                     }),
                 }));
                 accepted = true;
@@ -1609,11 +1610,15 @@ async fn normalized(
     mapper: &mut Normalizer,
     callback: &TrustedCallback,
     event: &Value,
-) -> Result<(), WorkerError> {
+) -> Result<Option<Option<String>>, WorkerError> {
     let batch = mapper.push(callback, event);
     if batch.fault.is_some() {
         return Err(error("redaction_failed"));
     }
+    let text = batch.signals.into_iter().find_map(|signal| match signal {
+        crate::zcode_events::Signal::TurnEnded { text, .. } => Some(text),
+        _ => None,
+    });
     for draft in batch.drafts {
         append(
             inner,
@@ -1622,7 +1627,7 @@ async fn normalized(
         )
         .await?;
     }
-    Ok(())
+    Ok(text)
 }
 struct NativeTurn<'a> {
     sid: &'a str,
@@ -1636,7 +1641,7 @@ async fn process_event(
     callback: &TrustedCallback,
     event: BufferedEvent,
     binding: NativeTurn<'_>,
-) -> Result<Option<Outcome>, WorkerError> {
+) -> Result<Option<WorkerCompletion>, WorkerError> {
     let event = event.take();
     if event.sid != binding.sid
         || event.tid.as_deref() != Some(binding.tid)
@@ -1644,8 +1649,25 @@ async fn process_event(
     {
         return Err(protocol());
     }
-    normalized(inner, job, mapper, callback, &event.frame).await?;
-    Ok(event.terminal)
+    let text = normalized(inner, job, mapper, callback, &event.frame).await?;
+    Ok(event.terminal.map(|outcome| {
+        if outcome == Outcome::Success
+            && let Some(text) = text
+        {
+            WorkerCompletion::normalized(
+                outcome,
+                crate::codex_events::TurnOutcome {
+                    turn_id: job.public_turn.clone(),
+                    ok: true,
+                    error_code: None,
+                    message: None,
+                    text: text.filter(|s| !s.is_empty()),
+                },
+            )
+        } else {
+            WorkerCompletion::unqualified(outcome, CompletionUnavailable::Disposition)
+        }
+    }))
 }
 
 mod event_profile {
