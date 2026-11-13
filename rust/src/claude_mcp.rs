@@ -3,6 +3,7 @@
 use crate::{
     claude_ask::Backend,
     claude_worker::{McpContext, ScopedMcp},
+    memory_turn::{self, TurnMemory},
     turn_coordinator::Ticket,
     turn_driver::{DispatchGate, Task, WorkerError},
 };
@@ -41,11 +42,17 @@ struct Entry {
     done: AtomicBool,
     changed: Notify,
     files: Mutex<Option<Files>>,
+    memory: Mutex<Option<MemoryPrepared>>,
     cleanup: tokio::sync::Mutex<()>,
+}
+struct MemoryPrepared {
+    server: Value,
+    catalog: String,
 }
 struct Wait {
     entry: Option<Arc<Entry>>,
     backend: Arc<Backend>,
+    memory: Option<Arc<memory_turn::Backend>>,
 }
 impl Drop for Wait {
     fn drop(&mut self) {
@@ -53,6 +60,9 @@ impl Drop for Wait {
             entry.cancelled.store(true, Ordering::Release);
             self.backend
                 .revoke(&entry.context.ticket, entry.context.generation);
+            if let Some(memory) = &self.memory {
+                memory.revoke(&entry.context.ticket);
+            }
         }
     }
 }
@@ -83,6 +93,7 @@ fn private_directory(fd: &OwnedFd) -> Result<(), WorkerError> {
 pub struct Factory {
     myself: Weak<Factory>,
     backend: Arc<Backend>,
+    memory: Option<Arc<memory_turn::Backend>>,
     gate: Arc<dyn DispatchGate>,
     helper: PathBuf,
     home: PathBuf,
@@ -100,6 +111,28 @@ impl Factory {
         helper: PathBuf,
         extras: Map<String, Value>,
     ) -> Result<Arc<Self>, WorkerError> {
+        Self::build(backend, gate, helper, extras, None)
+    }
+    /// Host-only optional shared memory; `pult-memory` is reserved for its scoped helper.
+    pub(crate) fn new_with_memory(
+        backend: Arc<Backend>,
+        gate: Arc<dyn DispatchGate>,
+        helper: PathBuf,
+        extras: Map<String, Value>,
+        memory: Arc<memory_turn::Backend>,
+    ) -> Result<Arc<Self>, WorkerError> {
+        if extras.contains_key("pult-memory") {
+            return Err(failure());
+        }
+        Self::build(backend, gate, helper, extras, Some(memory))
+    }
+    fn build(
+        backend: Arc<Backend>,
+        gate: Arc<dyn DispatchGate>,
+        helper: PathBuf,
+        extras: Map<String, Value>,
+        memory: Option<Arc<memory_turn::Backend>>,
+    ) -> Result<Arc<Self>, WorkerError> {
         let (home, jobs) = backend.host_resources().ok_or_else(failure)?;
         if !helper.is_absolute()
             || !home.is_absolute()
@@ -111,6 +144,7 @@ impl Factory {
         Ok(Arc::new_cyclic(|myself| Self {
             myself: myself.clone(),
             backend,
+            memory,
             gate,
             helper,
             home,
@@ -126,6 +160,9 @@ impl Factory {
         entry.cancelled.store(true, Ordering::Release);
         self.backend
             .revoke(&entry.context.ticket, entry.context.generation);
+        if let Some(memory) = &self.memory {
+            memory.revoke(&entry.context.ticket);
+        }
     }
     fn write_config(&self, entry: &Entry, key: &str) -> Result<PathBuf, WorkerError> {
         #[cfg(test)]
@@ -176,12 +213,16 @@ impl Factory {
             Mode::RUSR | Mode::WUSR,
         )
         .map_err(|_| failure())?;
+        let mut extras = self.extras.clone();
+        if let Some(memory) = entry.memory.lock().map_err(|_| failure())?.as_ref() {
+            extras.insert("pult-memory".into(), memory.server.clone());
+        }
         let config = crate::claude_launch::mcp_ask_config(
             self.helper.to_str().ok_or_else(failure)?,
             self.home.to_str().ok_or_else(failure)?,
             &entry.context.ticket.session().name,
             key,
-            self.extras.clone(),
+            extras,
         )
         .map_err(|_| failure())?;
         let bytes = serde_json::to_vec(&config).map_err(|_| failure())?;
@@ -303,6 +344,7 @@ impl ScopedMcp for Factory {
             done: AtomicBool::new(false),
             changed: Notify::new(),
             files: Mutex::new(None),
+            memory: Mutex::new(None),
             cleanup: tokio::sync::Mutex::new(()),
         });
         {
@@ -311,6 +353,10 @@ impl ScopedMcp for Factory {
             };
             if entries.len() >= MAX_SCOPES
                 || entries.contains_key(&(entry.context.ticket.clone(), entry.context.generation))
+                || (self.memory.is_some()
+                    && entries
+                        .keys()
+                        .any(|(ticket, _)| ticket == &entry.context.ticket))
             {
                 return Box::pin(async { Err(failure()) });
             }
@@ -326,6 +372,7 @@ impl ScopedMcp for Factory {
         let wait = Wait {
             entry: Some(entry.clone()),
             backend: self.backend.clone(),
+            memory: self.memory.clone(),
         };
         let tracked = self.jobs.track();
         let (send, receive) = tokio::sync::oneshot::channel();
@@ -333,13 +380,56 @@ impl ScopedMcp for Factory {
             let _tracked = tracked;
             let result = match preparation.await {
                 Ok(prepared) => {
-                    let writing = factory.clone();
-                    let writing_entry = entry.clone();
-                    tokio::task::spawn_blocking(move || {
-                        writing.write_config(&writing_entry, prepared.key())
-                    })
+                    async {
+                        if entry.cancelled.load(Ordering::Acquire) {
+                            return Err(failure());
+                        }
+                        if let Some(memory) = &factory.memory {
+                            let context = &entry.context;
+                            if memory.enabled(context.session.clone()).await? {
+                                #[cfg(test)]
+                                factory.hooks.before_memory();
+                                let scoped = memory
+                                    .prepare_current(
+                                        context.ticket.clone(),
+                                        context.public_turn.clone(),
+                                        context.approval,
+                                    )
+                                    .await?;
+                                if entry.cancelled.load(Ordering::Acquire) {
+                                    memory.revoke(&context.ticket);
+                                    return Err(failure());
+                                }
+                                let catalog = memory.catalog(context.ticket.clone()).await?;
+                                if catalog.len() > 16_000 || catalog.chars().count() > 4_000 {
+                                    return Err(failure());
+                                }
+                                *entry.memory.lock().map_err(|_| failure())? =
+                                    Some(MemoryPrepared {
+                                        server: {
+                                            let mut server = scoped.server().clone();
+                                            server
+                                                .as_object_mut()
+                                                .ok_or_else(failure)?
+                                                .remove("default_tools_approval_mode");
+                                            server
+                                        },
+                                        catalog,
+                                    });
+                            }
+                        }
+                        if entry.cancelled.load(Ordering::Acquire) {
+                            return Err(failure());
+                        }
+                        let writing = factory.clone();
+                        let writing_entry = entry.clone();
+                        tokio::task::spawn_blocking(move || {
+                            writing.write_config(&writing_entry, prepared.key())
+                        })
+                        .await
+                        .unwrap_or_else(|_| Err(failure()))
+                    }
                     .await
-                    .unwrap_or_else(|_| Err(failure()))
                 }
                 Err(error) => Err(error),
             };
@@ -365,6 +455,56 @@ impl ScopedMcp for Factory {
             }
             result
         })
+    }
+    fn catalog(
+        &self,
+        ticket: Ticket,
+        generation: u64,
+    ) -> Task<Result<Option<String>, WorkerError>> {
+        let result = (|| {
+            let entry = self
+                .entries
+                .lock()
+                .map_err(|_| failure())?
+                .get(&(ticket.clone(), generation))
+                .cloned()
+                .ok_or_else(failure)?;
+            if !entry.done.load(Ordering::Acquire) || entry.cancelled.load(Ordering::Acquire) {
+                return Err(failure());
+            }
+            let memory = entry.memory.lock().map_err(|_| failure())?;
+            if memory.is_some()
+                && !self
+                    .memory
+                    .as_ref()
+                    .is_some_and(|memory| memory.check(&ticket))
+            {
+                return Err(failure());
+            }
+            Ok(memory.as_ref().map(|memory| memory.catalog.clone()))
+        })();
+        Box::pin(async move { result })
+    }
+    fn check(&self, ticket: &Ticket, generation: u64) -> bool {
+        let entry = self
+            .entries
+            .lock()
+            .ok()
+            .and_then(|entries| entries.get(&(ticket.clone(), generation)).cloned());
+        let Some(entry) = entry else {
+            return false;
+        };
+        if !entry.done.load(Ordering::Acquire) || entry.cancelled.load(Ordering::Acquire) {
+            return false;
+        }
+        let Ok(memory) = entry.memory.lock() else {
+            return false;
+        };
+        memory.is_none()
+            || self
+                .memory
+                .as_ref()
+                .is_some_and(|memory| memory.check(ticket))
     }
     fn revoke(&self, ticket: &Ticket, generation: u64) {
         if let Some(entry) = self
@@ -399,6 +539,8 @@ impl ScopedMcp for Factory {
             let _tracked = tracked;
             let result = async {
                 let Some(entry) = entry else {
+                    // No exact generation entry means this factory owns no
+                    // memory scope here. A stale generation cannot revoke it.
                     return factory.backend.drain(ticket, generation).await;
                 };
                 let _cleanup = entry.cleanup.lock().await;
@@ -412,6 +554,9 @@ impl ScopedMcp for Factory {
                     changed.await;
                 }
                 factory.backend.drain(ticket.clone(), generation).await?;
+                if let Some(memory) = &factory.memory {
+                    memory.drain(ticket.clone()).await?;
+                }
                 let removing = factory.clone();
                 let removing_entry = entry.clone();
                 tokio::task::spawn_blocking(move || removing.remove_files(&removing_entry))

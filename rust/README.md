@@ -14,12 +14,16 @@ Owner-only `agent.recovery.get/confirm` позволяют осмотреть и
 привязку к отсутствующей native ZCode-сессии после joined cleanup текущего
 Runtime, без повторной отправки. Ограничения и договор —
 [R3-ZCODE-MISSING-RECOVERY](../docs/rust/R3-ZCODE-MISSING-RECOVERY.md).
+Claude и Codex используют общий backend памяти с отдельными scope каждого хода
+и подтверждением записи через Broker. Каталог передаётся только в native input;
+договор — [M3-CLAUDE-SHARED-MEMORY](../docs/rust/M3-CLAUDE-SHARED-MEMORY.md).
 
 Полный список методов берётся из `../protocol/methods.json`. В `hello_ok` и статусе
 публикуются `capabilities.experimental` и `supportedMethods`. Каталог отмечает остальные
 методы как `unported`, их вызов возвращает `not_implemented`. Неизвестное имя возвращает
-`not_found`. Scoped-ключ Claude разрешает только вопросы своего хода; runtime-ключи
-отвергаются до переноса их области доступа.
+`not_found`. Claude ask-ключ разрешает только вопросы своего хода; отдельный
+memory turn key разрешает scoped чтение и proposal. Runtime-ключи отвергаются
+до переноса их области доступа.
 
 ## Сборка и проверки
 

@@ -278,13 +278,23 @@ pub(crate) async fn claude_instance(
             .claude_asks
             .get_or_init(|| crate::claude_ask::Backend::new(Arc::downgrade(&state)))
             .clone();
+        let memory = state
+            .memory_turns
+            .get_or_init(|| {
+                crate::memory_turn::Backend::new(
+                    Arc::downgrade(&state),
+                    current.with_file_name("pult-memory-mcp"),
+                )
+            })
+            .clone();
         let helper = current.clone();
         let factory: crate::claude_runtime::McpFactory = Arc::new(move |gate| {
-            let factory = crate::claude_mcp::Factory::new(
+            let factory = crate::claude_mcp::Factory::new_with_memory(
                 backend.clone(),
                 gate,
                 helper.clone(),
                 Default::default(),
+                memory.clone(),
             )?;
             Ok(factory as Arc<dyn crate::claude_worker::ScopedMcp>)
         });
