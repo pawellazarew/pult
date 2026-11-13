@@ -937,6 +937,7 @@ async fn turn(
         }
         early.push_back(frame);
         while let Some(frame) = early.pop_front() {
+            final_text.observe_frame();
             let batch = mapper.push(&callback, &frame);
             if batch.fault.is_some() {
                 return Err(error(
@@ -954,8 +955,13 @@ async fn turn(
             }
             for signal in batch.signals {
                 match signal {
-                    Signal::Result { ok, text, .. } => {
-                        final_text.result(ok, text);
+                    Signal::Result {
+                        ok,
+                        text,
+                        result_type,
+                        ..
+                    } => {
+                        final_text.result(ok, text, result_type);
                         result = Some(ok);
                         terminal_deadline.get_or_insert_with(|| {
                             tokio::time::Instant::now() + inner.config.terminal_grace
@@ -1016,13 +1022,39 @@ async fn turn(
     if !natural_eof {
         return Err(error("worker_io_failed", "ZCode output did not reach EOF"));
     }
-    classify(&inner, &job, tail.as_bytes()).await?;
+    let stderr = classify(&inner, &job, tail.as_bytes()).await?;
+    if stderr == JoinedStderr::Empty
+        && job.native_io_complete.load(Ordering::Acquire)
+        && final_text.ordinary_failed()
+    {
+        let raw = format!(
+            "ход завершился неуспехом ({})",
+            final_text.result_type.as_deref().unwrap_or("?")
+        );
+        let Some(message) = failure_message(&inner, raw)? else {
+            return Ok(WorkerCompletion::unqualified(
+                failure(
+                    "internal",
+                    "ZCode failure message exceeded publication limits",
+                ),
+                CompletionUnavailable::Capacity,
+            ));
+        };
+        return Ok(final_text.finish_failure(&job.public_turn, message));
+    }
     Ok(WorkerCompletion::unqualified(
         failure("provider_failed", "ZCode returned no successful result"),
         CompletionUnavailable::Disposition,
     ))
 }
-async fn classify(inner: &Inner, job: &Job, bytes: &[u8]) -> Result<(), WorkerError> {
+/// Classification stays private; only exact joined-empty bytes qualify the
+/// ordinary failed-Result profile. Nonempty whitespace remains out of scope.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum JoinedStderr {
+    Empty,
+    Nonempty,
+}
+async fn classify(inner: &Inner, job: &Job, bytes: &[u8]) -> Result<JoinedStderr, WorkerError> {
     let text = String::from_utf8_lossy(bytes);
     let lines = text
         .trim_matches(crate::claude_launch::js_whitespace)
@@ -1114,7 +1146,51 @@ async fn classify(inner: &Inner, job: &Job, bytes: &[u8]) -> Result<(), WorkerEr
             "ZCode provider reported an execution failure",
         ));
     }
-    Ok(())
+    Ok(if bytes.is_empty() {
+        JoinedStderr::Empty
+    } else {
+        JoinedStderr::Nonempty
+    })
+}
+
+struct FailureMessageBudget(usize);
+impl std::io::Write for FailureMessageBudget {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self
+            .0
+            .checked_sub(bytes.len())
+            .ok_or_else(|| std::io::Error::other("ZCode failure message capacity"))?;
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+fn failure_message(inner: &Inner, raw: String) -> Result<Option<String>, WorkerError> {
+    let limits = zcode_events::Limits::default();
+    let fits = |text: &str| {
+        text.encode_utf16().count() <= limits.text_units
+            && serde_json::to_writer(FailureMessageBudget(limits.event_bytes), text).is_ok()
+    };
+    if !fits(&raw) {
+        return Ok(None);
+    }
+    let mut redactor = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        (inner.services.redactors)()
+    }))
+    .map_err(|_| error("redaction_failed", "ZCode failure redactor unavailable"))?;
+    let safe = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        redactor.redact(&Value::String(raw))
+    }))
+    .map_err(|_| error("redaction_failed", "ZCode failure message redaction failed"))?
+    .map_err(|_| error("redaction_failed", "ZCode failure message redaction failed"))?;
+    let Value::String(safe) = safe else {
+        return Err(error(
+            "redaction_failed",
+            "ZCode failure message redaction changed shape",
+        ));
+    };
+    Ok(fits(&safe).then_some(safe))
 }
 
 /// Route A successful raw result text wins; empty raw result falls back to
@@ -1125,8 +1201,18 @@ struct ZcodeText {
     raw: Option<String>,
     capacity: bool,
     first_result: Option<bool>,
+    result_type: Option<String>,
+    ambiguous: bool,
 }
 impl ZcodeText {
+    fn observe_frame(&mut self) {
+        if self.first_result.is_some() {
+            self.ambiguous = true
+        }
+    }
+    fn ordinary_failed(&self) -> bool {
+        self.first_result == Some(false) && !self.ambiguous
+    }
     fn ended(&mut self, text: Option<String>) {
         if self.capacity {
             return;
@@ -1148,11 +1234,33 @@ impl ZcodeText {
             self.ended.push_str(&text);
         }
     }
-    fn result(&mut self, ok: bool, text: Option<String>) {
+    fn result(&mut self, ok: bool, text: Option<String>, result_type: Option<String>) {
         if self.first_result.is_none() {
             self.first_result = Some(ok);
             self.raw = text.filter(|s| !s.is_empty());
+            self.result_type = result_type;
+        } else {
+            self.ambiguous = true
         }
+    }
+    fn finish_failure(mut self, turn: &str, message: String) -> WorkerCompletion {
+        let outcome = failure("internal", &message);
+        let raw = self.raw.take();
+        self.ended(raw);
+        if self.capacity {
+            return WorkerCompletion::unqualified(outcome, CompletionUnavailable::Capacity);
+        }
+        let text = (!self.ended.is_empty()).then_some(self.ended);
+        WorkerCompletion::normalized(
+            outcome,
+            crate::codex_events::TurnOutcome {
+                turn_id: turn.into(),
+                ok: false,
+                error_code: Some(crate::codex_events::OutcomeCode::Internal),
+                message: Some(message),
+                text,
+            },
+        )
     }
     fn finish(self, turn: &str) -> WorkerCompletion {
         if self.first_result != Some(true) {

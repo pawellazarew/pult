@@ -73,6 +73,8 @@ struct Rig {
     owner: Arc<ZcodeOwner>,
     sink: Arc<JournalSink>,
     signals: Arc<Mutex<Vec<ProviderSignal>>>,
+    redactors: Arc<dyn Fn() -> Box<dyn pult_core::zcode_events::Redactor> + Send + Sync>,
+    worker_sink: Option<Arc<dyn pult_core::turn_driver::EventSink>>,
 }
 fn python() -> PathBuf {
     [
@@ -155,6 +157,8 @@ impl Rig {
             owner,
             sink,
             signals: Arc::default(),
+            redactors: Arc::new(|| Box::new(pult_core::zcode_events::LogRedactor)),
+            worker_sink: None,
         }
     }
     fn snapshot(&self) -> TurnSnapshot {
@@ -198,7 +202,11 @@ impl Rig {
                     args: vec![
                         "-B".into(),
                         Path::new(env!("CARGO_MANIFEST_DIR"))
-                            .join("tests/fixtures/zcode_worker.py")
+                            .join(if mode.starts_with("failure-") {
+                                "tests/fixtures/zcode_failure.py"
+                            } else {
+                                "tests/fixtures/zcode_worker.py"
+                            })
                             .into_os_string(),
                         self.home.as_os_str().to_owned(),
                         mode.into(),
@@ -217,7 +225,10 @@ impl Rig {
             },
             Services {
                 driver: Arc::downgrade(&self.driver),
-                sink: self.sink.clone(),
+                sink: self
+                    .worker_sink
+                    .clone()
+                    .unwrap_or_else(|| self.sink.clone()),
                 gate: Arc::new(move |t: &Ticket, s: &TurnSnapshot| {
                     let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     if restrict && n >= 1 {
@@ -238,7 +249,7 @@ impl Rig {
                         barrier: barrier.clone(),
                     }))
                 }),
-                redactors: Arc::new(|| Box::new(pult_core::zcode_events::LogRedactor)),
+                redactors: self.redactors.clone(),
                 fatal_storage: Arc::new(|| {}),
                 provider_signal: Arc::new(move |v| signals.lock().unwrap().push(v)),
             },
@@ -816,7 +827,7 @@ async fn shutdown_unused_facade_denies_future_start() {
 async fn compact_failed_result_overrides_native_cancelled_completion() {
     let f = Rig::new(None);
     assert!(
-        matches!(f.finish(f.start(f.worker("cancelled-result-failure"),false)).await,Outcome::Failure{code,..}if code=="provider_failed")
+        matches!(f.finish(f.start(f.worker("cancelled-result-failure"),false)).await,Outcome::Failure{code,..}if code=="internal")
     );
 }
 
@@ -855,4 +866,246 @@ async fn direct_close_during_owned_acceptance_cannot_publish_late_started() {
     assert!(!f.events().iter().any(|v| v["kind"] == "message.user"));
     assert!(!f.driver.storage_failed());
     assert_eq!(f.driver.active_count(), 0);
+}
+
+fn assert_failure_pid_gone(f: &Rig) {
+    let pid: i32 = std::fs::read_to_string(f.home.join("provider.pid"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None),
+        Err(nix::errno::Errno::ESRCH)
+    );
+    assert_eq!(f.driver.active_count(), 0);
+    assert_eq!(
+        std::fs::read_to_string(f.home.join("failure-launches.jsonl"))
+            .unwrap()
+            .lines()
+            .count(),
+        1,
+        "no retry or fallback process"
+    );
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ordinary_failed_result_has_exact_internal_fields_and_redacts_assembled_type_message() {
+    for (mode, message) in [
+        ("failure-basic", "ход завершился неуспехом (error)"),
+        ("failure-token", "ход завершился неуспехом (<token>)"),
+    ] {
+        let f = Rig::new(None);
+        let mut handle = f.start(f.worker(mode), false);
+        let accepted = handle.accepted().await.unwrap();
+        let terminal = tokio::time::timeout(Duration::from_secs(10), handle.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            terminal.turn.outcome,
+            Outcome::Failure {
+                code: "internal".into(),
+                message: message.into()
+            }
+        );
+        let reference = terminal.completion_ref.unwrap();
+        assert_eq!(reference.user_event_id(), accepted.user_event_id);
+        assert_eq!(reference.public_turn_id(), accepted.turn_id);
+        let answer = f.driver.read_completion(reference).await.unwrap();
+        assert!(!answer.ok());
+        assert_eq!(answer.error_code(), Some("internal"));
+        assert_eq!(answer.message(), Some(message));
+        assert_eq!(answer.text(), Some("I\nF"));
+        assert!(
+            !serde_json::to_string(&f.events())
+                .unwrap()
+                .contains(&format!("mt_{}", "a".repeat(64)))
+        );
+        assert_eq!(
+            f.record().scalar("providerSessionId").as_deref(),
+            Some("sess_fixture_native")
+        );
+        assert!(f.signals.lock().unwrap().is_empty());
+        assert_failure_pid_gone(&f);
+    }
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn excluded_failed_schedules_never_publish_qualified_answer_or_retry() {
+    for mode in [
+        "failure-duplicate",
+        "failure-conflict",
+        "failure-late-frame",
+        "failure-stderr",
+        "failure-whitespace",
+        "failure-late-auth",
+        "failure-no-result",
+    ] {
+        let f = Rig::new(None);
+        let mut handle = f.start(f.worker(mode), false);
+        handle.accepted().await.unwrap();
+        let terminal = tokio::time::timeout(Duration::from_secs(10), handle.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        let reference = terminal.completion_ref.unwrap();
+        assert!(
+            f.driver.read_completion(reference).await.is_err(),
+            "qualified excluded {mode}"
+        );
+        if mode == "failure-conflict" || mode == "failure-no-result" {
+            assert_eq!(terminal.turn.outcome, Outcome::Success)
+        } else {
+            assert!(matches!(terminal.turn.outcome, Outcome::Failure { .. }))
+        }
+        let all = serde_json::to_string(&f.events()).unwrap();
+        assert!(!all.contains("private-stderr-42"));
+        assert!(!all.contains("authentication_required"));
+        assert_eq!(
+            f.events()
+                .iter()
+                .filter(|v| v["kind"] == "message.user")
+                .count(),
+            1
+        );
+        assert_failure_pid_gone(&f);
+    }
+}
+#[derive(Clone, Copy)]
+enum FailureFilter {
+    Error,
+    Shape,
+    Panic,
+    Capacity,
+    EscapedCapacity,
+}
+struct FailureMessageRedactor(FailureFilter);
+impl pult_core::zcode_events::Redactor for FailureMessageRedactor {
+    fn redact(&mut self, value: &Value) -> Result<Value, pult_core::zcode_events::RedactionError> {
+        if value
+            .as_str()
+            .is_some_and(|s| s.starts_with("ход завершился неуспехом ("))
+        {
+            return match self.0 {
+                FailureFilter::Error => Err(pult_core::zcode_events::RedactionError),
+                FailureFilter::Shape => Ok(serde_json::json!({"private-shape-change":true})),
+                FailureFilter::Panic => panic!("private-redactor-panic"),
+                FailureFilter::EscapedCapacity => Ok(Value::String("\0".repeat(150_000))),
+                FailureFilter::Capacity => Ok(Value::String(
+                    "x".repeat(pult_core::zcode_events::Limits::default().text_units + 1),
+                )),
+            };
+        }
+        pult_core::zcode_events::LogRedactor.redact(value)
+    }
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn assembled_failure_redactor_error_shape_panic_and_capacity_fail_closed_after_join() {
+    for filter in [
+        FailureFilter::Error,
+        FailureFilter::Shape,
+        FailureFilter::Panic,
+        FailureFilter::Capacity,
+        FailureFilter::EscapedCapacity,
+    ] {
+        let mut f = Rig::new(None);
+        f.redactors = Arc::new(move || Box::new(FailureMessageRedactor(filter)));
+        let mut handle = f.start(f.worker("failure-basic"), false);
+        handle.accepted().await.unwrap();
+        let terminal = tokio::time::timeout(Duration::from_secs(10), handle.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        let reference = terminal.completion_ref.unwrap();
+        let result = f.driver.read_completion(reference).await;
+        if matches!(
+            filter,
+            FailureFilter::Capacity | FailureFilter::EscapedCapacity
+        ) {
+            assert!(matches!(
+                result,
+                Err(
+                    pult_core::turn_completion::CompletionReadError::Unavailable(
+                        pult_core::turn_completion::CompletionUnavailable::Capacity
+                    )
+                )
+            ));
+            assert!(matches!(terminal.turn.outcome,Outcome::Failure{code,..}if code=="internal"));
+        } else {
+            assert!(result.is_err());
+            assert!(
+                matches!(terminal.turn.outcome,Outcome::Failure{code,..}if code=="redaction_failed")
+            );
+        }
+        let all = serde_json::to_string(&f.events()).unwrap();
+        assert!(!all.contains("private-shape-change"));
+        assert!(!all.contains("private-redactor-panic"));
+        assert_failure_pid_gone(&f);
+    }
+}
+struct FailureAppendGate {
+    sink: Arc<JournalSink>,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Semaphore>,
+}
+impl pult_core::turn_driver::EventSink for FailureAppendGate {
+    fn append(
+        &self,
+        value: Value,
+    ) -> pult_core::turn_driver::Task<
+        Result<pult_core::turn_driver::Receipt, pult_core::turn_driver::SinkError>,
+    > {
+        let gated = value["kind"] == "message.done";
+        let sink = self.sink.clone();
+        let entered = self.entered.clone();
+        let release = self.release.clone();
+        Box::pin(async move {
+            if gated {
+                entered.notify_one();
+                release.acquire().await.unwrap().forget()
+            }
+            sink.append(value).await
+        })
+    }
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn host_cancel_during_owned_output_io_keeps_slot_until_join_and_cannot_publish_failure_answer()
+ {
+    let mut f = Rig::new(None);
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    f.worker_sink = Some(Arc::new(FailureAppendGate {
+        sink: f.sink.clone(),
+        entered: entered.clone(),
+        release: release.clone(),
+    }));
+    let mut handle = f.start(f.worker("failure-blocked"), false);
+    handle.accepted().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    assert!(f.driver.cancel(handle.ticket()));
+    let held_count = f.driver.active_count();
+    let native_sid = f.record().scalar("providerSessionId");
+    let premature = f
+        .events()
+        .iter()
+        .any(|e| e["data"].get("completion").is_some());
+    release.add_permits(1);
+    let terminal = tokio::time::timeout(Duration::from_secs(10), handle.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(held_count, 1);
+    assert_eq!(native_sid.as_deref(), Some("sess_fixture_native"));
+    assert!(
+        !premature,
+        "owned IO must not publish a terminal completion before release"
+    );
+    assert_eq!(terminal.turn.outcome, Outcome::Interrupted);
+    assert!(
+        f.driver
+            .read_completion(terminal.completion_ref.unwrap())
+            .await
+            .is_err()
+    );
+    assert_failure_pid_gone(&f);
 }

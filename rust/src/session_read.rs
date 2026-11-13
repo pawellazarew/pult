@@ -48,7 +48,7 @@ fn object_end(bytes: &[u8], start: usize) -> usize {
 /// retaining every array comma gives the same recursive join without consuming
 /// the Rust stack or repeatedly copying nested arrays. Plain objects ignore
 /// their children and use Object.prototype.toString.
-fn javascript_string(value: &RawValue) -> Result<Vec<u16>> {
+pub(crate) fn javascript_string(value: &RawValue) -> Result<Vec<u16>> {
     let text = value.get();
     let bytes = text.as_bytes();
     let mut out = Vec::new();

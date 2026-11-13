@@ -41,7 +41,7 @@ Latest eligibility is ephemeral to the daemon epoch and exact session incarnatio
 
 R5 acceptance must use actual Node EventStore/reducers/history and Rust→Node→Rust round-trip for the additive nested status data, including escaped byte limits. TypeScript's permissive Record type alone is insufficient proof. Existing data without completion means no qualified remembered answer. No silent new kind/migration marker or rehydrated replay is permitted.
 
-The baseline ZCode failed-result mapping differs from Node: Rust provider_failed / static failure message versus Node internal / result-type message with accumulated text. This step must keep that difference explicit and use an unqualified/host fallback where the exact outcome is not supported; it must not publish an internally inconsistent qualified wait answer. No unrelated mapping fix is authorized here.
+The carrier baseline deliberately left ZCode failed-result mapping unqualified. The later [ordinary failure slice](R3-ZCODE-ORDINARY-FAILURE.md) now qualifies a single accepted failed raw Result with empty joined stderr, clean native IO, no host cancel and no later frame: exact internal/result-type message with accumulated I then F. Other stderr, ambiguous, no-Result and cancellation schedules remain conservative/unqualified. This is not full ZCode error or installed-native parity.
 
 Cancellation text parity, transport failures, terminal-grace fallback and installed native behavior require separate qualification. The transport must preserve existing source and unknown-execution contracts, not claim that all public wait outcomes are implemented.
 

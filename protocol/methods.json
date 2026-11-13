@@ -1419,12 +1419,81 @@
     {
       "name": "agent.wait",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "partial",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for agent.wait.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Owner-only bounded wait for current session status or qualified daemon-epoch completion. Partial Rust profile: explicit unavailable for unqualified outcomes; no restart rehydration or native background qualification.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "until": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "timeoutMs": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": true
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "cold",
+              "idle",
+              "working",
+              "blocked_permission",
+              "blocked_question",
+              "limited",
+              "interrupted",
+              "failed",
+              "done"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "matched",
+              "timeout"
+            ]
+          },
+          "turnId": {
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "errorCode": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "status",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
     },
     {
       "name": "daemon.status",

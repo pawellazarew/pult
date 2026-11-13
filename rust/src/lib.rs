@@ -56,6 +56,7 @@ mod session_read;
 mod session_recovery_api;
 mod session_runtime_api;
 mod session_tree;
+mod session_wait;
 mod snapshot;
 mod stream;
 mod subscriptions;
@@ -107,11 +108,12 @@ pub const PROTOCOL: u64 = 1;
 pub const MAX_LINE: usize = 1024 * 1024;
 // Catalog inventory spans roles. Owner transport rejects ask-only methods
 // before ordinary session dispatch; scoped hello advertises its own methods.
-pub const PARTIAL: [&str; 11] = [
+pub const PARTIAL: [&str; 12] = [
     "agent.start",
     "agent.list",
     "agent.prompt",
     "agent.stop",
+    "agent.wait",
     "agent.queue.send",
     "agent.queue.resume",
     "agent.queue.remove",
@@ -547,6 +549,7 @@ struct State {
     connection_id: AtomicU64,
     host_jobs: Arc<host_jobs::Tracker>,
     session_commands: Arc<session_runtime_api::Gate>,
+    session_waits: session_wait::Gate,
     stop: watch::Sender<bool>,
     store: Mutex<journal::EventStore>,
     history: Mutex<history::HistoryCache>,
@@ -844,6 +847,7 @@ async fn connection(
     let mut subscriptions = subscriptions::Subscriptions::new();
     let mut daemon_stopping = false;
     let mut responses = JoinSet::new();
+    let mut waits = JoinSet::new();
     loop {
         let line = tokio::select! {
             _ = shutdown.changed() => { daemon_stopping = true; break; },
@@ -997,6 +1001,53 @@ async fn connection(
             } else {
                 writer.response(&json!({"id":id,"error":{"code":"internal","message":"response exceeds frame budget; reduce limit or advance offset"}})).await?;
             }
+            continue;
+        }
+        // Scoped roles above never reach this owner-only read dispatch. Waits
+        // have independent limits/lifetime, not the mutation response JoinSet.
+        if let Some((id, query)) = session_wait::parse(&bytes) {
+            let query = match query {
+                Ok(query) => query,
+                Err(error) => {
+                    writer
+                        .response(
+                            &json!({"id":id,"error":{"code":error.code,"message":error.message}}),
+                        )
+                        .await?;
+                    continue;
+                }
+            };
+            while waits.try_join_next().is_some() {}
+            if waits.len() >= session_wait::PER_CONNECTION {
+                writer.response(&json!({"id":id,"error":{"code":"capacity","message":"too many waits on this connection"}})).await?;
+                continue;
+            }
+            let admission = match state.session_waits.admit() {
+                Ok(admission) => admission,
+                Err(error) => {
+                    writer
+                        .response(
+                            &json!({"id":id,"error":{"code":error.code,"message":error.message}}),
+                        )
+                        .await?;
+                    continue;
+                }
+            };
+            let state = state.clone();
+            let writer = writer.clone();
+            waits.spawn(async move {
+                match session_wait::wait(state, query, admission).await {
+                    Ok(result) => {
+                        let response = RpcResult { id:&id, result };
+                        if serde_json::to_vec(&response).is_ok_and(|bytes|bytes.len()<MAX_LINE) {
+                            let _ = writer.response(&response).await;
+                        } else {
+                            let _ = writer.response(&json!({"id":id,"error":{"code":"capacity","message":"wait result exceeds frame budget"}})).await;
+                        }
+                    },
+                    Err(error) => { let _ = writer.response(&json!({"id":id,"error":{"code":error.code,"message":error.message}})).await; },
+                }
+            });
             continue;
         }
         if let Some((id, command)) = session_api::parse(&bytes) {
@@ -1248,6 +1299,8 @@ async fn connection(
     if daemon_stopping {
         subscriptions.shutdown(&writer).await;
     }
+    waits.abort_all();
+    while waits.join_next().await.is_some() {}
     Ok(())
 }
 
@@ -1331,6 +1384,7 @@ async fn serve_owned(home: PathBuf, mut cancellation: watch::Receiver<bool>) -> 
         connection_id: AtomicU64::new(1),
         host_jobs: Arc::default(),
         session_commands: Arc::default(),
+        session_waits: Default::default(),
         stop,
         store: Mutex::new(store),
         history: Mutex::new(history::HistoryCache::default()),
