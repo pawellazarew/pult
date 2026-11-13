@@ -32,7 +32,7 @@ impl Worker for Controlled {
         Box::pin(async move {
             Ok(Started {
                 turn_id: turn,
-                done: Box::pin(async move { done.await.unwrap() }),
+                done: Box::pin(async move { done.await.unwrap().into() }),
             })
         })
     }

@@ -9,6 +9,7 @@ use crate::codex_events::{self, Normalizer, Redactor};
 use crate::codex_process::{self, Cleanup, CleanupStatus, Connection};
 use crate::codex_rpc::{Client, Event, ResponsePermit, RpcError};
 use crate::prompt_attachments::{self, PromptAttachment, PromptAttachmentScope};
+use crate::turn_completion::WorkerCompletion;
 use crate::turn_coordinator::{Outcome, Ticket};
 use crate::turn_driver::{
     DispatchDecision, DispatchGate, EventSink, Started, Task, Worker, WorkerError,
@@ -2026,8 +2027,8 @@ async fn session_started(
     }
     Ok(())
 }
-fn mapped_outcome(outcome: codex_events::TurnOutcome) -> Outcome {
-    if outcome.ok {
+fn mapped_outcome(outcome: codex_events::TurnOutcome) -> WorkerCompletion {
+    let mapped = if outcome.ok {
         Outcome::Success
     } else {
         match outcome.error_code {
@@ -2048,11 +2049,15 @@ fn mapped_outcome(outcome: codex_events::TurnOutcome) -> Outcome {
                 outcome.message.as_deref().unwrap_or("Codex turn failed"),
             ),
         }
-    }
+    };
+    WorkerCompletion::normalized(mapped, outcome)
 }
-fn publish_outcome(sender: &mut Option<oneshot::Sender<Outcome>>, outcome: Outcome) {
+fn publish_outcome(
+    sender: &mut Option<oneshot::Sender<WorkerCompletion>>,
+    outcome: impl Into<WorkerCompletion>,
+) {
     if let Some(sender) = sender.take() {
-        let _ = sender.send(outcome);
+        let _ = sender.send(outcome.into());
     }
 }
 async fn events(
@@ -2061,7 +2066,7 @@ async fn events(
     job: Arc<Job>,
     snapshot: TurnSnapshot,
     mut receiver: mpsc::Receiver<Envelope>,
-    outcome: oneshot::Sender<Outcome>,
+    outcome: oneshot::Sender<WorkerCompletion>,
 ) {
     let mut outcome = Some(outcome);
     let mut stop = job.event_stop.subscribe();
@@ -2299,14 +2304,17 @@ async fn events(
                                 "start_unknown",
                                 "Codex turn identity could not be confirmed",
                             )
+                            .into()
                         } else if unsupported {
                             failure(
                                 "unsupported_background",
                                 "Codex background execution is unsupported",
                             )
+                            .into()
                         } else {
                             forced_outcome
                                 .take()
+                                .map(WorkerCompletion::from)
                                 .unwrap_or_else(|| mapped_outcome(terminal))
                         },
                     );
@@ -2387,9 +2395,9 @@ async fn run_job(
         let result = Started {
             turn_id: job.public_id.clone(),
             done: Box::pin(async move {
-                done_rx
-                    .await
-                    .unwrap_or_else(|_| failure("provider_unavailable", "Codex event owner failed"))
+                done_rx.await.unwrap_or_else(|_| {
+                    failure("provider_unavailable", "Codex event owner failed").into()
+                })
             }),
         };
         if started.send(Ok(result)).is_err() {

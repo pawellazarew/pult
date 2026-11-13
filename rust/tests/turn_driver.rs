@@ -256,7 +256,7 @@ impl Worker for ControlledWorker {
     }
 }
 fn started() -> (Started, oneshot::Sender<Outcome>, oneshot::Receiver<()>) {
-    let (done, done_rx) = oneshot::channel();
+    let (done, done_rx) = oneshot::channel::<Outcome>();
     let (drop_tx, dropped) = oneshot::channel();
     let notice = DropNotice(Some(drop_tx));
     (
@@ -264,7 +264,10 @@ fn started() -> (Started, oneshot::Sender<Outcome>, oneshot::Receiver<()>) {
             turn_id: "provider-turn".into(),
             done: Box::pin(async move {
                 let _notice = notice;
-                done_rx.await.expect("test must complete or cancel done")
+                done_rx
+                    .await
+                    .expect("test must complete or cancel done")
+                    .into()
             }),
         },
         done,
@@ -1142,7 +1145,7 @@ async fn immediate_deferred_failure_or_panic_does_not_receipt_and_retry_remains_
             )
             .unwrap();
         let call = next(&mut worker.starts).await;
-        let done: Task<Outcome> = if panic {
+        let done: Task<pult_core::turn_completion::WorkerCompletion> = if panic {
             Box::pin(async { panic!("SECRET completion panic") })
         } else {
             Box::pin(async {
@@ -1150,6 +1153,7 @@ async fn immediate_deferred_failure_or_panic_does_not_receipt_and_retry_remains_
                     code: "rejected".into(),
                     message: "SECRET rejected".into(),
                 }
+                .into()
             })
         };
         call.reply
@@ -1184,7 +1188,7 @@ async fn immediate_deferred_failure_or_panic_does_not_receipt_and_retry_remains_
         call.reply
             .send(StartReply::Started(Started {
                 turn_id: "retry".into(),
-                done: Box::pin(async { Outcome::Success }),
+                done: Box::pin(async { Outcome::Success.into() }),
             }))
             .unwrap_or_else(|_| panic!("lost retry"));
         assert_eq!(bounded(retry.accepted()).await.unwrap().user_event_id, 2);
@@ -1369,7 +1373,7 @@ async fn cancel_in_initial_completion_poll_skips_deferred_receipt_and_joins_befo
                 let _notice = notice;
                 std::future::poll_fn(move |_| {
                     cancelling.cancel(&ticket);
-                    std::task::Poll::<Outcome>::Pending
+                    std::task::Poll::<pult_core::turn_completion::WorkerCompletion>::Pending
                 })
                 .await
             }),
@@ -1403,7 +1407,7 @@ async fn dropped_deferred_client_does_not_cancel_owned_start_append_or_terminal(
     call.reply
         .send(StartReply::Started(Started {
             turn_id: "provider-turn".into(),
-            done: Box::pin(async { Outcome::Success }),
+            done: Box::pin(async { Outcome::Success.into() }),
         }))
         .unwrap_or_else(|_| panic!("lost start"));
     let close = next(&mut worker.closes).await;
@@ -1538,7 +1542,7 @@ async fn question_only_and_queue_only_each_defer_their_receipt_until_started() {
         call.reply
             .send(StartReply::Started(Started {
                 turn_id: "provider-turn".into(),
-                done: Box::pin(async { Outcome::Success }),
+                done: Box::pin(async { Outcome::Success.into() }),
             }))
             .unwrap_or_else(|_| panic!("lost start"));
         bounded(handle.accepted()).await.unwrap();
@@ -1607,7 +1611,7 @@ async fn immediately_interrupted_deferred_turn_keeps_the_fact_without_a_user_rec
     call.reply
         .send(StartReply::Started(Started {
             turn_id: "interrupted-turn".into(),
-            done: Box::pin(async { Outcome::Interrupted }),
+            done: Box::pin(async { Outcome::Interrupted.into() }),
         }))
         .unwrap_or_else(|_| panic!("lost start"));
     let close = next(&mut worker.closes).await;
