@@ -25,6 +25,7 @@ pub struct Framing {
     max_wire_bytes: usize,
     max_input_bytes: usize,
     recover: bool,
+    raw: bool,
 }
 impl Framing {
     pub fn strict() -> Self {
@@ -32,6 +33,7 @@ impl Framing {
             max_wire_bytes: MAX_FRAME,
             max_input_bytes: MAX_FRAME,
             recover: false,
+            raw: false,
         }
     }
     pub fn codex() -> Self {
@@ -39,6 +41,7 @@ impl Framing {
             max_wire_bytes: CODEX_FRAME + 1,
             max_input_bytes: CODEX_FRAME + 1,
             recover: true,
+            raw: false,
         }
     }
     pub fn claude() -> Self {
@@ -46,27 +49,97 @@ impl Framing {
             max_wire_bytes: CODEX_FRAME + 1,
             max_input_bytes: crate::claude_launch::MAX_INPUT_BYTES + 1,
             recover: true,
+            raw: false,
         }
+    }
+    /// Raw wire bytes for a protocol-owned decoder. Limits include LF/CRLF.
+    /// No recovering/discarding or JSON conversion occurs on this output path.
+    pub fn raw_ndjson(max_wire_bytes: usize, max_input_bytes: usize) -> Result<Self> {
+        ensure!(
+            (1..=CODEX_FRAME).contains(&max_wire_bytes)
+                && (1..=CODEX_FRAME).contains(&max_input_bytes),
+            "invalid raw worker framing limits"
+        );
+        Ok(Self {
+            max_wire_bytes,
+            max_input_bytes,
+            recover: false,
+            raw: true,
+        })
+    }
+    /// Pure single-frame preparation, before admission/seal/first write poll.
+    /// Syntax is checked without Value conversion; protocol schema/duplicate-key
+    /// validation belongs to the caller's trusted codec, not this transport.
+    pub fn prepare_raw(self, bytes: Vec<u8>) -> Result<PreparedInput> {
+        ensure!(self.raw, "worker framing is not raw NDJSON");
+        ensure!(
+            bytes.len() <= self.max_input_bytes,
+            "worker request exceeds framing limit"
+        );
+        let body = bytes
+            .strip_suffix(b"\n")
+            .ok_or_else(|| anyhow::anyhow!("invalid raw worker NDJSON framing"))?;
+        let body = body.strip_suffix(b"\r").unwrap_or(body);
+        ensure!(
+            !body.is_empty() && !body.contains(&b'\n') && !body.contains(&b'\r'),
+            "invalid raw worker NDJSON framing"
+        );
+        ensure!(
+            std::str::from_utf8(body).is_ok(),
+            "invalid raw worker UTF-8"
+        );
+        serde_json::from_slice::<&serde_json::value::RawValue>(body)
+            .map_err(|_| anyhow::anyhow!("invalid raw worker JSON"))?;
+        Ok(PreparedInput { bytes, raw: true })
     }
     /// Prepare outside event-loop/admission locks when input can be large.
     pub fn encode(self, value: &Value) -> Result<PreparedInput> {
+        ensure!(!self.raw, "raw worker input requires a prepared raw frame");
         let mut bytes = serde_json::to_vec(value).context("worker request serialization failed")?;
         ensure!(
             bytes.len() < self.max_input_bytes,
             "worker request exceeds framing limit"
         );
         bytes.push(b'\n');
-        Ok(PreparedInput(bytes))
+        Ok(PreparedInput { bytes, raw: false })
     }
 }
 
 /// A single encoded NDJSON frame; no public constructor or raw diagnostic data.
-pub struct PreparedInput(Vec<u8>);
+pub struct PreparedInput {
+    bytes: Vec<u8>,
+    raw: bool,
+}
 impl std::fmt::Debug for PreparedInput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PreparedInput")
-            .field("bytes", &self.0.len())
+            .field("bytes", &self.bytes.len())
             .finish()
+    }
+}
+
+/// Exact post-holder NDJSON bytes. Payloads have no Debug/serde/Clone surface.
+/// The native codec must validate these bytes before treating them as a message.
+pub struct RawFrame(Vec<u8>);
+impl RawFrame {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+enum OutputSender {
+    Json(mpsc::Sender<Result<Value>>),
+    Raw(mpsc::Sender<Result<RawFrame>>),
+}
+enum OutputReceiver {
+    Json(mpsc::Receiver<Result<Value>>),
+    Raw(mpsc::Receiver<Result<RawFrame>>),
+}
+impl OutputReceiver {
+    fn close(&mut self) {
+        match self {
+            Self::Json(receiver) => receiver.close(),
+            Self::Raw(receiver) => receiver.close(),
+        }
     }
 }
 
@@ -298,7 +371,7 @@ pub struct Process {
     child: Child,
     stop_signal: StopSignal,
     stdin: Option<ChildStdin>,
-    output: mpsc::Receiver<Result<Value>>,
+    output: OutputReceiver,
     output_taken: bool,
     output_completion: Arc<OutputCompletion>,
     stdout_reader_index: Option<usize>,
@@ -309,7 +382,7 @@ pub struct Process {
     stderr_taken: bool,
     write_failed: bool,
     startup_reader: Option<BufReader<ChildStdout>>,
-    startup_sender: Option<mpsc::Sender<Result<Value>>>,
+    startup_sender: Option<OutputSender>,
     startup_attempted: bool,
     ready: bool,
     exit: Option<Exit>,
@@ -552,15 +625,26 @@ impl Process {
         let discarded = self.discarded.clone();
         let completion = self.output_completion.clone();
         self.stdout_reader_index = Some(self.readers.len());
-        self.readers.push(Some(tokio::spawn(collect_output(
-            reader,
-            sender,
-            framing,
-            discarded,
-            completion,
-            #[cfg(test)]
-            None,
-        ))));
+        let collector = match sender {
+            OutputSender::Json(sender) => tokio::spawn(collect_output(
+                reader,
+                sender,
+                framing,
+                discarded,
+                completion,
+                #[cfg(test)]
+                None,
+            )),
+            OutputSender::Raw(sender) => tokio::spawn(collect_raw_output(
+                reader,
+                sender,
+                framing.max_wire_bytes,
+                completion,
+                #[cfg(test)]
+                None,
+            )),
+        };
+        self.readers.push(Some(collector));
         self.ready = true;
         Ok(())
     }
@@ -568,7 +652,7 @@ impl Process {
     fn spawn_frontier(
         prepared: PreparedLaunch,
         gate: &dyn SpawnGate,
-    ) -> std::result::Result<(Self, mpsc::Sender<Result<Value>>), SpawnFailure> {
+    ) -> std::result::Result<(Self, OutputSender), SpawnFailure> {
         let PreparedLaunch {
             mut command,
             framing,
@@ -588,7 +672,13 @@ impl Process {
                 )));
             }
         };
-        let (sender, output) = mpsc::channel(if framing.recover { 1 } else { QUEUE });
+        let (sender, output) = if framing.raw {
+            let (sender, receiver) = mpsc::channel(1);
+            (OutputSender::Raw(sender), OutputReceiver::Raw(receiver))
+        } else {
+            let (sender, receiver) = mpsc::channel(if framing.recover { 1 } else { QUEUE });
+            (OutputSender::Json(sender), OutputReceiver::Json(receiver))
+        };
         let discarded = Arc::new(AtomicU64::new(0));
         let stderr_bytes = Arc::new(AtomicU64::new(0));
         // The guard exists before any await: cancelling the startup handshake
@@ -689,7 +779,11 @@ impl Process {
             "worker input is unavailable"
         );
         ensure!(
-            frame.0.len() <= self.framing.max_input_bytes,
+            frame.raw == self.framing.raw,
+            "worker request framing profile mismatch"
+        );
+        ensure!(
+            frame.bytes.len() <= self.framing.max_input_bytes,
             "worker request exceeds framing limit"
         );
         let mut write = WriteGuard {
@@ -699,7 +793,7 @@ impl Process {
         };
         let input = write.stdin.as_mut().context("worker input is closed")?;
         let result = tokio::time::timeout(WRITE_TIMEOUT, async {
-            input.write_all(&frame.0).await?;
+            input.write_all(&frame.bytes).await?;
             input.flush().await
         })
         .await;
@@ -712,19 +806,46 @@ impl Process {
         }
     }
 
-    /// Transfer the single receiver to a reader task. A second transfer fails.
+    /// Transfer the single JSON receiver. Wrong-profile access has no effect.
     pub fn take_output(&mut self) -> Result<mpsc::Receiver<Result<Value>>> {
+        let OutputReceiver::Json(output) = &mut self.output else {
+            bail!("worker output is raw NDJSON");
+        };
         ensure!(!self.output_taken, "worker output already transferred");
         self.output_taken = true;
         let (_sender, empty) = mpsc::channel(1);
-        Ok(std::mem::replace(&mut self.output, empty))
+        Ok(std::mem::replace(output, empty))
     }
     pub async fn recv(&mut self) -> Result<Option<Value>> {
+        let OutputReceiver::Json(output) = &mut self.output else {
+            bail!("worker output is raw NDJSON");
+        };
         ensure!(
             !self.output_taken,
             "worker output belongs to another reader"
         );
-        self.output.recv().await.transpose()
+        output.recv().await.transpose()
+    }
+    /// Transfer exact raw NDJSON bytes to the native protocol decoder.
+    /// Wrong-profile access never consumes or transfers the JSON receiver.
+    pub fn take_raw_output(&mut self) -> Result<mpsc::Receiver<Result<RawFrame>>> {
+        let OutputReceiver::Raw(output) = &mut self.output else {
+            bail!("worker output is JSON");
+        };
+        ensure!(!self.output_taken, "worker output already transferred");
+        self.output_taken = true;
+        let (_sender, empty) = mpsc::channel(1);
+        Ok(std::mem::replace(output, empty))
+    }
+    pub async fn recv_raw(&mut self) -> Result<Option<RawFrame>> {
+        let OutputReceiver::Raw(output) = &mut self.output else {
+            bail!("worker output is JSON");
+        };
+        ensure!(
+            !self.output_taken,
+            "worker output belongs to another reader"
+        );
+        output.recv().await.transpose()
     }
 
     pub async fn stop(&mut self) -> Result<Exit> {
@@ -868,6 +989,45 @@ async fn collect_output<R: AsyncBufRead + Unpin>(
     }
 }
 
+async fn collect_raw_output<R: AsyncBufRead + Unpin>(
+    mut reader: R,
+    sender: mpsc::Sender<Result<RawFrame>>,
+    limit: usize,
+    completion: Arc<OutputCompletion>,
+    #[cfg(test)] hook: Option<OutputEofHook>,
+) {
+    let eof = loop {
+        let frame = match bounded_line_limit(
+            &mut reader,
+            limit,
+            "raw subprocess frame exceeds framing limit",
+        )
+        .await
+        {
+            Ok(Some(line)) => Ok(RawFrame(line)),
+            Ok(None) => break true,
+            Err(_) => Err(anyhow::anyhow!("raw subprocess framing or read failed")),
+        };
+        let failed = frame.is_err();
+        if sender.send(frame).await.is_err() || failed {
+            break false;
+        }
+    };
+    if eof && !sender.is_closed() {
+        completion.eof.store(true, Ordering::Release);
+        #[cfg(test)]
+        if let Some(hook) = hook {
+            match hook {
+                OutputEofHook::Panic => panic!("synthetic raw stdout reader panic after EOF"),
+                OutputEofHook::Pause(entered) => {
+                    entered.notify_one();
+                    std::future::pending::<()>().await;
+                }
+            }
+        }
+    }
+}
+
 async fn collect_stderr<R: tokio::io::AsyncRead + Unpin>(
     mut reader: R,
     count: Arc<AtomicU64>,
@@ -955,6 +1115,13 @@ async fn recovering_line<R: AsyncBufRead + Unpin>(reader: &mut R, limit: usize) 
 }
 
 async fn bounded_line<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Option<Vec<u8>>> {
+    bounded_line_limit(reader, MAX_FRAME, "subprocess frame exceeds 1 MiB").await
+}
+async fn bounded_line_limit<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    limit: usize,
+    oversized_message: &'static str,
+) -> Result<Option<Vec<u8>>> {
     let mut line = Vec::new();
     loop {
         let bytes = reader
@@ -969,10 +1136,7 @@ async fn bounded_line<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Option<
             .iter()
             .position(|byte| *byte == b'\n')
             .map_or(bytes.len(), |offset| offset + 1);
-        ensure!(
-            line.len() + count <= MAX_FRAME,
-            "subprocess frame exceeds 1 MiB"
-        );
+        ensure!(line.len() + count <= limit, oversized_message);
         line.extend_from_slice(&bytes[..count]);
         reader.consume(count);
         if line.last() == Some(&b'\n') {
@@ -1060,6 +1224,90 @@ mod tests {
         ));
         assert!(output.recv().await.unwrap().is_err());
         assert!(output.recv().await.is_none());
+        let joined = join_reader(&mut task).await;
+        completion.joined.store(joined, Ordering::Release);
+        assert!(joined);
+        assert!(!completion.eof.load(Ordering::Acquire));
+        assert!(!completion.finished_cleanly());
+    }
+    #[tokio::test]
+    async fn raw_reader_read_error_is_not_normal_eof() {
+        let completion = Arc::new(OutputCompletion::default());
+        let (sender, mut output) = mpsc::channel(1);
+        let mut task = tokio::spawn(collect_raw_output(
+            BufReader::new(ErrorReader),
+            sender,
+            16,
+            completion.clone(),
+            None,
+        ));
+        let failure = output
+            .recv()
+            .await
+            .unwrap()
+            .err()
+            .expect("raw read error lost");
+        assert!(!format!("{failure:#}").contains("PRIVATE_READ_FAILURE"));
+        assert!(output.recv().await.is_none());
+        let joined = join_reader(&mut task).await;
+        completion.joined.store(joined, Ordering::Release);
+        assert!(joined);
+        assert!(!completion.eof.load(Ordering::Acquire));
+        assert!(!completion.finished_cleanly());
+    }
+    #[tokio::test]
+    async fn raw_reader_eof_before_panic_does_not_prove_clean_join() {
+        crate::panic_guard::install();
+        let completion = Arc::new(OutputCompletion::default());
+        let (sender, mut output) = mpsc::channel(1);
+        let mut task = tokio::spawn(collect_raw_output(
+            BufReader::new(&b"{}\n"[..]),
+            sender,
+            16,
+            completion.clone(),
+            Some(OutputEofHook::Panic),
+        ));
+        assert!(output.recv().await.unwrap().is_ok());
+        assert!(output.recv().await.is_none());
+        assert!(completion.eof.load(Ordering::Acquire));
+        let joined = join_reader(&mut task).await;
+        completion.joined.store(joined, Ordering::Release);
+        assert!(!joined);
+        assert!(!completion.finished_cleanly());
+    }
+    #[tokio::test]
+    async fn raw_reader_eof_before_abort_does_not_prove_clean_join() {
+        let completion = Arc::new(OutputCompletion::default());
+        let (sender, mut output) = mpsc::channel(1);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let mut task = tokio::spawn(collect_raw_output(
+            BufReader::new(&b"{}\n"[..]),
+            sender,
+            16,
+            completion.clone(),
+            Some(OutputEofHook::Pause(entered.clone())),
+        ));
+        assert!(output.recv().await.unwrap().is_ok());
+        entered.notified().await;
+        assert!(completion.eof.load(Ordering::Acquire));
+        task.abort();
+        let joined = join_reader(&mut task).await;
+        completion.joined.store(joined, Ordering::Release);
+        assert!(!joined);
+        assert!(!completion.finished_cleanly());
+    }
+    #[tokio::test]
+    async fn raw_reader_dropped_receiver_cannot_manufacture_eof() {
+        let completion = Arc::new(OutputCompletion::default());
+        let (sender, output) = mpsc::channel(1);
+        drop(output);
+        let mut task = tokio::spawn(collect_raw_output(
+            BufReader::new(&b""[..]),
+            sender,
+            16,
+            completion.clone(),
+            None,
+        ));
         let joined = join_reader(&mut task).await;
         completion.joined.store(joined, Ordering::Release);
         assert!(joined);
