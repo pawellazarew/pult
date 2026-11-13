@@ -160,9 +160,9 @@ try {
     try { expected = reopened.readFrom(0) } finally { reopened.close() }
     await start()
     assert.deepEqual(await client.request('events.tail'), { events: expected, cursor: 8 })
-    const cli = execFileSync(binary, ['--home', paths.home, 'events', 'tail', '--limit', '20'],
+    const cli = execFileSync(binary, ['--home', paths.home, 'events', 'tail', '--json', '--no-follow', '--limit', '20'],
       { encoding: 'utf8', timeout: 3000 })
-    assert.deepEqual(JSON.parse(cli), { events: expected, cursor: 8 })
+    assert.deepEqual(cli.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line)), expected)
     assert.equal((await client.request('daemon.status')).lastEventId, 8)
   })
   await check('tail filtering and numeric edges match current Node store', async () => {
@@ -255,10 +255,14 @@ try {
   await check('Rust events CLI filters the same persisted page as RPC', async () => {
     const params = { since: 3, sessionId: 'chat-a', limit: 2 }
     const expected = await client.request('events.tail', params)
-    const output = execFileSync(binary, ['--home', paths.home, 'events', 'tail',
+    const output = execFileSync(binary, ['--home', paths.home, 'events', 'tail', '--json', '--no-follow',
       '--since', String(params.since), '--session', params.sessionId, '--limit', String(params.limit)],
-    { encoding: 'utf8', timeout: 3000 })
-    assert.deepEqual(JSON.parse(output), expected)
+    // Filtered replay can end below the global cursor; TS no-follow then uses
+    // its 3s fallback. Allow that product timer plus CLI startup/cleanup margin.
+    { encoding: 'utf8', timeout: 6000 })
+    assert.deepEqual(output.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line)), expected.events)
+    const node = createStore(paths)
+    try { assert.equal(expected.cursor, node.lastId) } finally { node.close() }
   })
   await check('oversized tail fails explicitly while the connection and limited replay remain usable', async () => {
     const before = (await client.request('daemon.status')).lastEventId
