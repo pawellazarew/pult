@@ -229,6 +229,7 @@ impl Rig {
                         captured_approval: snapshot.settings.approval,
                         start_deadline: Instant::now() + Duration::from_secs(30),
                         reverse_timeout: Duration::from_secs(1),
+                        permission_timeout: None,
                         attachments: vec![],
                         language: ContextLanguage::En,
                     },
@@ -241,6 +242,8 @@ impl Rig {
                             crate::turn_driver::DispatchDecision::Allow
                         }),
                         spawn_gate: Arc::new(|_, _, _| Err(runtime_worker_error())),
+                        reply_gate: None,
+                        permission_slots: None,
                         input_gate: Arc::new(|_, _| Err(runtime_worker_error())),
                         resources: Arc::new(NeverResources),
                         interactions: Arc::new(zcode_appserver_worker::DenyInteractions),
@@ -542,4 +545,72 @@ async fn no_backend_memory_on_is_explicitly_unsupported_before_dispatch() {
             .get("zcodePendingInput")
             .is_none()
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn actual_native_approval_cannot_cross_replaced_current_source_or_worker_route() {
+    use crate::permission_broker::{Decision, Scope};
+    for fault in 0..6 {
+        let f = crate::zcode_native_permissions::tests::Fixture::new().await;
+        let mut handle = f.start().await;
+        let card = f.card().await;
+        {
+            let mut entries = f.runtime.inner.shared.state.lock().unwrap();
+            let entry = entries.get_mut(&f.key).unwrap();
+            match fault {
+                0 => {
+                    let current = entry.source.as_ref().unwrap();
+                    let replacement = Arc::new(Source {
+                        key: current.key.clone(),
+                        nonce: current.nonce.clone(),
+                        attempt: OnceLock::new(),
+                        selected: current.selected,
+                    });
+                    replacement
+                        .attempt
+                        .set(current.attempt.get().unwrap().clone())
+                        .ok()
+                        .unwrap();
+                    entry.source = Some(replacement);
+                }
+                1 => entry.expected_resume = Some(Some("foreign-native-resume".into())),
+                2 => {
+                    entry.worker = None;
+                }
+                3 => {
+                    f.runtime.inner.shared.guard.clear_cache().unwrap();
+                }
+                4 => {
+                    entry.quarantined = true;
+                }
+                5 => {
+                    entry.nonce = Arc::new(());
+                }
+                _ => unreachable!(),
+            }
+        }
+        crate::permission_state::resolve(
+            &f.state,
+            card["id"].as_str().unwrap(),
+            Decision::allow(Scope::Once),
+            "fixture-owner",
+        )
+        .unwrap();
+        let terminal = tokio::time::timeout(Duration::from_secs(15), handle.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            terminal.turn.outcome,
+            crate::turn_coordinator::Outcome::Success,
+            "fault={fault}"
+        );
+        assert!(
+            !f.proof().is_some_and(|p| p["decision"] == "allow"),
+            "fault={fault}"
+        );
+        // Restore metadata-only diagnostics after exact Worker close so the
+        // owning runtime can reap its original nonce normally.
+        f.finish().await;
+    }
 }

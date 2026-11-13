@@ -158,6 +158,114 @@ impl AppServerInputSeal<'_> {
     }
 }
 
+/// Exact accepted process/input identity; it is not native tool approval.
+/// No public constructor, Debug, Clone or serde. Arc clones retain the same binding.
+///
+/// ```compile_fail
+/// fn inspect(value: &pult_core::zcode_host_services::AcceptedNativeSource) {
+///     let _ = format!("{value:?}");
+/// }
+/// ```
+/// ```compile_fail
+/// fn duplicate(value: pult_core::zcode_host_services::AcceptedNativeSource) {
+///     let _ = value.clone();
+/// }
+/// ```
+/// ```compile_fail
+/// fn serialize(value: &pult_core::zcode_host_services::AcceptedNativeSource) {
+///     let _ = serde_json::to_string(value);
+/// }
+/// ```
+pub struct AcceptedNativeSource {
+    attempt: AppServerAttempt,
+    observed: crate::zcode_appserver_worker::ObservedRunning,
+    native_session: String,
+    native_turn: String,
+    runtime: crate::zcode_runtime::RuntimeSourceBinding,
+}
+
+impl AcceptedNativeSource {
+    pub(crate) fn attempt(&self) -> &AppServerAttempt {
+        &self.attempt
+    }
+    pub(crate) fn ticket(&self) -> &Ticket {
+        self.attempt.0.ticket()
+    }
+    pub(crate) fn generation(&self) -> u64 {
+        self.attempt.0.generation()
+    }
+    pub(crate) fn accepted(&self) -> &crate::turn_driver::Accepted {
+        self.observed.accepted()
+    }
+    pub(crate) fn initial(&self) -> &TurnSnapshot {
+        &self.attempt.0.0.initial
+    }
+    pub(crate) fn native_session_id(&self) -> &str {
+        &self.native_session
+    }
+    pub(crate) fn native_turn_id(&self) -> &str {
+        &self.native_turn
+    }
+    pub(crate) fn deadline(
+        &self,
+        admitted: std::time::Instant,
+        timeout: std::time::Duration,
+    ) -> std::time::Instant {
+        self.observed.deadline(admitted, timeout)
+    }
+    pub(crate) fn runtime(&self) -> &crate::zcode_runtime::RuntimeSourceBinding {
+        &self.runtime
+    }
+}
+/// Construct/use on one owned blocking thread before Runtime admission. No revived
+/// initial-input marker, attempt-map membership or inherited start-deadline check.
+pub struct AppServerReplyFrontier<'o> {
+    owner: &'o ZcodeOwner,
+    source: Arc<AcceptedNativeSource>,
+    registry: MutexGuard<'o, Registry>,
+    _consent: MutexGuard<'o, ConsentStore>,
+}
+
+pub struct AppServerReplySeal<'f> {
+    _frontier: PhantomData<MutexGuard<'f, ()>>,
+}
+
+impl AppServerReplyFrontier<'_> {
+    pub fn current_record(&self) -> &crate::registry::Record {
+        self.registry
+            .find(&self.source.ticket().session().name)
+            .expect("reply frontier retains the checked record")
+    }
+    /// Caller holds exact Runtime, memory-resource and pending-call gates through
+    /// the immediate bounded enqueue. There is no callback/IO under Driver CAS.
+    pub(crate) fn seal(
+        &self,
+        action: &crate::turn_driver::NativeReplyAction,
+    ) -> Option<AppServerReplySeal<'_>> {
+        let record = self.current_record();
+        if self.owner.failed.load(Ordering::Acquire)
+            || record.get(MARKER).is_some()
+            || record.scalar("providerSessionId").as_deref() != Some(&self.source.native_session)
+            || !Arc::ptr_eq(&self.owner.brand, &self.source.attempt.0.0.owner_brand)
+        {
+            return None;
+        }
+        self.owner
+            .trust
+            .driver
+            .upgrade()?
+            .seal_native_reply(
+                self.source.ticket(),
+                self.source.initial(),
+                self.source.accepted(),
+                action,
+            )
+            .then_some(AppServerReplySeal {
+                _frontier: PhantomData,
+            })
+    }
+}
+
 fn rank(approval: Approval) -> u8 {
     match approval {
         Approval::ReadOnly => 0,
@@ -175,6 +283,117 @@ impl ZcodeOwner {
             return Err(Error::Invalid);
         }
         self.operation(|| self.owned(&attempt.0))
+    }
+    /// Only the actual Runtime reply binder supplies its opaque Source witness.
+    /// A publicly constructible Accepted value alone cannot mint this identity.
+    pub(crate) fn bind_app_server_accepted(
+        &self,
+        attempt: &AppServerAttempt,
+        native: Acceptance,
+        observed: crate::zcode_appserver_worker::ObservedRunning,
+        runtime: crate::zcode_runtime::RuntimeSourceBinding,
+    ) -> Result<Arc<AcceptedNativeSource>, Error> {
+        let accepted = observed.accepted();
+        if self.failed.load(Ordering::Acquire)
+            || !Arc::ptr_eq(&self.brand, &attempt.0.0.owner_brand)
+            || !native.matches(attempt.attempt())
+            || !attempt.input_sealed()
+            || !attempt.0.0.retired.load(Ordering::Acquire)
+            || !matches!(attempt.0.0.route, AttemptRoute::AppServer { .. })
+            || !id(&native.native_session)
+            || !id(&native.native_turn)
+            || !runtime.matches_current(attempt.attempt())
+            || accepted.turn_id != attempt.0.public_turn()
+        {
+            return Err(Error::Invalid);
+        }
+        if attempt
+            .0
+            .0
+            .native
+            .lock()
+            .map_err(|_| Error::Storage)?
+            .as_deref()
+            != Some(native.native_session.as_str())
+        {
+            return Err(Error::Invalid);
+        }
+        let progress = self
+            .trust
+            .driver
+            .upgrade()
+            .and_then(|d| d.progress_for_ticket(attempt.0.ticket()))
+            .ok_or(Error::Unavailable)?;
+        if !matches!(&*progress.borrow(), crate::turn_driver::Progress::Running(a)
+            if a == accepted && a.user_event_id > 0 && a.user_event_id <= 9_007_199_254_740_991)
+        {
+            return Err(Error::Unavailable);
+        }
+        Ok(Arc::new(AcceptedNativeSource {
+            attempt: attempt.clone(),
+            observed,
+            native_session: native.native_session,
+            native_turn: native.native_turn,
+            runtime,
+        }))
+    }
+
+    pub(crate) fn prepare_app_server_reply<'o>(
+        &'o self,
+        source: &Arc<AcceptedNativeSource>,
+    ) -> Result<AppServerReplyFrontier<'o>, Error> {
+        if self.failed.load(Ordering::Acquire)
+            || !Arc::ptr_eq(&self.brand, &source.attempt.0.0.owner_brand)
+        {
+            return Err(Error::Invalid);
+        }
+        self.operation(|| {
+            // All injected/FS work precedes the caller's Runtime lock.
+            let policy = self.trust.snapshot_policy(source.ticket().session())?;
+            if !matches!(
+                self.trust.gate(source.ticket(), source.initial()),
+                DispatchDecision::Allow
+            ) {
+                return Err(Error::Unavailable);
+            }
+            let mut consent = self.trust.consent.lock().map_err(|_| Error::Storage)?;
+            let registry = self.trust.registry()?;
+            if registry.write_poisoned() {
+                return Err(Error::Storage);
+            }
+            let record = registry
+                .find(&source.ticket().session().name)
+                .ok_or(Error::Invalid)?;
+            self.trust.transaction_scope(record, source.initial())?;
+            if record.get(MARKER).is_some()
+                || record.scalar("providerSessionId").as_deref() != Some(source.native_session_id())
+                || !crate::owner_trust::same_authority(&policy.record, record)
+            {
+                return Err(Error::Uncertain);
+            }
+            let current = TurnSnapshot::try_from(record).map_err(|_| Error::Invalid)?;
+            let effective = host_policy::effective_access(&AccessFacts {
+                provider: current.provider,
+                desired: current.settings.approval,
+                effective_inherit_mode: policy.inherit_mode,
+                inherit_seen: record.scalar("inheritSeen"),
+                session_grant: (record.scalar("grant").as_deref() == Some("cli-once"))
+                    .then_some(SessionGrant::CliOnce),
+                consent: consent.read().map_err(|_| Error::Storage)?.facts(),
+            })
+            .effective;
+            if rank(effective) < rank(source.initial().settings.approval)
+                || self.trust.live(source.ticket()).as_ref() != Ok(source.initial())
+            {
+                return Err(Error::Unavailable);
+            }
+            Ok(AppServerReplyFrontier {
+                owner: self,
+                source: source.clone(),
+                registry,
+                _consent: consent,
+            })
+        })
     }
     pub fn reserve_app_server(
         &self,
@@ -400,6 +619,13 @@ impl AppServerNativeObserver {
         }
         self.started = Some(tid.into());
         Ok(())
+    }
+    pub(crate) fn matching_started_turn(&self) -> Option<&str> {
+        if self.failed || self.pending.is_none() {
+            None
+        } else {
+            self.started.as_deref()
+        }
     }
     pub fn saw_native_started(&self) -> bool {
         self.saw_native_started
