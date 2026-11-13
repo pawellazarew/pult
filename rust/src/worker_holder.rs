@@ -7,6 +7,7 @@ use rustix::process::{WaitId, WaitIdOptions, waitid};
 use std::io::{Read, Write};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::task::Poll;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -202,6 +203,81 @@ async fn confirm_zombie_group(leader: i32) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RunEnd {
+    Natural,
+    Term,
+    Interrupt,
+    OwnerGone,
+    DrainTimeout,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StopNotice {
+    Term,
+    Interrupt,
+    OwnerGone,
+}
+fn notice_from_polls(
+    owner_alive: bool,
+    term: Poll<Option<()>>,
+    interrupt: Poll<Option<()>>,
+) -> Option<StopNotice> {
+    if !owner_alive {
+        Some(StopNotice::OwnerGone)
+    } else if matches!(term, Poll::Ready(Some(()))) {
+        Some(StopNotice::Term)
+    } else if matches!(interrupt, Poll::Ready(Some(()))) {
+        Some(StopNotice::Interrupt)
+    } else {
+        // Closed/unknown signal sources cannot manufacture a stop request.
+        None
+    }
+}
+async fn pending_stop(
+    parent: i32,
+    term: &mut tokio::signal::unix::Signal,
+    interrupt: &mut tokio::signal::unix::Signal,
+) -> Option<StopNotice> {
+    std::future::poll_fn(|cx| {
+        Poll::Ready(notice_from_polls(
+            getppid().as_raw() == parent,
+            term.poll_recv(cx),
+            interrupt.poll_recv(cx),
+        ))
+    })
+    .await
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FinishPolicy {
+    NativeStatus,
+    Cancelled,
+}
+// Actual run calls this only AFTER known Group.cleanup. An explicit stop
+// remains cancellation even if the leader exited before its output drained.
+fn finish_policy(
+    natural: bool,
+    drained: bool,
+    readers_ok: bool,
+    reason: RunEnd,
+    pending: Option<StopNotice>,
+) -> Result<FinishPolicy> {
+    // A clean natural result remains the real native status, including7,
+    // even when the owner requested stop while mandatory cleanup was running.
+    if natural && drained && readers_ok {
+        return Ok(FinishPolicy::NativeStatus);
+    }
+    if matches!(reason, RunEnd::Term | RunEnd::Interrupt | RunEnd::OwnerGone) || pending.is_some() {
+        return Ok(FinishPolicy::Cancelled);
+    }
+    if natural {
+        ensure!(drained, "provider output drain unconfirmed");
+        ensure!(readers_ok, "provider output forwarding failed");
+        Ok(FinishPolicy::NativeStatus)
+    } else {
+        Ok(FinishPolicy::Cancelled)
+    }
+}
+
 fn joined(worker: JoinHandle<std::io::Result<u64>>) -> Result<()> {
     worker
         .join()
@@ -274,48 +350,62 @@ async fn run() -> Result<i32> {
         std::thread::spawn(move || std::io::copy(&mut errors, &mut std::io::stderr().lock()));
     let mut natural = false;
     let mut drained = false;
-    loop {
+    let reason = loop {
         if getppid().as_raw() != parent {
-            break;
+            break RunEnd::OwnerGone;
         }
         if group.exited_without_reaping()? {
             natural = true;
             let deadline = Instant::now() + Duration::from_secs(1);
-            loop {
+            let reason = loop {
                 if stdout.is_finished() && stderr.is_finished() {
                     drained = true;
-                    break;
+                    break RunEnd::Natural;
                 }
-                if getppid().as_raw() != parent || Instant::now() >= deadline {
-                    break;
+                if getppid().as_raw() != parent {
+                    break RunEnd::OwnerGone;
+                }
+                if Instant::now() >= deadline {
+                    break RunEnd::DrainTimeout;
                 }
                 tokio::select! {
-                    _ = term.recv() => break,
-                    _ = interrupt.recv() => break,
+                    _ = term.recv() => break RunEnd::Term,
+                    _ = interrupt.recv() => break RunEnd::Interrupt,
                     _ = tokio::time::sleep(Duration::from_millis(5)) => (),
                 }
-            }
-            break;
+            };
+            break reason;
         }
         // Pipe EOF alone is not an exit observation: a provider may close its
         // streams immediately before exiting with a nonzero code. Only waitid
         // (without reaping), explicit cancellation, or owner death ends this loop.
         tokio::select! {
-            _ = term.recv() => break,
-            _ = interrupt.recv() => break,
+            _ = term.recv() => break RunEnd::Term,
+            _ = interrupt.recv() => break RunEnd::Interrupt,
             _ = tokio::time::sleep(Duration::from_millis(20)) => (),
         }
-    }
+    };
     let status = group.cleanup().await?;
-    if natural {
-        ensure!(drained, "provider output drain unconfirmed");
-        joined(stdout)?;
-        joined(stderr)?;
-        return Ok(status.code().unwrap_or(128 + status.signal().unwrap_or(0)));
+    // No wait/timer and no signal after reap: sample only already-pending stop
+    // notifications (or owner loss) after mandatory group cleanup is known.
+    let pending = pending_stop(parent, &mut term, &mut interrupt).await;
+    let readers_ok = if drained {
+        // Both handles were observed finished; join BOTH even if the first Errs.
+        let output = joined(stdout);
+        let errors = joined(stderr);
+        output.is_ok() && errors.is_ok()
+    } else {
+        // Never wait for an unfinished forwarder while finalizing cancellation.
+        false
+    };
+    match finish_policy(natural, drained, readers_ok, reason, pending)? {
+        FinishPolicy::NativeStatus => {
+            Ok(status.code().unwrap_or(128 + status.signal().unwrap_or(0)))
+        }
+        // A cancelled attempt may leave forwarding threads blocked on a reader.
+        // They do not own cleanup; exit terminates them after mandatory group proof.
+        FinishPolicy::Cancelled => Ok(0),
     }
-    // A cancelled attempt may leave forwarding threads blocked on a reader.
-    // They do not own cleanup; process::exit terminates them after group proof.
-    Ok(0)
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -345,5 +435,138 @@ mod tests {
         ] {
             assert!(zombie_members(invalid, 42).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod finish_policy_tests {
+    use super::*;
+
+    // These call the PRIVATE decision function used by actual run after group
+    // cleanup. They qualify its reason policy, not an OS scheduling reproduction.
+    #[test]
+    fn term_during_undrained_natural_exit_is_cancellation_after_group_cleanup() {
+        assert_eq!(
+            finish_policy(true, false, false, RunEnd::Term, None).ok(),
+            Some(FinishPolicy::Cancelled)
+        );
+    }
+    #[test]
+    fn interrupt_during_undrained_natural_exit_is_cancellation_after_group_cleanup() {
+        assert_eq!(
+            finish_policy(true, false, false, RunEnd::Interrupt, None).ok(),
+            Some(FinishPolicy::Cancelled)
+        );
+    }
+    #[test]
+    fn owner_loss_during_undrained_natural_exit_is_cancellation_after_group_cleanup() {
+        assert_eq!(
+            finish_policy(true, false, false, RunEnd::OwnerGone, None).ok(),
+            Some(FinishPolicy::Cancelled)
+        );
+    }
+    #[test]
+    fn undrained_natural_timeout_remains_unconfirmed() {
+        assert!(finish_policy(true, false, false, RunEnd::DrainTimeout, None).is_err());
+    }
+    #[test]
+    fn drained_natural_exit_keeps_the_actual_native_status_path() {
+        assert_eq!(
+            finish_policy(true, true, true, RunEnd::Natural, None).ok(),
+            Some(FinishPolicy::NativeStatus)
+        );
+    }
+    #[test]
+    fn stop_before_natural_observation_keeps_existing_cancellation_path() {
+        for reason in [RunEnd::Term, RunEnd::Interrupt, RunEnd::OwnerGone] {
+            assert_eq!(
+                finish_policy(false, false, false, reason, None).ok(),
+                Some(FinishPolicy::Cancelled)
+            );
+        }
+    }
+    #[test]
+    fn a_finished_natural_forwarding_thread_error_is_not_success() {
+        let output =
+            std::thread::spawn(|| Err(std::io::Error::other("synthetic forwarding failure")));
+        assert!(joined(output).is_err());
+    }
+}
+
+#[cfg(test)]
+mod pending_stop_policy_tests {
+    use super::*;
+
+    #[test]
+    fn stop_queued_during_cleanup_cancels_an_undrained_natural_observation() {
+        for notice in [
+            StopNotice::Term,
+            StopNotice::Interrupt,
+            StopNotice::OwnerGone,
+        ] {
+            assert_eq!(
+                finish_policy(true, false, false, RunEnd::Natural, Some(notice)).ok(),
+                Some(FinishPolicy::Cancelled),
+            );
+        }
+    }
+    #[test]
+    fn stop_queued_during_cleanup_cancels_a_previously_timed_out_drain() {
+        assert_eq!(
+            finish_policy(
+                true,
+                false,
+                false,
+                RunEnd::DrainTimeout,
+                Some(StopNotice::Term)
+            )
+            .ok(),
+            Some(FinishPolicy::Cancelled),
+        );
+    }
+    #[test]
+    fn stop_queued_during_cleanup_cancels_finished_forwarding_error() {
+        assert_eq!(
+            finish_policy(true, true, false, RunEnd::Natural, Some(StopNotice::Term)).ok(),
+            Some(FinishPolicy::Cancelled),
+        );
+    }
+    #[test]
+    fn clean_native_status_path_survives_a_pending_stop() {
+        for notice in [
+            StopNotice::Term,
+            StopNotice::Interrupt,
+            StopNotice::OwnerGone,
+        ] {
+            assert_eq!(
+                finish_policy(true, true, true, RunEnd::Natural, Some(notice)).ok(),
+                Some(FinishPolicy::NativeStatus),
+            );
+        }
+    }
+    #[test]
+    fn bad_natural_readers_without_stop_remain_unconfirmed() {
+        assert!(finish_policy(true, true, false, RunEnd::Natural, None).is_err());
+        assert!(finish_policy(true, false, false, RunEnd::DrainTimeout, None).is_err());
+    }
+    #[test]
+    fn signal_poll_observation_never_invents_a_stop() {
+        assert_eq!(notice_from_polls(true, Poll::Pending, Poll::Pending), None);
+        assert_eq!(
+            notice_from_polls(true, Poll::Ready(None), Poll::Ready(None)),
+            None
+        );
+        assert_eq!(
+            notice_from_polls(true, Poll::Ready(Some(())), Poll::Pending),
+            Some(StopNotice::Term)
+        );
+        assert_eq!(
+            notice_from_polls(true, Poll::Ready(None), Poll::Ready(Some(()))),
+            Some(StopNotice::Interrupt)
+        );
+        assert_eq!(
+            notice_from_polls(false, Poll::Pending, Poll::Pending),
+            Some(StopNotice::OwnerGone)
+        );
     }
 }
