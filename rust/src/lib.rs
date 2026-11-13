@@ -107,11 +107,12 @@ pub const PROTOCOL: u64 = 1;
 pub const MAX_LINE: usize = 1024 * 1024;
 // Catalog inventory spans roles. Owner transport rejects ask-only methods
 // before ordinary session dispatch; scoped hello advertises its own methods.
-pub const PARTIAL: [&str; 11] = [
+pub const PARTIAL: [&str; 12] = [
     "agent.start",
     "agent.list",
     "agent.prompt",
     "agent.stop",
+    "agent.wait",
     "agent.queue.send",
     "agent.queue.resume",
     "agent.queue.remove",

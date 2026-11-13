@@ -1,14 +1,11 @@
 # R4 agent.wait — private backend qualification
 
-Этот backend slice пока **не рекламируется** через supportedMethods/catalog и не
-открывает скрытый CLI. Он не включает provider parity, native permission/account
-qualification, service installation или cutover. Public activation остаётся
-отдельным шагом после composed acceptance.
-
-Локальная composition использует reviewed carrier
-`40fab054d4dbc1ebe34951944fd1b66b6de601c8` и main
-`4cb65099f177123c8feb3e3055dc0c083fff1666`. Pure и actual State/socket acceptance
-ниже проверены на macOS; real provider qualification этим не заявляется.
+Backend доступен в экспериментальном Rust daemon как **partialMethods**, вместе
+с preview CLI `agent wait` / `prompt --wait`. Полная provider parity, native
+permission/account qualification, service installation и cutover не заявляются.
+Квалифицированные результаты проверены сквозным CLI-тестом; исходная отдельная
+квалификация backend ниже использовала carrier `40fab054` и main `4cb65099`.
+Итоговая композиция и 54 CLI-вызова описаны в [приёмке](R4-WAIT-E2E.md).
 
 ## Контракт запроса
 
@@ -102,7 +99,7 @@ JSON. Размер результата проверяется и с больш�
 capacity, без partial result или усечения. Disconnect снимает wait permit и
 сохраняет живую execution; завершение этой execution отдельно подтверждается Driver.
 
-Полный composed suite, provider-specific completion qualification, owned read-budget
-drain и публичная активация остаются отдельной приёмкой. Конкретные executed checks,
-исходные RED logs и hashes сохранены в persistent handoff. Этот slice не добавляет
-agent.wait в supportedMethods и не открывает hidden CLI.
+Сквозная приёмка и carrier проверяют composition и owned read-budget drain отдельно.
+Метод добавлен только в partialMethods, а не в fully supportedMethods. Необычные
+provider/error/background профили остаются открытыми; отсутствие квалифицированного
+ответа не заменяется историей. Исходные RED logs и hashes сохранены в persistent handoff.
