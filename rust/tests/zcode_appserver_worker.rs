@@ -299,6 +299,7 @@ impl Rig {
             captured_approval: Approval::Ask,
             start_deadline: Instant::now() + Duration::from_secs(15),
             reverse_timeout: Duration::from_secs(3),
+            permission_timeout: None,
             attachments: vec![],
             language: pult_core::zcode_launch::ContextLanguage::En,
         };
@@ -314,6 +315,8 @@ impl Rig {
                     attempt,
                 }))
             }),
+            reply_gate: None,
+            permission_slots: None,
             input_gate: Arc::new(|_, _| {
                 Ok(Arc::new(InputAdmission {
                     gate: Arc::new(Mutex::new(())),
@@ -1077,7 +1080,7 @@ impl NativeInteractions for HoldingInteraction {
     fn handle(
         &self,
         _: ReverseContext,
-        r: pult_core::zcode_appserver_protocol::ReverseRequest,
+        r: Arc<pult_core::zcode_appserver_protocol::ReverseRequest>,
     ) -> Task<Result<BoundReverseReply, WorkerError>> {
         let block = self.block.clone();
         Box::pin(async move {
@@ -1337,7 +1340,7 @@ impl NativeInteractions for ErrorInteraction {
     fn handle(
         &self,
         _: ReverseContext,
-        r: pult_core::zcode_appserver_protocol::ReverseRequest,
+        r: Arc<pult_core::zcode_appserver_protocol::ReverseRequest>,
     ) -> Task<Result<BoundReverseReply, WorkerError>> {
         let fail = self.bootstrap || self.calls.fetch_add(1, Ordering::SeqCst) > 0;
         let wrong = self.wrong_id;
