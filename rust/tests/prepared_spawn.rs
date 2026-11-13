@@ -403,26 +403,109 @@ async fn invalid_ack_with_term_before_exit_has_confirmed_cleanup() {
     ).unwrap();
     std::fs::set_permissions(&holder, std::fs::Permissions::from_mode(0o700)).unwrap();
     config.holder = holder;
-    let prepared = Process::prepare_launch(
+    let prepared = match Process::prepare_launch(
         config,
         Framing::strict(),
         StderrPolicy::PrivateTail { max_bytes: 16 },
     )
     .await
-    .unwrap();
+    {
+        Ok(prepared) => prepared,
+        Err(mut failure) => {
+            eprintln!(
+                "held-invalid-ack: phase=prepare retained={} io-code={:?}",
+                failure.process.is_some(),
+                failure.io_error_code()
+            );
+            if let Some(process) = &mut failure.process {
+                let _ = tokio::time::timeout(WATCHDOG, process.stop()).await;
+            }
+            panic!("held-invalid-ack prepare failed");
+        }
+    };
+    let failure =
+        match Process::spawn_prepared_owned(prepared, &Gate(Mutex::new(Flags::default()))).await {
+            Err(failure) => failure,
+            Ok(mut process) => {
+                eprintln!("held-invalid-ack: phase=ack unexpectedly-accepted=true");
+                let _ = tokio::time::timeout(WATCHDOG, process.stop()).await;
+                panic!("held-invalid-ack unexpectedly accepted");
+            }
+        };
+    if failure.process.is_none() {
+        eprintln!(
+            "held-invalid-ack: phase=ack retained=false io-code={:?}",
+            failure.io_error_code()
+        );
+    }
+    let mut process = *failure.process.expect("invalid ACK lost its process owner");
+    let signal = process.stop_signal();
+    let exit = match tokio::time::timeout(WATCHDOG, process.stop()).await {
+        Ok(Ok(exit)) => exit,
+        result => {
+            let io_code = result.as_ref().ok().and_then(|result| {
+                result.as_ref().err().and_then(|error| {
+                    error
+                        .downcast_ref::<std::io::Error>()
+                        .and_then(std::io::Error::raw_os_error)
+                })
+            });
+            eprintln!(
+                "held-invalid-ack: phase=stop returned={} io-code={io_code:?}",
+                result.is_ok()
+            );
+            panic!("held-invalid-ack stop failed");
+        }
+    };
+    if exit.code.is_some() {
+        eprintln!("held-invalid-ack: phase=exit exit-code={:?}", exit.code);
+    }
+    assert_eq!(exit.code, None);
+    let stop_still_available = signal.request_stop();
+    if stop_still_available {
+        eprintln!("held-invalid-ack: phase=expired-stop still-available=true");
+    }
+    assert!(!stop_still_available);
+    let stderr = match process.take_private_stderr() {
+        Ok(stderr) => stderr,
+        Err(error) => {
+            eprintln!("held-invalid-ack: phase=stderr-receipt state={error:?}");
+            panic!("held-invalid-ack stderr receipt unavailable");
+        }
+    };
+    if !stderr.as_bytes().is_empty() {
+        eprintln!(
+            "held-invalid-ack: phase=stderr-empty bytes={}",
+            stderr.as_bytes().len()
+        );
+    }
+    assert!(stderr.as_bytes().is_empty());
+}
+
+#[tokio::test]
+async fn before_pid_io_diagnostics_preserve_only_the_os_number() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let marker = "private-removed-holder-sentinel";
+    let holder = home.path().join(marker);
+    std::fs::write(&holder, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&holder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut config = launch(home.path(), "echo");
+    config.holder = holder.clone();
+    let prepared = Process::prepare_launch(config, Framing::strict(), StderrPolicy::CountOnly)
+        .await
+        .unwrap();
+    std::fs::remove_file(holder).unwrap();
     let failure = Process::spawn_prepared_owned(prepared, &Gate(Mutex::new(Flags::default())))
         .await
         .err()
-        .unwrap();
-    let mut process = *failure.process.expect("invalid ACK lost its process owner");
-    let signal = process.stop_signal();
-    let exit = tokio::time::timeout(WATCHDOG, process.stop())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(exit.code, None);
-    assert!(!signal.request_stop());
-    assert!(process.take_private_stderr().unwrap().as_bytes().is_empty());
+        .expect("a removed executable must not spawn");
+    assert!(failure.process.is_none());
+    assert_eq!(
+        failure.io_error_code(),
+        Some(nix::errno::Errno::ENOENT as i32)
+    );
+    assert!(!format!("{failure:?}").contains(marker));
 }
 
 #[tokio::test]
