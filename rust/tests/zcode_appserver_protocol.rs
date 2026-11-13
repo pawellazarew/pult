@@ -687,3 +687,198 @@ fn explicit_native_modes_and_set_mode_snapshot_ack_are_not_host_approval() {
     );
     assert!(OutboundRequest::set_mode(id(), "s1", SessionMode::Guarded, Some(u64::MAX)).is_err());
 }
+
+fn permission_request(bytes: &[u8]) -> ReverseRequest {
+    match decode_frame(bytes).unwrap() {
+        Incoming::Reverse(r @ ReverseRequest::Permission { .. }) => r,
+        _ => panic!("expected permission"),
+    }
+}
+fn retained_permission(r: &ReverseRequest) -> &NativePermissionData {
+    match r {
+        ReverseRequest::Permission {
+            payload: NativePermissionPayload::Retained(data),
+            ..
+        } => data,
+        _ => panic!("expected retained untrusted data"),
+    }
+}
+const PERMISSION_DENY: &[u8] = b"{\"id\":\"reverse-1\",\"result\":{\"decision\":\"deny\",\"reason\":\"Host approval is unavailable\"}}\n";
+
+#[test]
+fn permission_retains_all_untrusted_fields_without_changing_conservative_reply() {
+    let mut p = permission();
+    p["params"]["origin"] = json!({"kind":"subagent","agentId":"agent1","agentType":"worker","childSessionId":"child","parentSessionId":"s1","childTurnId":"child-turn","parentTurnId":"t1","parentToolCallId":"parent-call","description":"private origin"});
+    let request = permission_request(&wire(p.clone()));
+    let data = retained_permission(&request);
+    assert_eq!(data.untrusted_tool_call_id(), "tool-1");
+    assert_eq!(data.untrusted_tool_name(), "Bash");
+    assert_eq!(data.untrusted_reason(), "private reason");
+    assert_eq!(data.untrusted_risk_level(), "high");
+    assert_eq!(data.untrusted_turn_id().as_deref(), Some("t1"));
+    for (raw, expected) in [
+        (data.untrusted_params(), &p["params"]),
+        (data.untrusted_input(), &p["params"]["input"]),
+        (data.untrusted_options(), &p["params"]["options"]),
+        (data.untrusted_origin().unwrap(), &p["params"]["origin"]),
+    ] {
+        assert_eq!(&serde_json::from_str::<Value>(raw.get()).unwrap(), expected);
+    }
+    assert_eq!(request.default_deny().unwrap(), PERMISSION_DENY);
+}
+
+#[test]
+fn permission_primitive_array_and_null_input_remain_original_json() {
+    for input in [
+        json!(null),
+        json!(true),
+        json!(7),
+        json!(1.5),
+        json!("private string"),
+        json!([1, null, {"secret":true}]),
+    ] {
+        let mut p = permission();
+        p["params"]["input"] = input.clone();
+        p["params"].as_object_mut().unwrap().remove("turnId");
+        let request = permission_request(&wire(p));
+        let data = retained_permission(&request);
+        assert_eq!(data.untrusted_turn_id(), None);
+        assert!(data.untrusted_origin().is_none());
+        assert_eq!(
+            serde_json::from_str::<Value>(data.untrusted_input().get()).unwrap(),
+            input
+        );
+        assert_eq!(request.default_deny().unwrap(), PERMISSION_DENY);
+    }
+}
+
+#[test]
+fn permission_raw_params_and_fields_preserve_lexical_identity() {
+    let params = r#"{ "requestId":"permission-1", "sessionId":"s1", "toolCallId":"tool-1", "toolName":"B\u0061sh", "reason":"private\u0020reason", "riskLevel":"low", "input" : [ -0, 1.2300e+02, {"s":"\u0061", "n":  0.50 } ], "options" : [ { "optionId":"a", "kind":"allow", "name":"Allow", "response": { "decision":"allow", "modifiedInput": [ 1.00 ] } } ] }"#;
+    let bytes = format!(
+        "{{ \"id\":\"reverse-1\", \"method\":\"interaction/requestPermission\", \"params\":{params} }}\r\n"
+    );
+    let request = permission_request(bytes.as_bytes());
+    let data = retained_permission(&request);
+    assert_eq!(data.untrusted_params().get(), params);
+    assert_eq!(data.untrusted_tool_name(), "Bash");
+    assert_eq!(data.untrusted_reason(), "private reason");
+    assert_eq!(
+        data.untrusted_input().get(),
+        r#"[ -0, 1.2300e+02, {"s":"\u0061", "n":  0.50 } ]"#
+    );
+    assert_eq!(
+        data.untrusted_options().get(),
+        r#"[ { "optionId":"a", "kind":"allow", "name":"Allow", "response": { "decision":"allow", "modifiedInput": [ 1.00 ] } } ]"#
+    );
+    assert_eq!(request.default_deny().unwrap(), PERMISSION_DENY);
+}
+
+fn permission_with_retention_bytes(bytes: usize) -> Value {
+    let mut p = permission();
+    p["params"]["input"] = json!("");
+    let overhead = serde_json::to_vec(&p["params"]).unwrap().len()
+        + std::mem::size_of::<ReverseRequest>()
+        + "reverse-1".len()
+        + "s1".len()
+        + "permission-1".len();
+    p["params"]["input"] = json!("x".repeat(bytes - overhead));
+    p
+}
+#[test]
+fn permission_retention_boundary_counts_backing_metadata_and_correlation_copies() {
+    let at_limit = permission_with_retention_bytes(MAX_PERMISSION_RETENTION_BYTES);
+    let request = permission_request(&wire(at_limit));
+    assert!(
+        !retained_permission(&request)
+            .untrusted_input()
+            .get()
+            .is_empty()
+    );
+    assert_eq!(request.default_deny().unwrap(), PERMISSION_DENY);
+    let over_limit = permission_with_retention_bytes(MAX_PERMISSION_RETENTION_BYTES + 1);
+    let request = permission_request(&wire(over_limit));
+    assert!(matches!(
+        request,
+        ReverseRequest::Permission {
+            payload: NativePermissionPayload::ConservativeOnly(
+                PermissionPayloadLimit::RetentionBudget
+            ),
+            ..
+        }
+    ));
+    assert_eq!(request.default_deny().unwrap(), PERMISSION_DENY);
+}
+#[test]
+fn larger_valid_permission_is_explicitly_conservative_without_lowering_wire_limit() {
+    let mut p = permission();
+    p["params"]["input"] = json!({"secret":"x".repeat(1024 * 1024)});
+    let request = permission_request(&wire(p));
+    assert!(matches!(
+        request,
+        ReverseRequest::Permission {
+            payload: NativePermissionPayload::ConservativeOnly(
+                PermissionPayloadLimit::RetentionBudget
+            ),
+            ..
+        }
+    ));
+    assert_eq!(request.default_deny().unwrap(), PERMISSION_DENY);
+}
+#[test]
+fn permission_strict_validation_precedes_any_conservative_only_state() {
+    let mut p = permission_with_retention_bytes(MAX_PERMISSION_RETENTION_BYTES + 1);
+    p["params"]["origin"] = json!({"kind":"invented"});
+    assert!(decode_frame(&wire(p)).is_err());
+    let p = permission_with_retention_bytes(MAX_PERMISSION_RETENTION_BYTES + 1);
+    let input = serde_json::to_string(&p["params"]["input"]).unwrap();
+    let body = String::from_utf8(wire(p)).unwrap();
+    for malformed in [
+        body.replace(
+            "\"toolName\":\"Bash\"",
+            "\"toolName\":\"Bash\",\"toolName\":\"Other\"",
+        ),
+        body.replace("\"input\":", "\"input\":null,\"input\":"),
+        body.replace(
+            "\"decision\":\"allow\"",
+            "\"decision\":\"allow\",\"decision\":\"deny\"",
+        ),
+    ] {
+        assert!(decode_frame(malformed.as_bytes()).is_err());
+    }
+    let nested = format!(
+        "{}null{}",
+        "[".repeat(MAX_DEPTH + 1),
+        "]".repeat(MAX_DEPTH + 1)
+    );
+    let deep = body.replace(
+        &format!("\"input\":{input}"),
+        &format!("\"input\":{{\"nested\":{nested},\"padding\":{input}}}"),
+    );
+    assert!(decode_frame(deep.as_bytes()).is_err());
+    let duplicate = body.replace(
+        &format!("\"input\":{input}"),
+        &format!("\"input\":{{\"nested\":{{\"same\":1,\"same\":2}},\"padding\":{input}}}"),
+    );
+    assert!(decode_frame(duplicate.as_bytes()).is_err());
+    assert!(
+        decode_frame_with_limits(
+            body.as_bytes(),
+            DecodeLimits {
+                nodes: 12,
+                ..DecodeLimits::default()
+            }
+        )
+        .is_err()
+    );
+    assert!(
+        decode_frame_with_limits(
+            body.as_bytes(),
+            DecodeLimits {
+                string_bytes: 1024,
+                ..DecodeLimits::default()
+            }
+        )
+        .is_err()
+    );
+}
