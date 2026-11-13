@@ -2,8 +2,13 @@
 
 Этот backend slice пока **не рекламируется** через supportedMethods/catalog и не
 открывает скрытый CLI. Он не включает provider parity, native permission/account
-qualification, service installation или cutover. До reviewed completion-carrier
-composition и actual acceptance код не считается build/test qualified.
+qualification, service installation или cutover. Public activation остаётся
+отдельным шагом после composed acceptance.
+
+Локальная composition использует reviewed carrier
+`40fab054d4dbc1ebe34951944fd1b66b6de601c8` и main
+`4cb65099f177123c8feb3e3055dc0c083fff1666`. Pure и actual State/socket acceptance
+ниже проверены на macOS; real provider qualification этим не заявляется.
 
 ## Контракт запроса
 
@@ -81,15 +86,23 @@ raw JSON не возвращается. Wire overflow — явная capacity er
 
 ## Acceptance status
 
-Новые pure policy/raw-param cases и actual State/socket scenarios подготовлены:
+Локально прошли 18 тестов: 5 pure policy/raw-param и 13 actual State/socket cases:
 recovered status без outcome, pending cache suppression, closed/storage fault,
 UNKNOWN zero без answer read, held Registry/cache deadlines, partial-next-frame
 во время wait completion, same-socket stop/resolve, global/per-connection caps,
 disconnect/shutdown recovery, pending Broker override stale idle, exact reusable
 Normalizer answer и replacement Ticket во время заблокированного Store load.
 Они используют private scratch State и fake owned Worker; внешние
-CLI/аккаунты/провайдеры не нужны.
+CLI/аккаунты/провайдеры не использовались. Дополнительно прошли all-targets Clippy
+с `-D warnings`, cargo fmt check и git diff check.
 
-Все эти сценарии, native-specific completion projection и read-budget drain
-требуют composed carrier acceptance. Конкретные executed checks и hashes публикуются отдельно в handoff;
-наличие этого файла не означает PASS или public activation.
+Fake Worker получает qualified answer через actual Claude Normalizer и host-only
+typed carrier seam; public turnId берётся из accepted Started, а не из нормализованного
+JSON. Размер результата проверяется и с большим RPC id: полный envelope даёт
+capacity, без partial result или усечения. Disconnect снимает wait permit и
+сохраняет живую execution; завершение этой execution отдельно подтверждается Driver.
+
+Полный composed suite, provider-specific completion qualification, owned read-budget
+drain и публичная активация остаются отдельной приёмкой. Конкретные executed checks,
+исходные RED logs и hashes сохранены в persistent handoff. Этот slice не добавляет
+agent.wait в supportedMethods и не открывает hidden CLI.

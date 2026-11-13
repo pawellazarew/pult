@@ -14,7 +14,7 @@ async fn fixture_provider(kind: &str) -> (tempfile::TempDir, Arc<State>, Arc<dyn
     crate::session_runtime_api::execute(
         state.clone(),
         "agent.start",
-        json!({"name":"alpha","kind":kind,"cwd":home.path(),"approval":"ask"}),
+        json!({"name":"alpha","kind":kind,"scope":"general","approval":"ask"}),
         crate::host_policy::ClientKind::Other,
         "wait-test",
     )
@@ -290,7 +290,7 @@ impl crate::turn_driver::Worker for HostWorker {
                 turn_id: turn_id.into(),
                 done: Box::pin(async move {
                     done.await.unwrap_or_else(|_| {
-                        crate::turn_completion::WorkerCompletion::host(
+                        crate::turn_completion::WorkerCompletion::from(
                             crate::turn_coordinator::Outcome::Interrupted,
                         )
                     })
@@ -334,7 +334,7 @@ async fn pending_cache_cannot_complete_and_ineligible_host_completion_never_read
     );
     assert_eq!(state.driver.get().unwrap().active_count(), 1);
     assert!(
-        done.send(crate::turn_completion::WorkerCompletion::host(
+        done.send(crate::turn_completion::WorkerCompletion::from(
             crate::turn_coordinator::Outcome::Success
         ))
         .is_ok()
@@ -702,7 +702,7 @@ async fn disconnect_retires_only_wait_and_leaves_the_accepted_execution_owned() 
     assert_eq!(state.session_waits.0.available_permits(), GLOBAL);
     assert_eq!(driver.active_count(), 1);
     assert!(
-        done.send(crate::turn_completion::WorkerCompletion::host(
+        done.send(crate::turn_completion::WorkerCompletion::from(
             crate::turn_coordinator::Outcome::Success
         ))
         .is_ok()
@@ -740,19 +740,20 @@ async fn a_qualified_answer_with_a_large_rpc_id_gets_capacity_without_partial_re
         .await
         .unwrap()
         .unwrap();
+    let text = "fixture final answer ".repeat(128);
     assert!(
-        done.send(normalized(
-            handle.ticket(),
-            &snapshot.key,
-            false,
-            &"f".repeat(2048)
-        ))
-        .is_ok()
+        done.send(normalized(handle.ticket(), &snapshot.key, false, &text))
+            .is_ok()
     );
     tokio::time::timeout(BOUND, handle.wait())
         .await
         .unwrap()
         .unwrap();
+    let preview = invoke(state.clone(), json!({"name":"alpha","timeoutMs":0}))
+        .await
+        .unwrap_or_else(|e| panic!("{}", e.code));
+    assert!(preview["text"].as_str() == Some(text.as_str()));
+    assert!(text.len() > 1024);
     let (mut client, server) = connection(state.clone()).await;
     let id = "i".repeat(crate::MAX_LINE - 1024);
     let request = json!({"id":id,"method":"agent.wait","params":{"name":"alpha","timeoutMs":0}});
