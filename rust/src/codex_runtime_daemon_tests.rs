@@ -55,12 +55,57 @@ impl crate::network_guard::Probe for Probe {
         })
     }
 }
+// Test-only second IO stage: releasing the original fixture gate is not a
+// journal receipt. This permanently opens for all admitted/late waiters.
+struct OwnedIoPause {
+    entered: Notify,
+    open: watch::Sender<bool>,
+    admitted: AtomicUsize,
+    receipts: AtomicUsize,
+    receipt_changed: Notify,
+}
+impl OwnedIoPause {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            entered: Notify::new(),
+            open: watch::channel(false).0,
+            admitted: AtomicUsize::new(0),
+            receipts: AtomicUsize::new(0),
+            receipt_changed: Notify::new(),
+        })
+    }
+    async fn wait(&self) {
+        let mut open = self.open.subscribe();
+        self.entered.notify_one();
+        while !*open.borrow_and_update() {
+            open.changed().await.unwrap();
+        }
+    }
+    async fn receipt(&self) {
+        loop {
+            let changed = self.receipt_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.receipts.load(Ordering::Acquire) > 0 {
+                return;
+            }
+            changed.await;
+        }
+    }
+}
+struct OpenOwnedIo(Arc<OwnedIoPause>);
+impl Drop for OpenOwnedIo {
+    fn drop(&mut self) {
+        self.0.open.send_replace(true);
+    }
+}
 struct Sink {
     inner: Arc<JournalSink>,
     block: AtomicBool,
     permission: AtomicBool,
     entered: Notify,
     release: Arc<Semaphore>,
+    after_release: Mutex<Option<Arc<OwnedIoPause>>>,
 }
 impl EventSink for Sink {
     fn append(&self, draft: Value) -> Task<Result<Receipt, SinkError>> {
@@ -71,16 +116,149 @@ impl EventSink for Sink {
                     && draft["kind"] == "permission.resolved"));
         let inner = self.inner.clone();
         let release = self.release.clone();
+        let after_release = self.after_release.lock().unwrap().clone();
         if blocked {
+            if let Some(pause) = &after_release {
+                pause.admitted.fetch_add(1, Ordering::Release);
+            }
             self.entered.notify_one();
         }
         Box::pin(async move {
             if blocked {
                 release.acquire_owned().await.unwrap().forget();
+                if let Some(pause) = &after_release {
+                    pause.wait().await;
+                }
             }
-            inner.append(draft).await
+            let result = inner.append(draft).await;
+            if blocked
+                && result.is_ok()
+                && let Some(pause) = after_release
+            {
+                pause.receipts.fetch_add(1, Ordering::Release);
+                pause.receipt_changed.notify_waiters();
+            }
+            result
         })
     }
+}
+// Snapshot the exact host and lease identity while the accepted ticket owns it.
+struct ExactLease {
+    ticket: crate::turn_coordinator::Ticket,
+    host: Arc<CodexHost>,
+    nonce: Arc<()>,
+}
+impl ExactLease {
+    fn capture(runtime: &CodexRuntime, own: &Handle) -> Self {
+        let state = runtime.inner.shared.state.lock().unwrap();
+        let lease = state.leases.get(own.ticket().session()).unwrap();
+        assert_eq!(lease.ticket.as_ref(), Some(own.ticket()));
+        Self {
+            ticket: own.ticket().clone(),
+            host: lease.host.upgrade().unwrap(),
+            nonce: lease.nonce.clone(),
+        }
+    }
+    fn assert_current(&self, lease: &Lease) {
+        assert_eq!(lease.ticket.as_ref(), Some(&self.ticket));
+        assert!(Arc::ptr_eq(&lease.nonce, &self.nonce));
+        assert!(Arc::ptr_eq(&lease.host.upgrade().unwrap(), &self.host));
+    }
+    fn assert_retained(&self, runtime: &CodexRuntime, driver: &Driver) {
+        {
+            let state = runtime.inner.shared.state.lock().unwrap();
+            self.assert_current(state.leases.get(self.ticket.session()).unwrap());
+        }
+        assert!(driver.execution_snapshot(&self.ticket).is_some());
+        assert_eq!(driver.active_count(), 2);
+    }
+}
+async fn io_phase<T>(phase: &'static str, io: &OwnedIoPause, future: impl Future<Output = T>) -> T {
+    match tokio::time::timeout(Duration::from_secs(15), future).await {
+        Ok(result) => result,
+        Err(_) => {
+            eprintln!(
+                "[fixture-lifecycle] owned-io phase={phase} admitted={} receipts={}",
+                io.admitted.load(Ordering::Acquire),
+                io.receipts.load(Ordering::Acquire),
+            );
+            panic!("daemon fixture owned IO watchdog");
+        }
+    }
+}
+async fn finish_after_owned_io(
+    f: &Fixture,
+    runtime: &CodexRuntime,
+    own: &mut Handle,
+    exact: &ExactLease,
+    io: &OwnedIoPause,
+) {
+    io_phase("journal-receipt", io, io.receipt()).await;
+    let quiet = io_phase("exact-host-quiet", io, exact.host.shutdown()).await;
+    if quiet.is_err() {
+        eprintln!("[fixture-lifecycle] owned-io phase=exact-host-quiet cleanup-unconfirmed=true");
+    }
+    quiet.unwrap();
+    // Host quiet proves its admitted IO/jobs are joined. The Driver's own
+    // terminal append may still exceed a bounded runtime checkpoint, so retain
+    // that retry while observing its ACTUAL Finished state, not Quarantined.
+    let retry = runtime.shutdown();
+    let mut progress = own.subscribe_progress();
+    let terminal = io_phase("driver-finished", io, async {
+        loop {
+            let current = progress.borrow_and_update().clone();
+            if let Progress::Finished(result) = current {
+                break result;
+            }
+            progress.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        terminal.turn.outcome,
+        crate::turn_coordinator::Outcome::Interrupted
+    );
+    io_phase("same-lease-gone", io, async {
+        loop {
+            let changed = runtime.inner.shared.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            {
+                let state = runtime.inner.shared.state.lock().unwrap();
+                let Some(lease) = state.leases.get(exact.ticket.session()) else {
+                    break;
+                };
+                exact.assert_current(lease);
+            }
+            changed.await;
+        }
+    })
+    .await;
+    // An earlier checkpoint error is handled only after stronger new facts:
+    // actual receipt, exact host quiet, actual Finished and the same lease gone.
+    match io_phase("retained-retry-result", io, retry).await {
+        Ok(()) => {}
+        Err(RuntimeError::CleanupUnconfirmed) => {
+            assert!(io.receipts.load(Ordering::Acquire) > 0);
+            assert!(matches!(own.progress(), Progress::Finished(Ok(_))));
+            assert!(f.driver.execution_snapshot(&exact.ticket).is_none());
+            assert!(
+                !runtime
+                    .inner
+                    .shared
+                    .state
+                    .lock()
+                    .unwrap()
+                    .leases
+                    .contains_key(exact.ticket.session())
+            );
+        }
+        Err(_) => panic!("unexpected runtime checkpoint error"),
+    }
+    io_phase("known-quiescent-shutdown", io, runtime.shutdown())
+        .await
+        .unwrap();
 }
 struct Manual;
 impl Worker for Manual {
@@ -152,6 +330,7 @@ impl Fixture {
             permission: AtomicBool::new(false),
             entered: Notify::new(),
             release: Arc::new(Semaphore::new(0)),
+            after_release: Mutex::new(None),
         });
         let driver = Arc::new(
             Driver::new(
@@ -433,6 +612,10 @@ async fn daemon_shutdown_retains_quarantined_exact_lease_until_terminal_io_known
     let mut own = runtime.execute(key("one"), input("hold")).await.unwrap();
     accept(&f, &mut own).await;
     let neighbor = f.neighbor("two").await;
+    let exact = ExactLease::capture(&runtime, &own);
+    let io = OwnedIoPause::new();
+    io.open.send_replace(true); // Observe receipts without adding another block.
+    *f.sink.after_release.lock().unwrap() = Some(io.clone());
     f.sink.block.store(true, Ordering::Release);
     struct Release(Arc<Semaphore>);
     impl Drop for Release {
@@ -464,8 +647,10 @@ async fn daemon_shutdown_retains_quarantined_exact_lease_until_terminal_io_known
     );
     assert!(f.driver.execution_snapshot(own.ticket()).is_some());
     assert!(matches!(neighbor.progress(), Progress::Running(_)));
+    exact.assert_retained(&runtime, &f.driver);
+    assert!(matches!(own.progress(), Progress::Quarantined(_)));
     drop(release);
-    bounded(runtime.shutdown()).await.unwrap();
+    finish_after_owned_io(&f, &runtime, &mut own, &exact, &io).await;
     bounded(own.wait()).await.unwrap();
     assert!(
         !runtime
@@ -576,6 +761,10 @@ async fn own_pending_question_holds_ticket_while_neighbor_question_stays_indepen
     })
     .await;
     f.sink.permission.store(true, Ordering::Release);
+    let exact = ExactLease::capture(&runtime, &own);
+    let io = OwnedIoPause::new();
+    io.open.send_replace(true); // Observe receipts without adding another block.
+    *f.sink.after_release.lock().unwrap() = Some(io.clone());
     f.sink.block.store(true, Ordering::Release);
     struct Release(Arc<Semaphore>);
     impl Drop for Release {
@@ -607,11 +796,107 @@ async fn own_pending_question_holds_ticket_while_neighbor_question_stays_indepen
     );
     assert_eq!(f.broker.list(Some("two")).len(), 1);
     assert!(matches!(neighbor.progress(), Progress::Running(_)));
+    exact.assert_retained(&runtime, &f.driver);
+    assert!(matches!(own.progress(), Progress::Quarantined(_)));
     drop(release);
-    bounded(runtime.shutdown()).await.unwrap();
+    finish_after_owned_io(&f, &runtime, &mut own, &exact, &io).await;
     bounded(own.wait()).await.unwrap();
     assert_eq!(f.broker.list(Some("two")).len(), 1);
     assert!(!f.broker.storage_failed());
     let next = f.neighbor("three").await;
     f.finish(vec![neighbor, next], Some(question)).await;
+}
+
+#[tokio::test]
+async fn released_fixture_gate_does_not_make_owned_terminal_io_or_retry_known() {
+    let f = Fixture::new(true);
+    let runtime = f.runtime(true);
+    let mut own = runtime.execute(key("one"), input("hold")).await.unwrap();
+    accept(&f, &mut own).await;
+    let (host, nonce) = {
+        let state = runtime.inner.shared.state.lock().unwrap();
+        let lease = state.leases.get(&key("one")).unwrap();
+        assert_eq!(lease.ticket.as_ref(), Some(own.ticket()));
+        (lease.host.upgrade().unwrap(), lease.nonce.clone())
+    };
+    let neighbor = f.neighbor("two").await;
+    let pause = OwnedIoPause::new();
+    let opened_io = OpenOwnedIo(pause.clone());
+    *f.sink.after_release.lock().unwrap() = Some(pause.clone());
+    f.sink.block.store(true, Ordering::Release);
+    struct Release(Arc<Semaphore>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.add_permits(1);
+        }
+    }
+    let release = Release(f.sink.release.clone());
+    let stopping = runtime.shutdown();
+    bounded(f.sink.entered.notified()).await;
+    assert_eq!(
+        bounded(stopping).await,
+        Err(RuntimeError::CleanupUnconfirmed)
+    );
+    assert!(matches!(own.progress(), Progress::Quarantined(_)));
+    drop(release);
+    bounded(pause.entered.notified()).await;
+    assert_eq!(pause.receipts.load(Ordering::Acquire), 0);
+    // Same public retry as the original tests, while the admitted append is
+    // provably still waiting BEFORE its actual JournalSink receipt.
+    let retry = runtime.shutdown();
+    let result = bounded(retry).await;
+    eprintln!(
+        "[fixture-lifecycle] second-io retry-cleanup-unconfirmed={} actual-receipt=false",
+        result == Err(RuntimeError::CleanupUnconfirmed)
+    );
+    assert_eq!(result, Err(RuntimeError::CleanupUnconfirmed));
+    assert_eq!(pause.receipts.load(Ordering::Acquire), 0);
+    {
+        let state = runtime.inner.shared.state.lock().unwrap();
+        let lease = state.leases.get(&key("one")).unwrap();
+        assert_eq!(lease.ticket.as_ref(), Some(own.ticket()));
+        assert!(Arc::ptr_eq(&lease.nonce, &nonce));
+        assert!(Arc::ptr_eq(&lease.host.upgrade().unwrap(), &host));
+    }
+    assert_eq!(f.driver.active_count(), 2);
+    assert!(f.driver.execution_snapshot(own.ticket()).is_some());
+    assert!(matches!(own.progress(), Progress::Quarantined(_)));
+    assert!(matches!(neighbor.progress(), Progress::Running(_)));
+    // Open the controlled second stage permanently; then observe the actual
+    // receipt and this exact host's quiet joined cleanup, not a permit grant.
+    drop(opened_io);
+    bounded(pause.receipt()).await;
+    bounded(host.shutdown()).await.unwrap();
+    let retry = runtime.shutdown();
+    let mut progress = own.subscribe_progress();
+    let terminal = bounded(async {
+        loop {
+            let current = progress.borrow_and_update().clone();
+            if let Progress::Finished(result) = current {
+                break result;
+            }
+            progress.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        terminal.turn.outcome,
+        crate::turn_coordinator::Outcome::Interrupted
+    );
+    bounded(retry).await.unwrap();
+    bounded(runtime.shutdown()).await.unwrap();
+    assert!(
+        !runtime
+            .inner
+            .shared
+            .state
+            .lock()
+            .unwrap()
+            .leases
+            .contains_key(&key("one"))
+    );
+    assert!(f.driver.execution_snapshot(own.ticket()).is_none());
+    assert!(matches!(neighbor.progress(), Progress::Running(_)));
+    f.finish(vec![neighbor], None).await;
 }
