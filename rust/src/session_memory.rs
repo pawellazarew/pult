@@ -6,7 +6,7 @@ use crate::session_model::Record;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::{
-    Arc,
+    Arc, Mutex, MutexGuard,
     atomic::{AtomicBool, Ordering},
 };
 use subtle::ConstantTimeEq;
@@ -19,15 +19,44 @@ pub(crate) struct MemoryLease {
     pub generation: String,
     pub project_id: Option<String>,
     valid: AtomicBool,
+    // Registration and its issued key copies share this short admission gate.
+    admission: Arc<Mutex<()>>,
+}
+
+/// Borrowed input-handoff pin. No IO, callbacks or authority escapes in Drop.
+/// MutexGuard makes this !Send; the permit has no Debug/Clone/serde surface.
+#[cfg_attr(not(test), allow(dead_code))] // Future native input resource adapter, not active yet.
+pub(crate) struct MemoryLeaseAdmission<'a> {
+    _gate: MutexGuard<'a, ()>,
 }
 
 impl MemoryLease {
     pub fn is_valid(&self) -> bool {
-        self.valid.load(Ordering::Acquire)
+        self.valid.load(Ordering::Acquire) && !self.admission.is_poisoned()
     }
 
     fn invalidate(&self) {
+        // Revocation recovers a poisoned gate only to fail closed. Never clear
+        // poison or grant new admission through a recovered guard.
+        let _gate = self
+            .admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.valid.store(false, Ordering::Release);
+    }
+
+    /// A short borrowed pin only. Caller must not perform FS/DB/context lookup,
+    /// callbacks or awaits until this guard is dropped after its input handoff.
+    #[cfg_attr(not(test), allow(dead_code))] // Future native input resource adapter, not active yet.
+    pub(crate) fn admit(&self) -> Result<MemoryLeaseAdmission<'_>, MemoryError> {
+        let gate = self.admission.lock().map_err(|_| {
+            self.valid.store(false, Ordering::Release);
+            error("forbidden", "memory lease admission is unavailable")
+        })?;
+        if !self.is_valid() {
+            return Err(error("forbidden", "memory lease was revoked"));
+        }
+        Ok(MemoryLeaseAdmission { _gate: gate })
     }
 
     fn copy_for_key(&self) -> Self {
@@ -37,6 +66,7 @@ impl MemoryLease {
             generation: self.generation.clone(),
             project_id: self.project_id.clone(),
             valid: AtomicBool::new(true),
+            admission: self.admission.clone(),
         }
     }
 
@@ -120,6 +150,7 @@ impl SessionMemory {
             generation,
             project_id,
             valid: AtomicBool::new(true),
+            admission: Arc::new(Mutex::new(())),
         });
         let context = public_context(&lease, enabled);
         self.registrations
@@ -423,6 +454,75 @@ mod tests {
         drop(service);
         assert!(!owner.is_valid());
         assert!(!lease.is_valid());
+    }
+
+    #[test]
+    fn registration_and_key_copies_share_exact_admission_but_neighbor_does_not() {
+        let (mut service, record) = bound();
+        let owner = service
+            .registration("chat", &fingerprint(&record).unwrap())
+            .unwrap();
+        let (_, key) = issue(&mut service, &record);
+        service.bind("peer", "neighbor".into(), None, true).unwrap();
+        let peer = service.registration("peer", "neighbor").unwrap();
+        assert!(Arc::ptr_eq(&owner.admission, &key.admission));
+        assert!(!Arc::ptr_eq(&owner.admission, &peer.admission));
+        let permit = owner.admit().unwrap();
+        assert!(key.admission.try_lock().is_err());
+        let peer_permit = peer.admit().unwrap();
+        drop(peer_permit);
+        drop(permit);
+        let key_permit = key.admit().unwrap();
+        assert!(owner.admission.try_lock().is_err());
+        drop(key_permit);
+        service.revoke("chat");
+        assert!(owner.admit().is_err());
+        assert!(key.admit().is_err());
+        assert!(peer.admit().is_ok());
+    }
+
+    #[test]
+    fn admission_poison_fails_closed_for_owner_and_key_and_revoke_drop_recover() {
+        crate::panic_guard::install();
+        let (mut service, record) = bound();
+        let owner = service
+            .registration("chat", &fingerprint(&record).unwrap())
+            .unwrap();
+        let (_, key) = issue(&mut service, &record);
+        let gate = owner.admission.clone();
+        assert!(
+            std::thread::spawn(move || {
+                let _held = gate.lock().unwrap();
+                panic!("synthetic memory admission poison");
+            })
+            .join()
+            .is_err()
+        );
+        assert!(!owner.is_valid());
+        assert!(!key.is_valid());
+        assert!(owner.admit().is_err());
+        assert!(key.admit().is_err());
+        assert_eq!(service.revoke("chat"), json!({"revoked":true}));
+        // A fresh explicit registration has a fresh gate, not poison recovery.
+        service
+            .bind("chat", fingerprint(&record).unwrap(), None, true)
+            .unwrap();
+        let owner = service
+            .registration("chat", &fingerprint(&record).unwrap())
+            .unwrap();
+        let (_, key) = issue(&mut service, &record);
+        let gate = owner.admission.clone();
+        assert!(
+            std::thread::spawn(move || {
+                let _held = gate.lock().unwrap();
+                panic!("synthetic memory admission poison before drop");
+            })
+            .join()
+            .is_err()
+        );
+        drop(service);
+        assert!(!owner.is_valid());
+        assert!(!key.is_valid());
     }
 
     #[test]

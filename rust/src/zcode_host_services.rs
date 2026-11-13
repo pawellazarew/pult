@@ -4,7 +4,7 @@ use crate::consent_store::ConsentStore;
 use crate::owner_trust::{OwnerError, OwnerTrust, RouteValidity, yes};
 use crate::registry::{Record, Registry};
 use crate::turn_coordinator::Ticket;
-use crate::turn_driver::{DispatchDecision, Driver, Receipt, SpawnAction, Terminal};
+use crate::turn_driver::{DispatchDecision, Driver, InputAction, Receipt, SpawnAction, Terminal};
 use crate::turn_snapshot::{Provider, SessionKey, TurnSnapshot};
 use serde_json::json;
 use std::collections::HashMap;
@@ -12,6 +12,12 @@ use std::path::PathBuf;
 use std::sync::{
     Arc, Mutex, Weak,
     atomic::{AtomicBool, AtomicU8, Ordering},
+};
+
+mod app_server;
+pub use app_server::{
+    AppServerAttempt, AppServerInputFrontier, AppServerInputSeal, AppServerNativeObserver,
+    AppServerSessionStore, AppServerStartedEvidence, HostInputIds, NativeSessionReceipt,
 };
 
 const MARKER: &str = "zcodePendingInput";
@@ -69,8 +75,16 @@ struct Entry {
     expected_resume: Option<String>,
     marker: String,
     spawn: Arc<SpawnAction>,
+    route: AttemptRoute,
     native: Mutex<Option<String>>,
     retired: AtomicBool,
+}
+enum AttemptRoute {
+    Argv,
+    AppServer {
+        input: Arc<InputAction>,
+        ids: HostInputIds,
+    },
 }
 /// Opaque fresh owned-process binding. It is not deserializable authority.
 #[derive(Clone)]
@@ -98,6 +112,9 @@ impl Attempt {
     fn sealed(&self) -> bool {
         self.0.spawn.sealed()
     }
+    fn argv(&self) -> bool {
+        matches!(self.0.route, AttemptRoute::Argv)
+    }
 }
 impl std::fmt::Debug for Attempt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -119,7 +136,7 @@ impl TurnStartedEvidence {
         session_id: String,
         turn_id: String,
     ) -> Result<Self, Error> {
-        if !id(&session_id) || !id(&turn_id) {
+        if !attempt.argv() || !id(&session_id) || !id(&turn_id) {
             return Err(Error::Invalid);
         }
         Ok(Self {
@@ -172,7 +189,8 @@ impl MissingAfterJoin {
         joined: JoinedCleanup,
         saw_matching_native_turn_started: bool,
     ) -> Result<Self, Error> {
-        if !Arc::ptr_eq(&attempt.0, &joined.0.0)
+        if !attempt.argv()
+            || !Arc::ptr_eq(&attempt.0, &joined.0.0)
             || saw_matching_native_turn_started
             || !attempt.sealed()
             || !attempt.0.retired.load(Ordering::Acquire)
@@ -545,7 +563,24 @@ impl ZcodeOwner {
         public_turn: String,
         deadline: std::time::Instant,
     ) -> Result<Attempt, Error> {
+        self.reserve_route(
+            ReserveRequest::new(ticket, initial, generation, public_turn, deadline),
+            None,
+        )
+    }
+    fn reserve_route(
+        &self,
+        request: ReserveRequest,
+        app_server: Option<HostInputIds>,
+    ) -> Result<Attempt, Error> {
         self.operation(|| {
+            let ReserveRequest {
+                ticket,
+                initial,
+                generation,
+                public_turn,
+                deadline,
+            } = request;
             if generation == 0
                 || !id(&public_turn)
                 || ticket.session() != &initial.key
@@ -587,14 +622,20 @@ impl ZcodeOwner {
             if self.trust.live(&ticket).as_ref() != Ok(&initial) {
                 return Err(Error::Unavailable);
             }
-            let marker = json!({
+            let mut marker = json!({
                 "version": 1,
                 "nonce": nonce,
                 "generation": generation,
                 "publicTurn": public_turn,
                 "resumeSessionId": resume,
-            })
-            .to_string();
+            });
+            if let Some(ids) = &app_server {
+                marker["version"] = json!(2);
+                marker["route"] = json!("app-server");
+                marker["inputId"] = json!(ids.input_id);
+                marker["queryId"] = json!(ids.query_id);
+            }
+            let marker = marker.to_string();
             registry
                 .update_checked(&initial.key, |record| {
                     record.set_raw(
@@ -605,6 +646,13 @@ impl ZcodeOwner {
                 })
                 .map_err(|_| Error::Storage)?;
             let spawn = Arc::new(SpawnAction::new(ticket.clone(), deadline));
+            let route = match app_server {
+                None => AttemptRoute::Argv,
+                Some(ids) => AttemptRoute::AppServer {
+                    input: Arc::new(InputAction::new(spawn.clone())),
+                    ids,
+                },
+            };
             let attempt = Attempt(Arc::new(Entry {
                 owner_brand: self.brand.clone(),
                 ticket,
@@ -614,6 +662,7 @@ impl ZcodeOwner {
                 expected_resume: resume,
                 marker,
                 spawn,
+                route,
                 native: Mutex::new(None),
                 retired: AtomicBool::new(false),
             }));
@@ -640,6 +689,9 @@ impl ZcodeOwner {
     }
     /// Native identity only. The unknown-input marker is deliberately retained.
     pub fn record_native_session(&self, attempt: &Attempt, sid: &str) -> Result<(), Error> {
+        if !attempt.argv() {
+            return Err(Error::Invalid);
+        }
         self.operation(|| self.identity(attempt, sid, None).map(|_| ()))
     }
     fn identity(
@@ -710,13 +762,19 @@ impl ZcodeOwner {
         evidence: TurnStartedEvidence,
     ) -> Result<Acceptance, Error> {
         self.operation(|| {
-            if !Arc::ptr_eq(&attempt.0, &evidence.attempt.0) {
+            if !attempt.argv() || !Arc::ptr_eq(&attempt.0, &evidence.attempt.0) {
                 return Err(Error::Invalid);
             }
             self.identity(attempt, &evidence.session_id, Some(&evidence.turn_id))
         })
     }
     pub fn clear_never_sent(&self, attempt: &Attempt, proof: JoinedCleanup) -> Result<(), Error> {
+        if !attempt.argv() {
+            return Err(Error::Invalid);
+        }
+        self.clear_never_sent_inner(attempt, proof)
+    }
+    fn clear_never_sent_inner(&self, attempt: &Attempt, proof: JoinedCleanup) -> Result<(), Error> {
         self.operation(|| {
             if !Arc::ptr_eq(&attempt.0, &proof.0.0) || !attempt.0.spawn.never_sent() {
                 return Err(Error::Invalid);
