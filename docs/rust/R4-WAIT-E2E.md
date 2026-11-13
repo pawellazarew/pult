@@ -69,3 +69,19 @@ Builds/tests use isolated `target-wait-e2e`, jobs=1. Actual executed results,
 hashes and retained diagnostics are recorded in the persistent handoff; source
 presence alone is not a PASS claim. Permission/question/background parity and
 public wait activation remain separate acceptance work.
+
+## Executed local qualification
+
+Reviewed source `f0e1908` passed on macOS with fresh binaries in the isolated
+target. No assertion, deadline or production source changed during this run:
+
+- Default carrier mode: 17 paired adapter/daemon cases + 17 Node rollback checks.
+- Opt-in mode: 17 actual CLI waits, 3 prompt/wait calls, 17 UNKNOWN-zero calls and
+  17 restart/no-answer calls; the wrapper and Darwin zombie-proof unit both pass.
+- Backend State/socket regression: 18/18. CLI regression: 35/35, including the
+  independent 14-case actual public Node CLI / Rust formatting oracle.
+- All-targets Clippy with -D warnings, cargo fmt check and git diff check pass.
+
+The persistent TESTED handoff records exact source / binary hashes and separate
+logs for each command. No full unrelated suite was run here; these fakes qualify
+the bounded ordinary completion/wait seam, not installed native/account parity.
