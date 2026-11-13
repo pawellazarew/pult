@@ -387,6 +387,31 @@ impl ScopedResources for Factory {
         }
         Ok(Box::new(HeldMemory { _permit: permit }))
     }
+    fn check_reply<'a>(
+        &'a self,
+        frontier: &'a crate::zcode_host_services::AppServerReplyFrontier<'_>,
+        ticket: &Ticket,
+        generation: u64,
+    ) -> Result<Box<dyn ResourcePermit + 'a>, WorkerError> {
+        if self.install.is_poisoned() {
+            return Err(unavailable());
+        }
+        let entry = self
+            .entry
+            .get()
+            .filter(|entry| {
+                Self::matches(entry, ticket, generation)
+                    && Self::usable(entry)
+                    && entry.ready.load(Ordering::Acquire)
+            })
+            .ok_or_else(unavailable)?;
+        let scope = entry.scope.get().ok_or_else(unavailable)?;
+        let permit = scope.enter_current(frontier.current_record())?;
+        if !Self::usable(entry) {
+            return Err(unavailable());
+        }
+        Ok(Box::new(HeldMemory { _permit: permit }))
+    }
     fn revoke(&self, ticket: &Ticket, generation: u64) {
         let exact = {
             let mut install = self

@@ -74,6 +74,7 @@ pub mod zcode_events;
 pub mod zcode_host_services;
 pub mod zcode_launch;
 mod zcode_memory_resources;
+mod zcode_native_permissions;
 pub mod zcode_runtime;
 pub mod zcode_worker;
 

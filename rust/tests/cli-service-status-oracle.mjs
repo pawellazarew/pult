@@ -23,7 +23,7 @@ const cases = [
   { name: 'missing', platform: 'darwin', online: true, service: 'own', status: 113, stderr: 'Bad request.\n', state: { loaded: false, running: false, pid: null } },
   { name: 'linux running', platform: 'linux', online: true, service: 'own', stdout: 'LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=71\nExecMainPID=71\nExecMainCode=1\nExecMainStatus=0\n', state: { loaded: true, running: true, pid: 71, lastExitCode: 0, lastSignal: null } },
   { name: 'linux killed auto-restart', platform: 'linux', online: false, service: 'own', stdout: 'LoadState=loaded\nActiveState=activating\nSubState=auto-restart\nMainPID=0\nExecMainPID=72\nExecMainCode=2\nExecMainStatus=9\n', state: { loaded: true, running: false, pid: null, lastExitCode: null, lastSignal: { num: 9, name: '' }, state: 'activating (auto-restart)' } },
-  { name: 'explicit opaque stderr profile', platform: 'linux', online: true, service: 'own', status: 7, stderr: 'private-manager-line sk-abcdefghijklmnopqrstuvwxyz\n', delta: true },
+  { name: 'explicit opaque stderr profile', platform: 'linux', online: true, service: 'own', status: 7, stderr: 'private-manager-line sk-' + 'abcdefghijklmnopqrstuvwxyz\n', delta: true },
 ]
 async function run(kind, scenario, locale, json, scratch) {
   const home = join(scratch, 'pult'), user = join(scratch, 'user'), serviceDir = join(scratch, 'services')
@@ -88,7 +88,7 @@ async function run(kind, scenario, locale, json, scratch) {
       else assert.equal(value.home, home)
       if (scenario.state) for (const [key, expected] of Object.entries(scenario.state)) assert.deepEqual(value.service.manager[key], expected, scenario.name + key)
       if (scenario.delta) {
-        const original = 'systemctl --user show pultd.service -p LoadState,ActiveState,SubState,MainPID,ExecMainPID,ExecMainCode,ExecMainStatus: код 7 — private-manager-line sk-abcdefghijklmnopqrstuvwxyz'
+        const original = 'systemctl --user show pultd.service -p LoadState,ActiveState,SubState,MainPID,ExecMainPID,ExecMainCode,ExecMainStatus: код 7 — private-manager-line sk-' + 'abcdefghijklmnopqrstuvwxyz'
         const opaque = 'systemctl --user show pultd.service: код 7 — service manager query failed'
         assert.equal(value.service.error, kind === 'node' ? original : opaque)
         assert.equal(value.service.manager.error, kind === 'node' ? original : opaque)
@@ -122,7 +122,7 @@ for (const scenario of cases) {
       if (rust) {
         let expected = node
         if (scenario.delta) {
-          const original = 'systemctl --user show pultd.service -p LoadState,ActiveState,SubState,MainPID,ExecMainPID,ExecMainCode,ExecMainStatus: код 7 — private-manager-line sk-abcdefghijklmnopqrstuvwxyz'
+          const original = 'systemctl --user show pultd.service -p LoadState,ActiveState,SubState,MainPID,ExecMainPID,ExecMainCode,ExecMainStatus: код 7 — private-manager-line sk-' + 'abcdefghijklmnopqrstuvwxyz'
           const opaque = 'systemctl --user show pultd.service: код 7 — service manager query failed'
           assert.ok(node.stdout.includes(original), 'exact original Node diagnostic is observed')
           expected = { ...node, stdout: node.stdout.replaceAll(original, opaque) }

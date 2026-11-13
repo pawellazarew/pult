@@ -16,8 +16,9 @@ use std::sync::{
 
 mod app_server;
 pub use app_server::{
-    AppServerAttempt, AppServerInputFrontier, AppServerInputSeal, AppServerNativeObserver,
-    AppServerSessionStore, AppServerStartedEvidence, HostInputIds, NativeSessionReceipt,
+    AcceptedNativeSource, AppServerAttempt, AppServerInputFrontier, AppServerInputSeal,
+    AppServerNativeObserver, AppServerReplyFrontier, AppServerReplySeal, AppServerSessionStore,
+    AppServerStartedEvidence, HostInputIds, NativeSessionReceipt,
 };
 
 const MARKER: &str = "zcodePendingInput";

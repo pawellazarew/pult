@@ -418,6 +418,7 @@ pub(crate) async fn zcode_instance(
                 guard,
                 Default::default(),
                 memory,
+                crate::zcode_native_permissions::Service::new(Arc::downgrade(&state)),
             )
             .map_err(|_| anyhow!("ZCode runtime configuration unavailable"))?,
         );
