@@ -63,10 +63,11 @@ fn exact_create_and_resume_requests_use_private_mcp_array() {
     ] {
         let bytes = request.encode().unwrap();
         let value: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(
-            value,
-            json!({"id":"rpc-1","method":method,"params":{"sessionId":"s1","workspace":{"workspacePath":"/project","workspaceKey":"workspace-1"},"mcpServers":[{"name":"pult-memory","command":"/pult-memory-mcp","cwd":"/project","args":["--stdio"],"env":[{"name":"PULT_MEMORY_KEY","value":"private-fixture-key"}],"isolation":"session"}]}})
-        );
+        let mut expected = json!({"id":"rpc-1","method":method,"params":{"sessionId":"s1","workspace":{"workspacePath":"/project","workspaceKey":"workspace-1"},"mcpServers":[{"name":"pult-memory","command":"/pult-memory-mcp","cwd":"/project","args":["--stdio"],"env":[{"name":"PULT_MEMORY_KEY","value":"private-fixture-key"}],"isolation":"session"}]}});
+        if method == "session/create" {
+            expected["params"]["titleGenerationEnabled"] = json!(false);
+        }
+        assert_eq!(value, expected);
         assert!(bytes.ends_with(b"\n"));
         assert!(value["params"].get("content").is_none());
         assert!(value.get("jsonrpc").is_none());
@@ -130,11 +131,16 @@ fn send_ack_is_distinct_and_correlated() {
 }
 #[test]
 fn snapshot_ack_extracts_identity_and_runtime_without_input_acceptance() {
-    for method in [SnapshotMethod::Create, SnapshotMethod::Resume] {
+    for method in [
+        SnapshotMethod::Create,
+        SnapshotMethod::Resume,
+        SnapshotMethod::SetMode,
+    ] {
         let ack = response(json!({"id":"rpc-1","result":snapshot()}))
             .snapshot_ack(&id(), "s1", method)
             .unwrap();
         assert_eq!(ack.method, method);
+        assert_eq!(ack.session_mode, SessionMode::Guarded);
         assert_eq!(ack.session_id, "s1");
         assert_eq!(ack.workspace_path, "/project");
         assert_eq!(ack.workspace_key, "workspace-1");
@@ -251,7 +257,7 @@ fn turn_started_unknown_and_malformed_fields_fail_closed() {
         assert!(decode_frame(&wire(s)).is_err());
     }
     let mut s = started();
-    s["params"]["type"] = json!("turn.completed");
+    s["params"]["type"] = json!("invented.event");
     assert!(decode_frame(&wire(s)).is_err());
 }
 #[test]
@@ -299,7 +305,7 @@ fn protocol_errors_keep_only_bounded_code_without_reflecting_private_message() {
     let r = response(
         json!({"id":"rpc-1","error":{"code":-32601,"message":"private failure","data":{"private-key":"secret"}}}),
     );
-    assert_eq!(r.error_code(), Some(-32601));
+    assert_eq!(r.error_code(&id()).unwrap(), Some(-32601));
     assert!(r.send_ack(&id(), "s1").is_err());
 }
 #[test]
@@ -447,4 +453,237 @@ fn default_accepts_a_large_opaque_history_string_within_frame() {
         ),
         _ => panic!("expected snapshot"),
     }
+}
+
+#[test]
+fn native_send_started_intent_and_other_pinned_metadata_are_bounded_untrusted() {
+    let mut frame = started();
+    frame["params"]["payload"]["intent"] = json!({
+        "commandId":"host-input-1", "clientId":"legacy-session-send",
+        "sessionId":"s1", "type":"sendText", "text":"private prompt",
+        "modelSelection":{"providerId":"fixture-provider","modelId":"fixture-model"}
+    });
+    frame["params"]["payload"]["originMeta"] = json!({"private":"opaque"});
+    frame["params"]["payload"]["attachments"] = json!([{"name":"private.png"}]);
+    frame["params"]["payload"]["inputSource"] = json!("shared_context");
+    match decode_frame(&wire(frame.clone())).unwrap() {
+        Incoming::TurnStarted(candidate) => {
+            assert_eq!(candidate.input_id.as_deref(), Some("host-input-1"));
+            assert_eq!(candidate.turn_id.as_deref(), Some("t1"));
+        }
+        _ => panic!("expected transport candidate"),
+    }
+    for (field, value) in [
+        ("intent", json!([])),
+        ("originMeta", json!(true)),
+        ("attachments", json!([null])),
+        ("inputSource", json!("invented")),
+        ("authority", json!("owner")),
+    ] {
+        let mut bad = frame.clone();
+        bad["params"]["payload"][field] = value;
+        assert!(decode_frame(&wire(bad)).is_err());
+    }
+}
+
+#[test]
+fn exact_trace_schema_is_accepted_without_granting_reverse_authority() {
+    for trace in [
+        json!({}),
+        json!({"traceId":"trace-1","parentId":"parent-1","spanId":"span-1","traceparent":"00-fixture"}),
+    ] {
+        let mut frame = permission();
+        frame["trace"] = trace;
+        match decode_frame(&wire(frame)).unwrap() {
+            Incoming::Reverse(request) => {
+                let result: Value =
+                    serde_json::from_slice(&request.default_deny().unwrap()).unwrap();
+                assert_eq!(result["result"]["decision"], "deny");
+            }
+            _ => panic!("expected reverse"),
+        }
+    }
+    for trace in [
+        json!(null),
+        json!({"traceId":""}),
+        json!({"traceId":1}),
+        json!({"owner":true}),
+        json!({"traceId":"x".repeat(257)}),
+    ] {
+        let mut frame = permission();
+        frame["trace"] = trace;
+        assert!(decode_frame(&wire(frame)).is_err());
+    }
+}
+
+#[test]
+fn error_codes_require_exact_pending_rpc_id_before_exposure() {
+    let error = response(
+        json!({"id":"rpc-unrelated","error":{"code":-32004,"message":"private unavailable"}}),
+    );
+    assert!(matches!(
+        error.error_code(&id()),
+        Err(ProtocolError::CorrelationMismatch)
+    ));
+    assert_eq!(
+        error
+            .error_code(&RequestId::string("rpc-unrelated").unwrap())
+            .unwrap(),
+        Some(-32004)
+    );
+    let ok = response(json!({"id":"rpc-1","result":{}}));
+    assert_eq!(ok.error_code(&id()).unwrap(), None);
+}
+
+#[test]
+fn host_ids_reject_native_trim_ambiguity_and_mcp_magic_names() {
+    assert!(OutboundRequest::create(id(), " s1 ", workspace(), vec![helper()]).is_err());
+    assert!(Workspace::new("/project", " workspace-1 ").is_err());
+    assert!(Workspace::new("/project ", "workspace-1").is_err());
+    assert!(StdioMcpServer::new("helper", " helper ", "/project", &[], &[]).is_err());
+    assert!(StdioMcpServer::new("helper", "helper", "/project ", &[], &[]).is_err());
+    for name in [" helper ", "__proto__"] {
+        assert!(StdioMcpServer::new(name, "helper", "/project", &[], &[]).is_err());
+    }
+    // Native explicitly supports custom IDs; sess_ is a factory convention, not a wire rule.
+    assert!(
+        OutboundRequest::create(id(), "custom-native-sid", workspace(), vec![helper()]).is_ok()
+    );
+    for version in ["legacy", "auto", "2026-07-28"] {
+        assert!(helper().protocol_version(version).is_ok());
+    }
+    assert!(helper().protocol_version("2025-03-26").is_err());
+}
+
+#[test]
+fn encoded_content_capacity_is_checked_after_json_escaping() {
+    let request =
+        OutboundRequest::send(id(), "s1", "i1", "q1", &"\u{0001}".repeat(65_536)).unwrap();
+    assert!(matches!(
+        request.encode(),
+        Err(ProtocolError::FrameTooLarge)
+    ));
+}
+
+#[test]
+fn subscribe_request_and_ack_use_native_delivery_kind_and_exact_header() {
+    let request = OutboundRequest::subscribe(id(), "s1", DeliveryKind::DesktopContinuous, None)
+        .unwrap()
+        .encode()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&request).unwrap(),
+        json!({"id":"rpc-1","method":"session/subscribe","params":{"sessionId":"s1","deliveryKind":"desktop-continuous","includeSnapshot":false}})
+    );
+    let replay = OutboundRequest::subscribe(id(), "s1", DeliveryKind::WebRemoteReplayable, Some(8))
+        .unwrap()
+        .encode()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&replay).unwrap()["params"]["afterSeq"],
+        8
+    );
+    let ack = response(json!({"id":"rpc-1","result":{"sessionId":"s1","eventSeq":9,"events":[]}}))
+        .subscribe_ack(&id(), "s1")
+        .unwrap();
+    assert_eq!(ack.session_id, "s1");
+    assert_eq!(ack.event_seq, 9);
+    assert!(ack.untrusted_events().is_empty());
+    assert!(ack.untrusted_snapshot().is_none());
+    for result in [
+        json!({"sessionId":"other","eventSeq":9,"events":[]}),
+        json!({"sessionId":"s1","eventSeq":-1,"events":[]}),
+        json!({"sessionId":"s1","eventSeq":9,"events":[{}]}),
+        json!({"sessionId":"s1","eventSeq":9,"events":[{"eventId":"e1","sessionId":"other","seq":1,"timestamp":1,"type":"session.updated","payload":{}}]}),
+        json!({"sessionId":"s1","eventSeq":9,"events":[],"authority":true}),
+    ] {
+        assert!(
+            response(json!({"id":"rpc-1","result":result}))
+                .subscribe_ack(&id(), "s1")
+                .is_err()
+        );
+    }
+    assert!(
+        response(json!({"id":"unrelated","result":{"sessionId":"s1","eventSeq":9,"events":[]}}))
+            .subscribe_ack(&id(), "s1")
+            .is_err()
+    );
+}
+
+#[test]
+fn recognized_bounded_notifications_are_not_privileged_reverse_requests() {
+    let state = json!({"method":"state.updated","params":{"type":"state.updated","scope":"session","revision":8,"sessionId":"s1","workspace":{"workspacePath":"/project","workspaceKey":"workspace-1"},"reason":"prompt_started","patch":{"status":"running"}}});
+    match decode_frame(&wire(state.clone())).unwrap() {
+        Incoming::Notification(notification) => {
+            assert_eq!(notification.method(), "state.updated");
+            assert_eq!(notification.untrusted_params(), &state["params"]);
+        }
+        _ => panic!("expected bounded notification"),
+    }
+    let mut event = started();
+    event["params"]["type"] = json!("turn.completed");
+    event["params"]["payload"] = json!({"opaque":"untrusted"});
+    assert!(matches!(
+        decode_frame(&wire(event)),
+        Ok(Incoming::Notification(_))
+    ));
+    assert!(matches!(
+        decode_frame(&wire(
+            json!({"method":"startup/pluginsDegraded","params":{"reason":"timeout"}})
+        )),
+        Ok(Incoming::Notification(_))
+    ));
+    for notification in [
+        json!({"method":"invented/notification","params":{}}),
+        json!({"method":"state.updated","params":{"type":"state.updated","scope":"session","revision":-1,"patch":{}}}),
+        json!({"method":"state.updated","params":{"type":"state.updated","scope":"session","revision":1,"patch":{},"authority":"owner"}}),
+        json!({"method":"interaction/requestPermission","params":{}}),
+    ] {
+        assert!(decode_frame(&wire(notification)).is_err());
+    }
+    // A request ID changes dispatch: no privileged request may be ignored as a notification.
+    let mut request = state;
+    request["id"] = json!("server-1");
+    assert!(decode_frame(&wire(request)).is_err());
+}
+
+#[test]
+fn explicit_native_modes_and_set_mode_snapshot_ack_are_not_host_approval() {
+    for (mode, wire_mode) in [
+        (SessionMode::Plan, "plan"),
+        (SessionMode::Build, "build"),
+        (SessionMode::Edit, "edit"),
+        (SessionMode::Yolo, "yolo"),
+        (SessionMode::Guarded, "guarded"),
+        (SessionMode::Auto, "auto"),
+    ] {
+        let create = OutboundRequest::create(id(), "s1", workspace(), vec![helper()])
+            .unwrap()
+            .with_mode(mode)
+            .unwrap()
+            .encode()
+            .unwrap();
+        let create: Value = serde_json::from_slice(&create).unwrap();
+        assert_eq!(create["params"]["mode"], wire_mode);
+        assert_eq!(create["params"]["titleGenerationEnabled"], false);
+        let set = OutboundRequest::set_mode(id(), "s1", mode, Some(7))
+            .unwrap()
+            .encode()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&set).unwrap(),
+            json!({"id":"rpc-1","method":"session/setMode","params":{"sessionId":"s1","mode":wire_mode,"expectedRevision":7}})
+        );
+    }
+    let ack = response(json!({"id":"rpc-1","result":snapshot()}))
+        .snapshot_ack(&id(), "s1", SnapshotMethod::SetMode)
+        .unwrap();
+    assert_eq!(ack.method, SnapshotMethod::SetMode);
+    assert!(
+        OutboundRequest::close(id(), "s1")
+            .unwrap()
+            .with_mode(SessionMode::Guarded)
+            .is_err()
+    );
+    assert!(OutboundRequest::set_mode(id(), "s1", SessionMode::Guarded, Some(u64::MAX)).is_err());
 }

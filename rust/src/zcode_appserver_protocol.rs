@@ -82,7 +82,7 @@ pub struct Workspace {
 }
 impl Workspace {
     pub fn new(path: &str, key: &str) -> Result<Self> {
-        text(path, 4096, true)?;
+        canonical_text(path, 4096)?;
         identifier(key)?;
         if !path.starts_with('/') {
             return Err(ProtocolError::InvalidShape);
@@ -110,8 +110,12 @@ impl StdioMcpServer {
         env: &[(String, String)],
     ) -> Result<Self> {
         identifier(name)?;
-        text(command, 4096, true)?;
-        text(cwd, 4096, true)?;
+        // The pinned native adapter uses a normal JS object indexed by server name.
+        if name == "__proto__" {
+            return Err(ProtocolError::InvalidShape);
+        }
+        canonical_text(command, 4096)?;
+        canonical_text(cwd, 4096)?;
         if !cwd.starts_with('/') || args.len() > MAX_ARGS || env.len() > MAX_ENV_ENTRIES {
             return Err(ProtocolError::InvalidShape);
         }
@@ -160,6 +164,53 @@ impl StdioMcpServer {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeliveryKind {
+    DesktopContinuous,
+    WebRemoteReplayable,
+}
+impl DeliveryKind {
+    fn wire(self) -> &'static str {
+        match self {
+            Self::DesktopContinuous => "desktop-continuous",
+            Self::WebRemoteReplayable => "web-remote-replayable",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionMode {
+    Plan,
+    Build,
+    Edit,
+    Yolo,
+    Guarded,
+    Auto,
+}
+impl SessionMode {
+    fn wire(self) -> &'static str {
+        match self {
+            Self::Plan => "plan",
+            Self::Build => "build",
+            Self::Edit => "edit",
+            Self::Yolo => "yolo",
+            Self::Guarded => "guarded",
+            Self::Auto => "auto",
+        }
+    }
+    fn parse(value: &Value) -> Result<Self> {
+        match value.as_str() {
+            Some("plan") => Ok(Self::Plan),
+            Some("build") => Ok(Self::Build),
+            Some("edit") => Ok(Self::Edit),
+            Some("yolo") => Ok(Self::Yolo),
+            Some("guarded") => Ok(Self::Guarded),
+            Some("auto") => Ok(Self::Auto),
+            _ => Err(ProtocolError::InvalidShape),
+        }
+    }
+}
+
 pub struct OutboundRequest {
     id: RequestId,
     method: &'static str,
@@ -176,7 +227,35 @@ impl OutboundRequest {
         Ok(Self {
             id,
             method: "session/create",
-            params: json!({"sessionId":session_id,"workspace":workspace.value(),"mcpServers":servers_value(servers)?}),
+            params: json!({"sessionId":session_id,"workspace":workspace.value(),"mcpServers":servers_value(servers)?,"titleGenerationEnabled":false}),
+        })
+    }
+    /// Set only an explicitly captured native mode; this enum conveys no host approval.
+    pub fn with_mode(mut self, mode: SessionMode) -> Result<Self> {
+        if self.method != "session/create" {
+            return Err(ProtocolError::Unsupported);
+        }
+        self.params["mode"] = json!(mode.wire());
+        Ok(self)
+    }
+    pub fn set_mode(
+        id: RequestId,
+        session_id: &str,
+        mode: SessionMode,
+        expected_revision: Option<u64>,
+    ) -> Result<Self> {
+        identifier(session_id)?;
+        let mut params = json!({"sessionId":session_id,"mode":mode.wire()});
+        if let Some(revision) = expected_revision {
+            if revision > JS_SAFE_INTEGER {
+                return Err(ProtocolError::InvalidShape);
+            }
+            params["expectedRevision"] = json!(revision);
+        }
+        Ok(Self {
+            id,
+            method: "session/setMode",
+            params,
         })
     }
     /// Only the future worker can establish that resume is cold in a fresh dedicated process.
@@ -191,6 +270,27 @@ impl OutboundRequest {
             id,
             method: "session/resume",
             params: json!({"sessionId":session_id,"workspace":workspace.value(),"mcpServers":servers_value(servers)?}),
+        })
+    }
+    /// Native legacy events require an explicit subscription before send.
+    pub fn subscribe(
+        id: RequestId,
+        session_id: &str,
+        delivery_kind: DeliveryKind,
+        after_seq: Option<u64>,
+    ) -> Result<Self> {
+        identifier(session_id)?;
+        let mut params = json!({"sessionId":session_id,"deliveryKind":delivery_kind.wire(),"includeSnapshot":false});
+        if let Some(seq) = after_seq {
+            if seq > JS_SAFE_INTEGER {
+                return Err(ProtocolError::InvalidShape);
+            }
+            params["afterSeq"] = json!(seq);
+        }
+        Ok(Self {
+            id,
+            method: "session/subscribe",
+            params,
         })
     }
     /// Encoding does not mean delivery. Unknown send outcomes must never be automatically replayed.
@@ -255,7 +355,22 @@ pub enum Incoming {
     Response(Response),
     TurnStarted(TurnStartedCandidate),
     Reverse(ReverseRequest),
+    Notification(BoundedNotification),
 }
+/// Recognized, bounded observability only. It must never mint Driver or owner authority.
+pub struct BoundedNotification {
+    method: &'static str,
+    params: Value,
+}
+impl BoundedNotification {
+    pub fn method(&self) -> &'static str {
+        self.method
+    }
+    pub fn untrusted_params(&self) -> &Value {
+        &self.params
+    }
+}
+
 pub struct Response {
     id: RequestId,
     outcome: ResponseOutcome,
@@ -271,14 +386,31 @@ pub struct SendAcknowledgement {
 pub struct CloseAcknowledgement {
     pub closed: Option<bool>,
 }
+/// Subscription header ACK only; replayed events remain untrusted until individually parsed.
+pub struct SubscribeAcknowledgement {
+    pub session_id: String,
+    pub event_seq: u64,
+    events: Vec<Value>,
+    snapshot: Option<Value>,
+}
+impl SubscribeAcknowledgement {
+    pub fn untrusted_events(&self) -> &[Value] {
+        &self.events
+    }
+    pub fn untrusted_snapshot(&self) -> Option<&Value> {
+        self.snapshot.as_ref()
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SnapshotMethod {
     Create,
     Resume,
+    SetMode,
 }
 /// Pinned identity/header extraction only; opaque sections are NOT fully schema validated.
 pub struct SnapshotAcknowledgement {
     pub method: SnapshotMethod,
+    pub session_mode: SessionMode,
     pub session_id: String,
     pub workspace_path: String,
     pub workspace_key: String,
@@ -297,11 +429,15 @@ impl Response {
     pub fn id(&self) -> &RequestId {
         &self.id
     }
-    pub fn error_code(&self) -> Option<i64> {
-        match &self.outcome {
+    /// Correlate errors as strictly as success ACKs. The caller still binds the pending method.
+    pub fn error_code(&self, expected: &RequestId) -> Result<Option<i64>> {
+        if self.id != *expected {
+            return Err(ProtocolError::CorrelationMismatch);
+        }
+        Ok(match &self.outcome {
             ResponseOutcome::Error { code } => Some(*code),
             _ => None,
-        }
+        })
     }
     fn result(self, expected: &RequestId) -> Result<Value> {
         if self.id != *expected {
@@ -330,6 +466,35 @@ impl Response {
         Ok(SendAcknowledgement {
             session_id: id_field(o, "sessionId")?.into(),
             state_revision: uint(&o["stateRevision"])?,
+        })
+    }
+    pub fn subscribe_ack(
+        self,
+        expected: &RequestId,
+        expected_session_id: &str,
+    ) -> Result<SubscribeAcknowledgement> {
+        let v = self.result(expected)?;
+        let o = object(&v)?;
+        fields(o, &["sessionId", "eventSeq", "events"], &["snapshot"])?;
+        identifier(expected_session_id)?;
+        if id_field(o, "sessionId")? != expected_session_id {
+            return Err(ProtocolError::CorrelationMismatch);
+        }
+        let events = array(&o["events"], 0, MAX_NODES)?;
+        for event in events {
+            session_event_envelope(event)?;
+            if id_field(object(event)?, "sessionId")? != expected_session_id {
+                return Err(ProtocolError::CorrelationMismatch);
+            }
+        }
+        if let Some(snapshot) = o.get("snapshot") {
+            object(snapshot)?;
+        }
+        Ok(SubscribeAcknowledgement {
+            session_id: expected_session_id.into(),
+            event_seq: uint(&o["eventSeq"])?,
+            events: events.clone(),
+            snapshot: o.get("snapshot").cloned(),
         })
     }
     pub fn close_ack(self, expected: &RequestId) -> Result<CloseAcknowledgement> {
@@ -414,10 +579,7 @@ impl Response {
                 "nested_workflow_child",
             ],
         )?;
-        enum_string(
-            &session["mode"],
-            &["plan", "build", "edit", "yolo", "guarded", "auto"],
-        )?;
+        let session_mode = SessionMode::parse(&session["mode"])?;
         enum_string(
             &session["status"],
             &["idle", "running", "waiting", "paused", "completed", "error"],
@@ -475,6 +637,7 @@ impl Response {
         }
         Ok(SnapshotAcknowledgement {
             method,
+            session_mode,
             session_id,
             workspace_path,
             workspace_key,
@@ -627,15 +790,117 @@ pub fn decode_frame_with_limits(frame: &[u8], limits: DecodeLimits) -> Result<In
         };
         return Ok(Incoming::Response(Response { id, outcome }));
     }
-    // trace is intentionally unsupported until its own pinned typed profile is implemented.
-    fields(o, &["method", "params"], &["id"])?;
+    fields(o, &["method", "params"], &["id", "trace"])?;
+    if let Some(v) = o.get("trace") {
+        protocol_trace(v)?;
+    }
     let method = string_field(o, "method", 128, true)?;
-    if method == "session/event" && !o.contains_key("id") {
-        return turn_started(&o["params"]).map(Incoming::TurnStarted);
+    if !o.contains_key("id") {
+        return match method {
+            "session/event" => {
+                session_event_envelope(&o["params"])?;
+                if o["params"]["type"] == "turn.started" {
+                    turn_started(&o["params"]).map(Incoming::TurnStarted)
+                } else {
+                    Ok(Incoming::Notification(BoundedNotification {
+                        method: "session/event",
+                        params: o["params"].clone(),
+                    }))
+                }
+            }
+            "state.updated" => {
+                state_updated(&o["params"])?;
+                Ok(Incoming::Notification(BoundedNotification {
+                    method: "state.updated",
+                    params: o["params"].clone(),
+                }))
+            }
+            "startup/pluginsDegraded" => {
+                let p = object(&o["params"])?;
+                fields(p, &["reason"], &[])?;
+                if p["reason"] != "timeout" {
+                    return Err(ProtocolError::InvalidShape);
+                }
+                Ok(Incoming::Notification(BoundedNotification {
+                    method: "startup/pluginsDegraded",
+                    params: o["params"].clone(),
+                }))
+            }
+            _ => Err(ProtocolError::Unsupported),
+        };
     }
     let id = RequestId::parse(o.get("id").ok_or(ProtocolError::Unsupported)?)?;
     reverse(id, method, &o["params"]).map(Incoming::Reverse)
 }
+const SESSION_EVENT_TYPES: &[&str] = &[
+    "session.created",
+    "session.resumed",
+    "session.updated",
+    "session.titleUpdated",
+    "session.closed",
+    "turn.started",
+    "turn.steerQueued",
+    "turn.steerDrained",
+    "turn.completed",
+    "turn.failed",
+    "message.upserted",
+    "message.removed",
+    "part.started",
+    "part.delta",
+    "part.upserted",
+    "part.removed",
+    "model.streaming",
+    "tool.updated",
+    "permission.requested",
+    "permission.resolved",
+    "userInput.requested",
+    "userInput.resolved",
+    "checkpoint.created",
+    "rewind.triggered",
+    "streamRecovery.updated",
+];
+fn session_event_envelope(v: &Value) -> Result<()> {
+    let o = object(v)?;
+    fields(
+        o,
+        &["eventId", "sessionId", "seq", "timestamp", "type"],
+        &["turnId", "traceId", "deliveryKind", "payload"],
+    )?;
+    id_field(o, "eventId")?;
+    id_field(o, "sessionId")?;
+    uint(&o["seq"])?;
+    uint(&o["timestamp"])?;
+    optional_id(o, "turnId")?;
+    optional_id(o, "traceId")?;
+    enum_string(&o["type"], SESSION_EVENT_TYPES)?;
+    if let Some(v) = o.get("deliveryKind") {
+        enum_string(v, &["desktop-continuous", "web-remote-replayable"])?;
+    }
+    if let Some(v) = o.get("payload") {
+        object(v)?;
+    }
+    Ok(())
+}
+fn state_updated(v: &Value) -> Result<()> {
+    let o = object(v)?;
+    fields(
+        o,
+        &["type", "scope", "revision", "patch"],
+        &["workspace", "sessionId", "reason"],
+    )?;
+    if o["type"] != "state.updated" {
+        return Err(ProtocolError::InvalidShape);
+    }
+    enum_string(&o["scope"], &["server", "workspace", "session"])?;
+    uint(&o["revision"])?;
+    optional_id(o, "sessionId")?;
+    optional_text(o, "reason", MAX_STRING_BYTES)?;
+    if let Some(v) = o.get("workspace") {
+        workspace(v)?;
+    }
+    Ok(())
+}
+
 fn turn_started(v: &Value) -> Result<TurnStartedCandidate> {
     let o = object(v)?;
     fields(
@@ -674,8 +939,43 @@ fn turn_started(v: &Value) -> Result<TurnStartedCandidate> {
             "messageId",
             "foregroundExecutionId",
             "backgroundSource",
+            "intent",
+            "originMeta",
+            "attachments",
+            "inputSource",
         ],
     )?;
+    for key in ["intent", "originMeta"] {
+        if let Some(v) = p.get(key) {
+            object(v)?;
+        }
+    }
+    if let Some(v) = p.get("attachments") {
+        for attachment in array(v, 0, MAX_NODES)? {
+            object(attachment)?;
+        }
+    }
+    if let Some(v) = p.get("inputSource") {
+        enum_string(
+            v,
+            &[
+                "agent_listing_delta",
+                "background_task",
+                "fork",
+                "goal_state_change",
+                "goal-continuation",
+                "plugin_reference",
+                "bot_topic_context",
+                "rewind",
+                "selection_side_chat",
+                "subagent",
+                "subagent_message",
+                "todo_reminder",
+                "workflow_launch",
+                "shared_context",
+            ],
+        )?;
+    }
     uint(&p["turnNumber"])?;
     string_field(p, "input", MAX_STRING_BYTES, false)?;
     for k in [
@@ -897,6 +1197,20 @@ fn origin(v: &Value) -> Result<()> {
     optional_text(o, "description", 16 * 1024)?;
     Ok(())
 }
+// Exact pinned trace.ts shape, retained only as validated untrusted metadata.
+fn protocol_trace(v: &Value) -> Result<()> {
+    let o = object(v)?;
+    fields(o, &[], &["traceId", "parentId", "spanId", "traceparent"])?;
+    for value in o.values() {
+        let value = value.as_str().ok_or(ProtocolError::InvalidShape)?;
+        // Upstream min(1), without trim; whitespace is not an authorization signal.
+        if value.is_empty() || value.len() > MAX_ID_BYTES || value.contains('\0') {
+            return Err(ProtocolError::InvalidShape);
+        }
+    }
+    Ok(())
+}
+
 fn workspace(v: &Value) -> Result<()> {
     let o = object(v)?;
     fields(
@@ -930,8 +1244,16 @@ fn text(s: &str, max: usize, nonempty: bool) -> Result<()> {
         Ok(())
     }
 }
+fn canonical_text(s: &str, max: usize) -> Result<()> {
+    text(s, max, true)?;
+    if s != s.trim() {
+        return Err(ProtocolError::InvalidShape);
+    }
+    Ok(())
+}
 fn identifier(s: &str) -> Result<()> {
-    text(s, MAX_ID_BYTES, true)
+    canonical_text(s, MAX_ID_BYTES)?;
+    Ok(())
 }
 fn string_field<'a>(
     o: &'a Map<String, Value>,
@@ -947,7 +1269,9 @@ fn string_field<'a>(
     Ok(s)
 }
 fn id_field<'a>(o: &'a Map<String, Value>, key: &str) -> Result<&'a str> {
-    string_field(o, key, MAX_ID_BYTES, true)
+    let value = string_field(o, key, MAX_ID_BYTES, true)?;
+    identifier(value)?;
+    Ok(value)
 }
 fn optional_id(o: &Map<String, Value>, key: &str) -> Result<Option<String>> {
     o.get(key)
