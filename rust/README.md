@@ -125,3 +125,10 @@ Native transport и lifecycle process group описаны в
 Правила доступа, хранилище согласий и проверки рабочих папок описаны в
 [R3-HOST-POLICY](../docs/rust/R3-HOST-POLICY.md). Это библиотечные проверки;
 перед включением исполнения их ещё нужно соединить с driver и настройками.
+
+
+Основа следующего ZCode app-server Worker: [wire profile](../docs/rust/R3-ZCODE-APP-SERVER-PROTOCOL.md),
+[raw transport](../docs/rust/R3-RAW-TRANSPORT.md),
+[допуск первого input](../docs/rust/R3-INPUT-FRONTIER.md) и
+[совместная проверка через holder](../docs/rust/R3-ZCODE-WIRE-INTEGRATION.md).
+Эти слои не включают Route B в runtime и не закрывают доставку общей памяти ZCode.

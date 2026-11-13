@@ -767,3 +767,34 @@ Claude получает отдельный memory MCP scope на каждый х
 [общая память Claude/Codex](rust/M3-CLAUDE-SHARED-MEMORY.md). ZCode MCP, UI памяти,
 окончательное удаление данных и реальные provider smoke-тесты остаются в плане;
 этот шаг не закрывает M3 или рабочее переключение R5.
+
+### Продолжение R3 — native app-server ZCode и общая память
+
+Для доставки private memory MCP использовать отдельный `zcode app-server --stdio` на
+Ticket. В изученном CLI 0.17.1 Route A (`-p`) не имеет private MCP override; конфигурация
+пользователя/проекта не переписывается. Основание — официальный
+[ZCode@c5904686](https://github.com/zai-org/ZCode/tree/c5904686ea8341826b3affe5d993d06a134fa779).
+
+Порядок интеграции:
+
+1. Проверить native codec на исходных схемах и фактических emit paths: snapshots,
+   subscribe, send ACK, `turn.started` с intent, reverse requests с trace.
+2. Сохранить исходные bounded NDJSON bytes до проверки: промежуточный JSON Value
+   скрывает дублирующиеся ключи. Existing holder остаётся владельцем процесса и cleanup.
+3. Разделить допуск OS spawn и первого `session/send`: immutable Ticket/deadline,
+   отдельный once-only input seal, свежие policy/route/marker checks до первого handoff.
+4. Добавить Owner/Worker/Runtime с durable uncertainty marker и реальным SID до send.
+   Только exact send ACK вместе с matching native Started допускают Running и memory
+   provenance; create/resume snapshot и native close ACK этого не доказывают.
+5. Подключить тот же memory backend и проверить реальные helper scopes через fake
+   app-server: queue provenance, revoke/drain, read-only, cancel/fault/unknown ACK и
+   изоляцию соседей. Затем отдельно квалифицировать установленную CLI.
+
+Ни один из первых трёх слоёв сам по себе не закрывает ZCode execution или M3.
+Cold resume с новым MCP требует нового процесса: resident runtime игнорирует новую
+конфигурацию. Пустой MCP list наследует global config; plugins/builtins также могут
+добавляться native runtime. Отсутствие текущего send не доказывает отсутствия startup
+execution. Unknown send не повторяется и не переключается на Route A автоматически.
+
+Полный Rust-переезд остаётся открытым: R3 parity, M3 для всех провайдеров и окно
+памяти/purge, R4 CLI/интеграции, R5 рабочее переключение/откат/наблюдение, R6 Rust UI.
