@@ -464,10 +464,10 @@ impl Response {
             return Err(ProtocolError::InvalidShape);
         }
         for k in ["todos", "todoGroups", "slashCommands"] {
-            if let Some(v) = o.get(k) {
-                if !v.is_array() {
-                    return Err(ProtocolError::InvalidShape);
-                }
+            if let Some(v) = o.get(k)
+                && !v.is_array()
+            {
+                return Err(ProtocolError::InvalidShape);
             }
         }
         if let Some(v) = o.get("goalStats") {
@@ -690,10 +690,10 @@ fn turn_started(v: &Value) -> Result<TurnStartedCandidate> {
     if let Some(v) = p.get("epilogueStart") {
         uint(v)?;
     }
-    if let Some(v) = p.get("executionStartedAt") {
-        if !v.as_f64().is_some_and(|n| n.is_finite() && n >= 0.0) {
-            return Err(ProtocolError::InvalidShape);
-        }
+    if let Some(v) = p.get("executionStartedAt")
+        && !v.as_f64().is_some_and(|n| n.is_finite() && n >= 0.0)
+    {
+        return Err(ProtocolError::InvalidShape);
     }
     for (key, allowed) in [
         ("offPeakRunType", &["init", "resume"][..]),
@@ -813,10 +813,10 @@ fn reverse(id: RequestId, method: &str, v: &Value) -> Result<ReverseRequest> {
                     fields(q, &["question", "header", "options"], &["multiSelect"])?;
                     string_field(q, "question", 16 * 1024, true)?;
                     string_field(q, "header", 4096, true)?;
-                    if let Some(v) = q.get("multiSelect") {
-                        if !v.is_boolean() {
-                            return Err(ProtocolError::InvalidShape);
-                        }
+                    if let Some(v) = q.get("multiSelect")
+                        && !v.is_boolean()
+                    {
+                        return Err(ProtocolError::InvalidShape);
                     }
                     let mut seen = std::collections::HashSet::new();
                     for op in array(&q["options"], 1, 32)? {

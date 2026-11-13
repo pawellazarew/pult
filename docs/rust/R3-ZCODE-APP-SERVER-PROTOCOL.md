@@ -1,6 +1,6 @@
 # R3: ZCode app-server protocol profile
 
-Status: SOURCE_READY; tests are constructed and not yet executed. This module is a pure wire building and parsing layer. It does not launch ZCode, connect Route B, or change Route A, Owner, Worker, Runtime, State, or production behavior.
+Status: TESTED_PURE_CODEC; 22 constructed protocol tests and all-targets clippy pass on macOS / Rust 1.99.1. This module is a pure wire building and parsing layer. It does not launch ZCode, connect Route B, or change Route A, Owner, Worker, Runtime, State, or production behavior.
 
 ## Source pin and evidence boundary
 
@@ -11,7 +11,7 @@ Public primary source: [zai-org/ZCode at c5904686ea8341826b3affe5d993d06a134fa77
 - [Server operations](https://github.com/zai-org/ZCode/blob/c5904686ea8341826b3affe5d993d06a134fa779/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server-operations.ts): session/event envelope at 831–838; create at 1273; resume at 1618.
 - [MCP assembly](https://github.com/zai-org/ZCode/blob/c5904686ea8341826b3affe5d993d06a134fa779/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/protocol-mcp-config.ts), [server design](https://github.com/zai-org/ZCode/blob/c5904686ea8341826b3affe5d993d06a134fa779/apps/zcode-cli/docs/design/v2/zcode-protocol-agent-server.md), [CLI package](https://github.com/zai-org/ZCode/blob/c5904686ea8341826b3affe5d993d06a134fa779/apps/zcode-cli/package.json).
 
-Source inventory and downloaded primary text are retained under the parent Me workspace `.agents/workspaces/pult-migration/zcode-protocol-primary/`. No downloaded code was executed. The package identifies CLI 0.17.1. Previously supplied static installed-bundle inventory: App 3.18.0, `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs`, literal CLI 0.17.1, SHA-256 `26785f28ab8fb9f8b0f3821f2bf71d294f4d0b8bf28108785292f86c7e14090d`. This is static inventory, not live protocol qualification. No actual CLI, version, login, or model command, or user/account/credential reads were used for this change.
+Source inventory and downloaded primary text are retained under the parent Me workspace `.agents/workspaces/pult-migration/zcode-protocol-primary/`. No downloaded ZCode source or installed ZCode CLI was executed. The package identifies CLI 0.17.1. Previously supplied static installed-bundle inventory: App 3.18.0, `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs`, literal CLI 0.17.1, SHA-256 `26785f28ab8fb9f8b0f3821f2bf71d294f4d0b8bf28108785292f86c7e14090d`. This is static inventory, not live protocol qualification. No actual CLI, version, login, or model command, or user/account/credential reads were used for this change.
 
 ## Wire and public API
 
@@ -62,4 +62,10 @@ OS spawn and create contain no prompt. `session/send` is the future durable inpu
 
 ## Verification provenance
 
-`rust/tests/zcode_appserver_protocol.rs` contains CONSTRUCTED golden requests, ACK/snapshot/event/reverse/error fixtures and negatives for incompatible framing, duplicates, ambiguity, unknown/malformed fields, correlation, budgets, large configurable histories, MCP arrays and argv. They are not recorded frames, a live transcript or a differential oracle. Source-only work is not a tested freeze. `git diff --check` and standalone Rust 1.99.1 `rustfmt --edition 2024` on the owned module/tests passed. Cargo/tests remain pending the parent build slot; update this paragraph only after actual authorized checks.
+`rust/tests/zcode_appserver_protocol.rs` contains CONSTRUCTED golden requests, ACK/snapshot/event/reverse/error fixtures and negatives for incompatible framing, duplicates, ambiguity, unknown/malformed fields, correlation, budgets, large configurable histories, MCP arrays and argv. They are not recorded frames, a live transcript or a differential oracle. Verification executed serially in the parent-authorized shared target slot on macOS / Rust 1.99.1:
+
+- `cargo test --manifest-path rust/Cargo.toml --locked --test zcode_appserver_protocol`: EXIT 0, 22 passed, 0 failed (final code rerun).
+- `cargo clippy --manifest-path rust/Cargo.toml --locked --all-targets -- -D warnings`: EXIT 0 after three local collapsible-if fixes.
+- Standalone `rustfmt --edition 2024 --check` on the owned new module/tests and `git diff --check`: EXIT 0.
+
+Persistent logs are in the parent Me `.agents/workspaces/pult-migration/`: `zcode-protocol-test-final.log` and `zcode-protocol-clippy-fixed.log`. The first test attempt reused a stale library from the shared target and failed to find the new module; touching the owned `lib.rs` forced an actual library rebuild and both subsequent targeted test runs passed. A future worktree using that shared target must rebuild its own bins/library before asserting behavior. This is verification of the pure codec only, not Route B integration or live qualification. Full old-base test suites were intentionally not run in this isolated worktree; parent M3 has newer fixture fixes.
