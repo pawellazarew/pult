@@ -5,9 +5,17 @@ mode = sys.argv[2]
 args = sys.argv[3:]
 sid = args[args.index('--session-id') + 1] if '--session-id' in args else args[args.index('--resume') + 1]
 (home / 'provider.pid').write_text(str(os.getpid()))
+def step(value):
+    # Static test phases only: never native contents, paths or credentials.
+    if mode == 'memory-observe':
+        (home / 'fixture-step').write_text(value)
+step('started')
 for line in sys.stdin:
+    step('input-read')
     item = json.loads(line)
+    step('input-decoded')
     (home / 'input.json').write_text(json.dumps(item))
+    step('input-saved')
     def emit(value):
         value['session_id'] = sid
         print(json.dumps(value), flush=True)
@@ -16,7 +24,9 @@ for line in sys.stdin:
     if mode == 'control-mode': reported_mode = 'manual\x00'
     if mode == 'null-mode': reported_mode = None
     emit({'type':'system', 'subtype':'init', 'permissionMode': reported_mode})
+    step('init-written')
     emit({'type':'command_lifecycle', 'command_uuid':item['uuid'], 'state':'started'})
+    step('ack-written')
     if mode == 'assistant-block':
         emit({'type':'assistant', 'is_api_error_message':True, 'message':{'content':[{'type':'text','text':'Disabled Claude subscription access'}]}})
         threading.Event().wait()
@@ -29,3 +39,4 @@ for line in sys.stdin:
         emit({'type':'command_lifecycle', 'command_uuid':item['uuid'], 'state':'completed'})
     else:
         emit({'type':'result', 'is_error':False, 'terminal_reason':'completed', 'result':'fixture result', 'num_turns':1, 'user_message_uuids':[item['uuid']]})
+        step('result-written')
