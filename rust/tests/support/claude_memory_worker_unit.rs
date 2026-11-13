@@ -396,17 +396,29 @@ async fn synchronous_catalog_or_fresh_check_panic_denies_without_input_and_clean
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn attachment_context_and_memory_stay_separate_and_slash_with_attachment_is_ordinary() {
+    // The production panic hook intentionally suppresses arbitrary payloads.
+    // Keep a static fixture phase so CI failures remain actionable without secrets.
+    struct Phase(&'static str);
+    impl Drop for Phase {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                eprintln!("[memory-attachment-fixture] failed phase={}", self.0);
+            }
+        }
+    }
+    let mut phase = Phase("setup");
     let f = Rig::with_attachment(true);
+    phase.0 = "terminal";
     let mut turn = f.start("/context");
-    assert_eq!(
-        tokio::time::timeout(WATCHDOG, turn.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .turn
-            .outcome,
-        Outcome::Success
-    );
+    let terminal = tokio::time::timeout(WATCHDOG, turn.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    if let Outcome::Failure { code, .. } = &terminal.turn.outcome {
+        eprintln!("[memory-attachment-fixture] failure-code={code}");
+    }
+    assert_eq!(terminal.turn.outcome, Outcome::Success);
+    phase.0 = "native-blocks";
     let native = f.input().unwrap();
     let blocks = native["message"]["content"].as_array().unwrap();
     assert_eq!(blocks.len(), 4);
@@ -420,6 +432,7 @@ async fn attachment_context_and_memory_stay_separate_and_slash_with_attachment_i
             .contains("<pult_runtime_context>")
     );
     assert_eq!(f.mcp.catalog_calls.load(Ordering::Acquire), 1);
+    phase.0 = "cleanup";
     f.cleaned();
 }
 
