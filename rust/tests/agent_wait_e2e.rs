@@ -290,9 +290,9 @@ async fn actual_cli_wait_uses_qualified_native_completion_and_never_rehydrates_o
         .expect("wait E2E watchdog")
         .expect("could not observe wait E2E leader");
     assert!(stdout.contains(
-        "PASS 17 paired actual adapter/daemon cases, 17 actual Node rollback roundtrips"
+        "PASS 26 paired actual adapter/daemon cases, 26 actual Node rollback roundtrips"
     ));
     assert!(stdout.contains(
-        "PASS WAIT E2E 17 actual CLI waits, 3 prompt --wait, 17 UNKNOWN-zero, 17 restart-no-answer"
+        "PASS WAIT E2E 26 actual CLI waits, 3 prompt --wait, 26 UNKNOWN-zero, 26 restart-no-answer"
     ));
 }

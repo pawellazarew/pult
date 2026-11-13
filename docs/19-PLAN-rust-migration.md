@@ -844,9 +844,9 @@ alias `session` и ограниченное чтение `daemon logs`. Кома
 восстанавливается. [Договор CLI](rust/R4-CLI-WAIT.md),
 [backend](rust/R4-AGENT-WAIT.md), [сквозная приёмка](rust/R4-WAIT-E2E.md).
 
-Проверены 54 настоящих CLI-вызова против Rust daemon с контролируемыми peers трёх
-провайдеров: 17 ожиданий, 3 `prompt --wait`, 17 неизвестных aliases с нулевым timeout,
-17 перезапусков без старого ответа или повторной отправки. Сравнение public Node
+Сквозная матрица охватывает 81 настоящий CLI-вызов против Rust daemon с контролируемыми
+peers трёх провайдеров: 26 ожиданий, 3 `prompt --wait`, 26 неизвестных aliases с нулевым
+timeout, 26 перезапусков без старого ответа или повторной отправки. Сравнение public Node
 adapters и Node EventStore/reducers round-trip остаётся отдельным доказательством.
 Это не проверка installed provider CLI, аккаунта или модели.
 

@@ -1,13 +1,14 @@
 # R4 actual CLI → daemon → completion acceptance
 
 Fixture-only `PULT_COMPLETION_WAIT_E2E=1` mode extends the existing
-`final-completion-interop.mjs` oracle. Without that flag, its 17 paired adapter /
-Rust-daemon cases and 17 Node rollback roundtrips keep their existing assertions
+`final-completion-interop.mjs` oracle. Without that flag, its 26 paired adapter /
+Rust-daemon cases and 26 Node rollback roundtrips keep their existing assertions
 and execution path. No production method, catalog, help or capability changes.
 
 Composition: bare-prompt CLI `a7d3126ead3af948becd0251eb421a03d47fe4d1`, reviewed
 wait / holder composition `f34573f`, then carrier / codec composition
-`d34b1ea3b111d94e84d16da9a6ffdba972134bc4` (merged head `2fa8e310`).
+`d34b1ea3b111d94e84d16da9a6ffdba972134bc4` (merged head `2fa8e310`). Root composition adds the ordinary failure profile
+`632abf9` and extends the matrix from 54 to 81 actual CLI calls.
 
 ## Controlled cases
 
@@ -17,7 +18,7 @@ controlled peers, with private scratch HOME, project, journal and configuration.
 Installed provider CLIs, accounts, network guards with external probes, service
 installation and global configuration are not used.
 
-For each of 17 ordinary divergent/multi/empty/failed/escaped/capacity variants:
+For each of 26 ordinary divergent/multi/empty/failed/escaped/capacity variants:
 
 1. RPC prompt obtains the actual accepted turnId. Before any active-turn polling,
    the actual Rust executable runs `agent wait subject --json` against that daemon.
@@ -25,9 +26,9 @@ For each of 17 ordinary divergent/multi/empty/failed/escaped/capacity variants:
    qualified durable terminal, whose fields still pass the independent Node
    adapter comparator. Empty optional strings stay omitted. Exit codes use the
    existing Node CLI table.
-3. Capacity returns explicit capacity RPC failure; the currently unqualified
-   ZCode failed disposition returns explicit unavailable. Neither case fabricates
-   a successful answer or claims full failed-answer parity.
+3. Capacity returns explicit capacity RPC failure. Ordinary single ZCode failed
+   Result now carries qualified internal/message/ordered text; ambiguous, stderr
+   and cancellation profiles remain separately bounded and are not promoted.
 4. UNKNOWN + timeout=0 gives status-only timeout for successful outcomes,
    including successful-but-capacity-unavailable ZCode. Failed outcomes still
    take precedence and return their qualified result or explicit unavailable.
@@ -37,8 +38,8 @@ For each of 17 ordinary divergent/multi/empty/failed/escaped/capacity variants:
 
 The three divergent success cases additionally run actual `agent prompt … --wait
 --json`, require exactly one new durable user event and a new public turnId, and
-compare the result to that turn's durable answer. This yields 17 wait calls,
-3 prompt/wait calls, 17 UNKNOWN-zero calls and 17 restart calls (54 CLI invocations).
+compare the result to that turn's durable answer. This yields 26 wait calls,
+3 prompt/wait calls, 26 UNKNOWN-zero calls and 26 restart calls (81 CLI invocations).
 
 Wait completion requires Driver's per-turn close and durable publication. It
 does not require a shared Codex host process to exit between turns. Recorded
@@ -68,7 +69,7 @@ Node 24 and built TS dist are required, with no skip on missing prerequisites.
 Builds/tests use isolated `target-wait-e2e`, jobs=1. Actual executed results,
 hashes and retained diagnostics are recorded in the persistent handoff; source
 presence alone is not a PASS claim. Permission/question/background parity and
-public wait activation remain separate acceptance work.
+full public provider parity remain separate acceptance work.
 
 ## Executed local qualification
 
@@ -85,3 +86,6 @@ target. No assertion, deadline or production source changed during this run:
 The persistent TESTED handoff records exact source / binary hashes and separate
 logs for each command. No full unrelated suite was run here; these fakes qualify
 the bounded ordinary completion/wait seam, not installed native/account parity.
+
+The expanded 26-pair / 81-CLI matrix is the Root-composed activation contract;
+its executed result and full-suite proof are recorded separately before merge.

@@ -18,7 +18,7 @@ import {reduceStatusEvent} from '../../dist/sessions/status.js'
 import {attentionOf} from '../../dist/sessions/attention.js'
 const root=fileURLToPath(new URL('../../',import.meta.url)), binary=resolve(process.argv[2]), only=process.argv[3]??null
 // Fixture-only mode, sampled before the inherited PULT_* environment scrub.
-// Default carrier17 flow/assertions remain unchanged when this is absent.
+// Default carrier flow/assertions remain independent when this is absent.
 const waitE2E=process.env.PULT_COMPLETION_WAIT_E2E==='1'
 const temp=mkdtempSync('/tmp/pfcomp-');chmodSync(temp,0o700)
 const account=join(temp,'account');mkdirSync(account,{mode:0o700});process.env.HOME=account
