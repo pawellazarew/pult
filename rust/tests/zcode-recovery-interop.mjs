@@ -56,7 +56,7 @@ const get = name => client.request('agent.recovery.get', { name })
 async function normal(name, text) {
   const result = await client.request('agent.prompt', { name, text })
   assert.ok(result.turnId.startsWith('zcode-turn-'))
-  await until(async () => (await row(name)).status === 'done' && !pidAlive(launches().filter(value => value.name === name).at(-1).pid), `${name} did not finish owned cleanup`)
+  await until(async () => (await row(name)).status === 'idle' && !pidAlive(launches().filter(value => value.name === name).at(-1).pid), `${name} did not finish owned cleanup`)
   return record(name).providerSessionId
 }
 async function missing(name) {

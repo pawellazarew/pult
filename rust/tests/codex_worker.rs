@@ -1282,7 +1282,7 @@ case!(
             .collect();
         let done: Vec<_> = records
             .iter()
-            .filter(|e| e["kind"] == "status.changed" && e["data"]["status"] == "done")
+            .filter(|e| e["kind"] == "status.changed" && e["data"]["status"] == "idle")
             .collect();
         assert_eq!(done.len(), 1);
         assert_eq!(done[0]["data"]["turnId"], accepted.turn_id);
@@ -1296,7 +1296,7 @@ case!(
             .unwrap();
         let final_index = records
             .iter()
-            .position(|e| e["kind"] == "status.changed" && e["data"]["status"] == "done")
+            .position(|e| e["kind"] == "status.changed" && e["data"]["status"] == "idle")
             .unwrap();
         assert!(content < result && result < final_index);
         host.shutdown().await.unwrap();

@@ -79,7 +79,7 @@ try {
   await check('ordinary Codex turn uses the real daemon journal and durable thread metadata', async () => {
     const accepted = await client.request('agent.prompt', { name: 'one', text: 'hello one' })
     assert.match(accepted.turnId, /^pult-/)
-    await until(async () => (await client.request('agent.list')).sessions.find(row => row.name === 'one').status === 'done', 'turn did not finish')
+    await until(async () => (await client.request('agent.list')).sessions.find(row => row.name === 'one').status === 'idle', 'turn did not finish')
     const events = journal().filter(row => row.sessionId === 'one')
     assert.equal(events.filter(row => row.kind === 'message.user').length, 1)
     assert.ok(events.some(row => row.kind === 'message.done'))
@@ -96,7 +96,7 @@ try {
     assert.equal((await client.request('perm.list', { name: 'ask' })).pending.length, 1)
     const result = await client.request('perm.resolve', { id: card.id, decision: 'allow', scope: 'once' })
     assert.equal(result.resolved, true)
-    await until(async () => (await client.request('agent.list')).sessions.find(row => row.name === 'ask').status === 'done', 'resolved turn did not finish')
+    await until(async () => (await client.request('agent.list')).sessions.find(row => row.name === 'ask').status === 'idle', 'resolved turn did not finish')
     assert.ok(journal().some(row => row.kind === 'permission.resolved' && row.data.decision === 'allow'))
   })
   await check('a stale turn id cannot stop the current turn', async () => {
@@ -108,7 +108,7 @@ try {
   })
   await until(async () => (await client.request('daemon.status')).nativeRuntime.activeTurns === 0, 'previous stop cleanup')
   const row = async name => (await client.request('agent.list')).sessions.find(row => row.name === name)
-  const done = name => until(async () => ['done', 'failed', 'interrupted'].includes((await row(name)).status) && (await client.request('daemon.status')).nativeRuntime.activeTurns === 0, `${name}: terminal`)
+  const done = name => until(async () => ['idle', 'done', 'failed', 'interrupted'].includes((await row(name)).status) && (await client.request('daemon.status')).nativeRuntime.activeTurns === 0, `${name}: terminal`)
   const queue = async (text, name = 'one') => client.request('agent.prompt', { name, text, queue: true })
   await check('steering uses same public turn and rejection has no fake receipt', async () => {
     const active = await client.request('agent.prompt', { name: 'one', text: 'hold steering' })
@@ -146,7 +146,7 @@ try {
   await check('successful completion drains FIFO with durable per-item receipts', async () => {
     const second = await queue('fifo second')
     await client.request('agent.prompt', { name: 'one', text: 'complete-steer', steer: true })
-    await until(async () => !(await row('one')).queue?.length && (await row('one')).status === 'done', 'FIFO did not drain')
+    await until(async () => !(await row('one')).queue?.length && (await row('one')).status === 'idle', 'FIFO did not drain')
     const messages = journal().filter(e => e.sessionId === 'one' && e.kind === 'message.user')
     const first = messages.findIndex(e => e.data.text === 'edited first'), last = messages.findIndex(e => e.data.queueItemId === second.id)
     assert.ok(first >= 0 && last > first); assert.equal(messages.filter(e => e.data.queueItemId === second.id).length, 1)
@@ -172,7 +172,7 @@ try {
     const behind = await queue('behind held head')
     assert.equal(behind.queued, true)
     editor.close()
-    await until(async () => !(await row('one')).queue?.length && (await row('one')).status === 'done', 'disconnect did not release/drain held queue')
+    await until(async () => !(await row('one')).queue?.length && (await row('one')).status === 'idle', 'disconnect did not release/drain held queue')
     const texts = journal().filter(e => e.kind === 'message.user').map(e => e.data.text)
     assert.ok(texts.indexOf('after disconnect') < texts.indexOf('behind held head'))
   })
@@ -236,7 +236,7 @@ try {
     const other = await queue('independent FIFO', 'ask')
     await client.request('agent.queue.move', { name: 'one', id: held.id, hold: true })
     await client.request('agent.prompt', { name: 'ask', text: 'complete-steer', steer: true })
-    await until(async () => !(await row('ask')).queue?.length && (await row('ask')).status === 'done', 'sibling FIFO delayed by another hold')
+    await until(async () => !(await row('ask')).queue?.length && (await row('ask')).status === 'idle', 'sibling FIFO delayed by another hold')
     assert.equal((await row('one')).queue[0].id, held.id)
     assert.ok(journal().some(e => e.sessionId === 'ask' && e.kind === 'message.user' && e.data.queueItemId === other.id))
     await client.request('agent.stop', { name: 'one' }); await done('one')
@@ -275,7 +275,7 @@ try {
     await assert.rejects(client.request('agent.queue.resume', { name: 'one' }), e => e.code === 'send_unknown')
     await client.request('agent.queue.move', { name: 'one', id: uncertain.id, text: 'explicitly changed after unknown' })
     await client.request('agent.queue.resume', { name: 'one' })
-    await until(async () => !(await row('one')).queue?.length && (await row('one')).status === 'done', 'edited unknown item did not drain')
+    await until(async () => !(await row('one')).queue?.length && (await row('one')).status === 'idle', 'edited unknown item did not drain')
   })
   await check('scoped memory credentials cannot execute owner session commands', async () => {
     await client.request('memory.context.bind', { session: 'one', enabled: true })

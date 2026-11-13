@@ -324,7 +324,7 @@ async fn durable_user_input_precedes_worker_and_public_data_is_redacted() {
     assert_eq!(terminal.turn.outcome, Outcome::Success);
     assert_eq!(terminal.user_event_id, Some(1));
     assert!(terminal.terminal_event_id.is_some());
-    assert_eq!(terminal_status(&fixture.rows()), "done");
+    assert_eq!(terminal_status(&fixture.rows()), "idle");
     assert_eq!(driver.active_count(), 0);
     bounded(driver.shutdown(Duration::from_secs(5)))
         .await
@@ -1415,7 +1415,7 @@ async fn dropped_deferred_client_does_not_cancel_owned_start_append_or_terminal(
     let rows = fixture.rows();
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0]["data"]["questionId"], 42);
-    assert_eq!(terminal_status(&rows), "done");
+    assert_eq!(terminal_status(&rows), "idle");
 }
 #[tokio::test]
 async fn attachments_only_input_persists_exact_validated_metadata_without_native_bytes() {

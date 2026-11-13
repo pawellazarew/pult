@@ -429,6 +429,7 @@ impl StartingProcess {
 pub struct SpawnFailure {
     pub process: Option<Box<Process>>,
     error: anyhow::Error,
+    io_error_code: Option<i32>,
 }
 
 // The supervisor awaits this owned check through cancellation. A panic has not
@@ -456,16 +457,30 @@ impl std::fmt::Debug for SpawnFailure {
     }
 }
 impl SpawnFailure {
+    /// Safe host diagnostics: the underlying OS number, without its message,
+    /// executable path, arguments, environment or provider output.
+    pub fn io_error_code(&self) -> Option<i32> {
+        self.io_error_code
+    }
+
     fn before_spawn(error: anyhow::Error) -> Self {
+        let io_error_code = error
+            .downcast_ref::<std::io::Error>()
+            .and_then(std::io::Error::raw_os_error);
         Self {
             process: None,
             error,
+            io_error_code,
         }
     }
     fn after_spawn(process: Process, error: anyhow::Error) -> Self {
+        let io_error_code = error
+            .downcast_ref::<std::io::Error>()
+            .and_then(std::io::Error::raw_os_error);
         Self {
             process: Some(Box::new(process)),
             error,
+            io_error_code,
         }
     }
 }
@@ -665,11 +680,14 @@ impl Process {
         let child = command.spawn();
         let child = match child {
             Ok(child) => child,
-            Err(_) => {
+            Err(error) => {
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(permit)));
-                return Err(SpawnFailure::before_spawn(anyhow::anyhow!(
-                    "worker holder spawn failed"
-                )));
+                let mut failure =
+                    SpawnFailure::before_spawn(anyhow::anyhow!("worker holder spawn failed"));
+                // Retain only the OS number, never Command's contextual error
+                // message, which can contain private executable information.
+                failure.io_error_code = error.raw_os_error();
+                return Err(failure);
             }
         };
         let (sender, output) = if framing.raw {
