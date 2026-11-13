@@ -1073,7 +1073,7 @@ case!(
         assert_eq!(f.driver.active_count(), 2);
         assert!(!f.journal().iter().any(|row| row["sessionId"] == "one"
             && row["kind"] == "status.changed"
-            && row["data"]["status"] == "done"));
+            && matches!(row["data"]["status"].as_str(), Some("done" | "idle"))));
         assert_eq!(
             f.logs()
                 .iter()

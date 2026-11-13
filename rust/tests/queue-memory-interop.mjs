@@ -100,7 +100,7 @@ const stored = name => records().find(record => record.name === name)
 const queuedReceipt = id => journal().find(event => event.sessionId === 'writer' && event.kind === 'message.user' && event.data.queueItemId === id)
 const dispatch = run => evidence().find(row => row.kind === 'dispatch' && row.run === run)
 async function outcome(run) { await until(() => evidence().some(row => row.kind === 'result' && row.run === run), `missing ${run}`); return evidence().find(row => row.kind === 'result' && row.run === run) }
-async function terminal(name, status = 'done') { await until(async () => { const row = await session(name); return row.status === status && row.liveApproval === null }, `terminal/cleanup ${name}/${status}`) }
+async function terminal(name, status = 'idle') { await until(async () => { const row = await session(name); return row.status === status && row.liveApproval === null }, `terminal/cleanup ${name}/${status}`) }
 async function reaped(pid) { await until(() => evidence().filter(row => row.kind === 'mcp-started' && row.pid === pid).every(row => !alive(row.mcpPid)) && !alive(pid), `unreaped dedicated host ${pid}`) }
 const watchdog = setTimeout(async () => { console.error('composed queue memory watchdog'); await cleanup(); process.exit(1) }, 165000)
 try {

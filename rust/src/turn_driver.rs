@@ -999,7 +999,7 @@ fn answer(
 }
 fn terminal_draft(snapshot: &TurnSnapshot, turn_id: Option<&str>, outcome: &Outcome) -> Value {
     let mut data = match outcome {
-        Outcome::Success => json!({"status":"done"}),
+        Outcome::Success => json!({"status":"idle"}),
         Outcome::Interrupted => json!({"status":"interrupted"}),
         Outcome::Failure { code, message } => {
             json!({"status":"failed","errorCode":code,"error":message})
