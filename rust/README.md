@@ -7,8 +7,8 @@
 `agent.rename`, `agent.archive`, `agent.seen`, `agent.read`, `agent.tree` и `protocol.catalog`. Также добавлены M1-хранилище памяти и read-only ключи доверенных сессий с каталогом;
 договоры — [M1-MEMORY](../docs/rust/M1-MEMORY.md) и
 [M2-READ-CONTEXT](../docs/rust/M2-READ-CONTEXT.md). Всего Rust поддерживает 30 методов
-из 101; ещё 11 экспериментальных partial RPC включают обычные Claude/Codex/ZCode turns,
-общую очередь и Codex steering. Интеграция провайдеров —
+из 101; ещё 12 экспериментальных partial RPC включают обычные Claude/Codex/ZCode turns,
+общую очередь, Codex steering и ограниченный `agent.wait`. Интеграция провайдеров —
 [R3-NATIVE-PROVIDERS](../docs/rust/R3-NATIVE-PROVIDERS.md). Журнал использует нынешний формат `events/journal.jsonl`.
 Owner-only `agent.recovery.get/confirm` позволяют осмотреть и явно сбросить
 привязку к отсутствующей native ZCode-сессии после joined cleanup текущего
@@ -76,6 +76,12 @@ scratch=$(mktemp -d)
 подключения/старта daemon: последние 50 непустых строк по умолчанию, до 16 MiB scan
 и 4 MiB output; превышение — ошибка без частичного вывода. Scoped credentials
 к логам не допускаются. Аргументы, границы и проверки — [R4-CLI-LOCAL](../docs/rust/R4-CLI-LOCAL.md).
+
+`daemon status` печатает локализованный текст и состояние службы; `--json`
+возвращает `{running,...,service}`, в том числе при недоступном демоне. Наблюдение
+не запускает демон и не меняет службу. Все четыре scoped purpose запрещены до
+чтения owner/service данных; прежний raw RPC JSON остаётся только с явным
+`--initialize-runtime`. Ограничения и приёмка — [R4-SERVICE-STATUS](../docs/rust/R4-SERVICE-STATUS.md).
 
 `events tail` теперь повторяет пользовательский потоковый контракт TS CLI: по умолчанию
 следит за новыми событиями; `--no-follow` заканчивает replay, `--limit N` ограничивает

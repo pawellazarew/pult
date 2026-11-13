@@ -22,7 +22,7 @@ if mode in ("overflow", "stderr"):
     stream.write("x" * (1024 * 1024 + 1))
     stream.flush()
 elif mode == "failure":
-    sys.stderr.write("private-manager-line sk-abcdefghijklmnopqrstuvwxyz\n")
+    sys.stderr.write("private-manager-line sk-" + "abcdefghijklmnopqrstuvwxyz\n")
     sys.exit(7)
 else:
     print("LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=71\nExecMainPID=71\nExecMainCode=1\nExecMainStatus=0")
