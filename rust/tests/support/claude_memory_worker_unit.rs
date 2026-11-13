@@ -195,7 +195,7 @@ impl Rig {
                             .join("tests/fixtures/claude_worker.py")
                             .into_os_string(),
                         home.clone().into_os_string(),
-                        "normal".into(),
+                        if attach { "memory-observe" } else { "normal" }.into(),
                     ],
                     cwd: home.clone(),
                     env: BTreeMap::from([
@@ -414,8 +414,27 @@ async fn attachment_context_and_memory_stay_separate_and_slash_with_attachment_i
         .await
         .unwrap()
         .unwrap();
-    if let Outcome::Failure { code, .. } = &terminal.turn.outcome {
-        eprintln!("[memory-attachment-fixture] failure-code={code}");
+    if let Outcome::Failure { code, message } = &terminal.turn.outcome {
+        let step = std::fs::read_to_string(f.home.join("fixture-step"))
+            .ok()
+            .filter(|s| {
+                matches!(
+                    s.as_str(),
+                    "started"
+                        | "input-read"
+                        | "input-decoded"
+                        | "input-saved"
+                        | "init-written"
+                        | "ack-written"
+                        | "result-written"
+                )
+            });
+        eprintln!(
+            "[memory-attachment-fixture] failure-code={code} ack-timeout={} delivery-unknown={} input-exists={} native-step={step:?}",
+            message == "Claude input acknowledgement timed out",
+            message == "Claude input delivery is unknown",
+            f.home.join("input.json").is_file(),
+        );
     }
     assert_eq!(terminal.turn.outcome, Outcome::Success);
     phase.0 = "native-blocks";
