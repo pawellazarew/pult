@@ -817,16 +817,18 @@ Fake app-server, напрямую запускающий настоящий Rust
 проверку реальной CLI. По закреплённому
 [исходнику native policy](https://github.com/zai-org/ZCode/blob/c5904686ea8341826b3affe5d993d06a134fa779/apps/zcode-cli/packages/core/src/permission/service.ts)
 стандартный Guarded допускает generic MCP, а Plan-чтение с `needsApproval` может
-запросить native разрешение. Нынешний `DenyInteractions` его отклоняет; полного
-паритета памяти ReadOnly/Plan пока нет. Custom native rules и hooks требуют
-отдельной квалификации. Смена режима или автоматический grant по имени инструмента
-не заменяют привязку к точному ходу и настоящему решению человека.
+запросить native разрешение. Экспериментальный scoped мост Route B передаёт
+квалифицированный запрос в общий Inbox: настоящий Once, подтверждённый drain и
+свежие Owner/Runtime/Backend/Driver проверки допускают один bare allow для
+неизменного исходного запроса. Отсутствующий TID, неизвестный источник, изменённый
+input и устаревший запрос остаются deny. Типизированный payload и привязка к
+точному SID/TID, Ticket/generation не создаются из модельного JSON.
 
-Следующий шаг — сохранить типизированный исходный native permission payload и
-связать одноразовый ответ с общим Broker, точным SID/TID, Ticket/generation и
-неизменным input. Отсутствующий TID, неизвестный источник или устаревший запрос
-не дают allow. Native разрешение вызова `memory_propose` не подтверждает запись
-памяти: её отдельное согласие в Пульте остаётся обязательным даже в Full.
+Контролируемый peer с настоящими Rust holder/MCP проверяет этот путь и отдельное
+согласие на запись памяти. Native Once для `memory_propose` вызывает второй вопрос
+общего Backend; отказ оставляет память без изменений. Это не приёмка установленной
+CLI и полного ReadOnly/Plan, custom rules или hooks: они остаются в R3.
+[Договор scoped моста и приёмка](rust/M3-ZCODE-NATIVE-PERMISSION-BRIDGE.md).
 
 ### Продолжение R4 — локальные команды CLI
 
@@ -840,6 +842,18 @@ alias `session` и ограниченное чтение `daemon logs`. Кома
 команда не устанавливает, не запускает и не останавливает сервисы. Проверены
 36 точных пар Node/Rust и 4 отдельно оговорённых различия безопасного текста
 ошибок. [Договор и границы приёмки](rust/R4-SERVICE-STATUS.md).
+
+Команды `agent/session list`, `stop`, `rename`, `archive`, `unarchive`, `seen`
+получили обычный текстовый вывод и `--json`; 80 сравнений с public Node CLI
+проверяют формат, RU/EN, attention/context и Unicode. Явный Rust `stop --turn-id`
+сохраняет прежний raw JSON. Глубина и число узлов ограничены только для текстового
+отображения; `--json` сохраняет исходный ответ.
+[Договор команд чатов](rust/R4-AGENT-PRESENTATION.md).
+
+Локальный `browser [status] [--json]` показывает pinned MCP, наличие Chrome и
+сообщённый daemon.browser: 42 сравнения с public Node CLI. Команда не создаёт
+layout, не устанавливает и не запускает браузер; реальная обнаруженная программа
+проверяется только по метаданным. [Договор browser status](rust/R4-BROWSER-STATUS.md).
 
 Установленный launcher, полный doctor, управление службами, обновления и остальные
 команды R4 продолжают переноситься; новое preview CLI не переключает рабочий Пульт.
