@@ -32,10 +32,11 @@ export function run(provider){
    }
    if(provider==='zcode'){
     if(e.type==='turn.completed'){
-     e.payload.response=cfg.variant==='capacity'?'\0'.repeat(100_000):'ZCODE_INTERIM_1'
+     if(cfg.variant==='failed-ended-cancelled')e.payload.resultType='cancelled'
+     e.payload.response=['capacity','failed-capacity'].includes(cfg.variant)?'\0'.repeat(100_000):cfg.variant==='failed-no-text'?'':'ZCODE_INTERIM_1'
      if(cfg.variant.includes('multi')||cfg.variant==='capacity'){output({...e,eventId:'fixture-first-complete'});e={...e,eventId:'fixture-second-complete',payload:{...e.payload,response:cfg.variant==='capacity'?'\0'.repeat(100_000):'ZCODE_INTERIM_2'}}}
     }
-    if(e.type==='result'){e.response=cfg.variant.startsWith('empty')?'':cfg.variant==='large-escaped'?'\0'.repeat(100_000):cfg.variant==='capacity'?'':'ZCODE_FINAL_RESULT';if(cfg.variant==='failed')e.resultType='error'}
+    if(e.type==='result'){e.response=cfg.variant.startsWith('empty')||['failed-empty-response','failed-no-text'].includes(cfg.variant)?'':cfg.variant==='large-escaped'||cfg.variant==='failed-capacity'?'\0'.repeat(100_000):cfg.variant==='capacity'?'':'ZCODE_FINAL_RESULT';if(cfg.variant==='failed'||cfg.variant.startsWith('failed-'))e.resultType=cfg.variant==='failed-cancelled'?'cancelled':cfg.variant==='failed-unknown-type'?'fixture_unknown':cfg.variant==='failed-empty-type'?'':'error';if(cfg.variant==='missing-result-type')delete e.resultType}
    }
    if(provider==='codex'){
     if(e.method==='item/completed'&&e.params.item?.type==='agentMessage')e.params.item.text=cfg.variant==='empty'?'':cfg.variant==='large-escaped'?'\0'.repeat(100_000):'CODEX_ITEM_1'
