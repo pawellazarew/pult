@@ -109,6 +109,12 @@ pub struct AppServerInputSeal<'frontier> {
     _frontier: PhantomData<MutexGuard<'frontier, ()>>,
 }
 impl AppServerInputFrontier<'_> {
+    /// Current metadata under this frontier's held Registry serialization.
+    pub fn current_record(&self) -> &crate::registry::Record {
+        self.registry
+            .find(&self.attempt.0.ticket().session().name)
+            .expect("frontier retains the exact checked Registry record")
+    }
     /// Caller holds fresh Runtime/route admission through the first synchronous
     /// enqueue/poll. This method does bounded memory work and the Driver CAS.
     pub fn seal(&self) -> Option<AppServerInputSeal<'_>> {
