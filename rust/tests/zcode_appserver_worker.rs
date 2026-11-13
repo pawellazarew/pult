@@ -1310,10 +1310,7 @@ async fn saturated_event_queue_failure_stays_sticky_while_accept_store_is_owned(
     assert!(w.is_retired());
 }
 
-#[tokio::test]
-async fn actual_holder_unknown_exit_quarantines_without_external_cancel_or_replay() {
-    use pult_core::turn_driver::{DriverError, Progress};
-    let f = Rig::new(false);
+fn forced_unknown_worker(f: &Rig, mode: &str) -> Arc<ZcodeAppServerWorker> {
     let wrapper = f.home.join("forced-unknown-holder");
     std::fs::copy(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1327,9 +1324,15 @@ async fn actual_holder_unknown_exit_quarantines_without_external_cancel_or_repla
         env!("CARGO_BIN_EXE_pult-worker-holder"),
     )
     .unwrap();
-    let worker = f.worker_with("ack-first", |config, _| {
+    f.worker_with(mode, |config, _| {
         config.launch.holder = wrapper;
-    });
+    })
+}
+#[tokio::test]
+async fn actual_holder_unknown_exit_quarantines_without_external_cancel_or_replay() {
+    use pult_core::turn_driver::{DriverError, Progress};
+    let f = Rig::new(false);
+    let worker = forced_unknown_worker(&f, "ack-first");
     let mut handle = f.start(worker.clone());
     let accepted = bounded(handle.accepted()).await.unwrap();
     assert!(accepted.user_event_id > 0);
@@ -1402,5 +1405,64 @@ async fn actual_holder_unknown_exit_quarantines_without_external_cancel_or_repla
     assert!(
         quarantined_without_cancel,
         "unknown cleanup must quarantine without an external cancellation"
+    );
+}
+
+#[tokio::test]
+async fn before_native_started_unknown_holder_exit_reaches_quarantine_without_start_deadline() {
+    use pult_core::turn_driver::{DriverError, Progress};
+    let f = Rig::new(true);
+    let worker = forced_unknown_worker(&f, "resume-unavailable");
+    let mut handle = f.start(worker.clone());
+    wait_file(&f.home, "forced-holder-proof.json").await;
+    let joined: Value =
+        serde_json::from_slice(&std::fs::read(f.home.join("forced-holder-proof.json")).unwrap())
+            .unwrap();
+    assert_eq!(joined["real_holder_exit_zero"], true);
+    assert_eq!(joined["native_close_observed"], false);
+    let pid: u32 = std::fs::read_to_string(f.home.join("provider.pid"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(!alive(pid));
+    let proof = f.proof();
+    assert_eq!(
+        proof
+            .iter()
+            .filter(|v| v["method"] == "session/resume")
+            .count(),
+        1
+    );
+    assert!(!proof.iter().any(|v| v["method"] == "session/send"));
+    // Observe after the actual owned holder has joined. Do not wait for the
+    // separate default30s Driver start timeout to mask a stuck start receiver.
+    // Neither launch nor Driver deadlines are modified by this5s watchdog.
+    let accepted = tokio::time::timeout(Duration::from_secs(5), handle.accepted()).await;
+    let quarantined_without_cancel = matches!(&accepted, Ok(Err(DriverError::CleanupUnconfirmed)))
+        && matches!(handle.progress(), Progress::Quarantined(_));
+    let originally_starting = matches!(handle.progress(), Progress::Starting);
+    let originally_pending = accepted.is_err();
+    assert_eq!(f.driver.active_count(), 1);
+    assert!(f.record().get("zcodePendingInput").is_some());
+    assert_eq!(
+        f.record().scalar("providerSessionId").as_deref(),
+        Some("known-native")
+    );
+    assert!(!worker.is_retired());
+    if !quarantined_without_cancel {
+        eprintln!(
+            "stop-unknown before-start counterexample: accepted-timed-out={originally_pending} retained-starting={originally_starting} real-holder-joined=true native-finished=true native-started=false model-input=false"
+        );
+        // Cleanup only after preserving the failed original observation.
+        f.driver.cancel(handle.ticket());
+        assert!(matches!(
+            bounded(handle.wait()).await,
+            Err(DriverError::CleanupUnconfirmed)
+        ));
+    }
+    assert!(!f.proof().iter().any(|v| v["method"] == "session/send"));
+    assert!(
+        quarantined_without_cancel,
+        "unknown pre-start cleanup must quarantine without waiting for the start deadline"
     );
 }

@@ -254,6 +254,43 @@ enum Closed {
     Unconfirmed,
     Confirmed,
 }
+/// Observe owned cleanup without abandoning its supervisor/process. Unknown
+/// cleanup wakes the Driver so its existing close/quarantine protocol can run.
+/// Confirmed cleanup alone never invents a native start result or turn outcome.
+async fn await_owned<T>(
+    mut receive: oneshot::Receiver<T>,
+    mut closed: watch::Receiver<Closed>,
+) -> Result<T, WorkerError> {
+    loop {
+        let phase = *closed.borrow_and_update();
+        match phase {
+            Closed::Unconfirmed => return Err(error("cleanup_unconfirmed")),
+            Closed::Confirmed => return receive.await.map_err(|_| unavailable()),
+            Closed::Pending => {}
+        }
+        tokio::select! {
+            biased;
+            changed = closed.changed() => {
+                if changed.is_err() {
+                    let confirmed = matches!(*closed.borrow(), Closed::Confirmed);
+                    return if confirmed {
+                        receive.await.map_err(|_| unavailable())
+                    } else {
+                        Err(error("cleanup_unconfirmed"))
+                    };
+                }
+            }
+            result = &mut receive => {
+                // Cover a publication between changed()'s Pending poll and
+                // the ready result branch; unknown cleanup wins over success.
+                if matches!(*closed.borrow(), Closed::Unconfirmed) {
+                    return Err(error("cleanup_unconfirmed"));
+                }
+                return result.map_err(|_| unavailable());
+            }
+        }
+    }
+}
 struct Job {
     ticket: Ticket,
     generation: u64,
@@ -425,8 +462,9 @@ impl Worker for ZcodeAppServerWorker {
             Err(e) => Box::pin(async move { Err(e) }),
             Ok(job) => {
                 let (tx, rx) = oneshot::channel();
+                let closed = job.closed.subscribe();
                 tokio::spawn(supervise(inner, job, snapshot, text, tx));
-                Box::pin(async move { rx.await.unwrap_or_else(|_| Err(unavailable())) })
+                Box::pin(async move { await_owned(rx, closed).await? })
             }
         }
     }
@@ -1502,10 +1540,13 @@ async fn turn(
                     .take()
                     .ok_or_else(unavailable)?;
                 let completion = done.take().ok_or_else(unavailable)?;
+                let closed = job.closed.subscribe();
                 let _ = sender.send(Ok(Started {
                     turn_id: job.public_turn.clone(),
                     done: Box::pin(async move {
-                        completion.await.unwrap_or_else(|_| failure(&unavailable()))
+                        await_owned(completion, closed)
+                            .await
+                            .unwrap_or_else(|error| failure(&error))
                     }),
                 }));
                 accepted = true;
@@ -1833,5 +1874,74 @@ mod event_profile {
             frame: frame.clone(),
             terminal,
         }))
+    }
+}
+
+#[cfg(test)]
+mod cleanup_wait_tests {
+    use super::*;
+    use std::{
+        future::Future,
+        task::{Context, Poll, Waker},
+    };
+
+    #[test]
+    fn existing_unknown_cleanup_wins_over_an_already_ready_result() {
+        let (send, receive) = oneshot::channel();
+        send.send(7u8).unwrap();
+        let (_closed, watching) = watch::channel(Closed::Unconfirmed);
+        let mut waiting = Box::pin(await_owned(receive, watching));
+        let Poll::Ready(Err(error)) = waiting
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+        else {
+            panic!("unknown cleanup authorized a ready result");
+        };
+        assert_eq!(error.code, "cleanup_unconfirmed");
+    }
+
+    #[test]
+    fn cleanup_transition_and_ready_result_in_the_same_poll_fail_closed() {
+        let (send, receive) = oneshot::channel();
+        let (closed, watching) = watch::channel(Closed::Pending);
+        let mut waiting = Box::pin(await_owned(receive, watching));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(waiting.as_mut().poll(&mut context).is_pending());
+        send.send(7u8).unwrap();
+        closed.send_replace(Closed::Unconfirmed);
+        let Poll::Ready(Err(error)) = waiting.as_mut().poll(&mut context) else {
+            panic!("ready result hid a cleanup transition");
+        };
+        assert_eq!(error.code, "cleanup_unconfirmed");
+    }
+
+    #[test]
+    fn confirmed_cleanup_does_not_create_an_absent_native_result() {
+        let (send, receive) = oneshot::channel::<u8>();
+        let (_closed, watching) = watch::channel(Closed::Confirmed);
+        let mut waiting = Box::pin(await_owned(receive, watching));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(waiting.as_mut().poll(&mut context).is_pending());
+        drop(send);
+        let Poll::Ready(Err(error)) = waiting.as_mut().poll(&mut context) else {
+            panic!("confirmed cleanup fabricated native success");
+        };
+        assert_eq!(error.code, "provider_unavailable");
+    }
+
+    #[test]
+    fn lost_pending_cleanup_owner_cannot_authorize_a_ready_result() {
+        let (send, receive) = oneshot::channel();
+        send.send(7u8).unwrap();
+        let (closed, watching) = watch::channel(Closed::Pending);
+        drop(closed);
+        let mut waiting = Box::pin(await_owned(receive, watching));
+        let Poll::Ready(Err(error)) = waiting
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+        else {
+            panic!("missing cleanup proof authorized a result");
+        };
+        assert_eq!(error.code, "cleanup_unconfirmed");
     }
 }
