@@ -33,10 +33,11 @@ queue/interrupt/steer flags. Если ответ содержит queued receipt
 посылается по **имени сессии**, без скрытого turnId pin и без дополнительного prompt.
 Смена активного хода/queue auto-drain остаётся ответственностью backend контракта.
 
-Bare prompt без `--wait` сохраняет прежний Rust preview JSON reply. Он не стал
-полностью эквивалентен TS строке `Turn … started` / `{turnId,waiting:false}`.
+Bare prompt без `--wait` теперь использует TS started format:
+`ход … запущен` / `Turn … started`, либо `{turnId,waiting:false}` при `--json`.
 `--until`/`--timeout` без `--wait` не добавляют полей в prompt RPC и не вызывают wait.
-Эта отдельная разница формата сохранена явно, а не названа закрытой parity.
+Queued receipt использует тот же renderer с `--wait` и без него. Details и
+malformed-ACK граница — в [R4-CLI-PROMPT.md](R4-CLI-PROMPT.md).
 
 ## Result / exit / locale
 

@@ -129,7 +129,8 @@ enum AgentAction {
     /// Partial ordinary Codex execution.
     Prompt {
         name: String,
-        text: String,
+        #[arg(required = true, num_args = 1..)]
+        words: Vec<String>,
         #[arg(long)]
         attachments: Option<String>,
         #[arg(long, conflicts_with_all=["interrupt","steer"], help="Queue behind existing work; send immediately when idle")]
@@ -366,7 +367,7 @@ async fn main() -> Result<()> {
                 AgentAction::List => ("agent.list", serde_json::json!({})),
                 AgentAction::Prompt {
                     name,
-                    text,
+                    words,
                     attachments,
                     queue,
                     interrupt,
@@ -374,7 +375,7 @@ async fn main() -> Result<()> {
                     wait,
                     wait_options,
                 } => {
-                    let mut params = serde_json::json!({"name":&name,"text":text});
+                    let mut params = serde_json::json!({"name":&name,"text":words.join(" ")});
                     if let Some(attachments) = attachments {
                         let attachments: serde_json::Value = serde_json::from_str(&attachments)
                             .map_err(|_| anyhow::anyhow!("--attachments must be a JSON array"))?;
@@ -391,12 +392,9 @@ async fn main() -> Result<()> {
                             params[name] = serde_json::json!(true);
                         }
                     }
-                    if wait {
-                        let code =
-                            cli_wait::run(&home, &name, wait_options.into(), Some(params)).await;
-                        std::process::exit(code);
-                    }
-                    ("agent.prompt", params)
+                    let code =
+                        cli_wait::run_prompt(&home, &name, wait_options.into(), params, wait).await;
+                    std::process::exit(code);
                 }
                 AgentAction::Wait { name, options } => {
                     let code = cli_wait::run(&home, &name, options.into(), None).await;

@@ -139,23 +139,29 @@ async fn wait_accepts_response_after_three_seconds_but_ordinary_deadline_is_unch
     peer.await.unwrap();
 
     // The new composed path must not give prompt delivery the wait-only policy.
-    let fake = Fake::new();
-    let command = fake.command(&["agent", "prompt", "chat", "hello", "--wait"], "en");
-    let peer = tokio::spawn(async move {
-        let mut reader = accept(fake.listener).await;
-        assert_eq!(frame(&mut reader).await["method"], "agent.prompt");
-        let start = Instant::now();
-        eof(&mut reader).await;
-        assert!(start.elapsed() >= Duration::from_millis(2800));
-        assert!(start.elapsed() < Duration::from_secs(8));
-    });
-    assert_output(
-        &output(command).await,
-        2,
-        "",
-        "pult agent: timeout — daemon response timed out\n",
-    );
-    peer.await.unwrap();
+    for wait in [false, true] {
+        let fake = Fake::new();
+        let mut args = vec!["agent", "prompt", "chat", "hello"];
+        if wait {
+            args.push("--wait");
+        }
+        let command = fake.command(&args, "en");
+        let peer = tokio::spawn(async move {
+            let mut reader = accept(fake.listener).await;
+            assert_eq!(frame(&mut reader).await["method"], "agent.prompt");
+            let start = Instant::now();
+            eof(&mut reader).await;
+            assert!(start.elapsed() >= Duration::from_millis(2800));
+            assert!(start.elapsed() < Duration::from_secs(8));
+        });
+        assert_output(
+            &output(command).await,
+            2,
+            "",
+            "pult agent: timeout — daemon response timed out\n",
+        );
+        peer.await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -474,7 +480,7 @@ async fn prompt_wait_composes_once_by_session_name_and_keeps_dispatch_flags() {
 }
 
 #[tokio::test]
-async fn queued_prompt_never_waits_and_bare_prompt_keeps_its_preview_format() {
+async fn queued_prompt_never_waits_and_bare_prompt_uses_node_started_format() {
     for (locale, json, expected) in [
         (
             "en",
@@ -527,7 +533,105 @@ async fn queued_prompt_never_waits_and_bare_prompt_keeps_its_preview_format() {
     .await;
     assert_eq!(request["method"], "agent.prompt");
     assert_eq!(request["params"], json!({"name":"chat","text":"hello"}));
-    assert_output(&out, 0, "{\"turnId\":\"turn-A\"}\n", "");
+    assert_output(&out, 0, "{\"turnId\":\"turn-A\",\"waiting\":false}\n", "");
+}
+
+#[tokio::test]
+async fn prompt_ack_requires_a_nonempty_string_identity_before_start_or_wait() {
+    for result in [
+        json!({}),
+        json!({"turnId":null}),
+        json!({"turnId":5}),
+        json!({"turnId":""}),
+        json!({"turnId":{}}),
+    ] {
+        for wait in [false, true] {
+            let mut args = vec!["agent", "prompt", "chat", "hello"];
+            if wait {
+                args.push("--wait");
+            }
+            let (out, request) = reply(&args, "en", result.clone()).await;
+            assert_eq!(request["method"], "agent.prompt");
+            assert_output(
+                &out,
+                1,
+                "",
+                "pult agent: invalid_response — invalid agent prompt response\n",
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn bare_prompt_preserves_modes_attachments_and_existing_attachment_only_input() {
+    for mode in ["--queue", "--interrupt", "--steer"] {
+        let (out, request) = reply(
+            &[
+                "agent",
+                "prompt",
+                "chat",
+                "first",
+                "second",
+                "--attachments",
+                "[]",
+                mode,
+            ],
+            "en",
+            json!({"turnId":"turn-A"}),
+        )
+        .await;
+        assert_eq!(
+            request["params"],
+            json!({"name":"chat","text":"first second","attachments":[],&mode[2..]:true})
+        );
+        assert_output(&out, 0, "Turn turn-A started\n", "");
+    }
+    let (out, request) = reply(
+        &[
+            "agent",
+            "prompt",
+            "chat",
+            "",
+            "--attachments",
+            "[]",
+            "--json",
+        ],
+        "en",
+        json!({"turnId":"turn-A"}),
+    )
+    .await;
+    assert_eq!(
+        request["params"],
+        json!({"name":"chat","text":"","attachments":[]})
+    );
+    assert_output(&out, 0, "{\"turnId\":\"turn-A\",\"waiting\":false}\n", "");
+}
+
+#[tokio::test]
+async fn actual_node_cli_and_rust_prompt_output_share_the_source_oracle() {
+    let mut command = Command::new("node");
+    command
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/cli-prompt-oracle.mjs"
+        ))
+        .arg(env!("CARGO_BIN_EXE_pultd-rust"))
+        .kill_on_drop(true);
+    let result = tokio::time::timeout(Duration::from_secs(60), command.output())
+        .await
+        .expect("prompt oracle watchdog")
+        .expect("Node24 prompt oracle");
+    assert!(
+        result.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&result.stdout).contains(
+            "prompt oracle passed 14 paired Node/Rust cases + malformed Node observation"
+        )
+    );
 }
 
 #[tokio::test]
@@ -556,6 +660,19 @@ async fn scoped_keys_fail_before_owner_files_and_never_connect() {
                 .await
                 .is_err()
         );
+        let mut bare = fake.command(&["agent", "prompt", "chat", "hello"], "en");
+        bare.env(key, "private-sentinel");
+        assert_output(
+            &output(bare).await,
+            1,
+            "",
+            "pult agent: forbidden — agent wait requires owner authentication\n",
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), fake.listener.accept())
+                .await
+                .is_err()
+        );
         let mut command = Command::new(env!("CARGO_BIN_EXE_pultd-rust"));
         command
             .args([
@@ -573,6 +690,27 @@ async fn scoped_keys_fail_before_owner_files_and_never_connect() {
         assert_eq!(out.status.code(), Some(1));
         assert!(String::from_utf8_lossy(&out.stderr).contains("requires owner authentication"));
         assert!(!String::from_utf8_lossy(&out.stderr).contains("private-sentinel"));
+        let mut bare = Command::new(env!("CARGO_BIN_EXE_pultd-rust"));
+        for credential in KEYS {
+            bare.env_remove(credential);
+        }
+        bare.args([
+            "--home",
+            "relative-invalid-home",
+            "agent",
+            "prompt",
+            "chat",
+            "hello",
+        ])
+        .env(key, "private-sentinel")
+        .kill_on_drop(true);
+        let out = output(bare).await;
+        assert_output(
+            &out,
+            1,
+            "",
+            "pult agent: forbidden — agent wait requires owner authentication\n",
+        );
     }
 }
 
