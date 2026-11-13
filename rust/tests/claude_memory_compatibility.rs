@@ -23,6 +23,6 @@ async fn claude_approved_memory_is_readable_by_codex_without_scope_or_policy_byp
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("Claude shared memory interop passed 6")
+        String::from_utf8_lossy(&output.stdout).contains("Claude shared memory interop passed 7")
     );
 }

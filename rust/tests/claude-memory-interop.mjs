@@ -1,7 +1,7 @@
 import { readCompleteJsonl } from './support/complete-jsonl.mjs'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 const { connectClient } = await import('../../dist/cli/client.js')
@@ -13,7 +13,9 @@ const home = join(temp, 'home'), account = join(temp, 'account'), native = join(
 for (const path of [home, account, native, project]) { mkdirSync(path); chmodSync(path, 0o700) }
 writeFileSync(join(home, '.rust-core-scratch'), 'pult-rust-scratch-v1\n', { mode: 0o600 })
 writeFileSync(join(home, 'config.json'), JSON.stringify({ network: { claude: { mode: 'off' }, codex: { mode: 'off' }, guard: { mode: 'allow', countries: ['FI'] } } }), { mode: 0o600 })
-const env = { ...process.env, HOME: account, PULT_TEST: '1', PULT_CLAUDE_BIN: join(root, 'rust/tests/fixtures/claude_memory.py'), PULT_CODEX_BIN: join(root, 'rust/tests/fixtures/codex_memory.py'), PULT_CURL_BIN: join(root, 'rust/tests/fixtures/curl_loc_fi.sh'), ANTHROPIC_API_KEY: 'synthetic-not-an-account' }
+// The selected Codex path is genuinely absent until the cross-provider case.
+const codex = join(temp, 'codex-fixture')
+const env = { ...process.env, HOME: account, PULT_TEST: '1', PULT_CLAUDE_BIN: join(root, 'rust/tests/fixtures/claude_memory.py'), PULT_CODEX_BIN: codex, PULT_CURL_BIN: join(root, 'rust/tests/fixtures/curl_loc_fi.sh'), ANTHROPIC_API_KEY: 'synthetic-not-an-account' }
 for (const key of ['PULT_MEMORY_KEY', 'PULT_MEMORY_TURN_KEY', 'PULT_ASK_KEY', 'PULT_ASK_SESSION', 'PULT_WORKER_HOLDER_BIN', 'PULT_HOLDER_BIN']) delete env[key]
 const child = spawn(resolve(process.argv[2]), ['--home', home, 'daemon', 'serve'], { env, stdio: ['ignore', 'ignore', 'pipe'] })
 let stderr = '', client, checks = 0
@@ -26,8 +28,8 @@ const journal = () => readCompleteJsonl(join(home, 'events/journal.jsonl'))
 const row = async name => (await client.request('agent.list')).sessions.find(value => value.name === name)
 const memory = (method, params = {}) => client.request(`memory.${method}`, params)
 const alive = pid => { try { process.kill(pid, 0); return true } catch (error) { if (error.code === 'ESRCH') return false; throw error } }
-async function until(predicate, label) {
-  const deadline = Date.now() + 10000
+async function until(predicate, label, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs
   while (!await predicate()) {
     assert.equal(child.exitCode, null, `scratch daemon exited: ${stderr}`)
     assert.ok(Date.now() < deadline, label)
@@ -42,9 +44,9 @@ async function result(name, run) {
   await until(() => !alive(launch.pid) && !existsSync(launch.configPath), `${run} process/config cleanup pending`)
   return evidence().find(value => value.kind === 'result' && value.run === run)
 }
-async function card(name) {
+async function card(name, timeoutMs = 10000) {
   let value
-  await until(async () => { value = (await client.request('perm.list', { name })).pending[0]; return !!value }, `${name} missing memory approval`)
+  await until(async () => { value = (await client.request('perm.list', { name })).pending[0]; return !!value }, `${name} missing memory approval`, timeoutMs)
   assert.equal(value.toolName, 'pult_memory.propose')
   return value
 }
@@ -54,7 +56,8 @@ let seed, saved
 try {
   await until(() => existsSync(paths.sock) && existsSync(paths.token), 'startup')
   client = await connectClient(paths, { timeoutMs: 10000 })
-  await check('cold policy registration and ordinary memory-off Claude do not discover Codex', async () => {
+  await check('cold policy registration and ordinary memory-off Claude need no Codex binary', async () => {
+    assert.equal(existsSync(codex), false)
     for (const [name, more] of [
       ['writer', {}], ['readonly', { approval: 'read-only' }],
       ['full', { approval: 'full', confirm: true, grant: 'cli-once' }],
@@ -78,9 +81,12 @@ try {
     assert.ok(texts[1].includes(seed.id) && !texts[1].includes(seed.details))
     assert.ok(texts[1].length <= 4000 && Buffer.byteLength(texts[1]) <= 16000)
     const user = journal().find(value => value.sessionId === 'writer' && value.kind === 'message.user')
-    assert.equal(user.data.text, texts[0])
+    // Native input stays exact; the existing journal privacy policy masks a
+    // plain 32-hex identifier in user text. The catalog is never journal text.
+    assert.equal(user.data.text, JSON.stringify({ ...instruction, id: '<token>' }))
     assert.ok(!user.data.text.includes('Project memory:'))
     assert.equal((await client.request('daemon.status')).nativeRuntime.providers.codex.initialized, false)
+    assert.equal(existsSync(codex), false)
   })
   await check('denied Claude proposal does not save; allowed proposal has actual Claude provenance', async () => {
     await prompt('writer', { run: 'deny-add', proposal: add('deny-add') })
@@ -102,8 +108,12 @@ try {
     assert.equal(user.kind, 'message.user')
     assert.equal(JSON.parse(user.data.text).run, 'allow-add')
     assert.equal((await memory('list', { session: 'writer' })).memories.filter(value => value.name === 'Shared Claude decision').length, 1)
+    assert.equal(existsSync(codex), false)
+    assert.equal((await client.request('daemon.status')).nativeRuntime.providers.codex.initialized, false)
   })
   await check('a later Codex turn reads the same record and version through the shared backend', async () => {
+    copyFileSync(join(root, 'rust/tests/fixtures/codex_memory.py'), codex)
+    chmodSync(codex, 0o700)
     await prompt('reader', { run: 'codex-read-claude', id: saved.id })
     await until(() => codexEvidence().some(value => value.kind === 'result' && value.run === 'codex-read-claude'), 'Codex did not read Claude record')
     await until(async () => (await row('reader')).status === 'done', 'Codex read did not finish')
@@ -112,6 +122,37 @@ try {
     assert.equal(outcome.get.version, saved.version)
     assert.equal(outcome.get.details, saved.details)
     assert.ok(outcome.catalog.memories.some(value => value.id === saved.id))
+  })
+  await check('queued Claude memory uses its deferred user receipt and the next Codex sees the update', async () => {
+    const previous = await prompt('writer', { run: 'queue-blocker', id: saved.id, hold: true })
+    await until(() => evidence().some(value => value.kind === 'holding' && value.run === 'queue-blocker'), 'queue blocker did not reach helper barrier')
+    const blocker = evidence().filter(value => value.kind === 'launch' && value.name === 'writer').at(-1)
+    const instruction = { run: 'queued-update', proposal: { operation: 'update', id: saved.id, expectedVersion: saved.version, commandId: 'queued-update', summary: 'Updated by queued Claude input', reason: 'Offline queue provenance check' } }
+    const queued = await client.request('agent.prompt', { name: 'writer', text: JSON.stringify(instruction), queue: true })
+    assert.equal(queued.queued, true)
+    assert.equal(journal().filter(value => value.kind === 'message.user' && value.data.queueItemId === queued.id).length, 0)
+    assert.equal(evidence().some(value => value.kind === 'dispatch' && value.run === instruction.run), false)
+    writeFileSync(join(native, 'release-queue-blocker'), '')
+    // The next queued input may spend 30s in native admission; terminal-only
+    // waits retain their original 10s watchdog.
+    const pending = await card('writer', 35000)
+    const receipts = journal().filter(value => value.kind === 'message.user' && value.data.queueItemId === queued.id)
+    assert.equal(receipts.length, 1)
+    assert.equal(pending.input.sourceEventId, receipts[0].id)
+    assert.notEqual(pending.input.sourceTurnId, previous.turnId)
+    await client.request('perm.resolve', { id: pending.id, decision: 'allow', scope: 'once' })
+    assert.equal((await result('writer', instruction.run)).proposal.version, 2)
+    saved = await memory('get', { session: 'writer', id: saved.id })
+    assert.equal(saved.version, 2)
+    assert.equal(saved.author, 'claude')
+    assert.equal(saved.sourceEventId, receipts[0].id)
+    assert.equal(saved.sourceTurnId, pending.input.sourceTurnId)
+    assert.equal(alive(blocker.pid), false)
+    assert.equal(existsSync(blocker.configPath), false)
+    await prompt('reader', { run: 'codex-read-queued', id: saved.id })
+    await until(() => codexEvidence().some(value => value.kind === 'result' && value.run === 'codex-read-queued'), 'Codex did not see queued memory update')
+    await until(async () => (await row('reader')).status === 'done', 'queued memory read did not finish')
+    assert.equal(codexEvidence().find(value => value.kind === 'result' && value.run === 'codex-read-queued').get.version, 2)
   })
   await check('read-only hides and rejects proposals; Full still requires separate memory approval', async () => {
     await prompt('readonly', { run: 'readonly-propose', id: seed.id, proposal: add('readonly-add') })
@@ -136,7 +177,7 @@ try {
     assert.equal(outcome.get.isError, true)
     assert.equal(outcome.proposal.isError, true)
     assert.equal(journal().filter(value => value.kind === 'permission.requested').length, before)
-    assert.equal((await memory('get', { session: 'reader', id: saved.id })).version, 1)
+    assert.equal((await memory('get', { session: 'reader', id: saved.id })).version, 2)
   })
   console.log(`Claude shared memory interop passed ${checks}`)
 } finally {
