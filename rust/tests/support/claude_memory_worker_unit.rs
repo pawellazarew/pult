@@ -116,6 +116,9 @@ impl Rig {
         Self::with_attachment(false)
     }
     fn with_attachment(attach: bool) -> Self {
+        Self::with_attachment_mode(attach, false)
+    }
+    fn with_attachment_mode(attach: bool, observe: bool) -> Self {
         crate::panic_guard::install();
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().canonicalize().unwrap();
@@ -195,7 +198,7 @@ impl Rig {
                             .join("tests/fixtures/claude_worker.py")
                             .into_os_string(),
                         home.clone().into_os_string(),
-                        if attach { "memory-observe" } else { "normal" }.into(),
+                        if observe { "memory-observe" } else { "normal" }.into(),
                     ],
                     cwd: home.clone(),
                     env: BTreeMap::from([
@@ -406,53 +409,57 @@ async fn attachment_context_and_memory_stay_separate_and_slash_with_attachment_i
             }
         }
     }
-    let mut phase = Phase("setup");
-    let f = Rig::with_attachment(true);
-    phase.0 = "terminal";
-    let mut turn = f.start("/context");
-    let terminal = tokio::time::timeout(WATCHDOG, turn.wait())
-        .await
-        .unwrap()
-        .unwrap();
-    if let Outcome::Failure { code, message } = &terminal.turn.outcome {
-        let step = std::fs::read_to_string(f.home.join("fixture-step"))
-            .ok()
-            .filter(|s| {
-                matches!(
-                    s.as_str(),
-                    "started"
-                        | "input-read"
-                        | "input-decoded"
-                        | "input-saved"
-                        | "init-written"
-                        | "ack-written"
-                        | "result-written"
-                )
-            });
-        eprintln!(
-            "[memory-attachment-fixture] failure-code={code} ack-timeout={} delivery-unknown={} input-exists={} native-step={step:?}",
-            message == "Claude input acknowledgement timed out",
-            message == "Claude input delivery is unknown",
-            f.home.join("input.json").is_file(),
-        );
-    }
-    assert_eq!(terminal.turn.outcome, Outcome::Success);
-    phase.0 = "native-blocks";
-    let native = f.input().unwrap();
-    let blocks = native["message"]["content"].as_array().unwrap();
-    assert_eq!(blocks.len(), 4);
-    assert_eq!(blocks[0]["text"], "/context");
-    assert!(blocks[1]["text"].as_str().unwrap().contains("note.txt"));
-    assert_eq!(blocks[2]["text"], CATALOG);
-    assert!(
-        blocks[3]["text"]
-            .as_str()
+    // Preserve the original no-observation timing as well as the diagnostic
+    // fixture: adding sidecar writes must never be the apparent bug fix.
+    for observe in [false, true] {
+        let mut phase = Phase("setup");
+        let f = Rig::with_attachment_mode(true, observe);
+        phase.0 = "terminal";
+        let mut turn = f.start("/context");
+        let terminal = tokio::time::timeout(WATCHDOG, turn.wait())
+            .await
             .unwrap()
-            .contains("<pult_runtime_context>")
-    );
-    assert_eq!(f.mcp.catalog_calls.load(Ordering::Acquire), 1);
-    phase.0 = "cleanup";
-    f.cleaned();
+            .unwrap();
+        if let Outcome::Failure { code, message } = &terminal.turn.outcome {
+            let step = std::fs::read_to_string(f.home.join("fixture-step"))
+                .ok()
+                .filter(|s| {
+                    matches!(
+                        s.as_str(),
+                        "started"
+                            | "input-read"
+                            | "input-decoded"
+                            | "input-saved"
+                            | "init-written"
+                            | "ack-written"
+                            | "result-written"
+                    )
+                });
+            eprintln!(
+                "[memory-attachment-fixture] observe={observe} failure-code={code} ack-timeout={} delivery-unknown={} input-exists={} native-step={step:?}",
+                message == "Claude input acknowledgement timed out",
+                message == "Claude input delivery is unknown",
+                f.home.join("input.json").is_file(),
+            );
+        }
+        assert_eq!(terminal.turn.outcome, Outcome::Success);
+        phase.0 = "native-blocks";
+        let native = f.input().unwrap();
+        let blocks = native["message"]["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 4);
+        assert_eq!(blocks[0]["text"], "/context");
+        assert!(blocks[1]["text"].as_str().unwrap().contains("note.txt"));
+        assert_eq!(blocks[2]["text"], CATALOG);
+        assert!(
+            blocks[3]["text"]
+                .as_str()
+                .unwrap()
+                .contains("<pult_runtime_context>")
+        );
+        assert_eq!(f.mcp.catalog_calls.load(Ordering::Acquire), 1);
+        phase.0 = "cleanup";
+        f.cleaned();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
