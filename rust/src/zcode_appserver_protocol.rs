@@ -1,8 +1,9 @@
 //! Bounded, deliberately partial ZCode app-server wire profile. No process or Driver authority.
 //! Sources and unsupported surface: docs/rust/R3-ZCODE-APP-SERVER-PROTOCOL.md.
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value, json, value::RawValue};
 use std::fmt;
+use std::ops::Range;
 
 pub const APP_SERVER_ARGV: [&str; 2] = ["app-server", "--stdio"];
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
@@ -11,6 +12,9 @@ pub const MAX_CONTENT_BYTES: usize = 128 * 1024;
 pub const MAX_DEPTH: usize = 64;
 pub const MAX_NODES: usize = 1_000_000;
 pub const MAX_STRING_BYTES: usize = MAX_FRAME_BYTES;
+/// Host-retained permission data, including metadata and existing correlation strings.
+/// This does not lower the independent wire frame limit.
+pub const MAX_PERMISSION_RETENTION_BYTES: usize = 256 * 1024;
 pub const MAX_MCP_SERVERS: usize = 8;
 pub const MAX_MCP_CONFIG_BYTES: usize = 64 * 1024;
 pub const MAX_ENV_ENTRIES: usize = 32;
@@ -667,6 +671,7 @@ pub enum ReverseRequest {
         id: RequestId,
         session_id: String,
         request_id: String,
+        payload: NativePermissionPayload,
     },
     UserInput {
         id: RequestId,
@@ -674,6 +679,196 @@ pub enum ReverseRequest {
         request_id: String,
     },
 }
+/// Strictly validated but UNTRUSTED native data. Neither state authorizes a reply.
+/// Secret-bearing payloads deliberately implement no Clone, Debug or serde traits.
+/// ```compile_fail
+/// fn requires<T: Clone>() {}
+/// requires::<pult_core::zcode_appserver_protocol::NativePermissionPayload>();
+/// ```
+/// ```compile_fail
+/// fn requires<T: std::fmt::Debug>() {}
+/// requires::<pult_core::zcode_appserver_protocol::NativePermissionPayload>();
+/// ```
+/// ```compile_fail
+/// fn requires<T: serde::Serialize>() {}
+/// requires::<pult_core::zcode_appserver_protocol::NativePermissionPayload>();
+/// ```
+/// ```compile_fail
+/// fn requires<T: serde::Deserialize<'static>>() {}
+/// requires::<pult_core::zcode_appserver_protocol::NativePermissionPayload>();
+/// ```
+pub enum NativePermissionPayload {
+    Retained(NativePermissionData),
+    ConservativeOnly(PermissionPayloadLimit),
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PermissionPayloadLimit {
+    RetentionBudget,
+}
+
+/// One immutable original params allocation; field spans never own another copy.
+/// These are native claims, not an accepted source, consent or a permission receipt.
+/// ```compile_fail
+/// fn requires<T: Clone>() {}
+/// requires::<pult_core::zcode_appserver_protocol::NativePermissionData>();
+/// ```
+/// ```compile_fail
+/// fn requires<T: std::fmt::Debug>() {}
+/// requires::<pult_core::zcode_appserver_protocol::NativePermissionData>();
+/// ```
+/// ```compile_fail
+/// fn requires<T: serde::Serialize>() {}
+/// requires::<pult_core::zcode_appserver_protocol::NativePermissionData>();
+/// ```
+/// ```compile_fail
+/// fn requires<T: serde::Deserialize<'static>>() {}
+/// requires::<pult_core::zcode_appserver_protocol::NativePermissionData>();
+/// ```
+pub struct NativePermissionData {
+    params: Box<RawValue>,
+    fields: [Range<usize>; 6],
+    turn_id: Option<Range<usize>>,
+    origin: Option<Range<usize>>,
+}
+impl NativePermissionData {
+    pub fn untrusted_params(&self) -> &RawValue {
+        &self.params
+    }
+    pub fn untrusted_tool_call_id(&self) -> String {
+        self.text(0)
+    }
+    pub fn untrusted_tool_name(&self) -> String {
+        self.text(1)
+    }
+    pub fn untrusted_reason(&self) -> String {
+        self.text(2)
+    }
+    pub fn untrusted_risk_level(&self) -> String {
+        self.text(3)
+    }
+    pub fn untrusted_input(&self) -> &RawValue {
+        self.raw(&self.fields[4])
+    }
+    pub fn untrusted_options(&self) -> &RawValue {
+        self.raw(&self.fields[5])
+    }
+    pub fn untrusted_turn_id(&self) -> Option<String> {
+        self.turn_id
+            .as_ref()
+            .map(|span| serde_json::from_str(self.slice(span)).expect("validated permission text"))
+    }
+    pub fn untrusted_origin(&self) -> Option<&RawValue> {
+        self.origin.as_ref().map(|span| self.raw(span))
+    }
+    fn text(&self, field: usize) -> String {
+        serde_json::from_str(self.slice(&self.fields[field])).expect("validated permission text")
+    }
+    fn slice(&self, span: &Range<usize>) -> &str {
+        // Spans are checked against this exact immutable backing before construction.
+        &self.params.get()[span.clone()]
+    }
+    fn raw(&self, span: &Range<usize>) -> &RawValue {
+        serde_json::from_str(self.slice(span)).expect("validated permission raw field")
+    }
+}
+
+// These temporary borrowed views are used ONLY after strict duplicate/depth/node/shape
+// validation. RawValue is not an alternative decoder or an authorization boundary.
+#[derive(serde::Deserialize)]
+struct RawParams<'a> {
+    #[serde(borrow)]
+    params: &'a RawValue,
+}
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawPermissionFields<'a> {
+    #[serde(borrow)]
+    tool_call_id: &'a RawValue,
+    #[serde(borrow)]
+    tool_name: &'a RawValue,
+    #[serde(borrow)]
+    reason: &'a RawValue,
+    #[serde(borrow)]
+    risk_level: &'a RawValue,
+    #[serde(borrow)]
+    input: &'a RawValue,
+    #[serde(borrow)]
+    options: &'a RawValue,
+    #[serde(borrow)]
+    turn_id: Option<&'a RawValue>,
+    #[serde(borrow)]
+    origin: Option<&'a RawValue>,
+}
+fn raw_span(parent: &RawValue, field: &RawValue) -> Result<Range<usize>> {
+    // Address arithmetic only locates a borrowed subslice; bounds and exact contents
+    // are checked without pointer dereference, unsafe or self-referential storage.
+    let start = (field.get().as_ptr() as usize)
+        .checked_sub(parent.get().as_ptr() as usize)
+        .ok_or(ProtocolError::InvalidJson)?;
+    let end = start
+        .checked_add(field.get().len())
+        .ok_or(ProtocolError::InvalidJson)?;
+    if parent.get().get(start..end) != Some(field.get()) {
+        return Err(ProtocolError::InvalidJson);
+    }
+    Ok(start..end)
+}
+fn permission_payload(
+    body: &[u8],
+    id: &RequestId,
+    session_id: &str,
+    request_id: &str,
+) -> Result<NativePermissionPayload> {
+    let raw: RawParams<'_> =
+        serde_json::from_slice(body).map_err(|_| ProtocolError::InvalidJson)?;
+    // Count the one raw backing, fixed fields/enum metadata and correlation strings
+    // already retained by ReverseRequest. There are no retained input/options copies.
+    let id_bytes = match id {
+        RequestId::String(s) => s.len(),
+        RequestId::Integer(_) => 0,
+    };
+    let retained = raw
+        .params
+        .get()
+        .len()
+        .saturating_add(std::mem::size_of::<ReverseRequest>())
+        .saturating_add(id_bytes)
+        .saturating_add(session_id.len())
+        .saturating_add(request_id.len());
+    if retained > MAX_PERMISSION_RETENTION_BYTES {
+        return Ok(NativePermissionPayload::ConservativeOnly(
+            PermissionPayloadLimit::RetentionBudget,
+        ));
+    }
+    let p: RawPermissionFields<'_> =
+        serde_json::from_str(raw.params.get()).map_err(|_| ProtocolError::InvalidJson)?;
+    let fields = [
+        p.tool_call_id,
+        p.tool_name,
+        p.reason,
+        p.risk_level,
+        p.input,
+        p.options,
+    ]
+    .map(|field| raw_span(raw.params, field));
+    let [a, b, c, d, e, f] = fields;
+    let fields = [a?, b?, c?, d?, e?, f?];
+    let turn_id = p
+        .turn_id
+        .map(|field| raw_span(raw.params, field))
+        .transpose()?;
+    let origin = p
+        .origin
+        .map(|field| raw_span(raw.params, field))
+        .transpose()?;
+    Ok(NativePermissionPayload::Retained(NativePermissionData {
+        params: raw.params.to_owned(),
+        fields,
+        turn_id,
+        origin,
+    }))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimePreferencesScope {
     RuntimeMaterialization,
@@ -830,7 +1025,7 @@ pub fn decode_frame_with_limits(frame: &[u8], limits: DecodeLimits) -> Result<In
         };
     }
     let id = RequestId::parse(o.get("id").ok_or(ProtocolError::Unsupported)?)?;
-    reverse(id, method, &o["params"]).map(Incoming::Reverse)
+    reverse(id, method, &o["params"], body).map(Incoming::Reverse)
 }
 const SESSION_EVENT_TYPES: &[&str] = &[
     "session.created",
@@ -1014,7 +1209,7 @@ fn turn_started(v: &Value) -> Result<TurnStartedCandidate> {
         seq,
     })
 }
-fn reverse(id: RequestId, method: &str, v: &Value) -> Result<ReverseRequest> {
+fn reverse(id: RequestId, method: &str, v: &Value, body: &[u8]) -> Result<ReverseRequest> {
     let o = object(v)?;
     match method {
         "session/requestRuntimePreferences" => {
@@ -1079,10 +1274,14 @@ fn reverse(id: RequestId, method: &str, v: &Value) -> Result<ReverseRequest> {
                 optional_text(p, "description", 16 * 1024)?;
                 permission_response(&p["response"])?;
             }
+            let session_id = id_field(o, "sessionId")?;
+            let request_id = id_field(o, "requestId")?;
+            let payload = permission_payload(body, &id, session_id, request_id)?;
             Ok(ReverseRequest::Permission {
                 id,
-                session_id: id_field(o, "sessionId")?.into(),
-                request_id: id_field(o, "requestId")?.into(),
+                session_id: session_id.into(),
+                request_id: request_id.into(),
+                payload,
             })
         }
         "interaction/requestUserInput" => {
