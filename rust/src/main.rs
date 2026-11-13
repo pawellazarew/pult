@@ -311,6 +311,7 @@ async fn main() -> Result<()> {
         Action::Daemon {
             action: DaemonAction::Serve,
         } => {
+            reject_helper_credentials()?;
             anyhow::ensure!(
                 std::env::var_os("PULT_MEMORY_KEY").is_none()
                     && std::env::var_os("PULT_MEMORY_TURN_KEY").is_none(),
@@ -559,6 +560,7 @@ async fn main() -> Result<()> {
                     no_follow,
                 },
         } => {
+            reject_helper_credentials()?;
             let result = cli_client::events_tail(
                 &home,
                 parse_cli_cursor(&since),
@@ -582,11 +584,24 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+// Ambient permission/runtime credentials select a purpose-specific helper, not
+// owner authority. Presence (including empty/non-UTF8 values) fails before any
+// owner home/config/token/socket access. Memory-only routes remain below.
+fn reject_helper_credentials() -> Result<()> {
+    anyhow::ensure!(
+        std::env::var_os("PULT_ASK_KEY").is_none()
+            && std::env::var_os("PULT_RUNTIME_KEY").is_none(),
+        "permission/runtime credentials cannot use owner CLI commands"
+    );
+    Ok(())
+}
+
 async fn cli_request(
     home: &std::path::Path,
     method: &str,
     params: serde_json::Value,
 ) -> Result<Box<serde_json::value::RawValue>> {
+    reject_helper_credentials()?;
     let read_key = std::env::var_os("PULT_MEMORY_KEY");
     let turn_key = std::env::var_os("PULT_MEMORY_TURN_KEY");
     anyhow::ensure!(
@@ -612,6 +627,7 @@ async fn cli_request(
 // Even a rejected or misbehaving scoped endpoint cannot make the CLI inspect
 // owner display configuration when formatting a response.
 fn cli_language(home: &std::path::Path) -> Result<&'static str> {
+    reject_helper_credentials()?;
     if std::env::var_os("PULT_MEMORY_KEY").is_some()
         || std::env::var_os("PULT_MEMORY_TURN_KEY").is_some()
     {
