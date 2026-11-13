@@ -455,16 +455,88 @@ async fn ack_only_and_event_only_stay_starting_until_the_other_native_fact() {
         assert!(worker.is_retired());
     }
 }
+// Failure-only, host-owned diagnostics. Never dump native frames, arbitrary
+// errors, arguments, paths or private helper configuration. A cleanup retry
+// below cannot turn the original watchdog into a passing test.
+async fn cold_resume_watchdog(
+    rig: &Rig,
+    worker: &Arc<ZcodeAppServerWorker>,
+    handle: &Handle,
+    phase: &'static str,
+) -> ! {
+    use pult_core::turn_driver::{Progress, Worker};
+    let progress = match handle.progress() {
+        Progress::Starting => "starting",
+        Progress::Running(_) => "running",
+        Progress::Closing => "closing",
+        Progress::Quarantined(_) => "quarantined",
+        Progress::Finished(_) => "finished",
+    };
+    // A held Registry can itself explain the stall. Do not wait for it while
+    // trying to report a watchdog, and do not use this observation as authority.
+    let marker = rig.registry.try_lock().ok().and_then(|registry| {
+        registry
+            .find("chat")
+            .map(|record| record.get("zcodePendingInput").is_some())
+    });
+    let method = std::fs::read_to_string(rig.home.join("proof.jsonl"))
+        .ok()
+        .and_then(|proof| {
+            proof
+                .lines()
+                .filter_map(|line| {
+                    let value: Value = serde_json::from_str(line).ok()?;
+                    match value["method"].as_str()? {
+                        "session/resume" => Some("resume"),
+                        "session/setMode" => Some("set-mode"),
+                        "session/subscribe" => Some("subscribe"),
+                        "session/send" => Some("send"),
+                        "session/close" => Some("close"),
+                        _ => None,
+                    }
+                })
+                .next_back()
+        })
+        .unwrap_or("none-or-unreadable");
+    let native_alive = std::fs::read_to_string(rig.home.join("provider.pid"))
+        .ok()
+        .and_then(|pid| pid.parse::<u32>().ok())
+        .map(alive);
+    eprintln!(
+        "cold-resume watchdog: phase={phase} progress={progress} marker={marker:?} retired={} last-method={method} close-observed={} resource-drains={} native-alive={native_alive:?}",
+        worker.is_retired(),
+        rig.home.join("closed.entered").exists(),
+        rig.resources.drains.load(Ordering::Relaxed),
+    );
+    // Evidence is captured first. Afterwards ask the actual owned Worker to
+    // close, retaining its process/marker/IO joins; no direct PID kill or reset.
+    let cleanup = tokio::time::timeout(
+        Duration::from_secs(30),
+        worker.close(handle.ticket().clone()),
+    )
+    .await;
+    eprintln!(
+        "cold-resume watchdog cleanup: returned={} ok={}",
+        cleanup.is_ok(),
+        matches!(cleanup, Ok(Ok(()))),
+    );
+    panic!("cold-resume {phase} watchdog");
+}
 #[tokio::test]
 async fn cold_resume_applies_captured_mode_and_never_creates_a_new_session() {
     let f = Rig::new(true);
     let worker = f.worker("ack-first");
-    let mut h = f.start(worker);
-    bounded(h.accepted()).await.unwrap();
-    assert_eq!(
-        bounded(h.wait()).await.unwrap().turn.outcome,
-        Outcome::Success
-    );
+    let mut h = f.start(worker.clone());
+    let accepted = match tokio::time::timeout(Duration::from_secs(30), h.accepted()).await {
+        Ok(result) => result,
+        Err(_) => cold_resume_watchdog(&f, &worker, &h, "accepted").await,
+    };
+    accepted.unwrap();
+    let terminal = match tokio::time::timeout(Duration::from_secs(30), h.wait()).await {
+        Ok(result) => result,
+        Err(_) => cold_resume_watchdog(&f, &worker, &h, "completion").await,
+    };
+    assert_eq!(terminal.unwrap().turn.outcome, Outcome::Success);
     let proof = f.proof();
     let methods: Vec<_> = proof.iter().filter_map(|v| v["method"].as_str()).collect();
     assert_eq!(
