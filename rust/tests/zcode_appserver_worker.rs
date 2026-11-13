@@ -693,6 +693,86 @@ async fn cancelled_resources_preparation_and_catalog_are_owned_until_release() {
         assert!(w.is_retired());
     }
 }
+// Only entered after an original30s watchdog has already failed. No native
+// frames, errors, arguments, paths, input or private helper config are printed.
+async fn appserver_drain_watchdog(
+    rig: &Rig,
+    worker: &Arc<ZcodeAppServerWorker>,
+    ticket: &Ticket,
+    progress: &tokio::sync::watch::Receiver<pult_core::turn_driver::Progress>,
+    block: &Block,
+    phase: &'static str,
+    drain_released: bool,
+) -> ! {
+    use pult_core::turn_driver::{Progress, Worker};
+    let progress = match progress.borrow().clone() {
+        Progress::Starting => "starting",
+        Progress::Running(_) => "running",
+        Progress::Closing => "closing",
+        Progress::Quarantined(_) => "quarantined",
+        Progress::Finished(_) => "finished",
+    };
+    let marker = rig.registry.try_lock().ok().and_then(|registry| {
+        registry
+            .find("chat")
+            .map(|record| record.get("zcodePendingInput").is_some())
+    });
+    let alive_file = |name: &str| {
+        std::fs::read_to_string(rig.home.join(name))
+            .ok()
+            .and_then(|pid| pid.parse::<u32>().ok())
+            .map(alive)
+    };
+    let last_method = std::fs::read_to_string(rig.home.join("proof.jsonl"))
+        .ok()
+        .and_then(|proof| {
+            proof
+                .lines()
+                .filter_map(|line| {
+                    let row: Value = serde_json::from_str(line).ok()?;
+                    match row["method"].as_str()? {
+                        "session/create" => Some("create"),
+                        "session/resume" => Some("resume"),
+                        "session/setMode" => Some("set-mode"),
+                        "session/subscribe" => Some("subscribe"),
+                        "session/send" => Some("send"),
+                        "session/close" => Some("close"),
+                        _ => None,
+                    }
+                })
+                .next_back()
+        })
+        .unwrap_or("none-or-unreadable");
+    let revoked_count = rig
+        .resources
+        .revoked
+        .try_lock()
+        .ok()
+        .map(|entries| entries.len());
+    eprintln!(
+        "appserver-drain watchdog: phase={phase} progress={progress} active={} marker={marker:?} retired={} last-method={last_method} close-observed={} resource-drains={} revoked-count={revoked_count:?} native-alive={:?} descendant-alive={:?} drain-released={drain_released} release-permits={}",
+        rig.driver.active_count(),
+        worker.is_retired(),
+        rig.home.join("closed.entered").exists(),
+        rig.resources.drains.load(Ordering::Relaxed),
+        alive_file("provider.pid"),
+        alive_file("descendant.pid"),
+        block.release.available_permits(),
+    );
+    // Capture precedes this failure-only owned cleanup. Unblock only this test's
+    // resource waiter if its normal release was never reached. No direct PID
+    // kill, native replay or diagnostic retry can turn this failed test to PASS.
+    if !drain_released {
+        block.release();
+    }
+    let cleanup = tokio::time::timeout(Duration::from_secs(5), worker.close(ticket.clone())).await;
+    eprintln!(
+        "appserver-drain watchdog cleanup: returned={} known={}",
+        cleanup.is_ok(),
+        matches!(cleanup, Ok(Ok(())))
+    );
+    panic!("appserver-drain {phase} watchdog");
+}
 #[tokio::test]
 async fn close_ack_does_not_release_before_resource_drain_and_descendants_join() {
     let f = Rig::new(false);
@@ -700,8 +780,30 @@ async fn close_ack_does_not_release_before_resource_drain_and_descendants_join()
     *f.resources.drain_block.lock().unwrap() = Some(block.clone());
     let w = f.worker("descendant");
     let mut h = f.start(w.clone());
-    bounded(h.accepted()).await.unwrap();
-    bounded(block.entered.notified()).await;
+    let progress = h.subscribe_progress();
+    let ticket = h.ticket().clone();
+    let accepted = match tokio::time::timeout(Duration::from_secs(30), h.accepted()).await {
+        Ok(result) => result,
+        Err(_) => {
+            appserver_drain_watchdog(&f, &w, &ticket, &progress, &block, "accepted", false).await
+        }
+    };
+    accepted.unwrap();
+    if tokio::time::timeout(Duration::from_secs(30), block.entered.notified())
+        .await
+        .is_err()
+    {
+        appserver_drain_watchdog(
+            &f,
+            &w,
+            &ticket,
+            &progress,
+            &block,
+            "resource-drain-entry",
+            false,
+        )
+        .await;
+    }
     assert!(f.home.join("closed.entered").exists());
     assert_eq!(f.driver.active_count(), 1);
     assert!(!w.is_retired());
@@ -713,10 +815,22 @@ async fn close_ack_does_not_release_before_resource_drain_and_descendants_join()
         .unwrap();
     assert!(!alive(pid));
     block.release();
-    assert_eq!(
-        bounded(waiting).await.unwrap().turn.outcome,
-        Outcome::Success
-    );
+    let terminal = match tokio::time::timeout(Duration::from_secs(30), waiting).await {
+        Ok(result) => result,
+        Err(_) => {
+            appserver_drain_watchdog(
+                &f,
+                &w,
+                &ticket,
+                &progress,
+                &block,
+                "completion-after-drain-release",
+                true,
+            )
+            .await
+        }
+    };
+    assert_eq!(terminal.unwrap().turn.outcome, Outcome::Success);
     assert!(w.is_retired());
 }
 struct BlockingGate {
@@ -1483,5 +1597,48 @@ async fn before_native_started_unknown_holder_exit_reaches_quarantine_without_st
     assert!(
         quarantined_without_cancel,
         "unknown pre-start cleanup must quarantine without waiting for the start deadline"
+    );
+}
+
+#[tokio::test]
+async fn unknown_cleanup_before_resources_preserves_quarantine_without_drain_entry() {
+    use pult_core::turn_driver::{DriverError, Progress};
+    let f = Rig::new(false);
+    let block = Block::new();
+    *f.resources.drain_block.lock().unwrap() = Some(block.clone());
+    let worker = forced_unknown_worker(&f, "ack-first");
+    let mut handle = f.start(worker.clone());
+    let accepted = bounded(handle.accepted()).await.unwrap();
+    assert!(accepted.user_event_id > 0);
+    assert!(accepted.turn_id.starts_with("pult-turn-"));
+    wait_file(&f.home, "forced-holder-proof.json").await;
+    let joined: Value =
+        serde_json::from_slice(&std::fs::read(f.home.join("forced-holder-proof.json")).unwrap())
+            .unwrap();
+    assert_eq!(joined["real_holder_exit_zero"], true);
+    assert_eq!(joined["native_close_observed"], true);
+    assert!(matches!(
+        bounded(handle.wait()).await,
+        Err(DriverError::CleanupUnconfirmed)
+    ));
+    assert!(matches!(handle.progress(), Progress::Quarantined(_)));
+    // The actual owned outer125 is rejected BEFORE resources.drain. A waiter
+    // for this notification alone would remain pending even after close ACK.
+    assert_eq!(f.resources.drains.load(Ordering::Relaxed), 0);
+    let mut entered = Box::pin(block.entered.notified());
+    assert_pending(entered.as_mut());
+    assert_eq!(f.driver.active_count(), 1);
+    assert!(!worker.is_retired());
+    let pid: u32 = std::fs::read_to_string(f.home.join("provider.pid"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(!alive(pid));
+    assert_eq!(
+        f.proof()
+            .iter()
+            .filter(|row| row["method"] == "session/send")
+            .count(),
+        1
     );
 }
