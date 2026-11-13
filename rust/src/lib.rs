@@ -70,6 +70,7 @@ pub mod zcode_appserver_worker;
 pub mod zcode_events;
 pub mod zcode_host_services;
 pub mod zcode_launch;
+mod zcode_memory_resources;
 pub mod zcode_runtime;
 pub mod zcode_worker;
 
