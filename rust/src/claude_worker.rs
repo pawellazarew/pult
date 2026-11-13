@@ -1104,8 +1104,24 @@ mod vault_tests {
     use super::*;
     use crate::{turn_coordinator::Coordinator, turn_snapshot::TurnSettings};
     use std::{collections::BTreeMap, sync::atomic::AtomicUsize};
-    async fn panic_retains_process(panic_on: usize) {
+    fn diagnostic_hook() {
         crate::panic_guard::install();
+        static HOOK: std::sync::Once = std::sync::Once::new();
+        HOOK.call_once(|| {
+            std::panic::set_hook(Box::new(|info| {
+                if let Some(location) = info.location() {
+                    eprintln!(
+                        "[fixture-lifecycle] panic {}:{}",
+                        location.file(),
+                        location.line()
+                    );
+                }
+            }))
+        });
+    }
+    async fn panic_retains_process(panic_on: usize) {
+        diagnostic_hook();
+        eprintln!("[fixture-lifecycle] vault poll={panic_on} phase=start");
         let temp = tempfile::tempdir().unwrap();
         // Cargo integration-test targets build this real supervisor. Running
         // this module alone also requires `cargo build --bin pult-worker-holder`.
@@ -1125,10 +1141,14 @@ mod vault_tests {
             args:vec!["-u".into(),"-c".into(),"import json,os,sys;print(json.dumps({'pid':os.getpid()}),flush=True);sys.stdin.read()".into()],
             cwd:temp.path().into(),env:BTreeMap::from([("PATH".into(),"/usr/bin:/bin".into()),("HOME".into(),temp.path().as_os_str().to_owned())]),
         },Framing::claude()).await.unwrap_or_else(|_|panic!("synthetic process startup failed")));
+        eprintln!("[fixture-lifecycle] vault poll={panic_on} phase=spawned");
         let holder = process.as_ref().unwrap().pid();
         let child = process.as_mut().unwrap().recv().await.unwrap().unwrap()["pid"]
             .as_i64()
             .unwrap() as i32;
+        eprintln!(
+            "[fixture-lifecycle] vault poll={panic_on} phase=child-received holder={holder:?} child={child}"
+        );
         let signal = process.as_ref().unwrap().stop_signal();
         let snapshot = TurnSnapshot {
             key: SessionKey {
@@ -1167,6 +1187,10 @@ mod vault_tests {
             }),
         )
         .await;
+        eprintln!(
+            "[fixture-lifecycle] vault poll={panic_on} phase=checked-send error={}",
+            result.is_err()
+        );
         assert!(result.is_err());
         assert_eq!(polls.load(Ordering::Acquire), panic_on);
         assert_eq!(job.dispatch.load(Ordering::Acquire), 1);
@@ -1176,7 +1200,14 @@ mod vault_tests {
             nix::sys::signal::kill(nix::unistd::Pid::from_raw(child), None).is_ok(),
             "the proof must retain a still-live provider until explicit stop"
         );
-        retained.stop().await.unwrap();
+        eprintln!("[fixture-lifecycle] vault poll={panic_on} phase=stop-before");
+        let stopped = retained.stop().await;
+        eprintln!(
+            "[fixture-lifecycle] vault poll={panic_on} phase=stop-after ok={} child-present={}",
+            stopped.is_ok(),
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(child), None).is_ok()
+        );
+        stopped.unwrap();
         assert!(nix::sys::signal::kill(nix::unistd::Pid::from_raw(child), None).is_err());
         assert!(!signal.request_stop());
     }

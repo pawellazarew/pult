@@ -857,6 +857,175 @@ export const RPC_CATALOG = {
       }
     },
     {
+      "name": "agent.recovery.confirm",
+      "node": "extension",
+      "rust": "implemented",
+      "access": "owner",
+      "testOnly": false,
+      "description": "Owner-only ZCode recovery acknowledgement; records reset metadata and leaves the queue paused without initializing a provider or sending input. The root host must authorize the exact recovery action; acknowledgement JSON alone grants no authority.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "recoveryId": {
+            "type": "string"
+          },
+          "acknowledgePossibleExecution": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "recoveryId",
+          "acknowledgePossibleExecution"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "zcode"
+            ]
+          },
+          "reset": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "mayHaveExecuted": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "requestedEventId": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "committedEventId": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "queuePaused": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "startsNewConversation": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          }
+        },
+        "required": [
+          "provider",
+          "reset",
+          "mayHaveExecuted",
+          "requestedEventId",
+          "committedEventId",
+          "queuePaused",
+          "startsNewConversation"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "agent.recovery.get",
+      "node": "extension",
+      "rust": "implemented",
+      "access": "owner",
+      "testOnly": false,
+      "description": "Owner-only ZCode recovery metadata; reads available recovery state without initializing a provider or sending input.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "zcode"
+            ]
+          },
+          "recovery": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "recoveryId": {
+                "type": "string"
+              },
+              "sessionId": {
+                "type": "string"
+              },
+              "createdAt": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "available",
+                  "recovering",
+                  "unconfirmed"
+                ]
+              },
+              "mayHaveExecuted": {
+                "type": "boolean",
+                "enum": [
+                  true
+                ]
+              }
+            },
+            "required": [
+              "recoveryId",
+              "sessionId",
+              "createdAt",
+              "state",
+              "mayHaveExecuted"
+            ],
+            "additionalProperties": false
+          },
+          "deliveryUnknown": {
+            "type": "boolean"
+          },
+          "executionUnavailable": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "provider",
+          "recovery",
+          "deliveryUnknown",
+          "executionUnavailable"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "agent.rename",
       "node": "implemented",
       "rust": "implemented",
@@ -3867,11 +4036,13 @@ export const RPC_CATALOG = {
 } as const
 
 export type RpcMethodName = typeof RPC_CATALOG.methods[number]['name']
-export type RustFoundationMethod = "agent.archive" | "agent.read" | "agent.rename" | "agent.seen" | "agent.tree" | "daemon.status" | "daemon.stop" | "events.emit" | "events.get" | "events.history" | "events.snapshot" | "events.subscribe" | "events.tail" | "events.unsubscribe" | "memory.add" | "memory.catalog" | "memory.configure" | "memory.context.bind" | "memory.context.issue" | "memory.context.revoke" | "memory.context.status" | "memory.forget" | "memory.get" | "memory.history" | "memory.list" | "memory.search" | "memory.update" | "protocol.catalog"
+export type RustFoundationMethod = "agent.archive" | "agent.read" | "agent.recovery.confirm" | "agent.recovery.get" | "agent.rename" | "agent.seen" | "agent.tree" | "daemon.status" | "daemon.stop" | "events.emit" | "events.get" | "events.history" | "events.snapshot" | "events.subscribe" | "events.tail" | "events.unsubscribe" | "memory.add" | "memory.catalog" | "memory.configure" | "memory.context.bind" | "memory.context.issue" | "memory.context.revoke" | "memory.context.status" | "memory.forget" | "memory.get" | "memory.history" | "memory.list" | "memory.search" | "memory.update" | "protocol.catalog"
 
 export interface RustFoundationParams {
   "agent.archive": { "name": string; "archived": boolean; [key: string]: unknown }
   "agent.read": { "name": string; "since"?: number; "format"?: "text" | "json" }
+  "agent.recovery.confirm": { "name": string; "recoveryId": string; "acknowledgePossibleExecution": true }
+  "agent.recovery.get": { "name": string }
   "agent.rename": { "name": string; "title": string; [key: string]: unknown }
   "agent.seen": { "name": string; "unread"?: boolean; "upTo"?: number; [key: string]: unknown }
   "agent.tree": { "name": string }
@@ -3903,6 +4074,8 @@ export interface RustFoundationParams {
 export interface RustFoundationResults {
   "agent.archive": { "name": string; "provider": string; "cwd": string; "mode": string; "createdAt": string; "lastStatus": string; "lastEventId": number; [key: string]: unknown }
   "agent.read": { "cursor": number; "text"?: string; "events"?: Array<{ "id": number; "ts": string; "sessionId": string; "parentId"?: string; "provider": string; "kind": string; "data": { [key: string]: unknown }; [key: string]: unknown }>; "worktree"?: { "path": string; "branch": string; "repo": string }; "truncated"?: boolean }
+  "agent.recovery.confirm": { "provider": "zcode"; "reset": true; "mayHaveExecuted": true; "requestedEventId": number; "committedEventId": number; "queuePaused": true; "startsNewConversation": true }
+  "agent.recovery.get": { "provider": "zcode"; "recovery": { "recoveryId": string; "sessionId": string; "createdAt": string; "state": "available" | "recovering" | "unconfirmed"; "mayHaveExecuted": true } | null; "deliveryUnknown": boolean; "executionUnavailable": boolean }
   "agent.rename": { "name": string; "provider": string; "cwd": string; "mode": string; "createdAt": string; "lastStatus": string; "lastEventId": number; [key: string]: unknown }
   "agent.seen": { "name": string; "provider": string; "cwd": string; "mode": string; "createdAt": string; "lastStatus": string; "lastEventId": number; [key: string]: unknown }
   "agent.tree": { "roots": Array<{ [key: string]: unknown }>; "orphans": number; "text": string }

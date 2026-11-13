@@ -32,6 +32,15 @@ fn install_test_hook() {
         }))
     });
 }
+fn diagnostic_pid(f: &Fixture, phase: &'static str) {
+    let pid = std::fs::read_to_string(f.home.join("provider.pid"))
+        .ok()
+        .and_then(|value| value.trim().parse::<i32>().ok())
+        .filter(|pid| *pid > 0);
+    let present = pid
+        .is_some_and(|pid| nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok());
+    eprintln!("[fixture-lifecycle] owner phase={phase} provider-pid={pid:?} present={present}");
+}
 const WAIT: Duration = Duration::from_secs(20);
 macro_rules! case {($name:ident,$body:block)=>{#[tokio::test]async fn $name(){install_test_hook();tokio::time::timeout(WAIT,async $body).await.expect("Claude owner watchdog");}};}
 const PARENT: &str = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
@@ -360,6 +369,7 @@ case!(
 case!(
     cancelled_init_retains_diagnostic_identity_without_restoring_old_settings,
     {
+        eprintln!("[fixture-lifecycle] owner-cancel-init phase=start");
         let f = Fixture::new("ask", |_| {});
         let owner = f.owner(Arc::new(|_, _| true));
         let mut services = owner.services(f.sink.clone(), None);
@@ -375,7 +385,10 @@ case!(
             .driver
             .start(owner.snapshot(&f.key).unwrap(), "prompt".into(), worker)
             .unwrap();
+        eprintln!("[fixture-lifecycle] owner-cancel-init phase=init-entered-before");
         hold.entered.notified().await;
+        eprintln!("[fixture-lifecycle] owner-cancel-init phase=init-entered-after");
+        diagnostic_pid(&f, "owner-cancel-init-init-entered-after");
         assert!(f.driver.cancel(turn.ticket()));
         f.registry
             .lock()
@@ -385,11 +398,17 @@ case!(
                 Ok(())
             })
             .unwrap();
+        eprintln!("[fixture-lifecycle] owner-cancel-init phase=release-init-before");
         drop(unblock);
+        eprintln!("[fixture-lifecycle] owner-cancel-init phase=release-init-after");
+        eprintln!("[fixture-lifecycle] owner-cancel-init phase=turn-wait-before");
+        diagnostic_pid(&f, "owner-cancel-init-turn-wait-before");
         assert_eq!(
             turn.wait().await.unwrap().turn.outcome,
             Outcome::Interrupted
         );
+        eprintln!("[fixture-lifecycle] owner-cancel-init phase=turn-wait-after");
+        diagnostic_pid(&f, "owner-cancel-init-turn-wait-after");
         assert!(f.record().get("providerSessionId").is_some());
         assert!(f.record().get("claudeReservedSessionId").is_none());
         assert_eq!(f.record().scalar("title").as_deref(), Some("after-cancel"));
@@ -776,6 +795,7 @@ case!(
 case!(
     current_read_only_or_ask_rejects_old_full_init_even_when_global_consent_remains,
     {
+        eprintln!("[fixture-lifecycle] owner-narrow-init phase=start");
         for narrowed in ["read-only", "ask"] {
             let f = Fixture::new("full", |_| {});
             f.consent
@@ -795,7 +815,10 @@ case!(
             let unblock = Release(hold.release.clone());
             let worker = ClaudeWorker::new(f.config("bypass"), services).unwrap();
             let mut turn = f.driver.start(snapshot, "prompt".into(), worker).unwrap();
+            eprintln!("[fixture-lifecycle] owner-narrow-init phase=init-entered-before");
             hold.entered.notified().await;
+            eprintln!("[fixture-lifecycle] owner-narrow-init phase=init-entered-after");
+            diagnostic_pid(&f, "owner-narrow-init-init-entered-after");
             f.registry
                 .lock()
                 .unwrap()
@@ -804,13 +827,21 @@ case!(
                     Ok(())
                 })
                 .unwrap();
+            eprintln!("[fixture-lifecycle] owner-narrow-init phase=release-init-before");
             drop(unblock);
+            eprintln!("[fixture-lifecycle] owner-narrow-init phase=release-init-after");
+            eprintln!("[fixture-lifecycle] owner-narrow-init phase=accepted-before");
             assert!(turn.accepted().await.is_err());
+            eprintln!("[fixture-lifecycle] owner-narrow-init phase=accepted-after");
+            eprintln!("[fixture-lifecycle] owner-narrow-init phase=turn-wait-before");
+            diagnostic_pid(&f, "owner-narrow-init-turn-wait-before");
             assert!(matches!(
                 turn.wait().await.unwrap().turn.outcome,
                 Outcome::Failure { .. }
             ));
             assert_eq!(f.record().scalar("approval").as_deref(), Some(narrowed));
+            eprintln!("[fixture-lifecycle] owner-narrow-init phase=turn-wait-after");
+            diagnostic_pid(&f, "owner-narrow-init-turn-wait-after");
             assert!(f.record().get("providerSessionId").is_some());
             assert!(f.record().get("claudeReservedSessionId").is_none());
             assert!(!f.driver.storage_failed());

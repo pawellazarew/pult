@@ -854,6 +854,175 @@
       }
     },
     {
+      "name": "agent.recovery.confirm",
+      "node": "extension",
+      "rust": "implemented",
+      "access": "owner",
+      "testOnly": false,
+      "description": "Owner-only ZCode recovery acknowledgement; records reset metadata and leaves the queue paused without initializing a provider or sending input. The root host must authorize the exact recovery action; acknowledgement JSON alone grants no authority.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "recoveryId": {
+            "type": "string"
+          },
+          "acknowledgePossibleExecution": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "recoveryId",
+          "acknowledgePossibleExecution"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "zcode"
+            ]
+          },
+          "reset": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "mayHaveExecuted": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "requestedEventId": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "committedEventId": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "queuePaused": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "startsNewConversation": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          }
+        },
+        "required": [
+          "provider",
+          "reset",
+          "mayHaveExecuted",
+          "requestedEventId",
+          "committedEventId",
+          "queuePaused",
+          "startsNewConversation"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "agent.recovery.get",
+      "node": "extension",
+      "rust": "implemented",
+      "access": "owner",
+      "testOnly": false,
+      "description": "Owner-only ZCode recovery metadata; reads available recovery state without initializing a provider or sending input.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "zcode"
+            ]
+          },
+          "recovery": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "recoveryId": {
+                "type": "string"
+              },
+              "sessionId": {
+                "type": "string"
+              },
+              "createdAt": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "available",
+                  "recovering",
+                  "unconfirmed"
+                ]
+              },
+              "mayHaveExecuted": {
+                "type": "boolean",
+                "enum": [
+                  true
+                ]
+              }
+            },
+            "required": [
+              "recoveryId",
+              "sessionId",
+              "createdAt",
+              "state",
+              "mayHaveExecuted"
+            ],
+            "additionalProperties": false
+          },
+          "deliveryUnknown": {
+            "type": "boolean"
+          },
+          "executionUnavailable": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "provider",
+          "recovery",
+          "deliveryUnknown",
+          "executionUnavailable"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "agent.rename",
       "node": "implemented",
       "rust": "implemented",
