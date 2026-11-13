@@ -224,6 +224,8 @@ struct Control {
     cancel: watch::Sender<bool>,
     progress: watch::Sender<Progress>,
     spawn_sealed: std::sync::atomic::AtomicBool,
+    spawn_brand: std::sync::OnceLock<Arc<()>>,
+    input_sealed: std::sync::atomic::AtomicBool,
 }
 struct State {
     core: Coordinator,
@@ -280,6 +282,7 @@ impl MemoryAction {
 /// new PID and must stop/join it; it is never proof that nothing was spawned.
 /// This capability is deliberately neither Debug nor Serialize nor Clone.
 pub struct SpawnAction {
+    brand: Arc<()>,
     ticket: Ticket,
     deadline: std::time::Instant,
     state: std::sync::atomic::AtomicU8,
@@ -287,6 +290,7 @@ pub struct SpawnAction {
 impl SpawnAction {
     pub fn new(ticket: Ticket, deadline: std::time::Instant) -> Self {
         Self {
+            brand: Arc::new(()),
             ticket,
             deadline,
             state: std::sync::atomic::AtomicU8::new(0),
@@ -314,6 +318,58 @@ impl SpawnAction {
     }
     fn seal(&self) -> bool {
         if std::time::Instant::now() >= self.deadline {
+            return false;
+        }
+        self.state
+            .compare_exchange(
+                0,
+                1,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    }
+}
+
+/// Trusted-host admission for the first native input after an owned process
+/// spawn. Construction inherits the exact process action's ticket and absolute
+/// deadline; it does not enqueue, poll, write or acknowledge native input.
+/// The host must finish fresh policy checks before Driver::seal_input and seal
+/// before the first possible enqueue/write. This is not provider acceptance or
+/// a process/IO cleanup receipt. Deliberately not Debug, Serialize or Clone.
+pub struct InputAction {
+    process_spawn: Arc<SpawnAction>,
+    state: std::sync::atomic::AtomicU8,
+}
+impl InputAction {
+    pub fn new(process_spawn: Arc<SpawnAction>) -> Self {
+        Self {
+            process_spawn,
+            state: std::sync::atomic::AtomicU8::new(0),
+        }
+    }
+    /// Wins only before seal; a later cancel cannot erase possible delivery.
+    pub fn cancel(&self) -> bool {
+        self.state
+            .compare_exchange(
+                0,
+                2,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    }
+    pub fn sealed(&self) -> bool {
+        self.state.load(std::sync::atomic::Ordering::Acquire) == 1
+    }
+    /// No successful seal for this action, after local cancellation. This does
+    /// not exclude another action for the Ticket, native startup execution,
+    /// process cleanup or admitted external IO.
+    pub fn never_enqueued(&self) -> bool {
+        self.state.load(std::sync::atomic::Ordering::Acquire) == 2
+    }
+    fn seal(&self) -> bool {
+        if std::time::Instant::now() >= self.process_spawn.deadline {
             return false;
         }
         self.state
@@ -439,6 +495,8 @@ impl Driver {
             cancel,
             progress,
             spawn_sealed: std::sync::atomic::AtomicBool::new(false),
+            spawn_brand: std::sync::OnceLock::new(),
+            input_sealed: std::sync::atomic::AtomicBool::new(false),
         });
         state.jobs.insert(ticket.clone(), control.clone());
         drop(state);
@@ -588,7 +646,60 @@ impl Driver {
             return false;
         }
         control
+            .spawn_brand
+            .set(action.brand.clone())
+            .expect("spawn brand is assigned only after the unique spawn seal");
+        control
             .spawn_sealed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        true
+    }
+    /// Bounded linearization of the first native input against Driver
+    /// cancellation, fault and shutdown. The exact process action must already
+    /// be sealed by this Control. A second action cannot grant another input.
+    /// Caller retains its fresh source-policy admission through the first
+    /// enqueue/write; no callback, IO, native ACK or phase transition occurs here.
+    /// After true, cancellation cannot prove that input was never delivered.
+    pub fn seal_input(
+        &self,
+        ticket: &Ticket,
+        expected: &TurnSnapshot,
+        action: &InputAction,
+    ) -> bool {
+        let state = self.inner.state.lock().expect("driver state mutex");
+        if state.closed || state.storage_failed || &action.process_spawn.ticket != ticket {
+            return false;
+        }
+        let Some(active) = state.core.active(ticket) else {
+            return false;
+        };
+        if active.phase() != crate::turn_coordinator::Phase::Dispatching
+            || active.cancel_requested()
+            || active.snapshot() != expected
+        {
+            return false;
+        }
+        let Some(control) = state.jobs.get(ticket) else {
+            return false;
+        };
+        if *control.cancel.borrow()
+            || !control
+                .spawn_sealed
+                .load(std::sync::atomic::Ordering::Relaxed)
+            || !action.process_spawn.sealed()
+            || !control
+                .spawn_brand
+                .get()
+                .is_some_and(|brand| Arc::ptr_eq(brand, &action.process_spawn.brand))
+            || control
+                .input_sealed
+                .load(std::sync::atomic::Ordering::Relaxed)
+            || !action.seal()
+        {
+            return false;
+        }
+        control
+            .input_sealed
             .store(true, std::sync::atomic::Ordering::Relaxed);
         true
     }
