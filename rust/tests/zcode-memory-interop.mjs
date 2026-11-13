@@ -41,7 +41,7 @@ async function until(predicate, label, timeoutMs = 10000) {
 async function prompt(name, instruction) { return request('agent.prompt', { name, text: JSON.stringify(instruction) }, { timeoutMs: 35000 }) }
 async function result(name, run) {
   await until(() => evidence().some(value => value.kind === 'result' && value.run === run), `${run} missing native result`)
-  await until(async () => (await row(name)).status === 'done', `${run} not done`)
+  await until(async () => (await row(name)).status === 'idle', `${run} not idle`)
   const outcome = evidence().find(value => value.kind === 'result' && value.run === run)
   const helper = evidence().find(value => value.kind === 'mcp' && value.pid === outcome.pid)
   await until(() => !alive(outcome.pid) && !alive(helper.mcpPid), `${run} process/helper cleanup pending`)
@@ -60,7 +60,7 @@ async function crossRead(name, provider, run, value) {
   const file = provider === 'claude' ? 'claude-memory.jsonl' : 'memory-fixture.jsonl'
   let outcome
   await until(() => { outcome = readCompleteJsonl(join(native, file)).find(item => item.kind === 'result' && item.run === run); return !!outcome }, `${run} no cross-provider result`)
-  await until(async () => (await row(name)).status === 'done', `${run} cross-provider cleanup`)
+  await until(async () => (await row(name)).status === 'idle', `${run} cross-provider cleanup`)
   const records = readCompleteJsonl(join(native, file))
   const helpers = records.filter(item => item.pid === outcome.pid && item.mcpPid)
   assert.ok(helpers.length, `${run} missing actual helper PID evidence`)
