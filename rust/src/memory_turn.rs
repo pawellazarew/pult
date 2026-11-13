@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use std::{
     path::PathBuf,
     sync::{
-        Arc, Mutex, OnceLock, Weak,
+        Arc, Mutex, MutexGuard, OnceLock, Weak,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
@@ -155,6 +155,55 @@ impl Lease {
     }
 }
 
+/// Exact prepared Control identity, not permission to send input. A strong State
+/// pin keeps its registration alive while a future owned adapter prepares work.
+/// Never constructed from JSON, a memory key, or an independently cloned record.
+#[cfg_attr(not(test), allow(dead_code))] // Future native input resource adapter, not active yet.
+pub(crate) struct InputScope {
+    state: Arc<State>,
+    control: Arc<Control>,
+}
+
+/// Borrowed !Send short-gate pin, held only through the synchronous input handoff.
+/// Field order releases inner admission first; Drop does no IO or callbacks.
+#[cfg_attr(not(test), allow(dead_code))] // Future native input resource adapter, not active yet.
+#[must_use = "hold the input scope permit through the actual input handoff"]
+pub(crate) struct InputScopePermit<'a> {
+    _lease: session_memory::MemoryLeaseAdmission<'a>,
+    _control: MutexGuard<'a, ()>,
+    _execution: MutexGuard<'a, ()>,
+}
+#[cfg_attr(not(test), allow(dead_code))] // Future native input resource adapter, not active yet.
+impl InputScope {
+    /// Trusted caller precondition: `record` is the already-current record from
+    /// the same State's actual checked Registry/Owner frontier. Keep that guard
+    /// (and caller Consent -> Registry -> RuntimeState admission) through this
+    /// method and the input handoff. A standalone/cloned Record is not authority.
+    ///
+    /// No Registry, filesystem, DB or session-context mutex acquisition here.
+    /// Lock order: execution admission -> Control gate -> lease gate -> Driver.
+    /// Native dispatch still requires its own fresh Owner/Driver input seal.
+    pub(crate) fn enter_current<'a>(
+        &'a self,
+        record: &'a crate::registry::Record,
+    ) -> Result<InputScopePermit<'a>, WorkerError> {
+        let execution = self
+            .state
+            .execution_admission
+            .lock()
+            .map_err(|_| worker(denied()))?;
+        let control = self.control.gate.lock().map_err(|_| worker(denied()))?;
+        let lease = self.control.lease.get().ok_or_else(|| worker(denied()))?;
+        let lease = lease.admit().map_err(worker)?;
+        Backend::verify_locked(&self.state, &self.control, record, false).map_err(worker)?;
+        Ok(InputScopePermit {
+            _lease: lease,
+            _control: control,
+            _execution: execution,
+        })
+    }
+}
+
 pub(crate) struct Backend {
     state: Weak<State>,
     myself: Weak<Backend>,
@@ -173,6 +222,16 @@ impl Backend {
             #[cfg(test)]
             hooks: Arc::new(tests::Hooks::default()),
         })
+    }
+    /// Slow full verification belongs in the owned blocking preparation phase,
+    /// before the caller enters its Registry/Runtime input frontier. Capturing
+    /// this identity never authorizes a later input; enter_current must recheck.
+    #[cfg_attr(not(test), allow(dead_code))] // Future native input resource adapter, not active yet.
+    pub(crate) fn input_scope(&self, ticket: &Ticket) -> Result<InputScope, WorkerError> {
+        let state = self.state.upgrade().ok_or_else(|| worker(unavailable()))?;
+        let control = self.control(ticket).ok_or_else(|| worker(denied()))?;
+        Self::verify(&state, &control, false).map_err(worker)?;
+        Ok(InputScope { state, control })
     }
     /// Claude host adapter: snapshot is selected only by the exact trusted Ticket.
     /// The captured effective approval may narrow, never widen Driver authority.

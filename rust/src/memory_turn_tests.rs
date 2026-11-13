@@ -945,3 +945,342 @@ async fn memory_proposal_timeout_holds_owned_job_through_scoped_journal_drain() 
 async fn dropped_memory_caller_cannot_lose_scoped_journal_cleanup() {
     audit_memory_permission_drain(false, true).await;
 }
+
+// Future input resource handoff uses the same State/Backend/registration as reads
+// and proposals, but borrows the already-current Owner Registry record.
+#[tokio::test]
+async fn input_scope_rechecks_current_policy_private_fingerprint_and_archive_after_precheck() {
+    for change in ["off", "private", "temporary", "approval", "archived"] {
+        let mut fixture = Fixture::new().await;
+        let scope = fixture
+            .backend
+            .input_scope(fixture.handle.ticket())
+            .unwrap();
+        let control = fixture.control();
+        {
+            let mut registry = fixture.state.registry.lock().unwrap();
+            registry
+                .update_checked(fixture.handle.ticket().session(), |record| {
+                    match change {
+                        "off" => record.set_raw(
+                            "memory",
+                            serde_json::value::to_raw_value(&json!({"read":false,"write":"off"}))?,
+                        ),
+                        "private" | "temporary" | "archived" => {
+                            record.set_raw(change, serde_json::value::to_raw_value(&true)?)
+                        }
+                        "approval" => record.set_string("approval", "read-only"),
+                        _ => unreachable!(),
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            // No automatic revoke callback: final current-record validation is
+            // the only reason this previously preverified scope must fail.
+            assert!(control.valid.load(Ordering::Acquire));
+            assert!(control.lease.get().unwrap().is_valid());
+            let current = registry.find("chat").unwrap();
+            assert!(
+                scope.enter_current(current).is_err(),
+                "{change} admitted stale input memory"
+            );
+        }
+        fixture.close().await;
+    }
+}
+
+#[tokio::test]
+async fn input_scope_metadata_edits_remain_usable_and_do_not_lock_contexts_or_database() {
+    let mut fixture = Fixture::new().await;
+    let scope = fixture
+        .backend
+        .input_scope(fixture.handle.ticket())
+        .unwrap();
+    {
+        let mut registry = fixture.state.registry.lock().unwrap();
+        registry
+            .update_checked(fixture.handle.ticket().session(), |record| {
+                record.set_string("title", "Concurrent title survives");
+                Ok(())
+            })
+            .unwrap();
+        let state = fixture.state.clone();
+        let (held, observing) = mpsc::channel();
+        let (finished, wait) = mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _contexts = state.session_memory.lock().unwrap();
+            let _database = state.memory.lock().unwrap();
+            held.send(()).unwrap();
+            // Independent watchdog releases the mutexes on a regression,
+            // avoiding an unbounded self-deadlock if enter ever takes them.
+            wait.recv_timeout(Duration::from_secs(5)).is_ok()
+        });
+        observing.recv_timeout(Duration::from_secs(15)).unwrap();
+        let permit = scope.enter_current(registry.find("chat").unwrap()).unwrap();
+        assert!(fixture.state.execution_admission.try_lock().is_err());
+        assert!(scope.control.gate.try_lock().is_err());
+        drop(permit);
+        finished.send(()).unwrap();
+        assert!(
+            holder.join().unwrap(),
+            "input frontier waited on contexts/database"
+        );
+    }
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn input_scope_rejects_foreign_ticket_and_real_drained_replaced_control() {
+    let mut fixture = Fixture::new().await;
+    let mut foreign = Fixture::new().await;
+    assert_ne!(fixture.handle.ticket(), foreign.handle.ticket());
+    assert!(
+        fixture
+            .backend
+            .input_scope(foreign.handle.ticket())
+            .is_err()
+    );
+    let old_scope = fixture
+        .backend
+        .input_scope(fixture.handle.ticket())
+        .unwrap();
+    let old = fixture.control();
+    bounded(fixture.backend.drain(fixture.handle.ticket().clone()))
+        .await
+        .unwrap();
+    assert!(!old.valid.load(Ordering::Acquire));
+    fixture
+        .backend
+        .prepare(
+            fixture.handle.ticket().clone(),
+            old.snapshot.clone(),
+            old.public_turn.clone(),
+        )
+        .await
+        .unwrap();
+    let current_scope = fixture
+        .backend
+        .input_scope(fixture.handle.ticket())
+        .unwrap();
+    assert!(!Arc::ptr_eq(&old, &current_scope.control));
+    {
+        let registry = fixture.state.registry.lock().unwrap();
+        let current = registry.find("chat").unwrap();
+        assert!(old_scope.enter_current(current).is_err());
+        let permit = current_scope.enter_current(current).unwrap();
+        drop(permit);
+    }
+    fixture.close().await;
+    foreign.close().await;
+}
+
+#[tokio::test]
+async fn input_scope_final_checks_direct_cancel_driver_fault_global_fault_and_stop() {
+    for change in ["cancel", "driver", "global", "stop"] {
+        let mut fixture = Fixture::new().await;
+        let scope = fixture
+            .backend
+            .input_scope(fixture.handle.ticket())
+            .unwrap();
+        match change {
+            "cancel" => {
+                fixture
+                    .state
+                    .driver
+                    .get()
+                    .unwrap()
+                    .cancel(fixture.handle.ticket());
+            }
+            "driver" => fixture.state.driver.get().unwrap().report_storage_failure(),
+            "global" => fixture.state.execution_storage_failed(),
+            "stop" => crate::runtime_state::begin_shutdown(&fixture.state),
+            _ => unreachable!(),
+        }
+        {
+            let registry = fixture.state.registry.lock().unwrap();
+            assert!(
+                scope.enter_current(registry.find("chat").unwrap()).is_err(),
+                "{change} admitted input"
+            );
+        }
+        fixture.close().await;
+    }
+}
+
+async fn input_peer(fixture: &Fixture) -> Handle {
+    let snapshot = {
+        let mut registry = fixture.state.registry.lock().unwrap();
+        let mut peer = registry.find("chat").unwrap().clone();
+        peer.set_string("name", "peer");
+        let snapshot = TurnSnapshot {
+            key: SessionKey {
+                name: "peer".into(),
+                created_at: fixture.handle.ticket().session().created_at.clone(),
+            },
+            provider: Provider::Codex,
+            cwd: fixture.control().snapshot.cwd.clone(),
+            settings: fixture.control().snapshot.settings.clone(),
+        };
+        registry.insert(peer).unwrap();
+        snapshot
+    };
+    let mut handle = fixture
+        .state
+        .driver
+        .get()
+        .unwrap()
+        .start(
+            snapshot,
+            "independent neighbor".into(),
+            Arc::new(FixtureWorker(fixture.backend.clone())),
+        )
+        .unwrap();
+    bounded(handle.accepted()).await.unwrap();
+    handle
+}
+
+#[tokio::test]
+async fn input_permit_holds_control_revoke_until_handoff_drop_and_neighbor_survives() {
+    let mut fixture = Fixture::new().await;
+    let peer = input_peer(&fixture).await;
+    let peer_scope = fixture.backend.input_scope(peer.ticket()).unwrap();
+    let scope = fixture
+        .backend
+        .input_scope(fixture.handle.ticket())
+        .unwrap();
+    let control = fixture.control();
+    {
+        let registry = fixture.state.registry.lock().unwrap();
+        let permit = scope.enter_current(registry.find("chat").unwrap()).unwrap();
+        let (entered, observing) = mpsc::channel();
+        let revoking = control.clone();
+        let revoke = std::thread::spawn(move || {
+            // Establish the precise same Control gate really is pinned.
+            assert!(revoking.gate.try_lock().is_err());
+            entered.send(()).unwrap();
+            revoking.revoke();
+        });
+        observing.recv_timeout(Duration::from_secs(15)).unwrap();
+        assert!(control.valid.load(Ordering::Acquire));
+        drop(permit);
+        revoke.join().unwrap();
+        assert!(!control.valid.load(Ordering::Acquire));
+        assert!(scope.enter_current(registry.find("chat").unwrap()).is_err());
+        let peer_permit = peer_scope
+            .enter_current(registry.find("peer").unwrap())
+            .unwrap();
+        drop(peer_permit);
+        assert!(scope.enter_current(registry.find("peer").unwrap()).is_err());
+    }
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn input_permit_holds_context_lease_revoke_without_context_mutex_and_neighbor_survives() {
+    let mut fixture = Fixture::new().await;
+    let peer = input_peer(&fixture).await;
+    let peer_scope = fixture.backend.input_scope(peer.ticket()).unwrap();
+    let scope = fixture
+        .backend
+        .input_scope(fixture.handle.ticket())
+        .unwrap();
+    let control = fixture.control();
+    let lease = control.lease.get().unwrap().clone();
+    {
+        let registry = fixture.state.registry.lock().unwrap();
+        let permit = scope.enter_current(registry.find("chat").unwrap()).unwrap();
+        let (entered, observing) = mpsc::channel();
+        let state = fixture.state.clone();
+        let revoke = std::thread::spawn(move || {
+            let mut contexts = state.session_memory.lock().unwrap();
+            entered.send(()).unwrap();
+            contexts.revoke("chat")
+        });
+        observing.recv_timeout(Duration::from_secs(15)).unwrap();
+        assert!(fixture.state.session_memory.try_lock().is_err());
+        assert!(lease.is_valid());
+        assert!(control.valid.load(Ordering::Acquire));
+        drop(permit);
+        assert_eq!(revoke.join().unwrap(), json!({"revoked":true}));
+        assert!(!lease.is_valid());
+        assert!(control.valid.load(Ordering::Acquire));
+        assert!(scope.enter_current(registry.find("chat").unwrap()).is_err());
+        let peer_permit = peer_scope
+            .enter_current(registry.find("peer").unwrap())
+            .unwrap();
+        drop(peer_permit);
+    }
+    fixture.close().await;
+}
+
+#[test]
+fn input_scope_permits_have_no_send_debug_clone_or_serialization_surface() {
+    // Ambiguity becomes a compile error if a forbidden trait is introduced.
+    macro_rules! not_impl {
+        ($ty:ty, $bound:path) => {{
+            trait AmbiguousIfImplemented<A> {
+                fn check() {}
+            }
+            impl<T: ?Sized> AmbiguousIfImplemented<()> for T {}
+            impl<T: ?Sized + $bound> AmbiguousIfImplemented<u8> for T {}
+            let _ = <$ty as AmbiguousIfImplemented<_>>::check;
+        }};
+    }
+    not_impl!(InputScope, std::fmt::Debug);
+    not_impl!(InputScope, Clone);
+    not_impl!(InputScope, serde::Serialize);
+    not_impl!(InputScopePermit<'static>, Send);
+    not_impl!(InputScopePermit<'static>, std::fmt::Debug);
+    not_impl!(InputScopePermit<'static>, Clone);
+    not_impl!(InputScopePermit<'static>, serde::Serialize);
+    not_impl!(session_memory::MemoryLeaseAdmission<'static>, Send);
+    not_impl!(
+        session_memory::MemoryLeaseAdmission<'static>,
+        std::fmt::Debug
+    );
+    not_impl!(session_memory::MemoryLeaseAdmission<'static>, Clone);
+    not_impl!(
+        session_memory::MemoryLeaseAdmission<'static>,
+        serde::Serialize
+    );
+}
+
+#[tokio::test]
+async fn input_scope_gate_and_context_poison_fail_closed_without_payloads() {
+    for change in ["execution", "control", "contexts"] {
+        let mut fixture = Fixture::new().await;
+        let scope = fixture
+            .backend
+            .input_scope(fixture.handle.ticket())
+            .unwrap();
+        let state = fixture.state.clone();
+        let control = fixture.control();
+        crate::panic_guard::install();
+        let poisoned = std::thread::spawn(move || match change {
+            "execution" => {
+                let _guard = state.execution_admission.lock().unwrap();
+                panic!("synthetic private execution poison");
+            }
+            "control" => {
+                let _guard = control.gate.lock().unwrap();
+                panic!("synthetic private control poison");
+            }
+            "contexts" => {
+                let _guard = state.session_memory.lock().unwrap();
+                panic!("synthetic private context poison");
+            }
+            _ => unreachable!(),
+        });
+        assert!(poisoned.join().is_err());
+        {
+            let registry = fixture.state.registry.lock().unwrap();
+            let failure = scope
+                .enter_current(registry.find("chat").unwrap())
+                .err()
+                .expect("poisoned admission allowed");
+            assert_eq!(failure.code, "forbidden");
+            assert_eq!(failure.message, "memory turn preparation failed");
+        }
+        fixture.close().await;
+    }
+}
