@@ -45,7 +45,7 @@ async function node(provider,variant){
  try{
   await bounded(adapter.startSession({name:'subject',cwd:x.cwd,mode:'turn',broker:false,approval:'read-only',...(provider==='codex'?{model:'gpt-6-astra',effort:'low'}:{})}),'Node start')
   const started=await bounded(adapter.send('subject','literal final completion qualification'),'Node send'),outcome=await bounded(started.done,'Node done')
-  assert.equal(outcome.ok,variant!=='failed'&&!(provider==='claude'&&variant==='capacity'));if(variant==='large-escaped')assert.ok(outcome.text==='\0'.repeat(100_000),'large escaped text mismatch');if(variant==='capacity')assert.ok(outcome.text===(provider==='claude'?'\0'.repeat(100_000):'\0'.repeat(100_000)+'\n'+'\0'.repeat(100_000)),'capacity oracle text mismatch');return {outcome,messages:drafts.filter(d=>d.kind==='message.done').map(d=>d.data.text)}
+  assert.equal(outcome.ok,variant!=='failed'&&!(provider==='zcode'&&variant.startsWith('failed-'))&&!(provider==='claude'&&variant==='capacity'));if(variant==='large-escaped')assert.ok(outcome.text==='\0'.repeat(100_000),'large escaped text mismatch');if(variant==='failed-capacity')assert.ok(outcome.text==='\0'.repeat(100_000)+'\n'+'\0'.repeat(100_000),'failed capacity oracle text mismatch');if(variant==='capacity')assert.ok(outcome.text===(provider==='claude'?'\0'.repeat(100_000):'\0'.repeat(100_000)+'\n'+'\0'.repeat(100_000)),'capacity oracle text mismatch');return {outcome,messages:drafts.filter(d=>d.kind==='message.done').map(d=>d.data.text)}
  }finally{
   await bounded(adapter.shutdown(),'Node shutdown');const pids=rows(x.launch).map(r=>r.pid).filter(Number.isInteger)
   assert.ok(pids.length>0);await bounded((async()=>{while(pids.some(alive))await pause(10)})(),'fake process survived',3000)
@@ -64,7 +64,7 @@ async function daemon(x,provider){
 }
 let checks=0,complete=false
 try{
- for(const provider of ['claude','codex','zcode'])for(const variant of ['divergent','multi','empty','failed','large-escaped',...(provider!=='codex'?['capacity']:[])]){
+ for(const provider of ['claude','codex','zcode'])for(const variant of ['divergent','multi','empty','failed','large-escaped',...(provider!=='codex'?['capacity']:[]),...(provider==='zcode'?['failed-empty-response','failed-no-text','failed-multi','failed-cancelled','failed-ended-cancelled','failed-unknown-type','failed-empty-type','missing-result-type','failed-capacity']:[])]){
   if(only&&only!==`${provider}/${variant}`)continue
   const oracle=await node(provider,variant),x=prepare('rust',provider,variant)
   writeFileSync(join(x.paths.home,'.rust-core-scratch'),'pult-rust-scratch-v1\n',{mode:0o600})
@@ -79,11 +79,10 @@ try{
    assert.equal(completion.version,1);assert.equal(completion.incarnation,JSON.parse(readFileSync(join(x.paths.home,'sessions.json'),'utf8')).sessions[0].createdAt)
    const user=journal.find(e=>e.id===completion.userEventId);assert.equal(user.kind,'message.user');assert.equal(user.sessionId,'subject')
    assert.equal(event.data.turnId,receipt.turnId)
-   if(variant==='capacity'){
+   if(variant==='capacity'||variant==='failed-capacity'){
     assert.equal(completion.unavailable,'capacity');assert.equal(completion.outcome,undefined);assert.equal(event.data.status,oracle.outcome.ok?'idle':'failed')
-   }else if(provider==='zcode'&&variant==='failed'){
-    assert.equal(completion.unavailable,'disposition');assert.equal(completion.outcome,undefined);assert.equal(event.data.errorCode,'provider_failed')
    }else{
+    if(provider==='zcode'&&(variant==='failed'||variant.startsWith('failed-'))){assert.equal(event.data.errorCode,oracle.outcome.errorCode,'ordinary failed raw Result code parity');assert.equal(event.data.error,oracle.outcome.message,'ordinary failed raw Result message parity')}
     const {turnId:_,...fields}=oracle.outcome;assert.ok(completion.outcome,`${provider}/${variant} unavailable=${completion.unavailable} status=${event.data.status} code=${event.data.errorCode??'none'}`);assert.ok(isDeepStrictEqual(completion.outcome,{turnId:receipt.turnId,...fields}),'qualified outcome mismatch')
     assert.equal(event.data.status,fields.ok?'idle':'failed')
    }
