@@ -141,13 +141,18 @@ fn event_output(raw: &RawValue, json: bool) -> Result<(u64, String), Error> {
     ))
 }
 async fn output(text: String) -> Result<(), Error> {
+    emit(text, false).await
+}
+pub(super) async fn emit(text: String, stderr: bool) -> Result<(), Error> {
     // A duplicated File does not hold Rust's global stdout lock. exit() can
     // perform its own stdio cleanup even if this OS write remains blocked.
     // Duplication changes no shared file status flags or parent TTY settings.
-    let owned = std::io::stdout()
-        .as_fd()
-        .try_clone_to_owned()
-        .map_err(|_| io_error())?;
+    let owned = if stderr {
+        std::io::stderr().as_fd().try_clone_to_owned()
+    } else {
+        std::io::stdout().as_fd().try_clone_to_owned()
+    }
+    .map_err(|_| io_error())?;
     let task = tokio::task::spawn_blocking(move || {
         let mut out = std::fs::File::from(owned);
         out.write_all(text.as_bytes())?;
@@ -200,37 +205,7 @@ async fn tail_session(
     json: bool,
     no_follow: bool,
 ) -> Result<(), Error> {
-    let home = pult_core::checked_home(home).map_err(|_| Error {
-        exit: 1,
-        message: "event subscription requires a private Rust scratch home",
-    })?;
-    let locale = pult_core::cli_locale(&home).map_err(|_| io_error())?;
-    let mut token = String::new();
-    std::fs::File::open(home.join("run/token"))
-        .map_err(|_| io_error())?
-        .take(65)
-        .read_to_string(&mut token)
-        .map_err(|_| io_error())?;
-    if token.len() != 64 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(io_error());
-    }
-    let mut socket =
-        tokio::time::timeout(HANDSHAKE, UnixStream::connect(home.join("run/pultd.sock")))
-            .await
-            .map_err(|_| timed_out())?
-            .map_err(|_| io_error())?;
-    write_request(
-        &mut socket,
-        json!({"type":"hello","protocol":pult_core::PROTOCOL,"token":token,"client":"cli"}),
-    )
-    .await?;
-    let mut reader = BufReader::new(socket);
-    let hello = fields(&bounded_line(&mut reader).await?)?;
-    if hello.get("type").map(|v| value(v)).transpose()? != Some(json!("hello_ok"))
-        || integer(&hello, "protocol")? != pult_core::PROTOCOL
-    {
-        return Err(invalid());
-    }
+    let (mut reader, locale) = owner_connection(home).await?;
     let mut params = json!({"since":since});
     if let Some(session) = session {
         params["sessionId"] = json!(session);
@@ -279,5 +254,148 @@ async fn tail_session(
         if limit != 0.0 && shown as f64 >= limit {
             return Ok(());
         }
+    }
+}
+
+// Shared owner handshake/framing for event tail and the private wait CLI policy.
+// Callers must separate credential purposes BEFORE entering this filesystem path.
+async fn owner_connection(home: &Path) -> Result<(BufReader<UnixStream>, &'static str), Error> {
+    let home = pult_core::checked_home(home).map_err(|_| Error {
+        exit: 1,
+        message: "event subscription requires a private Rust scratch home",
+    })?;
+    let locale = pult_core::cli_locale(&home).map_err(|_| io_error())?;
+    let mut token = String::new();
+    std::fs::File::open(home.join("run/token"))
+        .map_err(|_| io_error())?
+        .take(65)
+        .read_to_string(&mut token)
+        .map_err(|_| io_error())?;
+    if token.len() != 64 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(io_error());
+    }
+    let mut socket =
+        tokio::time::timeout(HANDSHAKE, UnixStream::connect(home.join("run/pultd.sock")))
+            .await
+            .map_err(|_| timed_out())?
+            .map_err(|_| io_error())?;
+    write_request(
+        &mut socket,
+        json!({"type":"hello","protocol":pult_core::PROTOCOL,"token":token,"client":"cli"}),
+    )
+    .await?;
+    let mut reader = BufReader::new(socket);
+    let hello = fields(&bounded_line(&mut reader).await?)?;
+    if hello.get("type").map(|v| value(v)).transpose()? != Some(json!("hello_ok"))
+        || integer(&hello, "protocol")? != pult_core::PROTOCOL
+    {
+        return Err(invalid());
+    }
+    Ok((reader, locale))
+}
+
+pub(super) struct RpcError {
+    pub code: String,
+    pub message: String,
+}
+impl RpcError {
+    pub fn local(code: &str, message: &str) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+}
+impl From<Error> for RpcError {
+    fn from(error: Error) -> Self {
+        Self::local(
+            if error.exit == 2 {
+                "timeout"
+            } else {
+                "connection_closed"
+            },
+            "daemon connection or response failed",
+        )
+    }
+}
+pub(super) enum ResponsePolicy {
+    Ordinary,
+    Wait,
+}
+pub(super) struct OwnerClient {
+    reader: BufReader<UnixStream>,
+    pub locale: &'static str,
+    next_id: u64,
+}
+impl OwnerClient {
+    pub async fn connect(home: &Path) -> Result<Self, RpcError> {
+        if [
+            "PULT_MEMORY_KEY",
+            "PULT_MEMORY_TURN_KEY",
+            "PULT_ASK_KEY",
+            "PULT_RUNTIME_KEY",
+        ]
+        .iter()
+        .any(|key| std::env::var_os(key).is_some())
+        {
+            return Err(RpcError::local(
+                "forbidden",
+                "agent wait requires owner authentication",
+            ));
+        }
+        let (reader, locale) = owner_connection(home).await?;
+        Ok(Self {
+            reader,
+            locale,
+            next_id: 1,
+        })
+    }
+    pub async fn request(
+        &mut self,
+        method: &str,
+        params: Value,
+        policy: ResponsePolicy,
+    ) -> Result<Box<RawValue>, RpcError> {
+        if matches!(policy, ResponsePolicy::Wait) && method != "agent.wait" {
+            return Err(RpcError::local(
+                "invalid_params",
+                "long response policy is reserved for agent.wait",
+            ));
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        write_request(
+            self.reader.get_mut(),
+            json!({"id":id,"method":method,"params":params,"locale":self.locale}),
+        )
+        .await?;
+        let response = match policy {
+            ResponsePolicy::Ordinary => {
+                tokio::time::timeout(Duration::from_secs(3), line(&mut self.reader, false))
+                    .await
+                    .map_err(|_| RpcError::local("timeout", "daemon response timed out"))??
+            }
+            ResponsePolicy::Wait => line(&mut self.reader, false).await?,
+        }
+        .ok_or_else(|| RpcError::local("connection_closed", "connection to daemon closed"))?;
+        let mut response = fields(&response)?;
+        if integer(&response, "id")? != id
+            || response.contains_key("result") == response.contains_key("error")
+        {
+            return Err(RpcError::local(
+                "invalid_response",
+                "invalid daemon response",
+            ));
+        }
+        if let Some(raw) = response.remove("error") {
+            let error = fields(raw.get().as_bytes())?;
+            return Err(RpcError {
+                code: display(&error, "code")?,
+                message: display(&error, "message")?,
+            });
+        }
+        response
+            .remove("result")
+            .ok_or_else(|| RpcError::local("invalid_response", "missing daemon result"))
     }
 }

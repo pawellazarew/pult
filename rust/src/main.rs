@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 mod cli_client;
 mod cli_logs;
+mod cli_wait;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -137,6 +138,17 @@ enum AgentAction {
         interrupt: bool,
         #[arg(long, conflicts_with_all=["queue","interrupt"], help="Clarify the active Codex turn without interrupting it")]
         steer: bool,
+        /// Private preview composition; backend wait is not qualified yet.
+        #[arg(long, hide = true)]
+        wait: bool,
+        #[command(flatten)]
+        wait_options: WaitFlags,
+    },
+    #[command(hide = true)]
+    Wait {
+        name: String,
+        #[command(flatten)]
+        options: WaitFlags,
     },
     Stop {
         name: String,
@@ -172,6 +184,25 @@ enum AgentAction {
         #[arg(long)]
         unread: bool,
     },
+}
+
+#[derive(clap::Args)]
+struct WaitFlags {
+    #[arg(long, num_args = 0..=1, default_missing_value = "", hide = true)]
+    until: Option<String>,
+    #[arg(long, num_args = 0..=1, default_missing_value = "", hide = true)]
+    timeout: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+impl From<WaitFlags> for cli_wait::Options {
+    fn from(flags: WaitFlags) -> Self {
+        Self {
+            until: flags.until,
+            timeout: flags.timeout,
+            json: flags.json,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -243,7 +274,7 @@ enum DaemonAction {
 #[tokio::main]
 async fn main() -> Result<()> {
     pult_core::panic_guard::install();
-    let args = Args::parse();
+    let args = Args::parse_from(cli_wait::arguments(std::env::args_os()));
     if args.show_version || matches!(args.command, Some(Action::Version)) {
         println!("{}", env!("CARGO_PKG_VERSION"));
         return Ok(());
@@ -340,8 +371,10 @@ async fn main() -> Result<()> {
                     queue,
                     interrupt,
                     steer,
+                    wait,
+                    wait_options,
                 } => {
-                    let mut params = serde_json::json!({"name":name,"text":text});
+                    let mut params = serde_json::json!({"name":&name,"text":text});
                     if let Some(attachments) = attachments {
                         let attachments: serde_json::Value = serde_json::from_str(&attachments)
                             .map_err(|_| anyhow::anyhow!("--attachments must be a JSON array"))?;
@@ -358,7 +391,16 @@ async fn main() -> Result<()> {
                             params[name] = serde_json::json!(true);
                         }
                     }
+                    if wait {
+                        let code =
+                            cli_wait::run(&home, &name, wait_options.into(), Some(params)).await;
+                        std::process::exit(code);
+                    }
                     ("agent.prompt", params)
+                }
+                AgentAction::Wait { name, options } => {
+                    let code = cli_wait::run(&home, &name, options.into(), None).await;
+                    std::process::exit(code);
                 }
                 AgentAction::Stop { name, turn_id } => {
                     let mut params = serde_json::json!({"name":name});
