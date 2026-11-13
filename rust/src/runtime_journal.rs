@@ -210,6 +210,7 @@ pub(crate) mod tests {
             execution_admission: Mutex::new(()),
             host_jobs: Arc::default(),
             session_commands: Arc::default(),
+            session_waits: Default::default(),
             native_runtime: OnceLock::new(),
             memory_turns: OnceLock::new(),
             claude_asks: OnceLock::new(),
