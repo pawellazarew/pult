@@ -385,8 +385,17 @@ pub(crate) async fn zcode_instance(
                 .map_err(|_| anyhow!("network probe unavailable"))?,
         );
         let guard = Arc::new(crate::network_guard::NetworkGuard::new(curl.clone()));
+        let memory = state
+            .memory_turns
+            .get_or_init(|| {
+                crate::memory_turn::Backend::new(
+                    Arc::downgrade(&state),
+                    current.with_file_name("pult-memory-mcp"),
+                )
+            })
+            .clone();
         let runtime = Arc::new(
-            crate::zcode_runtime::ZcodeRuntime::new(
+            crate::zcode_runtime::ZcodeRuntime::new_daemon(
                 crate::zcode_runtime::Dependencies {
                     home: state.home.clone(),
                     registry: state.registry.clone(),
@@ -408,6 +417,7 @@ pub(crate) async fn zcode_instance(
                 bootstrap.extra_env,
                 guard,
                 Default::default(),
+                memory,
             )
             .map_err(|_| anyhow!("ZCode runtime configuration unavailable"))?,
         );

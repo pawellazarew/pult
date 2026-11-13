@@ -1,17 +1,20 @@
-//! Owned ordinary ZCode Route A controller. One process per explicit input.
+//! Owned ZCode controller: ordinary Route A or dedicated memory Route B per input.
 //! Shared NetworkGuard and daemon Broker are never owned/shut down here.
 //! Missing-native recovery remains explicitly blocked pending typed confirmation.
 use crate::consent_store::ConsentStore;
+use crate::memory_policy::Policy;
 use crate::network_guard::{Check, NetworkGuard};
 use crate::registry::Registry;
 use crate::runtime_config::RuntimeConfig;
 use crate::turn_coordinator::Ticket;
 use crate::turn_driver::{
-    DispatchGate, Driver, EventSink, Handle, Input, Progress, Task, Terminal, WorkerError,
+    DispatchGate, Driver, EventSink, Handle, Input, Progress, Task, Terminal, Worker, WorkerError,
 };
 use crate::turn_snapshot::{Provider, SessionKey, TurnSnapshot};
 use crate::worker_env::{self, Environment};
 use crate::worker_process::{Launch, SpawnDenied, SpawnGate, SpawnPermit};
+use crate::zcode_appserver_protocol::{SessionMode, Workspace};
+use crate::zcode_appserver_worker::{self, ZcodeAppServerWorker};
 use crate::zcode_host_services::{
     Attempt, Error as OwnerError, IdleRecoveryPermit, MissingAfterJoin, OwnerConfirmedRecovery,
     RecoveryWarningReceipt, ZcodeOwner,
@@ -28,7 +31,7 @@ use std::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::sync::{Notify, OnceCell, oneshot, watch};
 
@@ -205,13 +208,43 @@ fn recovery_id() -> Result<String, RuntimeError> {
         .collect::<String>();
     Ok(format!("zr-{serial}-{left}-{right}"))
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DispatchRoute {
+    Ordinary,
+    AppServer,
+}
+enum RuntimeWorker {
+    Ordinary(Arc<ZcodeWorker>),
+    AppServer(Arc<ZcodeAppServerWorker>),
+}
+impl RuntimeWorker {
+    fn route(&self) -> DispatchRoute {
+        match self {
+            Self::Ordinary(_) => DispatchRoute::Ordinary,
+            Self::AppServer(_) => DispatchRoute::AppServer,
+        }
+    }
+    fn worker(&self) -> Arc<dyn Worker> {
+        match self {
+            Self::Ordinary(w) => w.clone(),
+            Self::AppServer(w) => w.clone(),
+        }
+    }
+    fn take_missing_recovery(&self, ticket: &Ticket) -> Option<MissingAfterJoin> {
+        match self {
+            Self::Ordinary(w) => w.take_missing_recovery(ticket),
+            Self::AppServer(_) => None,
+        }
+    }
+}
 struct Source {
     key: SessionKey,
     nonce: Arc<()>,
     attempt: OnceLock<Attempt>,
+    selected: DispatchRoute,
 }
 struct Entry {
-    worker: Option<Arc<ZcodeWorker>>,
+    worker: Option<RuntimeWorker>,
     expected_resume: Option<Option<String>>,
     recovery_slot: Option<RecoveryReservation>,
     recovering: Option<Arc<RecoveryOperation>>,
@@ -285,6 +318,7 @@ struct Inner {
     limits: Limits,
     shared: Arc<Shared>,
     owner: OnceCell<Arc<ZcodeOwner>>,
+    memory: Option<Arc<crate::memory_turn::Backend>>,
     runtime: tokio::runtime::Handle,
 }
 pub struct ZcodeRuntime {
@@ -302,6 +336,41 @@ impl ZcodeRuntime {
         extra: Environment,
         guard: Arc<NetworkGuard>,
         limits: Limits,
+    ) -> Result<Self, RuntimeError> {
+        Self::construct(deps, command, config, parent, extra, guard, limits, None)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_daemon(
+        deps: Dependencies,
+        command: TrustedCommand,
+        config: RuntimeConfig,
+        parent: Environment,
+        extra: Environment,
+        guard: Arc<NetworkGuard>,
+        limits: Limits,
+        memory: Arc<crate::memory_turn::Backend>,
+    ) -> Result<Self, RuntimeError> {
+        Self::construct(
+            deps,
+            command,
+            config,
+            parent,
+            extra,
+            guard,
+            limits,
+            Some(memory),
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn construct(
+        deps: Dependencies,
+        command: TrustedCommand,
+        config: RuntimeConfig,
+        parent: Environment,
+        extra: Environment,
+        guard: Arc<NetworkGuard>,
+        limits: Limits,
+        memory: Option<Arc<crate::memory_turn::Backend>>,
     ) -> Result<Self, RuntimeError> {
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| RuntimeError::Invalid)?;
         if !deps.home.is_absolute()
@@ -350,6 +419,7 @@ impl ZcodeRuntime {
                 limits,
                 shared,
                 owner: OnceCell::new(),
+                memory,
                 runtime,
             }),
         })
@@ -645,6 +715,7 @@ struct Reservation {
     key: SessionKey,
     nonce: Arc<()>,
     cancel: watch::Receiver<bool>,
+    deadline: Instant,
 }
 fn remove(shared: &Shared, key: &SessionKey, nonce: &Arc<()>) {
     let mut state = shared.state.lock().expect("ZCode runtime");
@@ -738,6 +809,7 @@ fn reserve(
     input: &Input,
     queued: bool,
 ) -> Result<Reservation, RuntimeError> {
+    let deadline = Instant::now() + inner.limits.start_timeout;
     key.validate().map_err(|_| RuntimeError::Invalid)?;
     if input.text.len() > if queued { 200_000 } else { 65_536 }
         || (input.text.chars().all(crate::claude_launch::js_whitespace)
@@ -818,6 +890,7 @@ fn reserve(
         key: key.clone(),
         nonce,
         cancel: receiver,
+        deadline,
     })
 }
 fn alive(inner: &Inner, reservation: &Reservation) -> Result<(), RuntimeError> {
@@ -879,100 +952,143 @@ async fn prepare(
     let authority = owner.clone();
     let metadata = input.metadata.attachments.clone();
     let input_text = input.text.clone();
-    let (snapshot, attachments, expected_resume) = tokio::task::spawn_blocking(move || {
-        let before = reading
-            .deps
-            .registry
-            .lock()
-            .map_err(|_| RuntimeError::Storage)?
-            .find(&checking.name)
-            .cloned()
-            .ok_or(RuntimeError::Owner(OwnerError::Invalid))?;
-        let snapshot = authority.snapshot(&checking).map_err(RuntimeError::Owner)?;
-        if snapshot.provider != Provider::Zcode
-            || snapshot.settings.browser.is_some()
-            || before
-                .get("forkOnResume")
-                .is_some_and(|raw| !matches!(raw.get().trim(), "false" | "null"))
-            || before.get("settingSources").is_some()
-        {
-            return Err(RuntimeError::Unsupported);
-        }
-        let after = reading
-            .deps
-            .registry
-            .lock()
-            .map_err(|_| RuntimeError::Storage)?
-            .find(&checking.name)
-            .cloned()
-            .ok_or(RuntimeError::Owner(OwnerError::Invalid))?;
-        // Native identity/config are selected coherently; concurrent changes
-        // cause a pre-input rejection, never a fallback to a new conversation.
-        for field in [
-            "createdAt",
-            "provider",
-            "cwd",
-            "providerSessionId",
-            "forkOnResume",
-            "settingSources",
-            "approval",
-            "scope",
-            "grant",
-            "archived",
-            "browser",
-            "model",
-            "effort",
-            "serviceTier",
-            "zcodePendingInput",
-            "mode",
-        ] {
-            if before.get(field).map(|v| v.get()) != after.get(field).map(|v| v.get()) {
-                return Err(RuntimeError::Owner(OwnerError::Invalid));
+    let (snapshot, attachments, expected_resume, selected, native_mode) =
+        tokio::task::spawn_blocking(move || {
+            let before = reading
+                .deps
+                .registry
+                .lock()
+                .map_err(|_| RuntimeError::Storage)?
+                .find(&checking.name)
+                .cloned()
+                .ok_or(RuntimeError::Owner(OwnerError::Invalid))?;
+            let snapshot = authority.snapshot(&checking).map_err(RuntimeError::Owner)?;
+            if snapshot.provider != Provider::Zcode
+                || snapshot.settings.browser.is_some()
+                || before
+                    .get("forkOnResume")
+                    .is_some_and(|raw| !matches!(raw.get().trim(), "false" | "null"))
+                || before.get("settingSources").is_some()
+            {
+                return Err(RuntimeError::Unsupported);
             }
-        }
-        if after.get("providerSessionId").is_some() && after.scalar("providerSessionId").is_none() {
-            return Err(RuntimeError::Invalid);
-        }
-        let values = Value::Array(metadata.iter().map(|a| a.value()).collect());
-        let attachments = crate::prompt_attachments::validate_owned_prompt_attachments(
-            &reading.deps.home,
-            &checking.name,
-            Some(&values),
-        )
-        .map_err(|_| RuntimeError::Invalid)?;
-        let native = after.scalar("providerSessionId");
-        if native.as_deref().is_some_and(|s| {
-            s.is_empty() || s.len() > 512 || s.starts_with('-') || s.chars().any(char::is_control)
-        }) {
-            return Err(RuntimeError::Invalid);
-        }
-        let text =
-            crate::prompt_attachments::prompt_attachment_context(&input_text, &attachments, true);
-        let prompt = format!(
-            "{text}\n\n{}",
-            zcode_launch::approval_context_language(
-                snapshot.settings.approval,
-                true,
-                match reading.config.language {
-                    crate::runtime_config::Language::En => ContextLanguage::En,
-                    _ => ContextLanguage::Ru,
+            let after = reading
+                .deps
+                .registry
+                .lock()
+                .map_err(|_| RuntimeError::Storage)?
+                .find(&checking.name)
+                .cloned()
+                .ok_or(RuntimeError::Owner(OwnerError::Invalid))?;
+            // Native identity/config are selected coherently; concurrent changes
+            // cause a pre-input rejection, never a fallback to a new conversation.
+            for field in [
+                "createdAt",
+                "provider",
+                "cwd",
+                "providerSessionId",
+                "forkOnResume",
+                "settingSources",
+                "approval",
+                "scope",
+                "grant",
+                "archived",
+                "browser",
+                "model",
+                "effort",
+                "serviceTier",
+                "zcodePendingInput",
+                "mode",
+                "memory",
+                "private",
+                "temporary",
+            ] {
+                if before.get(field).map(|v| v.get()) != after.get(field).map(|v| v.get()) {
+                    return Err(RuntimeError::Owner(OwnerError::Invalid));
                 }
+            }
+            if after.get("providerSessionId").is_some()
+                && after.scalar("providerSessionId").is_none()
+            {
+                return Err(RuntimeError::Invalid);
+            }
+            let values = Value::Array(metadata.iter().map(|a| a.value()).collect());
+            let attachments = crate::prompt_attachments::validate_owned_prompt_attachments(
+                &reading.deps.home,
+                &checking.name,
+                Some(&values),
             )
-        );
-        zcode_launch::argv(&zcode_launch::Options {
-            prompt: &prompt,
-            cwd: snapshot.cwd.to_str().ok_or(RuntimeError::Invalid)?,
-            resume_session_id: native.as_deref(),
-            approval: snapshot.settings.approval,
-            model: snapshot.settings.model.as_deref(),
-            effort: snapshot.settings.effort.as_deref(),
+            .map_err(|_| RuntimeError::Invalid)?;
+            let native = after.scalar("providerSessionId");
+            if native.as_deref().is_some_and(|s| {
+                s.is_empty()
+                    || s.len() > 512
+                    || s.starts_with('-')
+                    || s.chars().any(char::is_control)
+            }) {
+                return Err(RuntimeError::Invalid);
+            }
+            let selected = if Policy::record(&after)
+                .map_err(|_| RuntimeError::Invalid)?
+                .read
+            {
+                DispatchRoute::AppServer
+            } else {
+                DispatchRoute::Ordinary
+            };
+            let native_mode = match snapshot.settings.approval {
+                crate::turn_snapshot::Approval::ReadOnly => SessionMode::Plan,
+                crate::turn_snapshot::Approval::Ask => SessionMode::Guarded,
+                crate::turn_snapshot::Approval::Full => SessionMode::Yolo,
+                _ if selected == DispatchRoute::AppServer => return Err(RuntimeError::Unsupported),
+                _ => SessionMode::Edit, // Only the legacy Ordinary path uses Workspace.
+            };
+            if selected == DispatchRoute::AppServer {
+                if reading.memory.is_none()
+                    || snapshot.settings.model.is_some()
+                    || snapshot.settings.effort.is_some()
+                    || snapshot.settings.service_tier.is_some()
+                {
+                    return Err(RuntimeError::Unsupported);
+                }
+                let cwd = snapshot.cwd.to_str().ok_or(RuntimeError::Unsupported)?;
+                Workspace::new(cwd, cwd).map_err(|_| RuntimeError::Unsupported)?;
+            }
+            if selected == DispatchRoute::Ordinary {
+                let text = crate::prompt_attachments::prompt_attachment_context(
+                    &input_text,
+                    &attachments,
+                    true,
+                );
+                let prompt = format!(
+                    "{text}\n\n{}",
+                    zcode_launch::approval_context_language(
+                        snapshot.settings.approval,
+                        true,
+                        match reading.config.language {
+                            crate::runtime_config::Language::En => ContextLanguage::En,
+                            _ => ContextLanguage::Ru,
+                        }
+                    )
+                );
+                zcode_launch::argv(&zcode_launch::Options {
+                    prompt: &prompt,
+                    cwd: snapshot.cwd.to_str().ok_or(RuntimeError::Invalid)?,
+                    resume_session_id: native.as_deref(),
+                    approval: snapshot.settings.approval,
+                    model: snapshot.settings.model.as_deref(),
+                    effort: snapshot.settings.effort.as_deref(),
+                })
+                .map_err(|_| RuntimeError::Invalid)?;
+            }
+            Ok((snapshot, attachments, native, selected, native_mode))
         })
-        .map_err(|_| RuntimeError::Invalid)?;
-        Ok((snapshot, attachments, native))
-    })
-    .await
-    .map_err(|_| RuntimeError::Storage)??;
+        .await
+        .map_err(|_| RuntimeError::Storage)??;
     input.metadata.attachments = attachments;
+    if selected == DispatchRoute::AppServer && Instant::now() >= reservation.deadline {
+        return Err(RuntimeError::Cancelled);
+    }
     alive(&inner, reservation)?;
     let mut closed = inner.shared.closed.subscribe();
     let mut cancelled = reservation.cancel.clone();
@@ -982,6 +1098,7 @@ async fn prepare(
         _=closed.changed()=>return Err(RuntimeError::Closed),
         _=cancelled.changed()=>return Err(RuntimeError::Cancelled),
         _=inner.deps.driver.wait_for_storage_failure()=>return Err(RuntimeError::Storage),
+        _=tokio::time::sleep_until(reservation.deadline.into()), if selected == DispatchRoute::AppServer => return Err(RuntimeError::Cancelled),
     };
     let env = inner
         .shared
@@ -1005,19 +1122,25 @@ async fn prepare(
     let snapshot_for_build = snapshot.clone();
     let cancellation = reservation.cancel.clone();
     let reservation_nonce = reservation.nonce.clone();
+    let deadline = reservation.deadline;
     let handle = tokio::task::spawn_blocking(move || {
         let _runtime = building.runtime.enter();
-        if *cancellation.borrow() || *building.shared.closed.borrow() {
+        if *cancellation.borrow()
+            || *building.shared.closed.borrow()
+            || (selected == DispatchRoute::AppServer && Instant::now() >= deadline)
+        {
             return Err(RuntimeError::Cancelled);
         }
         let slot = expected_resume
             .as_ref()
+            .filter(|_| selected == DispatchRoute::Ordinary)
             .map(|_| recovery_id())
             .transpose()?;
         let source = Arc::new(Source {
             key: key_for_build.clone(),
             nonce: reservation_nonce.clone(),
             attempt: OnceLock::new(),
+            selected,
         });
         {
             let mut entries = building.shared.state.lock().expect("ZCode runtime");
@@ -1058,61 +1181,153 @@ async fn prepare(
         let signal_source = source.clone();
         let signal_shared = weak.clone();
         let driver = Arc::downgrade(&building.deps.driver);
-        let worker = ZcodeWorker::new(
-            Config {
-                session: key_for_build,
-                home: building.deps.home.clone(),
-                launch: Launch {
-                    holder: building.command.holder.clone(),
-                    program: building.command.program.clone(),
-                    args: vec![],
-                    cwd: snapshot_for_build.cwd.clone(),
-                    env,
-                },
-                attachments: input.metadata.attachments.clone(),
-                broker_context: true,
-                language: match building.config.language {
-                    crate::runtime_config::Language::En => ContextLanguage::En,
-                    _ => ContextLanguage::Ru,
-                },
-                start_timeout: building.limits.start_timeout,
-                terminal_grace: Duration::from_secs(1),
-            },
-            Services {
-                driver: driver.clone(),
-                sink: building.deps.sink.clone(),
-                gate: gate.clone(),
-                store: owner.store(),
-                spawn_gate: Arc::new(move |attempt, initial, _approval| {
-                    let shared = weak.upgrade().ok_or_else(|| WorkerError {
-                        code: "closed".into(),
-                        message: "ZCode controller closed".into(),
-                    })?;
-                    bind_source(&shared, &for_spawn, &attempt).map_err(|_| WorkerError {
-                        code: "cancelled".into(),
-                        message: "ZCode source revoked".into(),
-                    })?;
-                    Ok(Arc::new(RuntimeSpawn {
-                        shared,
-                        owner: spawn_owner.clone(),
-                        source: for_spawn.clone(),
-                        initial,
-                    }))
-                }),
-                redactors: Arc::new(|| Box::new(crate::zcode_events::LogRedactor)),
-                fatal_storage: Arc::new(move || {
-                    if let Some(driver) = driver.upgrade() {
-                        driver.report_storage_failure();
-                    }
-                }),
-                provider_signal: Arc::new(move |signal| {
-                    if let Some(shared) = signal_shared.upgrade() {
-                        observe_signal(&shared, &signal_source, signal);
-                    }
-                }),
-            },
-        )
-        .map_err(|_| RuntimeError::Invalid)?;
+        let worker = if selected == DispatchRoute::Ordinary {
+            let registry = building.deps.registry.clone();
+            RuntimeWorker::Ordinary(
+                ZcodeWorker::new(
+                    Config {
+                        session: key_for_build,
+                        home: building.deps.home.clone(),
+                        launch: Launch {
+                            holder: building.command.holder.clone(),
+                            program: building.command.program.clone(),
+                            args: vec![],
+                            cwd: snapshot_for_build.cwd.clone(),
+                            env,
+                        },
+                        attachments: input.metadata.attachments.clone(),
+                        broker_context: true,
+                        language: match building.config.language {
+                            crate::runtime_config::Language::En => ContextLanguage::En,
+                            _ => ContextLanguage::Ru,
+                        },
+                        start_timeout: building.limits.start_timeout,
+                        terminal_grace: Duration::from_secs(1),
+                    },
+                    Services {
+                        driver: driver.clone(),
+                        sink: building.deps.sink.clone(),
+                        gate: gate.clone(),
+                        store: owner.store(),
+                        spawn_gate: Arc::new(move |attempt, initial, _approval| {
+                            let shared = weak.upgrade().ok_or_else(|| WorkerError {
+                                code: "closed".into(),
+                                message: "ZCode controller closed".into(),
+                            })?;
+                            bind_source(&shared, &for_spawn, &attempt).map_err(|_| {
+                                WorkerError {
+                                    code: "cancelled".into(),
+                                    message: "ZCode source revoked".into(),
+                                }
+                            })?;
+                            Ok(Arc::new(RuntimeSpawn {
+                                shared,
+                                registry: registry.clone(),
+                                owner: spawn_owner.clone(),
+                                source: for_spawn.clone(),
+                                initial,
+                            }))
+                        }),
+                        redactors: Arc::new(|| Box::new(crate::zcode_events::LogRedactor)),
+                        fatal_storage: Arc::new(move || {
+                            if let Some(driver) = driver.upgrade() {
+                                driver.report_storage_failure();
+                            }
+                        }),
+                        provider_signal: Arc::new(move |signal| {
+                            if let Some(shared) = signal_shared.upgrade() {
+                                observe_signal(&shared, &signal_source, signal);
+                            }
+                        }),
+                    },
+                )
+                .map_err(|_| RuntimeError::Invalid)?,
+            )
+        } else {
+            let memory = building.memory.clone().ok_or(RuntimeError::Unsupported)?;
+            let resources =
+                crate::zcode_memory_resources::Factory::new(memory, key_for_build.clone())
+                    .map_err(|_| RuntimeError::Unsupported)?;
+            let input_source = source.clone();
+            let input_shared = weak.clone();
+            let app_owner = owner.clone();
+            let registry = building.deps.registry.clone();
+            RuntimeWorker::AppServer(
+                ZcodeAppServerWorker::new(
+                    zcode_appserver_worker::Config {
+                        session: key_for_build,
+                        home: building.deps.home.clone(),
+                        launch: Launch {
+                            holder: building.command.holder.clone(),
+                            program: building.command.program.clone(),
+                            args: vec![],
+                            cwd: snapshot_for_build.cwd.clone(),
+                            env,
+                        },
+                        workspace_key: snapshot_for_build
+                            .cwd
+                            .to_str()
+                            .ok_or(RuntimeError::Unsupported)?
+                            .into(),
+                        native_mode,
+                        captured_approval: snapshot_for_build.settings.approval,
+                        start_deadline: deadline,
+                        reverse_timeout: Duration::from_secs(30),
+                        attachments: input.metadata.attachments.clone(),
+                        language: match building.config.language {
+                            crate::runtime_config::Language::En => ContextLanguage::En,
+                            _ => ContextLanguage::Ru,
+                        },
+                    },
+                    zcode_appserver_worker::Services {
+                        driver: driver.clone(),
+                        owner: app_owner.clone(),
+                        store: app_owner.app_server_store(),
+                        sink: building.deps.sink.clone(),
+                        gate: gate.clone(),
+                        resources,
+                        spawn_gate: Arc::new(move |attempt, initial, _| {
+                            let shared = weak.upgrade().ok_or_else(runtime_worker_error)?;
+                            bind_source(&shared, &for_spawn, &attempt)
+                                .map_err(|_| runtime_worker_error())?;
+                            Ok(Arc::new(RuntimeSpawn {
+                                shared,
+                                registry: registry.clone(),
+                                owner: spawn_owner.clone(),
+                                source: for_spawn.clone(),
+                                initial,
+                            }))
+                        }),
+                        input_gate: Arc::new(move |attempt, initial| {
+                            let shared = input_shared.upgrade().ok_or_else(runtime_worker_error)?;
+                            if input_source.selected != DispatchRoute::AppServer
+                                || input_source
+                                    .attempt
+                                    .get()
+                                    .is_none_or(|bound| !same_attempt(bound, attempt.attempt()))
+                            {
+                                return Err(runtime_worker_error());
+                            }
+                            Ok(Arc::new(RuntimeInput {
+                                shared,
+                                source: input_source.clone(),
+                                initial,
+                                deadline,
+                            }))
+                        }),
+                        interactions: Arc::new(zcode_appserver_worker::DenyInteractions),
+                        redactors: Arc::new(|| Box::new(crate::zcode_events::LogRedactor)),
+                        fatal_storage: Arc::new(move || {
+                            if let Some(d) = driver.upgrade() {
+                                d.report_storage_failure();
+                            }
+                        }),
+                    },
+                )
+                .map_err(|_| RuntimeError::Unsupported)?,
+            )
+        };
+        let dispatch_worker = worker.worker();
         if *cancellation.borrow() || *building.shared.closed.borrow() {
             return Err(RuntimeError::Cancelled);
         }
@@ -1122,12 +1337,12 @@ async fn prepare(
                 .get_mut(&source.key)
                 .filter(|e| Arc::ptr_eq(&e.nonce, &source.nonce))
                 .ok_or(RuntimeError::Cancelled)?;
-            entry.worker = Some(worker.clone());
+            entry.worker = Some(worker);
         }
         building
             .deps
             .driver
-            .start_input(snapshot_for_build, input, worker, gate)
+            .start_input(snapshot_for_build, input, dispatch_worker, gate)
             .map_err(|error| match error {
                 crate::turn_driver::DriverError::Busy => RuntimeError::Busy,
                 crate::turn_driver::DriverError::Capacity => RuntimeError::Capacity,
@@ -1269,12 +1484,13 @@ fn bind_source(
         || !source_entry(entry, source, attempt)
         || entry.expected_resume.as_ref().map(|id| id.as_deref())
             != Some(attempt.resume_session_id())
-        || attempt.resume_session_id().is_some_and(|id| {
-            entry
-                .recovery_slot
-                .as_ref()
-                .is_none_or(|slot| slot.expected_resume != id)
-        })
+        || (source.selected == DispatchRoute::Ordinary
+            && attempt.resume_session_id().is_some_and(|id| {
+                entry
+                    .recovery_slot
+                    .as_ref()
+                    .is_none_or(|slot| slot.expected_resume != id)
+            }))
     {
         return Err(RuntimeError::Cancelled);
     }
@@ -1288,31 +1504,112 @@ fn bind_source(
     entry.attempt = Some(attempt.clone());
     Ok(())
 }
+fn same_attempt(left: &Attempt, right: &Attempt) -> bool {
+    left.ticket() == right.ticket()
+        && left.generation() == right.generation()
+        && Arc::ptr_eq(left.spawn_action(), right.spawn_action())
+}
 fn bound_attempt(entry: &Entry, attempt: &Attempt) -> bool {
-    entry.attempt.as_ref().is_some_and(|bound| {
-        bound.ticket() == attempt.ticket()
-            && bound.generation() == attempt.generation()
-            && Arc::ptr_eq(bound.spawn_action(), attempt.spawn_action())
-    })
+    entry
+        .attempt
+        .as_ref()
+        .is_some_and(|bound| same_attempt(bound, attempt))
+}
+fn runtime_worker_error() -> WorkerError {
+    WorkerError {
+        code: "cancelled".into(),
+        message: "ZCode source revoked".into(),
+    }
+}
+struct RuntimeInput {
+    shared: Arc<Shared>,
+    source: Arc<Source>,
+    initial: TurnSnapshot,
+    deadline: Instant,
+}
+struct RuntimeInputPermit<'a> {
+    _admission: std::sync::MutexGuard<'a, RuntimeState>,
+}
+impl zcode_appserver_worker::InputPermit for RuntimeInputPermit<'_> {}
+impl zcode_appserver_worker::InputGate for RuntimeInput {
+    fn enter(&self) -> Result<Box<dyn zcode_appserver_worker::InputPermit + '_>, WorkerError> {
+        if Instant::now() >= self.deadline {
+            return Err(runtime_worker_error());
+        }
+        let attempt = self.source.attempt.get().ok_or_else(runtime_worker_error)?;
+        let entries = self
+            .shared
+            .state
+            .lock()
+            .map_err(|_| runtime_worker_error())?;
+        let entry = entries
+            .get(&self.source.key)
+            .ok_or_else(runtime_worker_error)?;
+        let stamp = entry.route.as_ref().ok_or_else(runtime_worker_error)?;
+        if Instant::now() >= self.deadline
+            || self.source.selected != DispatchRoute::AppServer
+            || *self.shared.closed.borrow()
+            || self.shared.blocked.load(Ordering::Acquire)
+            || entry.quarantined
+            || !entry
+                .worker
+                .as_ref()
+                .is_some_and(|w| w.route() == self.source.selected)
+            || !source_entry(entry, &self.source, attempt)
+            || !bound_attempt(entry, attempt)
+            || entry.expected_resume.as_ref().map(|s| s.as_deref())
+                != Some(attempt.resume_session_id())
+            || !self.shared.guard.is_current(&stamp.0)
+            || self
+                .shared
+                .driver
+                .snapshot_for_dispatch(attempt.ticket())
+                .as_ref()
+                != Some(&self.initial)
+        {
+            return Err(runtime_worker_error());
+        }
+        Ok(Box::new(RuntimeInputPermit {
+            _admission: entries,
+        }))
+    }
 }
 struct RuntimeSpawn {
     shared: Arc<Shared>,
+    registry: Arc<Mutex<Registry>>,
     owner: Arc<ZcodeOwner>,
     source: Arc<Source>,
     initial: TurnSnapshot,
 }
 struct RuntimePermit<'a> {
     _admission: std::sync::MutexGuard<'a, RuntimeState>,
+    _registry: std::sync::MutexGuard<'a, Registry>,
 }
 impl SpawnPermit for RuntimePermit<'_> {}
 impl SpawnGate for RuntimeSpawn {
     fn enter(&self) -> Result<Box<dyn SpawnPermit + '_>, SpawnDenied> {
         let attempt = self.source.attempt.get().ok_or(SpawnDenied)?;
+        let registry = self.registry.lock().map_err(|_| SpawnDenied)?;
+        if registry.write_poisoned() {
+            return Err(SpawnDenied);
+        }
+        let record = registry.find(&self.source.key.name).ok_or(SpawnDenied)?;
+        if record.scalar("createdAt").as_deref() != Some(self.source.key.created_at.as_str())
+            || Policy::record(record).map_err(|_| SpawnDenied)?.read
+                != (self.source.selected == DispatchRoute::AppServer)
+        {
+            return Err(SpawnDenied);
+        }
         let entries = self.shared.state.lock().map_err(|_| SpawnDenied)?;
         let entry = entries.get(&self.source.key).ok_or(SpawnDenied)?;
         let stamp = entry.route.as_ref().ok_or(SpawnDenied)?;
         if *self.shared.closed.borrow()
             || self.shared.blocked.load(Ordering::Acquire)
+            || entry.quarantined
+            || !entry
+                .worker
+                .as_ref()
+                .is_some_and(|w| w.route() == self.source.selected)
             || !source_entry(entry, &self.source, attempt)
             || !bound_attempt(entry, attempt)
             || !self.shared.guard.is_current(&stamp.0)
@@ -1328,6 +1625,7 @@ impl SpawnGate for RuntimeSpawn {
         }
         Ok(Box::new(RuntimePermit {
             _admission: entries,
+            _registry: registry,
         }))
     }
 }
@@ -1458,6 +1756,7 @@ fn reserve_recovery(
             key: action.key.clone(),
             nonce,
             cancel: receiver,
+            deadline: Instant::now() + inner.limits.start_timeout,
         },
         operation,
     ))
@@ -1616,6 +1915,7 @@ async fn run_recovery(
         key: reservation.key.clone(),
         nonce: reservation.nonce.clone(),
         cancel: reservation.cancel.clone(),
+        deadline: reservation.deadline,
     };
     let mut task = tokio::spawn(recovery_core(
         inner.clone(),
@@ -1674,3 +1974,7 @@ async fn run_recovery(
 #[cfg(test)]
 #[path = "../tests/support/zcode_recovery_consumer_unit.rs"]
 mod recovery_tests;
+
+#[cfg(test)]
+#[path = "../tests/support/zcode_runtime_memory_unit.rs"]
+mod memory_runtime_tests;
