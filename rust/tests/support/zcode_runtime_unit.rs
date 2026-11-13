@@ -198,6 +198,7 @@ async fn old_auth_source_cannot_block_replacement_or_relatched_after_reset() {
         key: f.key.clone(),
         nonce: Arc::new(()),
         attempt: OnceLock::new(),
+        selected: DispatchRoute::Ordinary,
     });
     assert!(source.attempt.set(attempt.clone()).is_ok());
     f.install(&h, source.clone(), Some(attempt));
@@ -217,6 +218,7 @@ async fn old_auth_source_cannot_block_replacement_or_relatched_after_reset() {
         key: f.key.clone(),
         nonce: Arc::new(()),
         attempt: OnceLock::new(),
+        selected: DispatchRoute::Ordinary,
     });
     let (cancel, _) = watch::channel(false);
     f.runtime.inner.shared.state.lock().unwrap().insert(
@@ -253,6 +255,7 @@ async fn real_driver_quarantine_cannot_be_reaped_or_auth_reset() {
         key: f.key.clone(),
         nonce: Arc::new(()),
         attempt: OnceLock::new(),
+        selected: DispatchRoute::Ordinary,
     });
     f.install(&h, source, None);
     f.runtime
@@ -296,6 +299,7 @@ async fn completed_driver_retry_is_reaped_by_shutdown_without_busy_poll() {
         key: f.key.clone(),
         nonce: Arc::new(()),
         attempt: OnceLock::new(),
+        selected: DispatchRoute::Ordinary,
     });
     f.install(&h, source, None);
     f.runtime.inner.deps.driver.cancel(h.ticket());
