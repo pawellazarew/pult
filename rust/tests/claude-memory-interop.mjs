@@ -39,7 +39,7 @@ async function until(predicate, label, timeoutMs = 10000) {
 async function prompt(name, instruction) { return client.request('agent.prompt', { name, text: JSON.stringify(instruction) }, { timeoutMs: 35000 }) }
 async function result(name, run) {
   await until(() => evidence().some(value => value.kind === 'result' && value.run === run), `${run} missing fixture result`)
-  await until(async () => (await row(name)).status === 'done', `${run} not done`)
+  await until(async () => (await row(name)).status === 'idle', `${run} not done`)
   const launch = evidence().filter(value => value.kind === 'launch' && value.name === name).at(-1)
   await until(() => !alive(launch.pid) && !existsSync(launch.configPath), `${run} process/config cleanup pending`)
   return evidence().find(value => value.kind === 'result' && value.run === run)
@@ -116,7 +116,7 @@ try {
     chmodSync(codex, 0o700)
     await prompt('reader', { run: 'codex-read-claude', id: saved.id })
     await until(() => codexEvidence().some(value => value.kind === 'result' && value.run === 'codex-read-claude'), 'Codex did not read Claude record')
-    await until(async () => (await row('reader')).status === 'done', 'Codex read did not finish')
+    await until(async () => (await row('reader')).status === 'idle', 'Codex read did not finish')
     const outcome = codexEvidence().find(value => value.kind === 'result' && value.run === 'codex-read-claude')
     assert.equal(outcome.get.id, saved.id)
     assert.equal(outcome.get.version, saved.version)
@@ -151,7 +151,7 @@ try {
     assert.equal(existsSync(blocker.configPath), false)
     await prompt('reader', { run: 'codex-read-queued', id: saved.id })
     await until(() => codexEvidence().some(value => value.kind === 'result' && value.run === 'codex-read-queued'), 'Codex did not see queued memory update')
-    await until(async () => (await row('reader')).status === 'done', 'queued memory read did not finish')
+    await until(async () => (await row('reader')).status === 'idle', 'queued memory read did not finish')
     assert.equal(codexEvidence().find(value => value.kind === 'result' && value.run === 'codex-read-queued').get.version, 2)
   })
   await check('read-only hides and rejects proposals; Full still requires separate memory approval', async () => {

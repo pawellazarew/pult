@@ -59,7 +59,7 @@ async function prompt(name, instruction) {
 }
 async function result(run, name) {
   await until(() => evidence().some(value => value.kind === 'result' && value.run === run), `missing result ${run}`)
-  await until(async () => (await session(name)).status === 'done', `turn ${run} not done`)
+  await until(async () => (await session(name)).status === 'idle', `turn ${run} not done`)
   return evidence().find(value => value.kind === 'result' && value.run === run)
 }
 async function card(name) {

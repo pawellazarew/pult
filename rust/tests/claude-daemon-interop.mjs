@@ -33,7 +33,7 @@ const journal = () => readCompleteJsonl(join(home, 'events/journal.jsonl'))
 const record = name => JSON.parse(readFileSync(join(home, 'sessions.json'), 'utf8')).sessions.find(row => row.name === name)
 const scope = name => JSON.parse(readFileSync(join(native, `${name}-scope.json`), 'utf8'))
 const row = async name => (await client.request('agent.list')).sessions.find(row => row.name === name)
-async function done(name, expected = 'done') {
+async function done(name, expected = 'idle') {
   await until(async () => (await row(name)).status === expected && (await client.request('daemon.status')).nativeRuntime.activeTurns === 0, `${name} missing terminal/cleanup`)
   await until(() => !existsSync(scope(name).path), 'scoped MCP configuration outlived cleanup')
 }
@@ -181,7 +181,7 @@ try {
     assert.equal(journal().filter(event => event.sessionId === 'plain' && event.kind === 'message.user').length, receipts)
     assert.equal(rows('inputs.jsonl').filter(row => row.name === 'plain').length, inputs)
     writeFileSync(join(native, 'release-plain'), '')
-    await until(async () => !(await row('plain')).queue?.length && (await row('plain')).status === 'done' && (await client.request('daemon.status')).nativeRuntime.activeTurns === 0, 'Claude FIFO did not drain')
+    await until(async () => !(await row('plain')).queue?.length && (await row('plain')).status === 'idle' && (await client.request('daemon.status')).nativeRuntime.activeTurns === 0, 'Claude FIFO did not drain')
     const queued = journal().filter(event => event.sessionId === 'plain' && event.kind === 'message.user' && [one.id, two.id].includes(event.data.queueItemId))
     assert.deepEqual(queued.map(event => event.data.queueItemId), [one.id, two.id])
     assert.deepEqual(queued.map(event => event.data.text), ['fifo first', 'fifo second'])
@@ -199,7 +199,7 @@ try {
     assert.deepEqual((await row('plain')).queue.map(item => item.id), [queued.id])
     assert.equal(journal().filter(event => event.kind === 'message.user' && event.data.queueItemId === queued.id).length, 0)
     await client.request('agent.queue.resume', { name: 'plain' })
-    await until(async () => !(await row('plain')).queue?.length && (await row('plain')).status === 'done' && (await client.request('daemon.status')).nativeRuntime.activeTurns === 0, 'Claude paused queue did not resume')
+    await until(async () => !(await row('plain')).queue?.length && (await row('plain')).status === 'idle' && (await client.request('daemon.status')).nativeRuntime.activeTurns === 0, 'Claude paused queue did not resume')
     assert.equal(journal().filter(event => event.kind === 'message.user' && event.data.queueItemId === queued.id).length, 1)
     assert.equal(record('plain').queueDispatch, undefined)
     await done('plain')

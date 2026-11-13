@@ -36,7 +36,7 @@ const journal = () => readCompleteJsonl(join(home, 'events/journal.jsonl'))
 const record = name => JSON.parse(readFileSync(join(home, 'sessions.json'), 'utf8')).sessions.find(row => row.name === name)
 const row = async name => (await client.request('agent.list')).sessions.find(row => row.name === name)
 async function done(name) {
-  await until(async () => (await row(name)).status === 'done' && (await client.request('daemon.status')).nativeRuntime.activeTurns === 0, `${name} did not finish cleanup`)
+  await until(async () => (await row(name)).status === 'idle' && (await client.request('daemon.status')).nativeRuntime.activeTurns === 0, `${name} did not finish cleanup`)
 }
 async function check(label, run) { await run(); checks++; console.log(`pass ${label}`) }
 try {
@@ -86,7 +86,7 @@ try {
     await assert.rejects(client.request('agent.queue.send', { name: 'plain', id: second.id }), e => e.code === 'unsupported')
     assert.equal(record('plain').queueDispatch, undefined)
     writeFileSync(join(native, 'release-plain'), '')
-    await until(async () => !(await row('plain')).queue?.length && (await row('plain')).status === 'done' && (await client.request('daemon.status')).nativeRuntime.activeTurns === 0, 'FIFO did not drain', 2 * QUEUED_START_AND_CLEANUP_MS)
+    await until(async () => !(await row('plain')).queue?.length && (await row('plain')).status === 'idle' && (await client.request('daemon.status')).nativeRuntime.activeTurns === 0, 'FIFO did not drain', 2 * QUEUED_START_AND_CLEANUP_MS)
     const receipts = journal().filter(e => e.sessionId === 'plain' && e.kind === 'message.user' && [first.id, second.id].includes(e.data.queueItemId))
     assert.deepEqual(receipts.map(e => e.data.queueItemId), [first.id, second.id])
     assert.deepEqual(receipts.map(e => e.data.text), ['fifo first', 'fifo second'])
@@ -112,7 +112,7 @@ try {
       // This deliberate delay is below the production 30s acceptance deadline,
       // but above the old terminal-only 10s helper. No early queued receipt.
       releaseStart = setTimeout(() => rmSync(startBarrier, { force: true }), 11500)
-      await until(async () => !(await row('plain')).queue?.length && (await row('plain')).status === 'done', 'paused backlog did not resume', QUEUED_START_AND_CLEANUP_MS)
+      await until(async () => !(await row('plain')).queue?.length && (await row('plain')).status === 'idle', 'paused backlog did not resume', QUEUED_START_AND_CLEANUP_MS)
       assert.equal(journal().filter(e => e.sessionId === 'plain' && e.kind === 'message.user' && e.data.queueItemId === queued.id).length, 1)
     } finally {
       clearTimeout(releaseStart)

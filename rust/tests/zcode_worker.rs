@@ -331,7 +331,7 @@ async fn native_acceptance_persists_identity_before_deferred_user_and_content() 
     assert_eq!(
         events
             .iter()
-            .filter(|v| v["kind"] == "status.changed" && v["data"]["status"] == "done")
+            .filter(|v| v["kind"] == "status.changed" && v["data"]["status"] == "idle")
             .count(),
         1
     );
