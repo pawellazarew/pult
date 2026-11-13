@@ -38,8 +38,9 @@ Existing test adaptations change only successful-turn status predicates/defaults
 The quarantine negative assertion retains done and also rejects premature idle;
 a general terminal helper adds idle while retaining done/failed/interrupted.
 Receipt, privacy, queue, approval, native PID and cleanup assertions remain.
-Root's separate untracked ZCode memory acceptance script is not edited by this
-slice and must be adapted explicitly after its own M3 proof is frozen.
+The independently qualified ZCode shared-memory acceptance is retained. Its two
+success predicates now expect idle; all nine memory scenarios and their receipt,
+provenance, approval, revocation and PID-cleanup checks remain unchanged.
 
 Wait remains unported. This corrects one prerequisite for future agent.wait;
 it does not add WaitHub, answer-outcome storage, long polling, native approval
