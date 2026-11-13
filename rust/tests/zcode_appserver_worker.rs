@@ -382,6 +382,25 @@ async fn real_holder_ack_in_both_orders_uses_actual_driver_receipt_and_durable_i
         }));
         let terminal = bounded(h.wait()).await.unwrap();
         assert_eq!(terminal.turn.outcome, Outcome::Success);
+        let reference = terminal.completion_ref.as_ref().unwrap();
+        assert_eq!(reference.public_turn_id(), accepted.turn_id);
+        assert_eq!(reference.user_event_id(), accepted.user_event_id);
+        let global = f
+            .journal
+            .lock()
+            .unwrap()
+            .read_ids(&[reference.terminal_event_id()])
+            .unwrap();
+        let completed: Value = serde_json::from_str(global[0].json.get()).unwrap();
+        assert_eq!(
+            completed["data"]["completion"]["outcome"]["text"],
+            "hello from native"
+        );
+        assert_eq!(
+            completed["data"]["completion"]["outcome"]["turnId"],
+            accepted.turn_id
+        );
+
         assert!(worker.is_retired());
         assert!(f.record().get("zcodePendingInput").is_none());
         let proof = f.proof();

@@ -1,5 +1,6 @@
 //! Owned ZCode Route A: one fresh process per input, argv prompt, no MCP.
 //! Only typed native turn.started accepts input; session identity alone does not.
+use crate::turn_completion::{CompletionUnavailable, WorkerCompletion};
 use crate::{
     prompt_attachments::{self, PromptAttachment},
     turn_coordinator::{Outcome, Ticket},
@@ -566,11 +567,11 @@ async fn run(
                 let _ = sender.send(Err(e));
                 return;
             }
-            failure(&e.code, &e.message)
+            failure(&e.code, &e.message).into()
         }
     };
     let _ = done.send(if job.cancelled() {
-        Outcome::Interrupted
+        Outcome::Interrupted.into()
     } else {
         outcome
     });
@@ -616,8 +617,8 @@ async fn turn(
     text: String,
     mut progress: watch::Receiver<Progress>,
     started: StartReply,
-    done: oneshot::Receiver<Outcome>,
-) -> Result<Outcome, WorkerError> {
+    done: oneshot::Receiver<WorkerCompletion>,
+) -> Result<WorkerCompletion, WorkerError> {
     if job.cancelled() {
         return Err(interrupted());
     }
@@ -801,6 +802,7 @@ async fn turn(
     let mut early = VecDeque::new();
     let mut early_bytes = 0usize;
     let mut result: Option<bool> = None;
+    let mut final_text = ZcodeText::default();
     let mut ended: Option<(bool, bool, bool)> = None;
     let mut cancel = job.cancel.subscribe();
     let deadline = tokio::time::sleep_until(tokio::time::Instant::from_std(job.deadline));
@@ -914,7 +916,7 @@ async fn turn(
                     turn_id: job.public_turn.clone(),
                     done: Box::pin(async move {
                         completion.await.unwrap_or_else(|_| {
-                            failure("worker_failed", "ZCode completion was lost")
+                            failure("worker_failed", "ZCode completion was lost").into()
                         })
                     }),
                 }));
@@ -952,7 +954,8 @@ async fn turn(
             }
             for signal in batch.signals {
                 match signal {
-                    Signal::Result { ok, .. } => {
+                    Signal::Result { ok, text, .. } => {
+                        final_text.result(ok, text);
                         result = Some(ok);
                         terminal_deadline.get_or_insert_with(|| {
                             tokio::time::Instant::now() + inner.config.terminal_grace
@@ -963,11 +966,9 @@ async fn turn(
                         text,
                         result_type,
                     } => {
-                        ended = Some((
-                            ok,
-                            text.is_some_and(|v| !v.is_empty()),
-                            result_type.as_deref() == Some("cancelled"),
-                        ));
+                        let has_text = text.as_ref().is_some_and(|v| !v.is_empty());
+                        final_text.ended(text);
+                        ended = Some((ok, has_text, result_type.as_deref() == Some("cancelled")));
                     }
                     _ => {}
                 }
@@ -1003,18 +1004,22 @@ async fn turn(
             .and_then(|_| Err(error("start_unknown", "ZCode input was not accepted")));
     }
     if result == Some(true) || result.is_none() && ended.is_some_and(|(ok, text, _)| ok && text) {
-        return Ok(Outcome::Success);
+        return Ok(if result == Some(true) {
+            final_text.finish(&job.public_turn)
+        } else {
+            WorkerCompletion::from(Outcome::Success)
+        });
     }
     if result.is_none() && ended.is_some_and(|(_, _, cancelled)| cancelled) {
-        return Ok(Outcome::Interrupted);
+        return Ok(Outcome::Interrupted.into());
     }
     if !natural_eof {
         return Err(error("worker_io_failed", "ZCode output did not reach EOF"));
     }
     classify(&inner, &job, tail.as_bytes()).await?;
-    Ok(failure(
-        "provider_failed",
-        "ZCode returned no successful result",
+    Ok(WorkerCompletion::unqualified(
+        failure("provider_failed", "ZCode returned no successful result"),
+        CompletionUnavailable::Disposition,
     ))
 }
 async fn classify(inner: &Inner, job: &Job, bytes: &[u8]) -> Result<(), WorkerError> {
@@ -1110,4 +1115,71 @@ async fn classify(inner: &Inner, job: &Job, bytes: &[u8]) -> Result<(), WorkerEr
         ));
     }
     Ok(())
+}
+
+/// Route A successful raw result text wins; empty raw result falls back to
+/// ordered TurnEnded text. Never retain an unbounded stream or partial answer.
+#[derive(Default)]
+struct ZcodeText {
+    ended: String,
+    raw: Option<String>,
+    capacity: bool,
+    first_result: Option<bool>,
+}
+impl ZcodeText {
+    fn ended(&mut self, text: Option<String>) {
+        if self.capacity {
+            return;
+        }
+        if let Some(text) = text.filter(|s| !s.is_empty()) {
+            let len = self
+                .ended
+                .len()
+                .checked_add(text.len())
+                .and_then(|n| n.checked_add(usize::from(!self.ended.is_empty())));
+            if len.is_none_or(|n| n > crate::MAX_LINE) {
+                self.capacity = true;
+                self.ended.clear();
+                return;
+            }
+            if !self.ended.is_empty() {
+                self.ended.push('\n')
+            };
+            self.ended.push_str(&text);
+        }
+    }
+    fn result(&mut self, ok: bool, text: Option<String>) {
+        if self.first_result.is_none() {
+            self.first_result = Some(ok);
+            self.raw = text.filter(|s| !s.is_empty());
+        }
+    }
+    fn finish(self, turn: &str) -> WorkerCompletion {
+        if self.first_result != Some(true) {
+            return WorkerCompletion::unqualified(
+                Outcome::Success,
+                CompletionUnavailable::Disposition,
+            );
+        }
+        let text = if let Some(raw) = self.raw {
+            Some(raw)
+        } else if self.capacity {
+            return WorkerCompletion::unqualified(
+                Outcome::Success,
+                CompletionUnavailable::Capacity,
+            );
+        } else {
+            (!self.ended.is_empty()).then_some(self.ended)
+        };
+        WorkerCompletion::normalized(
+            Outcome::Success,
+            crate::codex_events::TurnOutcome {
+                turn_id: turn.into(),
+                ok: true,
+                error_code: None,
+                message: None,
+                text,
+            },
+        )
+    }
 }

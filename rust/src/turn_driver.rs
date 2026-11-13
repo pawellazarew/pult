@@ -2,6 +2,10 @@
 use crate::prompt_attachments::{
     AttachmentKind, MAX_PROMPT_ATTACHMENT_BYTES, MAX_PROMPT_ATTACHMENTS, PromptAttachment,
 };
+use crate::turn_completion::{
+    CompletedAnswer, CompletionReadError, CompletionRef, CompletionUnavailable, Latest,
+    WorkerCompletion,
+};
 use crate::turn_coordinator::{
     Coordinator, DispatchAction, FinishedTurn, Limits, Outcome, StartAction, Ticket,
 };
@@ -64,6 +68,7 @@ pub struct SinkError {
 pub struct Completion {
     ticket: Ticket,
     outcome: Outcome,
+    answer_ref: Option<CompletionRef>,
 }
 impl Completion {
     pub fn ticket(&self) -> &Ticket {
@@ -72,8 +77,21 @@ impl Completion {
     pub fn outcome(&self) -> &Outcome {
         &self.outcome
     }
+    pub fn answer_ref(&self) -> Option<&CompletionRef> {
+        self.answer_ref.as_ref()
+    }
 }
 pub trait EventSink: Send + Sync + 'static {
+    fn read_completion(
+        &self,
+        _reference: CompletionRef,
+    ) -> Task<Result<CompletedAnswer, CompletionReadError>> {
+        Box::pin(async {
+            Err(CompletionReadError::Unavailable(
+                CompletionUnavailable::Unqualified,
+            ))
+        })
+    }
     fn append(&self, draft: Value) -> Task<Result<Receipt, SinkError>>;
     /// Once polled, owned IO must finish even if a caller stops waiting.
     /// Runs outside Driver locks. Error or panic closes execution admission.
@@ -90,7 +108,7 @@ pub struct Started {
     /// Public Pult turn identity used by CLI/journal; adapters keep the native
     /// provider turn identity separately for interrupt and callback routing.
     pub turn_id: String,
-    pub done: Task<Outcome>,
+    pub done: Task<WorkerCompletion>,
 }
 /// Both futures must be cancellation-safe: ownership survives their drop in the
 /// Worker, and close(ticket) must quiesce any partial or completed attempt.
@@ -154,6 +172,10 @@ pub struct Options {
     pub limits: Limits,
     pub start_timeout: Duration,
     pub close_timeout: Duration,
+    /// Bounded retained names, independent of the global finished-turn cache.
+    pub latest_sessions: usize,
+    /// Read IO remains admitted until its owned Store task finishes.
+    pub completion_reads: usize,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -161,6 +183,8 @@ impl Default for Options {
             limits: Limits::default(),
             start_timeout: Duration::from_secs(30),
             close_timeout: Duration::from_secs(5),
+            latest_sessions: 65536,
+            completion_reads: 64,
         }
     }
 }
@@ -174,6 +198,7 @@ pub struct Terminal {
     pub turn: FinishedTurn,
     pub user_event_id: Option<u64>,
     pub terminal_event_id: Option<u64>,
+    pub completion_ref: Option<CompletionRef>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Progress {
@@ -232,6 +257,7 @@ struct State {
     jobs: HashMap<Ticket, Arc<Control>>,
     closed: bool,
     storage_failed: bool,
+    latest: Latest,
 }
 struct Inner {
     state: Mutex<State>,
@@ -239,6 +265,8 @@ struct Inner {
     redactor: Redactor,
     options: Options,
     changed: Notify,
+    read_budget: Arc<tokio::sync::Semaphore>,
+    read_jobs: Arc<crate::host_jobs::Tracker>,
 }
 /// Opaque admission state for one trusted memory mutation. Cancellation before
 /// seal wins; a sealed operation owns its subsequent commit outcome.
@@ -392,6 +420,13 @@ impl Driver {
         redactor: Redactor,
         options: Options,
     ) -> Result<Self, DriverError> {
+        if options.latest_sessions == 0
+            || options.latest_sessions > 65536
+            || options.completion_reads == 0
+            || options.completion_reads > 1024
+        {
+            return Err(DriverError::Invalid);
+        }
         let core = Coordinator::new(options.limits).map_err(|_| DriverError::Invalid)?;
         Ok(Self {
             inner: Arc::new(Inner {
@@ -400,11 +435,14 @@ impl Driver {
                     jobs: HashMap::new(),
                     closed: false,
                     storage_failed: false,
+                    latest: Latest::new(),
                 }),
                 sink,
                 redactor,
                 options,
                 changed: Notify::new(),
+                read_budget: Arc::new(tokio::sync::Semaphore::new(options.completion_reads)),
+                read_jobs: Arc::new(crate::host_jobs::Tracker::default()),
             }),
         })
     }
@@ -481,6 +519,11 @@ impl Driver {
         if state.storage_failed {
             return Err(DriverError::StorageUnavailable);
         }
+        if !state.latest.contains_name(&snapshot.key.name)
+            && state.latest.len() >= self.inner.options.latest_sessions
+        {
+            return Err(DriverError::Capacity);
+        }
         let ticket = state
             .core
             .reserve(snapshot.clone())
@@ -499,6 +542,7 @@ impl Driver {
             input_sealed: std::sync::atomic::AtomicBool::new(false),
         });
         state.jobs.insert(ticket.clone(), control.clone());
+        state.latest.begin(&ticket, receiver.clone());
         drop(state);
         let (accepted, accepted_rx) = oneshot::channel();
         let inner = self.inner.clone();
@@ -774,6 +818,76 @@ impl Driver {
             changed.await;
         }
     }
+    /// Observation only. None is not authority: callers must check closed and
+    /// storage_failed separately before falling back to a status snapshot.
+    pub fn latest_progress(
+        &self,
+        session: &crate::turn_snapshot::SessionKey,
+    ) -> Option<(Ticket, watch::Receiver<Progress>)> {
+        let state = self.inner.state.lock().expect("driver state mutex");
+        if state.closed || state.storage_failed {
+            return None;
+        }
+        state.latest.get(session)
+    }
+    #[cfg(test)]
+    pub(crate) fn inner_read_jobs_for_test(&self) -> usize {
+        self.inner.read_jobs.active()
+    }
+    pub fn closed(&self) -> bool {
+        self.inner.state.lock().expect("driver state mutex").closed
+    }
+    /// Trusted host retirement; no callbacks, IO or neighboring-incarnation removal.
+    pub fn retire_latest(&self, session: &crate::turn_snapshot::SessionKey) {
+        self.inner
+            .state
+            .lock()
+            .expect("driver state mutex")
+            .latest
+            .retire(session);
+    }
+    pub fn read_completion(
+        &self,
+        reference: CompletionRef,
+    ) -> Task<Result<CompletedAnswer, CompletionReadError>> {
+        let inner = self.inner.clone();
+        Box::pin(async move {
+            // Registration and admission serialize with shutdown. There is no
+            // disconnected-caller permit queue and no IO/callback in this lock.
+            let (permit, job) = {
+                let state = inner.state.lock().expect("driver state mutex");
+                if state.closed || state.storage_failed || !state.latest.owns(&reference) {
+                    return Err(CompletionReadError::Invalid);
+                }
+                let permit = inner.read_budget.clone().try_acquire_owned().map_err(|_| {
+                    CompletionReadError::Unavailable(CompletionUnavailable::Capacity)
+                })?;
+                (permit, inner.read_jobs.track())
+            };
+            let (send, receive) = oneshot::channel();
+            tokio::spawn(async move {
+                let _permit = permit;
+                let _job = job;
+                let sink = inner.sink.clone();
+                let reading = reference.clone();
+                let result =
+                    match tokio::spawn(async move { sink.read_completion(reading).await }).await {
+                        Ok(result) => result,
+                        Err(_) => Err(CompletionReadError::Storage),
+                    };
+                let valid = {
+                    let state = inner.state.lock().expect("driver state mutex");
+                    !state.closed && !state.storage_failed && state.latest.owns(&reference)
+                };
+                let _ = send.send(if valid {
+                    result
+                } else {
+                    Err(CompletionReadError::Invalid)
+                });
+            });
+            receive.await.unwrap_or(Err(CompletionReadError::Storage))
+        })
+    }
     pub fn result(&self, ticket: &Ticket) -> Option<FinishedTurn> {
         self.inner
             .state
@@ -802,10 +916,11 @@ impl Driver {
                     .jobs
                     .is_empty()
                 {
-                    return;
+                    break;
                 }
                 notified.await;
             }
+            self.inner.read_jobs.wait().await;
         })
         .await
         .map_err(|_| DriverError::CleanupUnconfirmed)
@@ -1012,6 +1127,8 @@ fn terminal_draft(snapshot: &TurnSnapshot, turn_id: Option<&str>, outcome: &Outc
 }
 struct End {
     outcome: Outcome,
+    answer: Option<CompletedAnswer>,
+    unavailable: CompletionUnavailable,
     error: Option<DriverError>,
     touched: bool,
 }
@@ -1052,6 +1169,8 @@ async fn run(
                         ),
                         error: Some(error),
                         touched: false,
+                        answer: None,
+                        unavailable: CompletionUnavailable::Unqualified,
                     },
                 )
                 .await;
@@ -1106,6 +1225,8 @@ async fn execute(
             outcome: Outcome::Interrupted,
             error: Some(DriverError::Cancelled),
             touched: false,
+            answer: None,
+            unavailable: CompletionUnavailable::Unqualified,
         };
     }
     // The owned run waits for this check even after cancellation. It retains
@@ -1121,6 +1242,8 @@ async fn execute(
                 outcome: Outcome::Interrupted,
                 error: Some(DriverError::Cancelled),
                 touched: false,
+                answer: None,
+                unavailable: CompletionUnavailable::Unqualified,
             });
         }
         let decision = match gate {
@@ -1136,6 +1259,8 @@ async fn execute(
                 outcome: failure("journal_unknown", "execution paused"),
                 error: Some(DriverError::StorageUnavailable),
                 touched: false,
+                answer: None,
+                unavailable: CompletionUnavailable::Unqualified,
             });
         }
         if *cancellation.borrow() {
@@ -1143,6 +1268,8 @@ async fn execute(
                 outcome: Outcome::Interrupted,
                 error: Some(DriverError::Cancelled),
                 touched: false,
+                answer: None,
+                unavailable: CompletionUnavailable::Unqualified,
             });
         }
         let denied = match decision {
@@ -1159,6 +1286,8 @@ async fn execute(
                 outcome: failure("access_denied", "turn access denied before dispatch"),
                 error: Some(DriverError::AccessDenied),
                 touched: false,
+                answer: None,
+                unavailable: CompletionUnavailable::Unqualified,
             });
         }
         Ok(state.core.dispatch_start(&scope))
@@ -1172,6 +1301,8 @@ async fn execute(
                 outcome: failure("worker_panic", "dispatch check failed"),
                 error: Some(DriverError::WorkerFailed),
                 touched: false,
+                answer: None,
+                unavailable: CompletionUnavailable::Unqualified,
             };
         }
     };
@@ -1182,6 +1313,8 @@ async fn execute(
                 outcome: Outcome::Interrupted,
                 error: Some(DriverError::Cancelled),
                 touched: false,
+                answer: None,
+                unavailable: CompletionUnavailable::Unqualified,
             };
         }
         _ => {
@@ -1189,6 +1322,8 @@ async fn execute(
                 outcome: failure("driver_state", "turn could not be dispatched"),
                 error: Some(DriverError::Internal),
                 touched: false,
+                answer: None,
+                unavailable: CompletionUnavailable::Unqualified,
             };
         }
     };
@@ -1199,13 +1334,13 @@ async fn execute(
         biased;
         _=cancel.changed()=>{
             start.abort();let _=start.await;
-            return End{outcome:Outcome::Interrupted,error:Some(DriverError::Cancelled),touched:true};
+            return End{outcome:Outcome::Interrupted,error:Some(DriverError::Cancelled),touched: true, answer: None, unavailable: CompletionUnavailable::Unqualified };
         }
         result=tokio::time::timeout(inner.options.start_timeout,&mut start)=>match result {
             Ok(Ok(Ok(started)))=>started,
-            Ok(Ok(Err(error)))=>return End{outcome:normalized(inner,Outcome::Failure{code:error.code,message:error.message}),error:Some(DriverError::WorkerFailed),touched:true},
-            Ok(Err(_))=>return End{outcome:failure("worker_panic","worker start failed"),error:Some(DriverError::WorkerFailed),touched:true},
-            Err(_)=>{start.abort();let _=start.await;return End{outcome:failure("provider_timeout","worker start timed out"),error:Some(DriverError::WorkerFailed),touched:true};}
+            Ok(Ok(Err(error)))=>return End{outcome:normalized(inner,Outcome::Failure{code:error.code,message:error.message}),error:Some(DriverError::WorkerFailed),touched: true, answer: None, unavailable: CompletionUnavailable::Unqualified },
+            Ok(Err(_))=>return End{outcome:failure("worker_panic","worker start failed"),error:Some(DriverError::WorkerFailed),touched: true, answer: None, unavailable: CompletionUnavailable::Unqualified },
+            Err(_)=>{start.abort();let _=start.await;return End{outcome:failure("provider_timeout","worker start timed out"),error:Some(DriverError::WorkerFailed),touched: true, answer: None, unavailable: CompletionUnavailable::Unqualified };}
         }
     };
     if started.turn_id.is_empty()
@@ -1220,6 +1355,8 @@ async fn execute(
             ),
             error: Some(DriverError::WorkerFailed),
             touched: true,
+            answer: None,
+            unavailable: CompletionUnavailable::Unqualified,
         };
     }
     let Started { turn_id, done } = started;
@@ -1235,7 +1372,7 @@ async fn execute(
             biased;
             _=cancel.changed()=>{
                 stop_completion(&mut handle).await;
-                return End { outcome: Outcome::Interrupted, error: Some(DriverError::Cancelled), touched: true };
+                return End { outcome: Outcome::Interrupted, error: Some(DriverError::Cancelled), touched: true, answer: None, unavailable: CompletionUnavailable::Unqualified };
             }
             result=checkpoint_rx=>result,
         };
@@ -1247,6 +1384,8 @@ async fn execute(
                     outcome: normalized(inner, outcome),
                     error: Some(DriverError::WorkerFailed),
                     touched: true,
+                    answer: None,
+                    unavailable: CompletionUnavailable::Unqualified,
                 };
             }
             Err(_) => {
@@ -1255,6 +1394,8 @@ async fn execute(
                     outcome: failure("worker_panic", "worker completion failed"),
                     error: Some(DriverError::WorkerFailed),
                     touched: true,
+                    answer: None,
+                    unavailable: CompletionUnavailable::Unqualified,
                 };
             }
         }
@@ -1288,6 +1429,8 @@ async fn execute(
                     DriverError::WorkerFailed
                 }),
                 touched: true,
+                answer: None,
+                unavailable: CompletionUnavailable::Unqualified,
             };
         }
     }
@@ -1298,6 +1441,8 @@ async fn execute(
                 outcome: Outcome::Interrupted,
                 error: Some(DriverError::Cancelled),
                 touched: true,
+                answer: None,
+                unavailable: CompletionUnavailable::Unqualified,
             };
         }
         match append(inner, draft).await {
@@ -1311,6 +1456,8 @@ async fn execute(
                     ),
                     error: Some(error),
                     touched: true,
+                    answer: None,
+                    unavailable: CompletionUnavailable::Unqualified,
                 };
             }
         }
@@ -1345,6 +1492,8 @@ async fn execute(
             },
             error: Some(error),
             touched: true,
+            answer: None,
+            unavailable: CompletionUnavailable::Unqualified,
         };
     }
     // Ordinary input preserves the original ordering: start polling completion
@@ -1352,13 +1501,21 @@ async fn execute(
     let mut done = completion.take().unwrap_or_else(|| {
         tokio::spawn(pending_done.take().expect("unpolled ordinary completion"))
     });
-    let outcome = tokio::select! {
+    let completed = tokio::select! {
         biased;
-        _=cancel.changed()=>{stop_completion(&mut done).await;Outcome::Interrupted},
-        result=&mut done=>match result {Ok(outcome)=>normalized(inner,outcome),Err(_)=>failure("worker_panic","worker completion failed")},
+        _=cancel.changed()=>{stop_completion(&mut done).await;WorkerCompletion::from(Outcome::Interrupted)},
+        result=&mut done=>match result {Ok(value)=>value,Err(_)=>WorkerCompletion::from(failure("worker_panic","worker completion failed"))},
     };
+    let (raw, mut answer, mut unavailable) = completed.into_parts();
+    let outcome = normalized(inner, raw.clone());
+    if outcome != raw && answer.is_some() {
+        answer = None;
+        unavailable = CompletionUnavailable::Disposition;
+    }
     End {
         outcome,
+        answer,
+        unavailable,
         error: None,
         touched: true,
     }
@@ -1369,15 +1526,15 @@ enum InitialPoll {
     Pending,
 }
 async fn checkpoint_done(
-    mut done: Task<Outcome>,
+    mut done: Task<WorkerCompletion>,
     checkpoint: oneshot::Sender<InitialPoll>,
-) -> Outcome {
+) -> WorkerCompletion {
     let mut checkpoint = Some(checkpoint);
     std::future::poll_fn(move |cx| {
         let result = done.as_mut().poll(cx);
         if let Some(sender) = checkpoint.take() {
             let initial = match &result {
-                std::task::Poll::Ready(outcome) => InitialPoll::Ready(outcome.clone()),
+                std::task::Poll::Ready(outcome) => InitialPoll::Ready(outcome.outcome().clone()),
                 std::task::Poll::Pending => InitialPoll::Pending,
             };
             let _ = sender.send(initial);
@@ -1386,11 +1543,11 @@ async fn checkpoint_done(
     })
     .await
 }
-async fn stop_completion(done: &mut tokio::task::JoinHandle<Outcome>) {
+async fn stop_completion(done: &mut tokio::task::JoinHandle<WorkerCompletion>) {
     done.abort();
     let _ = done.await;
 }
-async fn stop_owned_completion(done: &mut Option<tokio::task::JoinHandle<Outcome>>) {
+async fn stop_owned_completion(done: &mut Option<tokio::task::JoinHandle<WorkerCompletion>>) {
     if let Some(done) = done.as_mut() {
         stop_completion(done).await;
     }
@@ -1465,6 +1622,19 @@ async fn finish(
             }
         }
     }
+    let candidate_cancelled = {
+        let state = inner.state.lock().expect("driver state mutex");
+        state.closed
+            || state.storage_failed
+            || state
+                .core
+                .active(ticket)
+                .is_none_or(|v| v.cancel_requested())
+    };
+    if candidate_cancelled {
+        end.answer = None;
+        end.unavailable = CompletionUnavailable::Cancelled;
+    }
     let provider_id = inner
         .state
         .lock()
@@ -1477,16 +1647,20 @@ async fn finish(
         .lock()
         .expect("driver state mutex")
         .storage_failed;
+    let mut draft = terminal_draft(snapshot, provider_id.as_deref(), &end.outcome);
+    if let (Some(user), Some(turn)) = (user_event_id, provider_id.as_deref()) {
+        draft["data"]["completion"] = match end.answer.take() {
+            Some(answer) => answer.payload(&snapshot.key, user, turn),
+            None => {
+                crate::turn_completion::unavailable_payload(&snapshot.key, user, end.unavailable)
+            }
+        };
+    }
     let terminal_event_id = if storage_failed {
         end.error = Some(DriverError::StorageUnavailable);
         None
     } else {
-        match append(
-            inner,
-            terminal_draft(snapshot, provider_id.as_deref(), &end.outcome),
-        )
-        .await
-        {
+        match append(inner, draft).await {
             Ok(receipt) => Some(receipt.id),
             Err(error) => {
                 end.error = Some(error);
@@ -1494,11 +1668,22 @@ async fn finish(
             }
         }
     };
+    let mut completion_ref = match (user_event_id, terminal_event_id, provider_id.as_ref()) {
+        (Some(user), Some(terminal), Some(turn)) => Some(CompletionRef::new(
+            ticket.clone(),
+            turn.clone(),
+            user,
+            terminal,
+            &end.outcome,
+        )),
+        _ => None,
+    };
     if terminal_event_id.is_some() && end.error != Some(DriverError::StorageUnavailable) {
         let sink = inner.sink.clone();
         let completion = Completion {
             ticket: ticket.clone(),
             outcome: end.outcome.clone(),
+            answer_ref: completion_ref.clone(),
         };
         if !matches!(
             tokio::spawn(async move { sink.before_release(completion).await }).await,
@@ -1509,6 +1694,7 @@ async fn finish(
         }
     }
     if end.error == Some(DriverError::StorageUnavailable) {
+        completion_ref = None;
         end.outcome = failure(
             "journal_unknown",
             "journal result is unknown; execution paused",
@@ -1546,6 +1732,7 @@ async fn finish(
                 turn,
                 user_event_id,
                 terminal_event_id,
+                completion_ref,
             })
         }
     };

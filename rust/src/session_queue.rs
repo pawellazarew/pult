@@ -1455,7 +1455,7 @@ mod tests {
                     }
                     Ok(Started {
                         turn_id: "pult-fixture".into(),
-                        done: Box::pin(async move { done.await.unwrap() }),
+                        done: Box::pin(async move { done.await.unwrap().into() }),
                     })
                 })
             }

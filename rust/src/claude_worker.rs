@@ -2,6 +2,7 @@
 //! and scoped MCP; this module is not an RPC spawn or authorization endpoint.
 //! The first integration retires the process after every turn; warm process
 //! reuse, background work and the daemon owner bridge remain separate work.
+use crate::turn_completion::WorkerCompletion;
 use crate::turn_coordinator::{Outcome, Ticket};
 use crate::turn_driver::{
     DispatchDecision, DispatchGate, Driver, EventSink, Progress, Started, Task, Worker, WorkerError,
@@ -781,7 +782,7 @@ async fn run(
     match result {
         Ok(outcome) => {
             let _ = done.send(if job.cancelled() {
-                Outcome::Interrupted
+                Outcome::Interrupted.into()
             } else {
                 outcome
             });
@@ -790,7 +791,7 @@ async fn run(
             if let Some(sender) = started.take() {
                 let _ = sender.send(Err(err));
             } else {
-                let _ = done.send(failure(&err.code, &err.message));
+                let _ = done.send(failure(&err.code, &err.message).into());
             }
         }
     }
@@ -806,8 +807,8 @@ async fn turn(
     process: &mut Option<Process>,
     progress: &mut watch::Receiver<Progress>,
     started: &mut Option<oneshot::Sender<Result<Started, WorkerError>>>,
-    done: oneshot::Receiver<Outcome>,
-) -> Result<Outcome, WorkerError> {
+    done: oneshot::Receiver<WorkerCompletion>,
+) -> Result<WorkerCompletion, WorkerError> {
     if job.cancelled() {
         return Err(interrupted());
     }
@@ -981,13 +982,14 @@ async fn turn(
     let mut init_seen = false;
     let mut acknowledged_id = None;
     loop {
-        let frame = tokio::select! {biased; _=cancel.changed()=>return if accepted {Ok(Outcome::Interrupted)}else{Err(interrupted())}, _=&mut deadline,if !accepted=>return Err(error("unknown_send","Claude input acknowledgement timed out")),frame=output.recv()=>frame};
+        let frame = tokio::select! {biased; _=cancel.changed()=>return if accepted {Ok(Outcome::Interrupted.into())}else{Err(interrupted())}, _=&mut deadline,if !accepted=>return Err(error("unknown_send","Claude input acknowledgement timed out")),frame=output.recv()=>frame};
         let Some(frame) = frame else {
             return if accepted {
                 Ok(failure(
                     "provider_unavailable",
                     "Claude exited without its matching result",
-                ))
+                )
+                .into())
             } else {
                 Err(unavailable())
             };
@@ -1106,14 +1108,14 @@ async fn turn(
             let _ = sender.send(Ok(Started {
                 turn_id: job.public_id.clone(),
                 done: Box::pin(async move {
-                    completion
-                        .await
-                        .unwrap_or_else(|_| failure("worker_failed", "Claude completion was lost"))
+                    completion.await.unwrap_or_else(|_| {
+                        failure("worker_failed", "Claude completion was lost").into()
+                    })
                 }),
             }));
             accepted = true;
             if !receipt_ready(progress, job).await {
-                return Ok(Outcome::Interrupted);
+                return Ok(Outcome::Interrupted.into());
             }
         }
         if !accepted {
@@ -1161,17 +1163,18 @@ async fn turn(
             // Preserve normalized provider evidence before the Driver terminal.
             // A stop signal still takes precedence over a coincident success.
             if let Some(outcome) = stop_outcome {
-                return Ok(outcome);
+                return Ok(outcome.into());
             }
             if let Some(terminal) = batch.terminal {
-                return Ok(if terminal.ok {
+                let mapped = if terminal.ok {
                     Outcome::Success
                 } else {
                     failure(
                         "provider_unavailable",
                         terminal.message.as_deref().unwrap_or("Claude turn failed"),
                     )
-                });
+                };
+                return Ok(WorkerCompletion::normalized(mapped, terminal));
             }
         }
     }

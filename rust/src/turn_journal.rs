@@ -44,6 +44,28 @@ impl JournalSink {
 }
 
 impl EventSink for JournalSink {
+    fn read_completion(
+        &self,
+        reference: crate::turn_completion::CompletionRef,
+    ) -> Task<
+        Result<
+            crate::turn_completion::CompletedAnswer,
+            crate::turn_completion::CompletionReadError,
+        >,
+    > {
+        let store = self.store.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                let mut store = store
+                    .lock()
+                    .map_err(|_| crate::turn_completion::CompletionReadError::Storage)?;
+                crate::turn_completion_store::read(&mut store, &reference)
+            })
+            .await
+            .map_err(|_| crate::turn_completion::CompletionReadError::Storage)?
+        })
+    }
+
     fn append(&self, draft: Value) -> Task<Result<Receipt, SinkError>> {
         let store = self.store.clone();
         let committed = self.committed.clone();
