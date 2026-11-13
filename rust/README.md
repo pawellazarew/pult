@@ -59,6 +59,8 @@ scratch=$(mktemp -d)
 
 ```sh
 ./rust/target/release/pultd-rust --home /absolute/scratch daemon status
+./rust/target/release/pultd-rust --home /absolute/scratch daemon logs -n 50
+./rust/target/release/pultd-rust --home /absolute/scratch session list
 ./rust/target/release/pultd-rust --home /absolute/scratch catalog
 ./rust/target/release/pultd-rust --home /absolute/scratch events tail --json --no-follow --since 0 --session chat --limit 100
 ./rust/target/release/pultd-rust --home /absolute/scratch events snapshot
@@ -66,7 +68,14 @@ scratch=$(mktemp -d)
 ./rust/target/release/pultd-rust --home /absolute/scratch events get 1 2
 ./rust/target/release/pultd-rust --home /absolute/scratch daemon stop
 ./rust/target/release/pultd-rust --skill
+./rust/target/release/pultd-rust --version
 ```
+
+`version`, `--version` и `-v` печатают версию Rust crate без home/config/account.
+`session` — alias `agent`. Локальный `daemon logs` читает `logs/pultd.log` без
+подключения/старта daemon: последние 50 непустых строк по умолчанию, до 16 MiB scan
+и 4 MiB output; превышение — ошибка без частичного вывода. Scoped credentials
+к логам не допускаются. Аргументы, границы и проверки — [R4-CLI-LOCAL](../docs/rust/R4-CLI-LOCAL.md).
 
 `events tail` теперь повторяет пользовательский потоковый контракт TS CLI: по умолчанию
 следит за новыми событиями; `--no-follow` заканчивает replay, `--limit N` ограничивает
@@ -93,7 +102,7 @@ JSON lock содержит PID и время старта процесса, со
 теряет соединение, другие клиенты продолжают работу. `daemon.stop` сначала отправляет
 ответ своему авторизованному клиенту, затем закрывает listener и остальные соединения.
 
-`--home` обязателен. Сервер проверяет канонический путь и отвергает production `~/.pult`,
+`--home` обязателен для команд работы с состоянием; version/help/skill обходятся без него. Сервер проверяет канонический путь и отвергает production `~/.pult`,
 настроенный `PULT_HOME`, их родителей и вложенные каталоги. Он также отвергает symlink-home и общедоступные каталоги. Существующие `events`,
 `config.json` и `sessions.json` разрешены в scratch-home с приватным маркером `.rust-core-scratch`, который сервер
 публикует при первом запуске. Это позволяет перезапускать собственный проверочный журнал.
