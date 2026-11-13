@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+mod cli_client;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -197,12 +198,16 @@ enum EventsAction {
         ids: Vec<u64>,
     },
     Tail {
-        #[arg(long, default_value_t = 0)]
-        since: u64,
+        #[arg(long, default_value = "0", num_args = 0..=1, default_missing_value = "", allow_negative_numbers = true)]
+        since: String,
+        #[arg(long, num_args = 0..=1)]
+        session: Option<Option<String>>,
+        #[arg(long, default_value = "0", num_args = 0..=1, default_missing_value = "", allow_negative_numbers = true)]
+        limit: String,
         #[arg(long)]
-        session: Option<String>,
+        json: bool,
         #[arg(long)]
-        limit: Option<usize>,
+        no_follow: bool,
     },
 }
 
@@ -223,7 +228,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     if args.skill {
         println!(
-            "Rust core protocol 1. Use an explicit private scratch --home.\nCommands: agent start --params JSON, agent list, agent prompt NAME TEXT [--attachments JSON] [--queue|--interrupt|--steer], agent stop NAME [--turn-id ID], perm list [--name NAME], perm resolve ID allow|deny [--scope once|session|rule] [--answers JSON] [--message TEXT] (partial ordinary Codex staging), memory add|update|forget|get|list|search|history|catalog|configure --params JSON, memory context bind|issue|revoke|status --params JSON (owner administration; ordinary Codex memory is opt-in), daemon serve, daemon status, daemon stop, catalog, events tail, events snapshot, events history --session NAME [--before ID] [--budget BYTES], events get ID..., agent read NAME [--since N] [--format text|json], agent tree NAME [--json], agent rename NAME [TITLE] [--title TEXT], agent archive|unarchive NAME, agent seen NAME [--unread]\nPULT_MEMORY_KEY selects memory-only authentication for every RPC without reading the owner token or display config. Memory credentials allow only get/list/search/catalog; they never grant owner authority.\nOwner-token connections support memory.configure, memory.context.bind, memory.context.issue, memory.context.revoke, memory.context.status, memory.catalog, memory.add, memory.update, memory.forget, memory.get, memory.list, memory.search, memory.history, agent.read, agent.tree, agent.rename, agent.archive, agent.seen, daemon.status, daemon.stop, events.tail, events.subscribe, events.unsubscribe, events.snapshot, events.history, events.get and protocol.catalog.\nPartial owner methods: agent.start, agent.list, agent.prompt, agent.stop, agent.queue.send/resume/remove/move, perm.list, perm.resolve. Queue and Codex steering are available; background and remaining provider parity continue.\nHistory reads per-session files, snapshots and get use the global journal.\nSubscriptions replay committed events with bounded output. live=true sends an empty-session reset.\nevents.emit requires PULT_TEST=1 and is for deterministic verification.\nJournal append is acknowledged after sync. A failed append has an unknown outcome until replay.\nOther catalogued methods return not_implemented. Legacy ask/runtime credentials remain rejected.\nPrivate sessions/config are allowed only in a marked Rust scratch home. Startup recovers sessions cold and pauses queues; no provider is started. Production cutover and remaining provider parity follow later compatibility steps."
+            "Rust core protocol 1. Use an explicit private scratch --home.\nCommands: agent start --params JSON, agent list, agent prompt NAME TEXT [--attachments JSON] [--queue|--interrupt|--steer], agent stop NAME [--turn-id ID], perm list [--name NAME], perm resolve ID allow|deny [--scope once|session|rule] [--answers JSON] [--message TEXT] (partial ordinary Codex staging), memory add|update|forget|get|list|search|history|catalog|configure --params JSON, memory context bind|issue|revoke|status --params JSON (owner administration; ordinary Codex memory is opt-in), daemon serve, daemon status, daemon stop, catalog, events tail [--since N] [--session ID] [--json] [--no-follow] [--limit N] (follows by default), events snapshot, events history --session NAME [--before ID] [--budget BYTES], events get ID..., agent read NAME [--since N] [--format text|json], agent tree NAME [--json], agent rename NAME [TITLE] [--title TEXT], agent archive|unarchive NAME, agent seen NAME [--unread]\nPULT_MEMORY_KEY selects memory-only authentication for every RPC without reading the owner token or display config. Memory credentials allow only get/list/search/catalog; they never grant owner authority.\nOwner-token connections support memory.configure, memory.context.bind, memory.context.issue, memory.context.revoke, memory.context.status, memory.catalog, memory.add, memory.update, memory.forget, memory.get, memory.list, memory.search, memory.history, agent.read, agent.tree, agent.rename, agent.archive, agent.seen, daemon.status, daemon.stop, events.tail, events.subscribe, events.unsubscribe, events.snapshot, events.history, events.get and protocol.catalog.\nPartial owner methods: agent.start, agent.list, agent.prompt, agent.stop, agent.queue.send/resume/remove/move, perm.list, perm.resolve. Queue and Codex steering are available; background and remaining provider parity continue.\nHistory reads per-session files, snapshots and get use the global journal.\nSubscriptions replay committed events with bounded output. live=true sends an empty-session reset.\nevents.emit requires PULT_TEST=1 and is for deterministic verification.\nJournal append is acknowledged after sync. A failed append has an unknown outcome until replay.\nOther catalogued methods return not_implemented. Legacy ask/runtime credentials remain rejected.\nPrivate sessions/config are allowed only in a marked Rust scratch home. Startup recovers sessions cold and pauses queues; no provider is started. Production cutover and remaining provider parity follow later compatibility steps."
         );
         return Ok(());
     }
@@ -480,16 +485,27 @@ async fn main() -> Result<()> {
                     since,
                     session,
                     limit,
+                    json,
+                    no_follow,
                 },
         } => {
-            let mut params = serde_json::json!({"since":since});
-            if let Some(session) = session {
-                params["sessionId"] = serde_json::json!(session);
-            }
-            if let Some(limit) = limit {
-                params["limit"] = serde_json::json!(limit);
-            }
-            cli_request(&home, "events.tail", params).await?
+            let result = cli_client::events_tail(
+                &home,
+                parse_cli_cursor(&since),
+                session.flatten(),
+                parse_cli_cursor(&limit),
+                json,
+                no_follow,
+            )
+            .await;
+            let code = match result {
+                Ok(()) => 0,
+                Err(error) => {
+                    eprintln!("pult: {error}");
+                    error.exit
+                }
+            };
+            std::process::exit(code);
         }
     };
     println!("{}", serde_json::to_string(&result)?);

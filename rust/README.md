@@ -60,13 +60,23 @@ scratch=$(mktemp -d)
 ```sh
 ./rust/target/release/pultd-rust --home /absolute/scratch daemon status
 ./rust/target/release/pultd-rust --home /absolute/scratch catalog
-./rust/target/release/pultd-rust --home /absolute/scratch events tail --since 0 --session chat --limit 100
+./rust/target/release/pultd-rust --home /absolute/scratch events tail --json --no-follow --since 0 --session chat --limit 100
 ./rust/target/release/pultd-rust --home /absolute/scratch events snapshot
 ./rust/target/release/pultd-rust --home /absolute/scratch events history --session chat --budget 65536
 ./rust/target/release/pultd-rust --home /absolute/scratch events get 1 2
 ./rust/target/release/pultd-rust --home /absolute/scratch daemon stop
 ./rust/target/release/pultd-rust --skill
 ```
+
+`events tail` теперь повторяет пользовательский потоковый контракт TS CLI: по умолчанию
+следит за новыми событиями; `--no-follow` заканчивает replay, `--limit N` ограничивает
+число показанных событий, `--json` печатает один event на строку. Без `--json` — текст
+`#ID TS provider/kind sessionId [data]`. Это сознательная смена прежнего проверочного
+Rust CLI, который печатал `{events,cursor}`; сам RPC `events.tail` не меняется.
+Follow заканчивается по SIGINT, закрытию/end подписки или лимиту, без reconnect.
+Используется только уже работающий daemon в явном scratch-home; on-demand запуск,
+установленный launcher и production-home guard этим шагом не меняются.
+Договор и проверки — [R4-CLI-EVENTS](../docs/rust/R4-CLI-EVENTS.md).
 
 Сервер создаёт `run/pultd.sock`, `run/token` и `run/pultd.lock` в формате текущего Пульта.
 Токен — 32 случайных байта в hex, новый на каждый успешный запуск. Он публикуется после
