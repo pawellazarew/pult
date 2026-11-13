@@ -1309,3 +1309,98 @@ async fn saturated_event_queue_failure_stays_sticky_while_accept_store_is_owned(
     );
     assert!(w.is_retired());
 }
+
+#[tokio::test]
+async fn actual_holder_unknown_exit_quarantines_without_external_cancel_or_replay() {
+    use pult_core::turn_driver::{DriverError, Progress};
+    let f = Rig::new(false);
+    let wrapper = f.home.join("forced-unknown-holder");
+    std::fs::copy(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/zcode_holder_forced_unknown.py"),
+        &wrapper,
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(
+        f.home.join("actual-holder.path"),
+        env!("CARGO_BIN_EXE_pult-worker-holder"),
+    )
+    .unwrap();
+    let worker = f.worker_with("ack-first", |config, _| {
+        config.launch.holder = wrapper;
+    });
+    let mut handle = f.start(worker.clone());
+    let accepted = bounded(handle.accepted()).await.unwrap();
+    assert!(accepted.user_event_id > 0);
+    assert!(accepted.turn_id.starts_with("pult-turn-"));
+    // NativeStarted legitimately resolves the unknown-input marker already.
+    // Unknown later cleanup must preserve that accepted identity/state.
+    let accepted_marker = f.record().get("zcodePendingInput").is_some();
+    let accepted_native = f.record().scalar("providerSessionId");
+    wait_file(&f.home, "forced-holder-proof.json").await;
+    let joined: Value =
+        serde_json::from_slice(&std::fs::read(f.home.join("forced-holder-proof.json")).unwrap())
+            .unwrap();
+    assert_eq!(joined["real_holder_exit_zero"], true);
+    assert_eq!(joined["native_close_observed"], true);
+    assert_eq!(joined["internal_owner_rebound"], true);
+    let pid: u32 = std::fs::read_to_string(f.home.join("provider.pid"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        !alive(pid),
+        "real native peer did not finish before forced125"
+    );
+    let proof = f.proof();
+    assert_eq!(
+        proof
+            .iter()
+            .filter(|v| v["method"] == "session/send")
+            .count(),
+        1
+    );
+    assert!(proof.iter().any(|v| v["send_marker_present"] == true
+        && v["sid_durable"] == true
+        && v["content_ok"] == true));
+    // Normative assertion: a completed native turn with unknown owned cleanup
+    // must reach Quarantined without an external cancel driving the supervisor.
+    // The30s bound is the same watchdog as the other actual-holder cases.
+    let completion = tokio::time::timeout(Duration::from_secs(30), handle.wait()).await;
+    let quarantined_without_cancel =
+        matches!(&completion, Ok(Err(DriverError::CleanupUnconfirmed)))
+            && matches!(handle.progress(), Progress::Quarantined(_));
+    let originally_running = matches!(handle.progress(), Progress::Running(_));
+    let originally_pending = completion.is_err();
+    assert_eq!(f.driver.active_count(), 1, "unknown cleanup freed capacity");
+    assert_eq!(
+        f.record().get("zcodePendingInput").is_some(),
+        accepted_marker
+    );
+    assert_eq!(f.record().scalar("providerSessionId"), accepted_native);
+    assert!(!worker.is_retired());
+    if !quarantined_without_cancel {
+        eprintln!(
+            "stop-unknown counterexample: wait-timed-out={originally_pending} retained-running={originally_running} real-holder-joined=true native-finished=true exact-started=true replay=false"
+        );
+        // Failure-only owned cleanup request. It cannot satisfy the original
+        // no-external-cancel assertion or convert this counterexample to PASS.
+        f.driver.cancel(handle.ticket());
+        let after_cancel = bounded(handle.wait()).await;
+        assert!(matches!(after_cancel, Err(DriverError::CleanupUnconfirmed)));
+        assert!(matches!(handle.progress(), Progress::Quarantined(_)));
+    }
+    assert_eq!(
+        f.proof()
+            .iter()
+            .filter(|v| v["method"] == "session/send")
+            .count(),
+        1,
+        "unknown cleanup replayed native input"
+    );
+    assert!(
+        quarantined_without_cancel,
+        "unknown cleanup must quarantine without an external cancellation"
+    );
+}
