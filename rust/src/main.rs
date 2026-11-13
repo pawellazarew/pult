@@ -1,13 +1,21 @@
 #![forbid(unsafe_code)]
 mod cli_client;
+mod cli_logs;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
+#[command(
+    about = "Rust preview CLI; owner commands require an explicit private scratch --home",
+    after_help = "Local commands: version, daemon logs. Agent/session execution remains partial; installed service and production cutover are not enabled."
+)]
 struct Args {
-    #[arg(long, required_unless_present = "skill")]
+    #[arg(long)]
     home: Option<PathBuf>,
+    /// Print this Rust crate's version without reading local state.
+    #[arg(long = "version", short = 'v', global = true)]
+    show_version: bool,
     #[arg(long)]
     skill: bool,
     #[command(subcommand)]
@@ -16,6 +24,8 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Action {
+    /// Print this Rust crate's version without reading local state.
+    Version,
     /// Private scoped permission MCP helper; never reads owner credentials.
     McpAsk,
     Daemon {
@@ -27,6 +37,7 @@ enum Action {
         #[command(subcommand)]
         action: MemoryAction,
     },
+    #[command(visible_alias = "session")]
     Agent {
         #[command(subcommand)]
         action: AgentAction,
@@ -220,24 +231,43 @@ enum DaemonAction {
         initialize_runtime: bool,
     },
     Stop,
+    /// Read bounded local logs/pultd.log; never connects to or starts a daemon.
+    Logs {
+        #[arg(short = 'n', long, num_args = 0..=1, default_missing_value = "50", allow_negative_numbers = true)]
+        n: Option<String>,
+        #[arg(long, num_args = 0..=1, default_missing_value = "50", allow_negative_numbers = true)]
+        lines: Option<String>,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     pult_core::panic_guard::install();
     let args = Args::parse();
+    if args.show_version || matches!(args.command, Some(Action::Version)) {
+        println!("{}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     if args.skill {
         println!(
-            "Rust core protocol 1. Use an explicit private scratch --home.\nCommands: agent start --params JSON, agent list, agent prompt NAME TEXT [--attachments JSON] [--queue|--interrupt|--steer], agent stop NAME [--turn-id ID], perm list [--name NAME], perm resolve ID allow|deny [--scope once|session|rule] [--answers JSON] [--message TEXT] (partial ordinary Codex staging), memory add|update|forget|get|list|search|history|catalog|configure --params JSON, memory context bind|issue|revoke|status --params JSON (owner administration; ordinary Codex memory is opt-in), daemon serve, daemon status, daemon stop, catalog, events tail [--since N] [--session ID] [--json] [--no-follow] [--limit N] (follows by default), events snapshot, events history --session NAME [--before ID] [--budget BYTES], events get ID..., agent read NAME [--since N] [--format text|json], agent tree NAME [--json], agent rename NAME [TITLE] [--title TEXT], agent archive|unarchive NAME, agent seen NAME [--unread]\nPULT_MEMORY_KEY selects memory-only authentication for every RPC without reading the owner token or display config. Memory credentials allow only get/list/search/catalog; they never grant owner authority.\nOwner-token connections support memory.configure, memory.context.bind, memory.context.issue, memory.context.revoke, memory.context.status, memory.catalog, memory.add, memory.update, memory.forget, memory.get, memory.list, memory.search, memory.history, agent.read, agent.tree, agent.rename, agent.archive, agent.seen, daemon.status, daemon.stop, events.tail, events.subscribe, events.unsubscribe, events.snapshot, events.history, events.get and protocol.catalog.\nPartial owner methods: agent.start, agent.list, agent.prompt, agent.stop, agent.queue.send/resume/remove/move, perm.list, perm.resolve. Queue and Codex steering are available; background and remaining provider parity continue.\nHistory reads per-session files, snapshots and get use the global journal.\nSubscriptions replay committed events with bounded output. live=true sends an empty-session reset.\nevents.emit requires PULT_TEST=1 and is for deterministic verification.\nJournal append is acknowledged after sync. A failed append has an unknown outcome until replay.\nOther catalogued methods return not_implemented. Legacy ask/runtime credentials remain rejected.\nPrivate sessions/config are allowed only in a marked Rust scratch home. Startup recovers sessions cold and pauses queues; no provider is started. Production cutover and remaining provider parity follow later compatibility steps."
+            "Rust core protocol 1. Use an explicit private scratch --home.\nCommands: version (also --version/-v; no home needed), daemon logs [-n N|--lines N] (bounded local owner logs; no daemon needed), agent/session start --params JSON, agent list, agent prompt NAME TEXT [--attachments JSON] [--queue|--interrupt|--steer], agent stop NAME [--turn-id ID], perm list [--name NAME], perm resolve ID allow|deny [--scope once|session|rule] [--answers JSON] [--message TEXT] (partial ordinary Codex staging), memory add|update|forget|get|list|search|history|catalog|configure --params JSON, memory context bind|issue|revoke|status --params JSON (owner administration; ordinary Codex memory is opt-in), daemon serve, daemon status, daemon stop, catalog, events tail [--since N] [--session ID] [--json] [--no-follow] [--limit N] (follows by default), events snapshot, events history --session NAME [--before ID] [--budget BYTES], events get ID..., agent read NAME [--since N] [--format text|json], agent tree NAME [--json], agent rename NAME [TITLE] [--title TEXT], agent archive|unarchive NAME, agent seen NAME [--unread]\nPULT_MEMORY_KEY selects memory-only authentication for every RPC without reading the owner token or display config. Memory credentials allow only get/list/search/catalog; they never grant owner authority.\nOwner-token connections support memory.configure, memory.context.bind, memory.context.issue, memory.context.revoke, memory.context.status, memory.catalog, memory.add, memory.update, memory.forget, memory.get, memory.list, memory.search, memory.history, agent.read, agent.tree, agent.rename, agent.archive, agent.seen, daemon.status, daemon.stop, events.tail, events.subscribe, events.unsubscribe, events.snapshot, events.history, events.get and protocol.catalog.\nPartial owner methods: agent.start, agent.list, agent.prompt, agent.stop, agent.queue.send/resume/remove/move, perm.list, perm.resolve. Queue and Codex steering are available; background and remaining provider parity continue.\nHistory reads per-session files, snapshots and get use the global journal.\nSubscriptions replay committed events with bounded output. live=true sends an empty-session reset.\nevents.emit requires PULT_TEST=1 and is for deterministic verification.\nJournal append is acknowledged after sync. A failed append has an unknown outcome until replay.\nOther catalogued methods return not_implemented. Legacy ask/runtime credentials remain rejected.\nPrivate sessions/config are allowed only in a marked Rust scratch home. Startup recovers sessions cold and pauses queues; no provider is started. Production cutover and remaining provider parity follow later compatibility steps."
         );
         return Ok(());
     }
-    let home = args.home.expect("clap requires home");
+    let home = args
+        .home
+        .ok_or_else(|| anyhow::anyhow!("--home is required for this command"))?;
     let result = match args.command.unwrap_or(Action::Daemon {
         action: DaemonAction::Status {
             initialize_runtime: false,
         },
     }) {
+        Action::Version => unreachable!("version returns before home access"),
+        Action::Daemon {
+            action: DaemonAction::Logs { n, lines },
+        } => {
+            return cli_logs::run(&home, n.as_deref().or(lines.as_deref()));
+        }
         Action::McpAsk => {
             return pult_core::ask_mcp::run(
                 home,
