@@ -73,8 +73,8 @@ complete-corrupt control still fails closed. Normal 18-check interoperability,
 its six-second predicates, and the cold-site control remain unchanged.
 
 Failure-only check-nine observations distinguish its four RPC phases and emit
-bounded, allowlisted codes/counts and fixture reader error classes, without raw
+bounded, allowlisted codes/counts and fixture exception classes and last-journal-read context, without raw
 provider text, IDs, paths or credentials. Failed or unconfirmed scratch is
-retained. This source counterexample does not establish the natural trigger of
+retained. Last-read context does not locate a later unrelated exception. This source counterexample does not establish the natural trigger of
 the prior Linux CI rejection; a Node minor-version difference is not a cause
 claim.

@@ -96,14 +96,14 @@ async function unknownDrainDiagnostic(nativeOffset, journalOffset, context) {
     if (Array.isArray(ids) && Number.isSafeInteger(ids[1]) && ids[1] > 1 && ids[1] < 2147483648) { process.kill(ids[1], 0); recordedNativePidAlive = true }
   } catch {}
   const knownStatuses = new Set(['cold', 'working', 'idle', 'failed', 'interrupted', 'done', 'blocked', 'starting', 'waiting'])
-  let providerReadError = 'none', providerReadPhase = 'none'
+  let providerFixtureError = 'none', providerLastJournalReadPhase = 'none'
   try {
     const evidence = JSON.parse(boundedFile(join(native, 'fixture-read-error.json'), 0, 1024) ?? 'null')
-    if (['UnicodeDecodeError', 'JSONDecodeError', 'AssertionError', 'KeyError', 'other'].includes(evidence?.errorClass)) providerReadError = evidence.errorClass
-    if (['bootstrap', 'turn_start_journal', 'permission_journal'].includes(evidence?.phase)) providerReadPhase = evidence.phase
+    if (['UnicodeDecodeError', 'JSONDecodeError', 'AssertionError', 'KeyError', 'other'].includes(evidence?.errorClass)) providerFixtureError = evidence.errorClass
+    if (['bootstrap', 'turn_start_journal', 'permission_journal'].includes(evidence?.lastJournalReadPhase)) providerLastJournalReadPhase = evidence.lastJournalReadPhase
   } catch {}
   console.error('[unknown-drain-fixture] ' + JSON.stringify({
-    phase: context?.phase ?? 'edited_unknown_cold_retry', ...(context ? { failedRPC: context.method, rpcErrorCode: codes.has(context.code) ? context.code : 'other', providerReadError, providerReadPhase } : {}), status: knownStatuses.has(row.status) ? row.status : 'other',
+    phase: context?.phase ?? 'edited_unknown_cold_retry', ...(context ? { failedRPC: context.method, rpcErrorCode: codes.has(context.code) ? context.code : 'other', providerFixtureError, providerLastJournalReadPhase } : {}), status: knownStatuses.has(row.status) ? row.status : 'other',
     queueCount: Array.isArray(row.queue) ? Math.min(row.queue.length, 129) : -1,
     queuePaused: row.queuePaused === true,
     activeTurns: Number.isSafeInteger(status.nativeRuntime?.activeTurns) ? status.nativeRuntime.activeTurns : -1,
@@ -159,7 +159,7 @@ try {
     if (journalCorrupt) {
       await assert.rejects(client.request('agent.prompt', { name: 'one', text: 'hello one' }), error => error.code === 'internal')
       await until(async () => (await client.request('daemon.status')).nativeRuntime.activeTurns === 0, 'corrupt snapshot did not drain')
-      assert.deepEqual(JSON.parse(boundedFile(join(native, 'fixture-read-error.json'), 0, 1024)), { phase: 'turn_start_journal', errorClass: 'JSONDecodeError' })
+      assert.deepEqual(JSON.parse(boundedFile(join(native, 'fixture-read-error.json'), 0, 1024)), { lastJournalReadPhase: 'turn_start_journal', errorClass: 'JSONDecodeError' })
       const copied = JSON.parse(boundedFile(join(native, 'journal-snapshot-evidence.json'), 0, 1024))
       assert.deepEqual(copied, { copiedWorkingReceipt: true, mode: 'corrupt_complete', sourceUnchanged: true })
       assert.equal(journal().filter(row => row.kind === 'message.user').length, 1)
