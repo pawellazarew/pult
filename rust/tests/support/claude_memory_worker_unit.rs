@@ -120,6 +120,9 @@ impl Rig {
         Self::with_attachment_mode(attach, false)
     }
     fn with_attachment_mode(attach: bool, observe: bool) -> Self {
+        Self::with_attachment_dependencies(attach, observe, false)
+    }
+    fn with_attachment_dependencies(attach: bool, observe: bool, block_optional: bool) -> Self {
         crate::panic_guard::install();
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().canonicalize().unwrap();
@@ -186,6 +189,21 @@ impl Rig {
         .map(PathBuf::from)
         .find(|p| p.is_file())
         .unwrap();
+        let mut args = vec!["-B".into()];
+        if block_optional {
+            args.push(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/claude_optional_import_barrier.py")
+                    .into_os_string(),
+            );
+        }
+        args.extend([
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/claude_worker.py")
+                .into_os_string(),
+            home.clone().into_os_string(),
+            if observe { "memory-observe" } else { "normal" }.into(),
+        ]);
         let worker = ClaudeWorker::new(
             Config {
                 session: snapshot.key.clone(),
@@ -193,14 +211,7 @@ impl Rig {
                 launch: Launch {
                     holder,
                     program: python,
-                    args: vec![
-                        "-B".into(),
-                        Path::new(env!("CARGO_MANIFEST_DIR"))
-                            .join("tests/fixtures/claude_worker.py")
-                            .into_os_string(),
-                        home.clone().into_os_string(),
-                        if observe { "memory-observe" } else { "normal" }.into(),
-                    ],
+                    args,
                     cwd: home.clone(),
                     env: BTreeMap::from([
                         ("PATH".into(), "/usr/bin:/bin".into()),
@@ -441,6 +452,43 @@ async fn synchronous_catalog_or_fresh_check_panic_denies_without_input_and_clean
         assert!(f.input().is_none());
         f.cleaned();
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ordinary_attachment_fixture_does_not_wait_for_optional_imports_before_ack() {
+    let f = Rig::with_attachment_dependencies(true, false, true);
+    let mut turn = f.start("/context");
+    let terminal = tokio::time::timeout(WATCHDOG, turn.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    let blocked = std::fs::read_to_string(f.home.join("fixture-import-blocked"))
+        .ok()
+        .filter(|value| matches!(value.as_str(), "pathlib" | "threading"));
+    if let Outcome::Failure { code, message } = &terminal.turn.outcome {
+        let startup = *f.startup_diagnostic.lock().unwrap();
+        eprintln!(
+            "[optional-import-fixture] code={code} ack-timeout={} blocked={blocked:?} pre-import={} post-import={}",
+            message == "Claude input acknowledgement timed out",
+            startup.pre_import,
+            startup.post_import,
+        );
+    }
+    assert_eq!(terminal.turn.outcome, Outcome::Success);
+    assert!(blocked.is_none());
+    let input = f.input().unwrap();
+    let blocks = input["message"]["content"].as_array().unwrap();
+    assert_eq!(blocks.len(), 4);
+    assert_eq!(blocks[0]["text"], "/context");
+    assert!(blocks[1]["text"].as_str().unwrap().contains("note.txt"));
+    assert_eq!(blocks[2]["text"], CATALOG);
+    assert!(
+        blocks[3]["text"]
+            .as_str()
+            .unwrap()
+            .contains("<pult_runtime_context>")
+    );
+    f.cleaned();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
