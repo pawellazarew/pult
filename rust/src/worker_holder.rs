@@ -16,8 +16,107 @@ async fn main() {
     pult_core::panic_guard::install();
     // Arguments, spawn failures and provider stderr may contain private data.
     // No diagnostics are copied into the holder's own protocol or stderr.
-    let code = run().await.unwrap_or(125);
+    let code = match run().await {
+        Ok(code) => code,
+        Err(error) => {
+            emit_failure_observation(&error);
+            125
+        }
+    };
     std::process::exit(code);
+}
+
+fn failure_observation(error: &anyhow::Error) -> String {
+    // Compare only our fixed labels. Never expose Display, provider stderr,
+    // argv or paths. Most-specific causes precede their cleanup contexts.
+    let labels: Vec<_> = error.chain().map(ToString::to_string).collect();
+    let phase = [
+        ("process snapshot deadline", "snapshot_deadline"),
+        ("process snapshot unavailable", "snapshot_spawn"),
+        ("process snapshot stdout missing", "snapshot_pipe"),
+        ("process snapshot exceeds budget", "snapshot_budget"),
+        ("process snapshot failed", "snapshot_exit"),
+        ("invalid process snapshot", "snapshot_parse"),
+        ("ambiguous process snapshot", "snapshot_parse"),
+        ("invalid process pid", "snapshot_parse"),
+        ("invalid process group", "snapshot_parse"),
+        ("process id overflow", "snapshot_parse"),
+        ("duplicate process snapshot pid", "snapshot_parse"),
+        ("invalid process status", "snapshot_parse"),
+        ("owned zombie leader missing", "zombie_leader_missing"),
+        ("group member still executing", "group_member_running"),
+        (
+            "process group membership changed during proof",
+            "zombie_membership_changed",
+        ),
+        ("leader still executing", "leader_running"),
+        ("group TERM failed", "group_term"),
+        ("group KILL failed", "group_kill"),
+        ("leader reap failed", "leader_reap"),
+        ("provider output drain unconfirmed", "output_drain"),
+        ("provider output forwarding failed", "output_forwarding"),
+    ]
+    .into_iter()
+    .find_map(|(label, phase)| labels.iter().any(|value| value == label).then_some(phase))
+    .unwrap_or("other");
+    let errno = error
+        .downcast_ref::<std::io::Error>()
+        .and_then(std::io::Error::raw_os_error)
+        .or_else(|| error.downcast_ref::<nix::errno::Errno>().map(|e| *e as i32))
+        .map_or_else(|| "none".to_owned(), |value| value.to_string());
+    format!("PULT_HOLDER_DIAG phase={phase} errno={errno}\n")
+}
+
+fn emit_failure_observation(error: &anyhow::Error) {
+    use std::os::fd::AsFd;
+    // The forwarder can hold Rust's stderr lock while blocked. Duplicate only
+    // fd2; never mutate its shared flags or take any stdio lock for this hint.
+    let Ok(descriptor) = std::io::stderr().as_fd().try_clone_to_owned() else {
+        return;
+    };
+    let line = failure_observation(error);
+    if line.len() > 128 {
+        return;
+    }
+    let (done, observed) = std::sync::mpsc::sync_channel(1);
+    let launched = std::thread::Builder::new()
+        .name("pult-failure-observer".into())
+        .spawn(move || {
+            let mut file = std::fs::File::from(descriptor);
+            let _ = file.write_all(line.as_bytes());
+            let _ = done.send(());
+        });
+    if launched.is_ok() {
+        // Best effort only: even a full fd2 cannot postpone exit125 forever.
+        // No owned provider/process work is delegated to this detached writer.
+        let _ = observed.recv_timeout(Duration::from_millis(20));
+    }
+}
+
+#[cfg(test)]
+mod failure_observation_tests {
+    use super::failure_observation;
+
+    #[test]
+    fn specific_snapshot_cause_precedes_group_context_without_reflection() {
+        let error = anyhow::anyhow!("process snapshot deadline").context("group TERM failed");
+        assert_eq!(
+            failure_observation(&error),
+            "PULT_HOLDER_DIAG phase=snapshot_deadline errno=none\n"
+        );
+        let error = anyhow::Error::new(std::io::Error::from_raw_os_error(13))
+            .context("process snapshot unavailable")
+            .context("group KILL failed");
+        assert_eq!(
+            failure_observation(&error),
+            "PULT_HOLDER_DIAG phase=snapshot_spawn errno=13\n"
+        );
+        let error = anyhow::anyhow!("PRIVATE_PROVIDER_ARGUMENT_OR_ERROR");
+        assert_eq!(
+            failure_observation(&error),
+            "PULT_HOLDER_DIAG phase=other errno=none\n"
+        );
+    }
 }
 
 /// Keep the leader unreaped until the last group signal has been sent. Reaping
