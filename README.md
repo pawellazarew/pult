@@ -125,6 +125,8 @@ Temporary conversations stay in memory and do not enter that journal.
 
 Since 0.3.18, **Preview** opens a shared browser page, iOS Simulator or Android Emulator beside the chat. The browser uses Electron's existing Chromium. Mobile SDKs and system images are not bundled.
 
+The browser page defaults to **1280 × 800** regardless of panel width. The read-only thumbnail opens a larger in-app view with **Fit / 100%** (100% requires enough space). Expanding or folding keeps the same page, forms, scroll and login; it does not take control. Use **Take control** for native input and **Esc** to fold. Large local observer frames have their own bounded quality budget; model screenshot limits remain unchanged.
+
 Connect an installed device, watch screen updates about once a second, and select **Take control** to cancel queued agent input. Return control when ready; an already-running operation may finish during takeover. Claude and Codex share the `pult_runtime` MCP tools, including in full-access sessions. This is separate from the existing external Playwright browser.
 
 Xcode and an iOS runtime are required for iOS; Android needs its SDK, Emulator and an AVD. iOS input also needs AXe, reused from an existing installation or Homebrew XcodeBuildMCP when available. Missing AXe can be installed from the displayed setup proposal. **Installing an add-on requires explicit consent even in full access.** Missing Xcode and Android SDK components use guided manual setup. This does not sandbox an agent with full shell access.

@@ -39,3 +39,12 @@ describe('runtime setup status', () => {
     assert.equal(runtimeSetupLabel('failed', true), 'Установка не завершена')
   })
 })
+
+describe('local expanded browser frame budget', () => {
+  it('accepts full-quality local images without changing the model image budget', () => {
+    const frame = { image: { data: 'A'.repeat(600004), mimeType: 'image/jpeg' as const } }
+    assert.equal(runtimeImage(frame), null)
+    assert.ok(runtimeImage(frame, true))
+    assert.equal(runtimeImage({ image: { data: 'A'.repeat(2800004), mimeType: 'image/jpeg' } }, true), null)
+  })
+})
