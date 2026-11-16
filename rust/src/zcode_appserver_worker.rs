@@ -426,7 +426,8 @@ pub(crate) mod fault_test {
     use super::*;
     use std::sync::{Condvar, LazyLock};
 
-    static HOOKS: LazyLock<Mutex<Vec<(Ticket, Weak<Hook>)>>> = LazyLock::new(Mutex::default);
+    type HooksByTicket = Vec<(Ticket, Weak<Hook>)>;
+    static HOOKS: LazyLock<Mutex<HooksByTicket>> = LazyLock::new(Mutex::default);
 
     pub(crate) struct Hook {
         pause_code: Option<&'static str>,
@@ -534,14 +535,9 @@ impl Job {
         }
     }
     fn fail(&self, failure: WorkerError) {
-        self.revoke_permissions();
         #[cfg(test)]
-        fault_test::after_revoke(&self.ticket, &failure.code);
-        // Revoke Ready input before waiting on any resource admission lock.
-        if let Some(a) = self.attempt.lock().expect("attempt").as_ref() {
-            a.attempt().cancel_before_spawn();
-            a.cancel_before_input();
-        }
+        let failure_code = failure.code.clone();
+        // Publish the cause before revocation wakes callbacks that can fail too.
         self.failure.send_if_modified(|current| {
             if current.is_some() {
                 return false;
@@ -551,6 +547,14 @@ impl Job {
         });
         #[cfg(test)]
         fault_test::published(&self.ticket, self.failure.borrow().as_ref());
+        self.revoke_permissions();
+        #[cfg(test)]
+        fault_test::after_revoke(&self.ticket, &failure_code);
+        // Revoke Ready input before waiting on any resource admission lock.
+        if let Some(a) = self.attempt.lock().expect("attempt").as_ref() {
+            a.attempt().cancel_before_spawn();
+            a.cancel_before_input();
+        }
         self.stop();
     }
     fn stop(&self) {
@@ -1965,9 +1969,9 @@ async fn turn(
             return Err(interrupted());
         }
         let event = tokio::select! {biased;
+            e=async {failure_rx.wait_for(|e| e.is_some()).await.ok().and_then(|e| e.clone())}=>return Err(e.unwrap_or_else(protocol)),
             v=events.recv()=>v.ok_or_else(protocol)?,
             _=cancel.changed()=>return Err(interrupted()),
-            e=async {failure_rx.wait_for(|e| e.is_some()).await.ok().and_then(|e| e.clone())}=>return Err(e.unwrap_or_else(protocol)),
             _=tokio::time::sleep_until(inner.config.start_deadline.into()),if !accepted=>return Err(error("start_unknown"))
         };
         match event {
