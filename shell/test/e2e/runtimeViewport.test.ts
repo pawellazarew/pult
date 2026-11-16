@@ -10,9 +10,18 @@ import { launch, waitFor } from './harness.js'
 import type { Harness } from './harness.js'
 import type { RuntimeResult } from '../../../src/runtimes/types.js'
 
+// Diagnostic reads never extend or turn a failed visibility assertion into a pass.
+async function boundedProof(read: () => Promise<unknown>): Promise<unknown> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const pending = Promise.resolve().then(read).catch(() => ({ state: 'unavailable' }))
+  try { return await Promise.race([pending, new Promise(resolve => { timer = setTimeout(() => resolve({ state: 'timeout' }), 150) })]) }
+  finally { if (timer) clearTimeout(timer) }
+}
+
 // Actual Electron + private daemon/fake provider. No account, external page or profile.
 for (const dpr of [1, 2]) describe(`fixed viewport, actual Electron display DPR ${dpr}`, () => {
   let h: Harness
+  let owner: Awaited<ReturnType<Harness['client']>> | undefined
   let url: string
   let loads = 0
   const server = createServer((req, res) => {
@@ -36,12 +45,51 @@ for (const dpr of [1, 2]) describe(`fixed viewport, actual Electron display DPR 
       const target = await wc.debugger.sendCommand('Target.getTargetInfo')
       return { id: wc.id, target: target.targetInfo.targetId, ...await wc.executeJavaScript('({width:innerWidth,height:innerHeight,nonce,scroll:scrollY,value:document.querySelector("input").value,hit:window.hit??null,cookie:document.cookie})') }
     }, url)
+  const setExpanded = async (wanted: boolean): Promise<void> => {
+    if ((await h.win.locator('.runtime-expanded').count() > 0) !== wanted) await h.win.getByTestId('runtime-expand').click()
+    assert.ok(await waitFor(async () => await h.win.locator('.runtime-expanded').count() === (wanted ? 1 : 0)))
+  }
+  const nativeProof = async (): Promise<string> => {
+    const [dom, native, controller] = await Promise.all([
+      boundedProof(() => h.win.evaluate(() => {
+        const slot = document.querySelector<HTMLElement>('[data-testid="runtime-screen"]')
+        const panel = slot?.closest<HTMLElement>('.runtime-panel')
+        const box = slot?.getBoundingClientRect(), outer = panel?.getBoundingClientRect()
+        const rect = (b: DOMRect | undefined): unknown => b ? { x: b.x, y: b.y, width: b.width, height: b.height } : null
+        const label = document.querySelector('.runtime-viewport-label')?.textContent?.match(/^(\d+) × (\d+)$/)
+        const control = document.querySelector('[data-testid="runtime-control"]')?.textContent ?? ''
+        return { expanded: !!document.querySelector('.runtime-expanded'), ariaExpanded: document.querySelector('[data-testid="runtime-expand"]')?.getAttribute('aria-expanded') === 'true', visibility: document.visibilityState,
+          width: innerWidth, height: innerHeight, dpr: devicePixelRatio, slot: rect(box), panel: rect(outer), client: slot ? { width: slot.clientWidth, height: slot.clientHeight } : null,
+          fits: !!box && !!outer && box.top >= outer.top && box.bottom <= outer.bottom && box.left >= outer.left && box.right <= outer.right && box.top >= 0 && box.bottom <= innerHeight,
+          frame: label ? { width: Number(label[1]), height: Number(label[2]) } : null, error: !!document.querySelector('.runtime-error'),
+          uiController: control.includes('Вернуть агенту') ? 'human' : control.includes('Взять управление') ? 'agent' : 'missing', attachButton: !!document.querySelector('[data-testid="runtime-attach"]'), observerStatus: !!document.querySelector('.runtime-frame-status'),
+          otherModal: Array.from(document.querySelectorAll('[role="dialog"],[aria-modal="true"],dialog[open]')).some(el => el !== panel) }
+      })),
+      boundedProof(() => h.app.evaluate(({ BrowserWindow }, base) => {
+        const win = BrowserWindow.getAllWindows()[0]!
+        const view = win.contentView.children.find(v => 'webContents' in v && (v as import('electron').WebContentsView).webContents.getURL() === base)
+        return { windowVisible: win.isVisible(), windowFocused: win.isFocused(), minimized: win.isMinimized(), content: win.getContentBounds(), exists: !!view, visible: view?.getVisible() ?? false, bounds: view?.getBounds() ?? null }
+      }, url)),
+      boundedProof(async () => {
+        if (!owner) return { controller: 'missing' }
+        const discovery = await owner.request('runtime.discover', { sessionId: 'fixed' }) as { controllers?: Record<string, string>; controller?: string; attached?: string[] }
+        const value = discovery.controllers?.['web:fixed'] ?? discovery.controller
+        return { controller: value === 'human' || value === 'agent' ? value : 'missing', attached: discovery.attached?.includes('web:fixed') === true }
+      }),
+    ])
+    return JSON.stringify({ dom, native, controller })
+  }
+  const assertNativeVisibility = async (expected: boolean, phase: string): Promise<void> => {
+    const satisfied = await waitFor(() => h.app.evaluate(({ BrowserWindow }, args) => BrowserWindow.getAllWindows()[0]!.contentView.children.some(v => 'webContents' in v && (v as import('electron').WebContentsView).webContents.getURL() === args.url && v.getVisible()) === args.expected, { url, expected }))
+    if (!satisfied) assert.fail(`native visibility phase=${phase} expected=${expected} waitForResult=false ${await nativeProof()}`)
+  }
   before(async () => {
     await new Promise<void>(r => server.listen(0, '127.0.0.1', r))
     url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/`
     h = await launch({ name: `fixed-viewport-${dpr}`, args: [`--force-device-scale-factor=${dpr}`] })
     assert.ok(await waitFor(async () => await h.win.getAttribute('.app', 'data-conn') === 'up', 20_000))
     const c = await h.client()
+    owner = c
     await c.request('agent.start', { name: 'fixed', kind: 'claude', cwd: h.workDir('fixed') })
     assert.ok(await waitFor(async () => {
       const discovery = await c.request('runtime.discover', { sessionId: 'fixed' }) as { targets: Array<{ kind: string; state: string }> }
@@ -61,13 +109,12 @@ for (const dpr of [1, 2]) describe(`fixed viewport, actual Electron display DPR 
     const before = await probe()
     assert.equal(before.width, 1280); assert.equal(before.height, 800)
     const loadCount = loads
-    await h.win.getByTestId('runtime-expand').click()
-    await h.win.locator('.runtime-expanded').waitFor()
+    await setExpanded(true)
     assert.deepEqual(await probe(), before)
     const c = await h.client()
     await c.request('runtime.takeover', { sessionId: 'fixed', targetId: 'web:fixed' })
     assert.ok(await waitFor(async () => (await h.win.getByTestId('runtime-control').textContent())?.includes('Вернуть агенту') === true))
-    assert.ok(await waitFor(() => h.app.evaluate(({ BrowserWindow }, base) => BrowserWindow.getAllWindows()[0]!.contentView.children.some(v => 'webContents' in v && (v as import('electron').WebContentsView).webContents.getURL() === base && v.getVisible()), url)))
+    await assertNativeVisibility(true, 'initial_takeover')
     assert.deepEqual(await probe(), before)
     assert.ok(await waitFor(async () => await h.win.getByLabel('Адрес страницы', { exact: true }).inputValue() === url))
     await h.screen(`fixed-viewport-${dpr}-expanded-native-renderer-only`)
@@ -87,9 +134,9 @@ for (const dpr of [1, 2]) describe(`fixed viewport, actual Electron display DPR 
       }
     }
     await h.win.evaluate(() => window.dispatchEvent(new CustomEvent('pult:settings', { detail: 'voice' })))
-    assert.ok(await waitFor(() => h.app.evaluate(({ BrowserWindow }, base) => !BrowserWindow.getAllWindows()[0]!.contentView.children.some(v => 'webContents' in v && (v as import('electron').WebContentsView).webContents.getURL() === base && v.getVisible()), url)))
+    await assertNativeVisibility(false, 'modal_hide')
     await h.win.keyboard.press('Escape')
-    assert.ok(await waitFor(() => h.app.evaluate(({ BrowserWindow }, base) => BrowserWindow.getAllWindows()[0]!.contentView.children.some(v => 'webContents' in v && (v as import('electron').WebContentsView).webContents.getURL() === base && v.getVisible()), url)))
+    await assertNativeVisibility(true, 'modal_restore')
     // Own scratch daemon only: null-hide cannot wait for any daemon RPC.
     const daemon = h.daemonPid()
     assert.ok(daemon)
@@ -97,12 +144,12 @@ for (const dpr of [1, 2]) describe(`fixed viewport, actual Electron display DPR 
     let hidden: Promise<void> | undefined
     try {
       hidden = h.win.evaluate(async () => window.pult!.runtimeView!('fixed', null))
-      assert.ok(await waitFor(() => h.app.evaluate(({ BrowserWindow }, base) => !BrowserWindow.getAllWindows()[0]!.contentView.children.some(v => 'webContents' in v && (v as import('electron').WebContentsView).webContents.getURL() === base && v.getVisible()), url)), 'hide must not wait for the paused owned daemon')
+      await assertNativeVisibility(false, 'paused_daemon_null_hide')
     } finally { process.kill(daemon, 'SIGCONT') }
     await hidden
-    await h.win.getByTestId('runtime-expand').click()
-    await h.win.getByTestId('runtime-expand').click()
-    assert.ok(await waitFor(() => h.app.evaluate(({ BrowserWindow }, base) => BrowserWindow.getAllWindows()[0]!.contentView.children.some(v => 'webContents' in v && (v as import('electron').WebContentsView).webContents.getURL() === base && v.getVisible()), url)))
+    await setExpanded(false)
+    await setExpanded(true)
+    await assertNativeVisibility(true, 'reexpand_after_null_hide')
     // Native Escape must fold, even when focus belongs to the guest page.
     await h.app.evaluate(({ webContents }, base) => {
       const wc = webContents.getAllWebContents().find(w => w.getURL() === base)!
@@ -115,14 +162,14 @@ for (const dpr of [1, 2]) describe(`fixed viewport, actual Electron display DPR 
   })
 
   it('hits all four corners through native and transformed CDP after fit/resize and does not add document scroll', async () => {
-    await h.win.getByTestId('runtime-expand').click()
+    await setExpanded(true)
     for (const size of [{ width: 1050, height: 800 }, { width: 1450, height: 1000 }]) {
       await h.app.evaluate(({ BrowserWindow }, size) => BrowserWindow.getAllWindows()[0]!.setContentSize(size.width, size.height), size)
       assert.ok(await waitFor(async () => {
         const r = await probe(); return r.width === 1280 && r.height === 800
       }))
       for (const [id, x, y] of [['tl', 20, 20], ['tr', 1260, 20], ['bl', 20, 780], ['br', 1260, 780]] as const) {
-        assert.ok(await waitFor(() => h.app.evaluate(({ BrowserWindow }, base) => BrowserWindow.getAllWindows()[0]!.contentView.children.some(v => 'webContents' in v && (v as import('electron').WebContentsView).webContents.getURL() === base && v.getVisible()), url)))
+        await assertNativeVisibility(true, 'corner_precondition')
         const native = await h.app.evaluate(async ({ BrowserWindow }, args) => {
           const win = BrowserWindow.getAllWindows()[0]!
           const view = win.contentView.children.find(v => 'webContents' in v && (v as import('electron').WebContentsView).webContents.getURL() === args.url) as import('electron').WebContentsView
