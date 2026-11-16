@@ -359,7 +359,7 @@ export class RuntimeWeb {
           y = runtimeNumber(input['y'], -1, 0, 4096)
         }
         const point = runtimeInputPoint({ x, y }, page.viewport, page.scale)
-        // Electron 45.2.3's emulated surface requires presentation-scaled CDP
+        // Electron 45.3.3's emulated surface requires presentation-scaled CDP
         // positions (qualified against native clicks); do not multiply by DPR.
         await this.command(page, 'Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 })
         await this.command(page, 'Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', clickCount: 1 })

@@ -47,7 +47,7 @@ export function runtimeFit(box: RuntimeBounds, viewport: { width: number; height
   return { x: box.x + Math.floor((box.width - width) / 2), y: box.y + Math.floor((box.height - height) / 2), width, height, scale }
 }
 
-/** Qualified Electron 45.2.3 emulation position transform, independent of display DPR. */
+/** Qualified Electron 45.3.3 emulation position transform, independent of display DPR. */
 export function runtimeInputPoint(point: { x: number; y: number }, viewport: { width: number; height: number }, scale: number): { x: number; y: number } {
   if (!Number.isFinite(point.x) || !Number.isFinite(point.y) || point.x < 0 || point.y < 0 || point.x >= viewport.width || point.y >= viewport.height) throw new Error(tr('Точка за пределами страницы'))
   return { x: point.x * scale, y: point.y * scale }

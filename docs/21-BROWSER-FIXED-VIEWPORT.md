@@ -20,7 +20,7 @@ a smaller area returns to Fit.
 
 ## Qualified Electron contract
 
-Electron 45.2.3 is pinned by the shell package. One owner applies CDP desktop
+Electron 45.3.3 is pinned by the shell package. One owner applies CDP desktop
 `Emulation.setDeviceMetricsOverride` with the logical viewport, deviceScaleFactor
 1 and presentation scale. There is no concurrent Electron emulation/zoom owner.
 Hidden pages use a full-size render surface. Cross-page navigation retains the
@@ -31,8 +31,10 @@ mouse succeeds. The qualified adapter therefore converts **positions** from CSS
 viewport points to presentation-scaled points exactly once for both press/release
 and wheel origins, including AX-ref taps. Wheel deltas stay CSS distances. Neither
 display DPR nor document scroll is multiplied/added. This is the tested Electron
-45.2.3 adapter contract, not a general statement about all CDP implementations.
-Requalify it when Electron changes.
+45.3.3 adapter contract, not a general statement about all CDP implementations.
+Requalify it when Electron changes. The earlier 45.2.3 evidence is archived
+separately; the 45.3.3 profile was rerun with its actual embedded Node 24.22.3
+and Chromium 156.0.8078.100 at display DPR1/2.
 
 Whole host operations and presentation changes share a bounded queue (16).
 `runtime.host.begin` is rechecked inside that queue before executing a job, so
