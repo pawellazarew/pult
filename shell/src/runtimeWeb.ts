@@ -215,7 +215,9 @@ export class RuntimeWeb {
     wc.on('before-input-event', (event, input) => {
       invalidate()
       if ((input.control || input.meta) && ['+', '=', '-', '0'].includes(input.key)) { event.preventDefault(); return }
-      if (input.type === 'keyDown' && input.key === 'Escape' && page.view.getVisible()) {
+      // Layout hides the native surface while awaiting emulation; the current
+      // presentation intent still owns Escape until a synchronous null-hide.
+      if (input.type === 'keyDown' && input.key === 'Escape' && this.pages.get(sessionId) === page && this.active === sessionId && this.bounds.has(sessionId)) {
         event.preventDefault()
         this.options.onEscape?.(sessionId)
       }
