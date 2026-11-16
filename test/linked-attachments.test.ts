@@ -41,6 +41,8 @@ it('references fail explicitly when missing, resized, symlinked, or inside the m
   assert.throws(() => validateOwnedPromptAttachments(home, 'w', [{ ...reference, path: moved }]), /недоступно|изменилось/)
   const parentAlias = join(root, 'cache-alias'); symlinkSync(cached, parentAlias)
   assert.throws(() => validateOwnedPromptAttachments(home, 'w', [{ ...reference, path: join(parentAlias, 'original.mp4') }]), /недоступно|изменилось/)
+  const caseAlias = join(home, 'ATTACHMENTS', 'w', 'day', 'original.mp4')
+  if (existsSync(caseAlias)) assert.throws(() => validateOwnedPromptAttachments(home, 'w', [{ ...reference, path: caseAlias }]), /недоступно|изменилось/)
 }))
 
 it('reference metadata survives registry queue reload/removal and cache GC never removes the original', () => fixture((_root, home, reference) => {

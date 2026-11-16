@@ -9,7 +9,7 @@
 //   * без `rm -r`: только `unlink` файлов и `rmdir` ПУСТЫХ папок — даже ошибка в счёте возраста не снесёт дерево разом.
 
 import { chmodSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmdirSync, unlinkSync } from 'node:fs'
-import { isAbsolute, join, resolve, sep } from 'node:path'
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { SESSION_NAME_RE } from '../sessions/registry.js'
 
 export const ATTACHMENTS_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000
@@ -23,7 +23,24 @@ export function insideAttachmentCache(home: string, source: string): boolean {
   try { roots.push(join(realpathSync(home), 'attachments')) } catch { /* home may not exist yet */ }
   try { roots.push(realpathSync(join(home, 'attachments'))) } catch { /* cache may not exist */ }
   try { sources.push(realpathSync(source)) } catch { /* caller validates availability */ }
-  return roots.some((root) => sources.some((file) => file === root || file.startsWith(root + sep)))
+  if (roots.some((root) => sources.some((file) => file === root || file.startsWith(root + sep)))) return true
+  // realpath does not case-fold names on case-insensitive volumes. Compare actual
+  // directory identities as well, without opening or reading any file contents.
+  const identities = new Set<string>()
+  for (const root of new Set(roots)) {
+    try { const st = lstatSync(root, { bigint: true }); if (st.isDirectory()) identities.add(`${st.dev}:${st.ino}`) } catch { /* cache may not exist */ }
+  }
+  if (!identities.size) return false
+  for (const source of new Set(sources)) {
+    let at = source
+    for (;;) {
+      try { const st = lstatSync(at, { bigint: true }); if (st.isDirectory() && identities.has(`${st.dev}:${st.ino}`)) return true } catch { /* availability is checked by the caller */ }
+      const parent = dirname(at)
+      if (parent === at) break
+      at = parent
+    }
+  }
+  return false
 }
 /** Глубина обхода: `attachments/<сессия>/<день>/<файл>` — 3; запас на случай вложенности, но не бесконечно. */
 const MAX_DEPTH = 4

@@ -63,7 +63,11 @@ it('a large original under managed cache cannot become a GC-exempt reference thr
     const home = path.join(root, 'home'); const cache = path.join(home, 'attachments', 'other', 'day'); mkdirSync(cache, { recursive: true })
     const source = path.join(cache, 'large.mp4'); const fd = openSync(source, 'wx'); try { ftruncateSync(fd, LARGE) } finally { closeSync(fd) }
     const alias = path.join(root, 'alias'); symlinkSync(cache, alias)
-    for (const original of [source, path.join(alias, 'large.mp4')]) assert.ok('error' in importAttachment({ home, session: 'draft', item: { path: original } }))
+    const originals = [source, path.join(alias, 'large.mp4')]
+    // realpath preserves spelling on a case-insensitive filesystem; the cache is still the same directory.
+    const caseAlias = path.join(home, 'ATTACHMENTS', 'other', 'day', 'large.mp4')
+    if (existsSync(caseAlias)) originals.push(caseAlias)
+    for (const original of originals) assert.ok('error' in importAttachment({ home, session: 'draft', item: { path: original } }))
     assert.equal(existsSync(source), true)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
