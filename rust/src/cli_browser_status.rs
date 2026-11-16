@@ -112,7 +112,7 @@ fn package_bytes(root: &Path) -> Result<Option<Vec<u8>>> {
     );
     Ok(Some(bytes))
 }
-fn installed(root: &Path) -> Result<bool> {
+pub(super) fn installed(root: &Path) -> Result<bool> {
     if !regular(root, &Path::new(PACKAGE_DIR).join("cli.js"))? {
         return Ok(false);
     }
@@ -180,7 +180,7 @@ fn fixture_relative(path: &Path, root: &Path) -> Result<PathBuf> {
         .map(Path::to_owned)
         .map_err(|_| anyhow!("browser fixture Chrome path must stay inside scratch home"))
 }
-fn chrome(root: &Path) -> Result<Option<PathBuf>> {
+pub(super) fn chrome(root: &Path) -> Result<Option<PathBuf>> {
     if std::env::var("PULT_TEST").as_deref() == Ok("1") {
         // A missing fake is None, never a fallback into real HOME/Applications.
         let Some(path) = std::env::var_os("PULT_TEST_BROWSER_CHROME_FILE").map(PathBuf::from)

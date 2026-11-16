@@ -21,6 +21,14 @@ mod history;
 /// Lossless JSON object fields for CLI responses with opaque UTF-16 metadata.
 pub use history::Fields as RawFields;
 mod codex_memory;
+/// Encode JavaScript UTF-16 string units losslessly at a CLI JSON boundary.
+pub fn encode_js_string(units: &[u16]) -> String {
+    history::encode_string(units)
+}
+/// Node JSON.stringify projection for bounded CLI diagnostic warning values.
+pub fn stringify_js_value(raw: &serde_json::value::RawValue) -> anyhow::Result<String> {
+    Ok(history::stringify(raw)?.get().to_owned())
+}
 mod host_jobs;
 pub mod host_paths;
 pub mod host_policy;

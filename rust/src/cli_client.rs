@@ -398,6 +398,15 @@ impl OwnerClient {
         let locale = pult_core::cli_locale(&home).map_err(|_| {
             RpcError::local("invalid_config", "service status locale is unavailable")
         })?;
+        Self::status_at(home, locale, deadline).await
+    }
+    /// Doctor has already admitted the home and read its lenient diagnostic locale.
+    pub(super) async fn status_at(
+        home: std::path::PathBuf,
+        locale: &'static str,
+        deadline: Option<Duration>,
+    ) -> Result<(std::path::PathBuf, &'static str, Option<Box<RawValue>>), RpcError> {
+        Self::owner_purpose()?;
         // Only transport failures become an offline observation. Unsafe local
         // owner files must fail before a socket request or service query.
         let token = owner_token(&home).map_err(|_| {
