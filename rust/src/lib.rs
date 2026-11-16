@@ -56,6 +56,7 @@ mod session_read;
 mod session_recovery_api;
 mod session_runtime_api;
 mod session_tree;
+mod session_usage;
 mod session_wait;
 mod snapshot;
 mod stream;
@@ -66,6 +67,7 @@ pub mod turn_coordinator;
 pub mod turn_driver;
 pub mod turn_journal;
 pub mod turn_snapshot;
+mod usage_api;
 pub mod worker_env;
 pub mod worker_process;
 pub mod zcode_appserver_protocol;
@@ -122,7 +124,7 @@ pub const PARTIAL: [&str; 12] = [
     "perm.request",
     "perm.resolve",
 ];
-pub const SUPPORTED: [&str; 30] = [
+pub const SUPPORTED: [&str; 31] = [
     "agent.archive",
     "agent.read",
     "agent.recovery.confirm",
@@ -153,6 +155,7 @@ pub const SUPPORTED: [&str; 30] = [
     "memory.search",
     "memory.update",
     "protocol.catalog",
+    "usage.get",
 ];
 const SCRATCH_MARKER: &str = "pult-rust-scratch-v1\n";
 
@@ -574,6 +577,8 @@ struct State {
     runtime_init: Mutex<()>,
     consent: Mutex<Option<runtime_state::Consent>>,
     live_sessions: Mutex<session_live::Cache>,
+    usage: Mutex<session_usage::Cache>,
+    usage_reads: Arc<Semaphore>,
 }
 
 fn memory_status(state: &State) -> Value {
@@ -1070,6 +1075,25 @@ async fn connection(
             }
             continue;
         }
+        // Scoped roles have already been rejected above. Unknown object params
+        // are ignored losslessly, including opaque UTF16 string values.
+        if let Some((id, parsed)) = usage_api::parse(&bytes) {
+            let result = match parsed {
+                Ok(()) => usage_api::execute(state.clone()).await,
+                Err(error) => Err(error),
+            };
+            match result {
+                Ok(result) => writer.response(&RpcResult { id: &id, result }).await?,
+                Err(error) => {
+                    writer
+                        .response(
+                            &json!({"id":id,"error":{"code":error.code,"message":error.message}}),
+                        )
+                        .await?
+                }
+            }
+            continue;
+        }
         if let Some((id, query)) = read_api::parse(&bytes) {
             match query {
                 Err(error) => writer.response(&json!({"id":id,"error":{"code":"invalid_params","message":error.to_string()}})).await?,
@@ -1409,6 +1433,8 @@ async fn serve_owned(home: PathBuf, mut cancellation: watch::Receiver<bool>) -> 
         runtime_init: Mutex::new(()),
         consent: Mutex::new(None),
         live_sessions: Mutex::new(live_sessions),
+        usage: Mutex::new(crate::session_usage::Cache::default()),
+        usage_reads: Arc::new(tokio::sync::Semaphore::new(4)),
     });
     runtime_journal::initialize(&state)?;
     let permits = Arc::new(Semaphore::new(64));

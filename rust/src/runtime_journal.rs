@@ -162,7 +162,37 @@ impl EventSink for HostSink {
                     // without generic redaction of legitimate opaque IDs.
                     let draft = crate::redaction::redact_memory_capabilities(&draft);
                     let mut store = state.store.lock().map_err(|_| unavailable())?;
+                    // Prepare optional usage without rejecting the authoritative event.
+                    // Only this manager-equivalent sink feeds usage, never debug/replay.
+                    let prepared_usage = if draft["kind"] == "usage.updated" {
+                        let registry = state.registry.lock();
+                        let mut cache = state.usage.lock();
+                        Some(match (registry.as_ref(), cache.as_mut()) {
+                            (Ok(registry), Ok(cache)) => {
+                                let name = draft["sessionId"].as_str().unwrap_or_default();
+                                let provider =
+                                    registry.find(name).and_then(|r| r.scalar("provider"));
+                                match serde_json::value::to_raw_value(&draft["data"]) {
+                                    Ok(data) => cache.prepare(
+                                        &name.encode_utf16().collect::<Vec<_>>(),
+                                        provider.as_deref(),
+                                        &data,
+                                    ),
+                                    Err(_) => crate::session_usage::Prepared::Unavailable,
+                                }
+                            }
+                            _ => crate::session_usage::Prepared::Unavailable,
+                        })
+                    } else {
+                        None
+                    };
                     let event = store.append(draft).map_err(|_| unavailable())?;
+                    if let Some(prepared) = prepared_usage {
+                        // Poison only makes usage unreadable; execution still commits.
+                        if let Ok(mut cache) = state.usage.lock() {
+                            cache.apply_committed(prepared);
+                        }
+                    }
                     let receipt = Receipt {
                         id: event["id"].as_u64().ok_or_else(unavailable)?,
                         ts: event["ts"].as_str().ok_or_else(unavailable)?.to_owned(),
@@ -248,6 +278,8 @@ pub(crate) mod tests {
             runtime_init: Mutex::new(()),
             consent: Mutex::new(None),
             live_sessions: Mutex::new(crate::session_live::Cache::new(65536).unwrap()),
+            usage: Mutex::new(crate::session_usage::Cache::default()),
+            usage_reads: Arc::new(tokio::sync::Semaphore::new(4)),
         });
         initialize(&state).unwrap();
         let sink: Arc<dyn EventSink> = Arc::new(HostSink(Arc::downgrade(&state)));

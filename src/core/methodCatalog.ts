@@ -4094,18 +4094,88 @@ export const RPC_CATALOG = {
     {
       "name": "usage.get",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "implemented",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for usage.get.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Read daemon-epoch usage for all registered sessions in registry order. Restart resets totals; bounded host projection may explicitly become unavailable independently of execution.",
+      "paramsSchema": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "resultSchema": {
+        "type": "object",
+        "required": [
+          "usage"
+        ],
+        "properties": {
+          "usage": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "session",
+                "provider",
+                "totalCostUsd",
+                "inputTokens",
+                "outputTokens",
+                "cacheReadTokens",
+                "turns",
+                "rateLimit"
+              ],
+              "properties": {
+                "session": {
+                  "type": "string"
+                },
+                "provider": {
+                  "type": "string"
+                },
+                "totalCostUsd": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "inputTokens": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "outputTokens": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "cacheReadTokens": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "turns": {
+                  "type": "number"
+                },
+                "rateLimit": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "additionalProperties": true
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      }
     }
   ]
 } as const
 
 export type RpcMethodName = typeof RPC_CATALOG.methods[number]['name']
-export type RustFoundationMethod = "agent.archive" | "agent.read" | "agent.recovery.confirm" | "agent.recovery.get" | "agent.rename" | "agent.seen" | "agent.tree" | "daemon.status" | "daemon.stop" | "events.emit" | "events.get" | "events.history" | "events.snapshot" | "events.subscribe" | "events.tail" | "events.unsubscribe" | "memory.add" | "memory.catalog" | "memory.configure" | "memory.context.bind" | "memory.context.issue" | "memory.context.revoke" | "memory.context.status" | "memory.forget" | "memory.get" | "memory.history" | "memory.list" | "memory.search" | "memory.update" | "protocol.catalog"
+export type RustFoundationMethod = "agent.archive" | "agent.read" | "agent.recovery.confirm" | "agent.recovery.get" | "agent.rename" | "agent.seen" | "agent.tree" | "daemon.status" | "daemon.stop" | "events.emit" | "events.get" | "events.history" | "events.snapshot" | "events.subscribe" | "events.tail" | "events.unsubscribe" | "memory.add" | "memory.catalog" | "memory.configure" | "memory.context.bind" | "memory.context.issue" | "memory.context.revoke" | "memory.context.status" | "memory.forget" | "memory.get" | "memory.history" | "memory.list" | "memory.search" | "memory.update" | "protocol.catalog" | "usage.get"
 
 export interface RustFoundationParams {
   "agent.archive": { "name": string; "archived": boolean; [key: string]: unknown }
@@ -4138,6 +4208,7 @@ export interface RustFoundationParams {
   "memory.search": { "session"?: string; "scope"?: "project" | "global" | "visible"; "limit"?: number; "offset"?: number; "query": string }
   "memory.update": { "session"?: string; "scope"?: "project" | "global"; "commandId": string; "reason": string; "id": string; "expectedVersion": number; "name"?: string; "summary"?: string; "details"?: string; "pinned"?: boolean }
   "protocol.catalog": { [key: string]: unknown }
+  "usage.get": { [key: string]: unknown }
 }
 
 export interface RustFoundationResults {
@@ -4171,6 +4242,7 @@ export interface RustFoundationResults {
   "memory.search": { "memories": Array<{ "id": string; "scope": "project" | "global"; "projectId"?: string; "name": string; "summary": string; "pinned": boolean; "version": number; "createdAt": string; "updatedAt": string; "deleted": boolean; "author": string; "reason": string; "sourceSession"?: string }>; "hasMore": boolean }
   "memory.update": { "id": string; "scope": "project" | "global"; "projectId"?: string; "name": string; "summary": string; "details": string; "pinned": boolean; "version": number; "createdAt": string; "updatedAt": string; "deleted": boolean; "author": "owner" | "claude" | "codex" | "zcode"; "reason": string; "sourceSession"?: string; "sourceEventId"?: number; "sourceTurnId"?: string; "sourceCreatedAt"?: string }
   "protocol.catalog": { "catalogVersion": 1; "protocolVersion": 1; "methods": Array<{ "name": string; "node": "implemented" | "reserved" | "extension"; "rust": "implemented" | "partial" | "unported"; "access": "owner" | "ask" | "owner-or-runtime" | "owner-shell" | "owner-or-memory" | "owner-or-turn-memory"; "testOnly": boolean; "description": string; "paramsSchema": { [key: string]: unknown } | null; "resultSchema": { [key: string]: unknown } | null }> }
+  "usage.get": { "usage": Array<{ "session": string; "provider": string; "totalCostUsd": number | null; "inputTokens": number | null; "outputTokens": number | null; "cacheReadTokens": number | null; "turns": number; "rateLimit": { [key: string]: unknown } | null }> }
 }
 
 export type RustPartialMethod = "agent.list" | "agent.prompt" | "agent.queue.move" | "agent.queue.remove" | "agent.queue.resume" | "agent.queue.send" | "agent.start" | "agent.stop" | "agent.wait" | "perm.list" | "perm.request" | "perm.resolve"

@@ -781,6 +781,8 @@ pub(crate) mod tests {
             runtime_init: Mutex::new(()),
             consent: Mutex::new(None),
             live_sessions: Mutex::new(crate::session_live::Cache::new(65536).unwrap()),
+            usage: Mutex::new(crate::session_usage::Cache::default()),
+            usage_reads: Arc::new(tokio::sync::Semaphore::new(4)),
         });
         crate::runtime_journal::initialize(&state).unwrap();
         (home, state)
