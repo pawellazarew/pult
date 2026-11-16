@@ -18,6 +18,7 @@ name = "pult-memory-mcp"
 path = "src/memory_mcp_main.rs"
 
 [dependencies]
+sha2 = "=0.10.9"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

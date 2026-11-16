@@ -3,6 +3,7 @@ mod cli_agent;
 mod cli_browser_status;
 mod cli_client;
 mod cli_daemon_status;
+mod cli_doctor;
 mod cli_logs;
 mod cli_owned_query;
 mod cli_runtime_files;
@@ -10,6 +11,15 @@ mod cli_runtime_status;
 mod cli_service;
 mod cli_usage;
 mod cli_wait;
+mod doctor_config;
+mod doctor_exec;
+mod doctor_files;
+mod doctor_model;
+mod doctor_net;
+mod doctor_path;
+mod doctor_schema;
+mod doctor_service;
+mod doctor_toml;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -35,6 +45,13 @@ struct Args {
 enum Action {
     /// Print this Rust crate's version without reading local state.
     Version,
+    /// Diagnose local CLIs, login, schemas, network, daemon and service; never starts a daemon.
+    Doctor {
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        no_net: bool,
+    },
     /// Show daemon-epoch usage (owner only).
     Usage {
         #[arg(long)]
@@ -334,7 +351,7 @@ async fn main() -> Result<()> {
     }
     if args.skill {
         println!(
-            "Rust core protocol 1. Use an explicit private scratch --home.\nCommands: usage [--json] (daemon-epoch usage), version (also --version/-v; no home needed), daemon logs [-n N|--lines N] (bounded local owner logs; no daemon needed), agent/session start --params JSON, agent list [--json], agent prompt NAME TEXT... [--attachments JSON] [--queue|--interrupt|--steer] [--wait --until idle,blocked,done --timeout MS --json], agent wait NAME [--until idle,blocked,done] [--timeout MS] [--json], agent stop NAME [--turn-id ID] [--json], perm list [--name NAME], perm resolve ID allow|deny [--scope once|session|rule] [--answers JSON] [--message TEXT] (partial provider permission staging), memory add|update|forget|get|list|search|history|catalog|configure --params JSON, memory context bind|issue|revoke|status --params JSON (owner administration; shared provider memory is opt-in), daemon serve, daemon status [--json] [--initialize-runtime], daemon stop, runtime [status] [--json] (managed Node observation; no install/update), browser [status] [--json] (local observation only; no install or launch), catalog, events tail [--since N] [--session ID] [--json] [--no-follow] [--limit N] (follows by default), events snapshot, events history --session NAME [--before ID] [--budget BYTES], events get ID..., agent read NAME [--since N] [--format text|json], agent tree NAME [--json], agent rename NAME [TITLE] [--title TEXT] [--json], agent archive|unarchive NAME [--json], agent seen NAME [--unread] [--json]\nPULT_MEMORY_KEY selects memory-only authentication for every RPC without reading the owner token or display config. Memory credentials allow only get/list/search/catalog; they never grant owner authority.\nOwner-token connections support memory.configure, memory.context.bind, memory.context.issue, memory.context.revoke, memory.context.status, memory.catalog, memory.add, memory.update, memory.forget, memory.get, memory.list, memory.search, memory.history, agent.read, agent.tree, agent.rename, agent.archive, agent.seen, daemon.status, daemon.stop, events.tail, events.subscribe, events.unsubscribe, events.snapshot, events.history, events.get, protocol.catalog and usage.get.\nPartial owner methods: agent.start, agent.list, agent.prompt, agent.wait, agent.stop, agent.queue.send/resume/remove/move, perm.list, perm.resolve. Queue, qualified completion waits and Codex steering are available; unqualified completions fail explicitly. Waits never restore an old answer after daemon restart. Background and remaining provider parity continue.\nHistory reads per-session files, snapshots and get use the global journal.\nSubscriptions replay committed events with bounded output. live=true sends an empty-session reset.\nevents.emit requires PULT_TEST=1 and is for deterministic verification.\nJournal append is acknowledged after sync. A failed append has an unknown outcome until replay.\nOther catalogued methods return not_implemented. Owner CLI rejects scoped helper credentials; mcp-ask and memory helpers use their own purpose-specific transports.\nPrivate sessions/config are allowed only in a marked Rust scratch home. Startup recovers sessions cold and pauses queues; no provider is started. Production cutover and remaining provider parity follow later compatibility steps."
+            "Rust core protocol 1. Use an explicit private scratch --home.\nCommands: doctor [--json] [--no-net] (full local diagnostics; no daemon start), usage [--json] (daemon-epoch usage), version (also --version/-v; no home needed), daemon logs [-n N|--lines N] (bounded local owner logs; no daemon needed), agent/session start --params JSON, agent list [--json], agent prompt NAME TEXT... [--attachments JSON] [--queue|--interrupt|--steer] [--wait --until idle,blocked,done --timeout MS --json], agent wait NAME [--until idle,blocked,done] [--timeout MS] [--json], agent stop NAME [--turn-id ID] [--json], perm list [--name NAME], perm resolve ID allow|deny [--scope once|session|rule] [--answers JSON] [--message TEXT] (partial provider permission staging), memory add|update|forget|get|list|search|history|catalog|configure --params JSON, memory context bind|issue|revoke|status --params JSON (owner administration; shared provider memory is opt-in), daemon serve, daemon status [--json] [--initialize-runtime], daemon stop, runtime [status] [--json] (managed Node observation; no install/update), browser [status] [--json] (local observation only; no install or launch), catalog, events tail [--since N] [--session ID] [--json] [--no-follow] [--limit N] (follows by default), events snapshot, events history --session NAME [--before ID] [--budget BYTES], events get ID..., agent read NAME [--since N] [--format text|json], agent tree NAME [--json], agent rename NAME [TITLE] [--title TEXT] [--json], agent archive|unarchive NAME [--json], agent seen NAME [--unread] [--json]\nPULT_MEMORY_KEY selects memory-only authentication for every RPC without reading the owner token or display config. Memory credentials allow only get/list/search/catalog; they never grant owner authority.\nOwner-token connections support memory.configure, memory.context.bind, memory.context.issue, memory.context.revoke, memory.context.status, memory.catalog, memory.add, memory.update, memory.forget, memory.get, memory.list, memory.search, memory.history, agent.read, agent.tree, agent.rename, agent.archive, agent.seen, daemon.status, daemon.stop, events.tail, events.subscribe, events.unsubscribe, events.snapshot, events.history, events.get, protocol.catalog and usage.get.\nPartial owner methods: agent.start, agent.list, agent.prompt, agent.wait, agent.stop, agent.queue.send/resume/remove/move, perm.list, perm.resolve. Queue, qualified completion waits and Codex steering are available; unqualified completions fail explicitly. Waits never restore an old answer after daemon restart. Background and remaining provider parity continue.\nHistory reads per-session files, snapshots and get use the global journal.\nSubscriptions replay committed events with bounded output. live=true sends an empty-session reset.\nevents.emit requires PULT_TEST=1 and is for deterministic verification.\nJournal append is acknowledged after sync. A failed append has an unknown outcome until replay.\nOther catalogued methods return not_implemented. Owner CLI rejects scoped helper credentials; mcp-ask and memory helpers use their own purpose-specific transports.\nPrivate sessions/config are allowed only in a marked Rust scratch home. Startup recovers sessions cold and pauses queues; no provider is started. Production cutover and remaining provider parity follow later compatibility steps."
         );
         return Ok(());
     }
@@ -348,6 +365,16 @@ async fn main() -> Result<()> {
         },
     }) {
         Action::Version => unreachable!("version returns before home access"),
+        Action::Doctor { json, no_net } => {
+            let code = match cli_doctor::run(&home, json, no_net).await {
+                Ok(code) => code,
+                Err(error) => {
+                    let _ = cli_client::emit(format!("Error: {error}\n"), true).await;
+                    1
+                }
+            };
+            std::process::exit(code);
+        }
         Action::Runtime { action: _, json } => {
             let code = match cli_runtime_status::run(&home, json).await {
                 Ok(code) => code,

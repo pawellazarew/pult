@@ -16,12 +16,23 @@ const LIMIT: usize = 1024 * 1024;
 pub(super) enum Kind {
     Service,
     NodeVersion,
+    DoctorShell,
+    DoctorVersion,
+    DoctorAuth,
+    DoctorSchema,
+    DoctorSavedNode,
+    DoctorNetwork,
 }
 impl Kind {
     fn deadline(self) -> Duration {
         match self {
             Self::Service => Duration::from_secs(20),
             Self::NodeVersion => Duration::from_secs(60),
+            Self::DoctorShell => Duration::from_secs(3),
+            Self::DoctorVersion | Self::DoctorSchema => Duration::from_secs(30),
+            Self::DoctorAuth => Duration::from_secs(20),
+            Self::DoctorSavedNode => Duration::from_secs(10),
+            Self::DoctorNetwork => Duration::from_secs(8),
         }
     }
 }
@@ -43,6 +54,7 @@ pub(super) enum Error {
 }
 pub(super) struct Output {
     pub status: std::process::ExitStatus,
+    pub failure: Option<Error>,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
 }
@@ -192,9 +204,10 @@ impl Drop for Query {
 async fn capture_pipe(
     pipe: impl AsyncRead + Unpin,
     combined: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+    limit: usize,
 ) -> Result<Vec<u8>, Error> {
     let mut bytes = Vec::new();
-    let mut pipe = pipe.take(LIMIT as u64 + 1);
+    let mut pipe = pipe.take(limit as u64 + 1);
     if let Some(combined) = combined {
         let mut buffer = [0; 8192];
         loop {
@@ -214,7 +227,7 @@ async fn capture_pipe(
             .await
             .map_err(|_| Error::Output)?;
     }
-    if bytes.len() > LIMIT {
+    if bytes.len() > limit {
         return Err(Error::Overflow);
     }
     Ok(bytes)
@@ -226,6 +239,23 @@ pub(super) async fn run(
     cleanup_failed: &mut bool,
     interrupt: &mut tokio::signal::unix::Signal,
 ) -> Result<Output, Error> {
+    run_with_cancel(command, kind, cancelled, cleanup_failed, async {
+        interrupt.recv().await;
+    })
+    .await
+}
+pub(super) async fn run_with_cancel(
+    command: &mut Command,
+    kind: Kind,
+    cancelled: &mut bool,
+    cleanup_failed: &mut bool,
+    cancellation: impl std::future::Future<Output = ()>,
+) -> Result<Output, Error> {
+    tokio::pin!(cancellation);
+    tokio::select! { biased;
+        _ = &mut cancellation => { *cancelled = true; return Err(Error::Interrupted); },
+        _ = std::future::ready(()) => (),
+    }
     let child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -247,9 +277,14 @@ pub(super) async fn run(
     let stderr = owner.child.stderr.take().ok_or(Error::StderrUnavailable)?;
     let combined = matches!(kind, Kind::NodeVersion)
         .then(|| std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)));
+    let limit = if matches!(kind, Kind::Service | Kind::NodeVersion) {
+        LIMIT
+    } else {
+        4 * LIMIT
+    };
     let stdout_budget = combined.clone();
-    reads.spawn(async move { (true, capture_pipe(stdout, stdout_budget).await) });
-    reads.spawn(async move { (false, capture_pipe(stderr, combined).await) });
+    reads.spawn(async move { (true, capture_pipe(stdout, stdout_budget, limit).await) });
+    reads.spawn(async move { (false, capture_pipe(stderr, combined, limit).await) });
     let mut output = None;
     let mut error_output = None;
     let deadline = tokio::time::Instant::now() + kind.deadline();
@@ -261,7 +296,7 @@ pub(super) async fn run(
         }
         tokio::select! {
             _ = tokio::time::sleep_until(deadline) => break Err(Error::Timeout),
-            _ = interrupt.recv() => { *cancelled = true; break Err(Error::Interrupted); },
+            _ = &mut cancellation => { *cancelled = true; break Err(Error::Interrupted); },
             item = reads.join_next(), if !reads.is_empty() => match item {
                 Some(Ok((out, Ok(bytes)))) => if out { output = Some(bytes); } else { error_output = Some(bytes); },
                 Some(Ok((_, Err(error)))) => break Err(error),
@@ -304,13 +339,29 @@ pub(super) async fn run(
         }
     }
     let status = cleanup.map_err(|_| Error::Cleanup)?;
-    result?;
-    if let Some(error) = read_error {
+    let diagnostic = !matches!(kind, Kind::Service | Kind::NodeVersion);
+    let failure = result.err().or(read_error);
+    if let Some(error) = failure
+        && (!diagnostic
+            || matches!(
+                error,
+                Error::Interrupted | Error::Ownership | Error::OutputCleanup
+            ))
+    {
         return Err(error);
     }
     Ok(Output {
         status,
-        stdout: output.ok_or(Error::OutputUnavailable)?,
-        stderr: error_output.ok_or(Error::OutputUnavailable)?,
+        failure,
+        stdout: if failure.is_some() {
+            output.unwrap_or_default()
+        } else {
+            output.ok_or(Error::OutputUnavailable)?
+        },
+        stderr: if failure.is_some() {
+            error_output.unwrap_or_default()
+        } else {
+            error_output.ok_or(Error::OutputUnavailable)?
+        },
     })
 }
