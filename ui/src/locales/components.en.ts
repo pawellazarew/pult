@@ -1,5 +1,9 @@
 /** English translations of application-owned component text. Placeholder values remain untouched. */
 export const componentsEn: Readonly<Record<string, string>> = {
+  "Вписать": "Fit",
+  "Обнови desktop-приложение для фиксированного размера страницы и крупного просмотра": "Update the desktop app for fixed page size and expanded preview",
+  "Миниатюра · разверни для крупного просмотра и ввода": "Thumbnail · expand for a larger view and input",
+  "100% доступно, когда страница помещается целиком": "100% is available when the whole page fits",
   "Закрыть новый чат?": "Close the new chat?",
   "Закрыть чат": "Close chat",
   "Сообщение и вложения будут удалены.": "The message and attachments will be deleted.",

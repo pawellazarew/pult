@@ -10,7 +10,7 @@ import '../runtime.css'
 
 type Discovery = RuntimeDiscovery & { attached?: string[]; controller?: 'agent' | 'human'; controllers?: Record<string, 'agent' | 'human'> }
 type SetupRequest = { id: string; setup: RuntimeSetup; status: 'pending' | 'approved' | 'denied' | 'installing' | 'failed'; sessionId: string; error?: string }
-type ViewBridge = PultBridge & { runtimeView?(sessionId: string, bounds: RuntimeBounds | null): Promise<void> }
+type ViewBridge = PultBridge & { runtimeView?(sessionId: string, bounds: (RuntimeBounds & { actualSize?: boolean }) | null): Promise<void> }
 const KINDS: Array<{ id: RuntimeKind; label: string }> = [{ id: 'web', label: tr('Браузер') }, { id: 'ios', label: 'iOS' }, { id: 'android', label: 'Android' }]
 
 /** Device coordinates refer to the original framebuffer, not the compressed preview. */
@@ -28,9 +28,9 @@ export function runtimeCoordinates(kind: RuntimeKind, frame: RuntimeResult | nul
 }
 
 /** A driver may only display bounded raster images, never a returned HTML/URL payload. */
-export function runtimeImage(result: RuntimeResult): string | null {
+export function runtimeImage(result: RuntimeResult, local = false): string | null {
   const image = result.image
-  return image && ['image/jpeg', 'image/png'].includes(image.mimeType) && typeof image.data === 'string' && image.data.length <= 600_000 && /^[A-Za-z0-9+/=\r\n]+$/.test(image.data)
+  return image && ['image/jpeg', 'image/png'].includes(image.mimeType) && typeof image.data === 'string' && image.data.length <= (local ? 2_800_000 : 600_000) && /^[A-Za-z0-9+/=\r\n]+$/.test(image.data)
     ? `data:${image.mimeType};base64,${image.data}` : null
 }
 
@@ -44,6 +44,11 @@ export function RuntimePanel({ bridge, sessionId, obstructed, onClose }: { bridg
   const [error, setError] = useState<string | null>(null)
   const [frame, setFrame] = useState<RuntimeResult | null>(null)
   const [frameAt, setFrameAt] = useState<number | null>(null)
+  const [expanded, setExpanded] = useState(false)
+  const [oneToOne, setOneToOne] = useState(false)
+  const [canOneToOne, setCanOneToOne] = useState(false)
+  const expandButton = useRef<HTMLButtonElement>(null)
+  const panelRef = useRef<HTMLElement>(null)
   const [slotVisible, setSlotVisible] = useState(true)
   const [visible, setVisible] = useState(() => document.visibilityState !== 'hidden')
   const [url, setUrl] = useState('http://localhost:3000')
@@ -63,9 +68,9 @@ export function RuntimePanel({ bridge, sessionId, obstructed, onClose }: { bridg
   const attached = !!targetId && !!discovery.attached?.includes(targetId)
   const human = (discovery.controllers?.[targetId] ?? discovery.controller) === 'human'
   const web = kind === 'web'
-  const nativeEligible = web && attached && human && !!bridge.runtimeView
+  const nativeEligible = web && expanded && attached && human && !!bridge.runtimeView && !!bridge.runtimePreview
   const nativeWeb = nativeEligible && slotVisible
-  const picture = frame ? runtimeImage(frame) : null
+  const picture = frame ? runtimeImage(frame, expanded && web) : null
   const syncUrl = useCallback((result: RuntimeResult): void => {
     if (typeof result.url === 'string' && result.url.length <= 8192 && (!human || document.activeElement !== urlInput.current)) setUrl(result.url)
   }, [human])
@@ -107,7 +112,25 @@ export function RuntimePanel({ bridge, sessionId, obstructed, onClose }: { bridg
     return () => { ++lifetime.current; if (timer) clearTimeout(timer); document.removeEventListener('visibilitychange', visibility) }
   }, [refresh])
 
-  useEffect(() => { setFrame(null); setFrameAt(null); setDetails(null) }, [targetId])
+  useEffect(() => { setFrame(null); setFrameAt(null); setDetails(null); setExpanded(false) }, [targetId])
+  const fold = useCallback((): void => { setExpanded(false); setOneToOne(false); requestAnimationFrame(() => expandButton.current?.focus()) }, [])
+  useEffect(() => bridge.onRuntimeEscape?.((id) => { if (id === sessionId) fold() }), [bridge, sessionId, fold])
+  useEffect(() => {
+    if (!expanded) return
+    const key = (event: KeyboardEvent): void => {
+      if (obstructed) return
+      if (event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); fold() }
+      if (event.key === 'Tab') {
+        const controls = Array.from(panelRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), summary') ?? []).filter(el => el.getClientRects().length > 0)
+        const first = controls[0], last = controls[controls.length - 1]
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus() }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus() }
+      }
+    }
+    window.addEventListener('keydown', key, true)
+    panelRef.current?.querySelector<HTMLButtonElement>('button')?.focus()
+    return () => window.removeEventListener('keydown', key, true)
+  }, [expanded, obstructed, fold])
 
   const perform = useCallback(async (action: string, input: Record<string, unknown> = {}): Promise<RuntimeResult | null> => {
     if (!targetId) return null
@@ -130,24 +153,27 @@ export function RuntimePanel({ bridge, sessionId, obstructed, onClose }: { bridg
     finally { if (epoch === lifetime.current) setBusy(false) }
   }, [bridge, sessionId, targetId, refresh, discovery.targets, syncUrl])
 
-  // One outstanding screenshot request. Hidden panels/tabs and native web views do not poll.
+  // One outstanding request. Native human view polls only metadata; hidden panels/tabs do not poll.
   useEffect(() => {
-    if (!attached || !targetId || !visible || obstructed || nativeWeb || !target?.capabilities.includes('screenshot')) return
+    if (!attached || !targetId || !visible || obstructed || !target?.capabilities.includes('screenshot')) return
     let alive = true
     let timer: ReturnType<typeof setTimeout> | undefined
     const epoch = lifetime.current
     const poll = async (): Promise<void> => {
       try {
-        const result = await bridge.call('runtime.perform', { sessionId, targetId, action: 'screenshot' }) as RuntimeResult
+        const result = (expanded || nativeWeb) && web && bridge.runtimePreview
+          ? await bridge.runtimePreview(sessionId, nativeWeb)
+          : await bridge.call('runtime.perform', { sessionId, targetId, action: 'screenshot' }) as RuntimeResult
         if (!alive || epoch !== lifetime.current || activeTarget.current !== targetId) return
         syncUrl(result)
-        if (runtimeImage(result)) { setFrame(result); setFrameAt(Date.now()) }
+        if (runtimeImage(result, expanded && web)) { setFrame(result); setFrameAt(Date.now()) }
+        else if (web && nativeWeb) setFrame(previous => ({ ...previous, ...result }))
       } catch (e) { if (alive && epoch === lifetime.current) setError(errorText(e)) }
       if (alive) timer = setTimeout(() => { void poll() }, 1000)
     }
     void poll()
     return () => { alive = false; if (timer) clearTimeout(timer) }
-  }, [attached, targetId, visible, obstructed, nativeWeb, bridge, sessionId, syncUrl, target?.capabilities.join(',')])
+  }, [attached, targetId, visible, obstructed, nativeWeb, bridge, sessionId, syncUrl, expanded, web, target?.capabilities.join(',')])
 
   // Native contents live above the renderer; hide them whenever a modal could overlap.
   useLayoutEffect(() => {
@@ -157,8 +183,13 @@ export function RuntimePanel({ bridge, sessionId, obstructed, onClose }: { bridg
       const panel = slot.current?.closest('.runtime-panel')?.getBoundingClientRect()
       const fits = !!box && !!panel && box.top >= panel.top && box.bottom <= panel.bottom && box.left >= panel.left && box.right <= panel.right && box.top >= 0 && box.bottom <= window.innerHeight
       setSlotVisible(fits)
-      const show = nativeEligible && visible && !obstructed && fits && box && box.width > 0 && box.height > 0
-      void bridge.runtimeView!(sessionId, show ? { x: Math.round(box.left), y: Math.round(box.top), width: Math.floor(box.width), height: Math.floor(box.height) } : null).catch((e: unknown) => setError(errorText(e)))
+      const width = Number(frame?.coordinateWidth) || 1280, height = Number(frame?.coordinateHeight) || 800
+      const content = box && slot.current ? { left: box.left + slot.current.clientLeft, top: box.top + slot.current.clientTop, width: slot.current.clientWidth, height: slot.current.clientHeight } : null
+      const fitsSize = !!content && content.width >= width && content.height >= height
+      setCanOneToOne(fitsSize)
+      if (!fitsSize) setOneToOne(false)
+      const show = nativeEligible && visible && !obstructed && fits && content && content.width > 0 && content.height > 0
+      void bridge.runtimeView!(sessionId, show ? { x: Math.round(content.left), y: Math.round(content.top), width: Math.floor(content.width), height: Math.floor(content.height), actualSize: oneToOne && canOneToOne } : null).catch((e: unknown) => setError(errorText(e)))
     }
     update()
     const observer = new ResizeObserver(update)
@@ -168,7 +199,7 @@ export function RuntimePanel({ bridge, sessionId, obstructed, onClose }: { bridg
     window.addEventListener('resize', update)
     window.addEventListener('scroll', update, true)
     return () => { observer.disconnect(); window.removeEventListener('resize', update); window.removeEventListener('scroll', update, true); void bridge.runtimeView!(sessionId, null).catch(() => {}) }
-  }, [bridge, sessionId, nativeEligible, visible, obstructed])
+  }, [bridge, sessionId, nativeEligible, visible, obstructed, expanded, oneToOne, canOneToOne, frame?.coordinateWidth, frame?.coordinateHeight])
 
   const control = async (): Promise<void> => {
     setBusy(true); setError(null)
@@ -195,7 +226,7 @@ export function RuntimePanel({ bridge, sessionId, obstructed, onClose }: { bridg
     finally { setBusy(false) }
   }
   const tap = (e: MouseEvent<HTMLImageElement>): void => {
-    if (!human || busy || !target?.capabilities.includes('tap')) return
+    if (web || !human || busy || !target?.capabilities.includes('tap')) return
     const el = e.currentTarget
     const size = runtimeCoordinates(kind, frame, { width: el.naturalWidth, height: el.naturalHeight })
     if (!size) return
@@ -211,8 +242,8 @@ export function RuntimePanel({ bridge, sessionId, obstructed, onClose }: { bridg
     void perform('swipe', { x: Math.floor(size.width / 2), y: Math.floor(size.height * start), endX: Math.floor(size.width / 2), endY: Math.floor(size.height * end), duration: 350 })
   }
 
-  return <aside className="runtime-panel" aria-label={tr("Превью и устройства")} data-testid="runtime-panel">
-    <div className="runtime-title"><div><b>{tr("Превью")}</b><span>{tr("Одна среда у тебя и агента")}</span></div><button type="button" className="btn btn-ghost btn-sm" aria-label={tr("Закрыть превью")} onClick={onClose}><Icon name="x" /></button></div>
+  return <>{expanded && <div className="runtime-backdrop" aria-hidden="true" />}<aside ref={panelRef} role={expanded ? 'dialog' : undefined} aria-modal={expanded || undefined} className={`runtime-panel${expanded ? ' runtime-expanded' : ''}`} aria-label={tr("Превью и устройства")} data-testid="runtime-panel">
+    <div className="runtime-title"><div><b>{tr("Превью")}</b><span>{tr("Одна среда у тебя и агента")}</span></div><button type="button" className="btn btn-ghost btn-sm" aria-label={expanded ? tr("Свернуть") : tr("Закрыть превью")} onClick={expanded ? fold : onClose}><Icon name="x" /></button></div>
     <div className="runtime-kinds" role="tablist" aria-label={tr("Тип среды")}>{KINDS.map((k) => <button key={k.id} type="button" role="tab" aria-selected={kind === k.id} className={`btn btn-sm ${kind === k.id ? 'runtime-tab-active' : 'btn-ghost'}`} onClick={() => { setKind(k.id); setSelected('') }}>{k.label}</button>)}<button type="button" className="btn btn-ghost btn-sm runtime-refresh" disabled={busy} aria-label={tr("Найти устройства заново")} onClick={() => void refresh()}><Icon name="refresh" /></button></div>
     {error && <div className="runtime-error" role="alert">{error}</div>}
     {loading && <div className="runtime-note" role="status">{tr("Ищу доступные среды…")}</div>}
@@ -222,10 +253,13 @@ export function RuntimePanel({ bridge, sessionId, obstructed, onClose }: { bridg
     {attached && <>
       <div className="runtime-control"><span className={human ? 't-ok' : 't-run'}><StatusDot state={human ? 'done' : 'working'} size="md" label={null} />{human ? tr('Ты управляешь') : tr('Управляет агент')}</span><button type="button" className="btn btn-sm" disabled={busy} onClick={() => void control()} data-testid="runtime-control">{human ? tr('Вернуть агенту') : tr('Взять управление')}</button></div>
       {web && <form className="runtime-address" onSubmit={navigate}><input ref={urlInput} aria-label={tr("Адрес страницы")} value={url} placeholder="http://localhost:3000" onChange={(e) => setUrl(e.target.value)} spellCheck={false} disabled={!human} /><button type="submit" className="btn btn-sm" disabled={busy || !human}>{tr("Открыть")}</button><button type="button" className="btn btn-ghost btn-sm" aria-label={tr("Перезагрузить страницу")} disabled={busy || !human} onClick={() => void perform('reload')}><Icon name="refresh" /></button></form>}
-      <div ref={slot} className={`runtime-screen${web ? ' runtime-screen-web' : ''}${human ? ' runtime-screen-human' : ''}`} data-testid="runtime-screen" aria-label={nativeWeb ? tr('Интерактивная веб-страница') : tr('Экран выбранной среды')}>
-        {!nativeWeb && (picture ? <img src={picture} alt={tr`Экран: ${target?.name ?? tr('устройство')}`} draggable={false} onClick={tap} /> : <div className="runtime-placeholder">{targetId.startsWith('android-avd:') ? tr('Эмулятор загружается. Затем выбери запущенное устройство и нажми «Подключить».') : target?.capabilities.includes('screenshot') ? tr('Ожидаю первый кадр…') : tr('Для показа экрана нужен дополнительный компонент.')}</div>)}
+      {web && <div className="runtime-view-toolbar"><span className="runtime-viewport-label">{Number(frame?.coordinateWidth) || 1280} × {Number(frame?.coordinateHeight) || 800}</span><div>{expanded && <><button type="button" className={`btn btn-ghost btn-sm${!oneToOne ? ' runtime-mode-active' : ''}`} onClick={() => setOneToOne(false)} data-testid="runtime-fit" aria-pressed={!oneToOne}>{tr('Вписать')}</button><button type="button" className={`btn btn-ghost btn-sm${oneToOne ? ' runtime-mode-active' : ''}`} disabled={!canOneToOne} title={tr('100% доступно, когда страница помещается целиком')} onClick={() => setOneToOne(true)} data-testid="runtime-actual" aria-pressed={oneToOne}>100%</button></>}<button ref={expandButton} type="button" className="btn btn-sm" onClick={() => expanded ? fold() : setExpanded(true)} data-testid="runtime-expand" disabled={!bridge.runtimePreview} aria-expanded={expanded}>{expanded ? tr('Свернуть') : tr('Развернуть')}</button></div></div>}
+      <div ref={slot} className={`runtime-screen${web ? ' runtime-screen-web' : ''}${human && !web ? ' runtime-screen-human' : ''}`} data-testid="runtime-screen" aria-label={nativeWeb ? tr('Интерактивная веб-страница') : tr('Экран выбранной среды')}>
+        {!nativeWeb && (picture ? <img src={picture} style={web && expanded && oneToOne && canOneToOne ? { width: Number(frame?.coordinateWidth) || 1280, height: Number(frame?.coordinateHeight) || 800, maxWidth: 'none', maxHeight: 'none' } : undefined} alt={tr`Экран: ${target?.name ?? tr('устройство')}`} draggable={false} onClick={tap} /> : <div className="runtime-placeholder">{targetId.startsWith('android-avd:') ? tr('Эмулятор загружается. Затем выбери запущенное устройство и нажми «Подключить».') : target?.capabilities.includes('screenshot') ? tr('Ожидаю первый кадр…') : tr('Для показа экрана нужен дополнительный компонент.')}</div>)}
       </div>
       {!web && human && kind === 'ios' && picture && !runtimeCoordinates(kind, frame) && <p className="runtime-note">{tr("Координаты экрана ещё недоступны. Нажатия по картинке отключены; агент может работать по названиям элементов.")}</p>}
+      {web && !bridge.runtimePreview && <p className="runtime-note">{tr('Обнови desktop-приложение для фиксированного размера страницы и крупного просмотра')}</p>}
+      {web && !expanded && <p className="runtime-note">{tr('Миниатюра · разверни для крупного просмотра и ввода')}</p>}
       {!nativeWeb && <div className="runtime-frame-status"><span>{web && human && !slotVisible ? tr('Прокрути панель к экрану для ввода') : frameAt ? tr('Кадры обновляются раз в секунду') : tr('Подключено')}</span>{!human && <span>{tr("Для ввода возьми управление")}</span>}</div>}
       {!web && human && <div className="runtime-mobile-input"><div className="runtime-device-buttons">{target?.capabilities.includes('button') && <><button type="button" className="btn btn-sm" disabled={busy} onClick={() => void perform('button', { button: kind === 'android' ? 'back' : 'home' })}>{kind === 'android' ? tr('Назад') : tr('Домой')}</button>{kind === 'android' && <button type="button" className="btn btn-sm" disabled={busy} onClick={() => void perform('button', { button: 'home' })}>{tr("Домой")}</button>}</>}{target?.capabilities.includes('swipe') && <><button type="button" className="btn btn-sm" disabled={busy || !runtimeCoordinates(kind, frame)} onClick={() => swipe('up')}>{tr("↑ Прокрутить")}</button><button type="button" className="btn btn-sm" disabled={busy || !runtimeCoordinates(kind, frame)} onClick={() => swipe('down')}>↓</button></>}</div>{target?.capabilities.includes('type') && <form onSubmit={mobileType}><input aria-label={tr("Текст для устройства")} value={text} onChange={(e) => setText(e.target.value)} placeholder={tr("Ввести в активное поле")} /><button className="btn btn-sm" type="submit" disabled={busy || !text}>{tr("Ввести")}</button></form>}</div>}
       <div className="runtime-bottom-actions">{target?.capabilities.includes('inspect') && <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => void perform('inspect')}>{tr("Элементы экрана")}</button>}{target?.capabilities.includes('logs') && <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => void perform('logs')}>{tr("Ошибки и журнал")}</button>}<button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => void perform('detach')}>{tr("Отключить")}</button></div>
@@ -241,7 +275,7 @@ export function RuntimePanel({ bridge, sessionId, obstructed, onClose }: { bridg
       {!request.setup.installable && <p className="runtime-note">{tr("Эти шаги выполняются вручную. После настройки нажми ↻ — Пульт перепроверит готовность.")}</p>}
     </div>)}
     {discovery.setup.filter((s) => s.kind === kind && !requests.some((r) => r.setup.id === s.id && (['pending', 'installing', 'failed'].includes(r.status) || (r.status === 'approved' && !s.installable)))).map((setup) => <details className="runtime-setup" key={setup.id} open={!targets.length || setup.installable}><summary>{setup.title}</summary><SetupInfo setup={setup} bridge={bridge} />{setup.installable && <div className="runtime-setup-actions"><button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={() => void requestSetup(setup)} data-testid="runtime-install-helper">{tr("Установить помощник")}</button></div>}</details>)}
-  </aside>
+  </aside></>
 }
 
 export function runtimeSetupLabel(status: SetupRequest['status'], installable: boolean): string {

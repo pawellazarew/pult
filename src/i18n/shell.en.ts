@@ -1,4 +1,9 @@
 export const shellEn: Readonly<Record<string, string>> = {
+  "Неверная команда": "Invalid command",
+  "Браузер занят; повтори действие": "Browser is busy; try again",
+  "Крупный кадр превышает предел качества": "Large frame exceeds the quality budget",
+  "Точка за пределами страницы": "Point is outside the page",
+  "Сначала возьми управление браузером": "Take browser control first",
   "Некорректный профиль сети.": "Invalid network profile.",
   "Страж сети запретил действие CLI: {0}": "The network guard blocked the CLI action: {0}",
   "Выбран нестандартный native launcher. Открой его путь и обнови эту установку вручную.": "A nondefault native launcher is selected. Reveal its path and update this installation manually.",

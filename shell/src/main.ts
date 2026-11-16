@@ -39,7 +39,7 @@ import type { CallReply, ConnState, DaemonStatus, NavTarget, NotifyTarget } from
 import { externalUrl } from './externalUrl.js'
 import { DaemonLink } from './link.js'
 import { RuntimeWeb, isCreatingRuntimeWeb } from './runtimeWeb.js'
-import { runtimeSessionId, runtimeWebPartition } from './runtimeWebPolicy.js'
+import { runtimeSessionId, runtimeViewAuthorized, runtimeWebPartition } from './runtimeWebPolicy.js'
 import { startRuntimeHost } from './runtimeHost.js'
 import { locatePackage, resolveNode } from './locate.js'
 import { isNotifyKind, notificationSound } from './notifySound.js'
@@ -481,11 +481,33 @@ function registerIpc(): void {
     if (!trusted(e)) return fail('forbidden', tr('Вызов не из окна Пульта'))
     try {
       const id = runtimeSessionId(sessionId)
-      if (!link || !runtimeWeb) throw new Error(tr('Пульт ещё не готов'))
-      const result = await link.call('agent.list', {}) as { sessions?: Array<{ name?: unknown }> }
-      if (!result.sessions?.some((s) => s.name === id)) throw new Error(tr('Сессия недоступна'))
-      runtimeWeb.setView(id, bounds)
+      if (!runtimeWeb) throw new Error(tr('Пульт ещё не готов'))
+      // Hiding is restrictive and must not wait for daemon IO or controller lookup.
+      if (bounds === null) { await runtimeWeb.setView(id, null); return { ok: true, result: null } }
+      if (!link) throw new Error(tr('Пульт ещё не готов'))
+      await runtimeWeb.requestView(id, bounds, async () => {
+        const result = await link!.call('agent.list', {}) as { sessions?: Array<{ name?: unknown; createdAt?: unknown }> }
+        const record = result.sessions?.find((s) => s.name === id)
+        if (!record || typeof record.createdAt !== 'string') throw new Error(tr('Сессия недоступна'))
+        const instanceId = record.createdAt
+        return { instanceId, authorize: () => runtimeViewAuthorized(id, instanceId,
+          () => link!.call('runtime.discover', { sessionId: id }) as Promise<{ controllers?: Record<string, string> }>,
+          () => link!.call('agent.list', {}) as Promise<{ sessions?: Array<{ name?: unknown; createdAt?: unknown }> }>,
+        ) }
+      })
       return { ok: true, result: null }
+    } catch (err) { return toReply(err) }
+  })
+  ipcMain.handle(IPC.runtimePreview, async (e, sessionId: unknown, metadataOnly: unknown): Promise<CallReply> => {
+    if (!trusted(e)) return fail('forbidden', tr('Вызов не из окна Пульта'))
+    try {
+      const id = runtimeSessionId(sessionId)
+      if (!link || !runtimeWeb) throw new Error(tr('Пульт ещё не готов'))
+      const result = await link.call('agent.list', {}) as { sessions?: Array<{ name?: unknown; createdAt?: unknown }> }
+      const record = result.sessions?.find((s) => s.name === id)
+      if (!record || typeof record.createdAt !== 'string') throw new Error(tr('Сессия недоступна'))
+      if (metadataOnly !== undefined && typeof metadataOnly !== 'boolean') throw new Error(tr('Неверная команда'))
+      return { ok: true, result: metadataOnly ? await runtimeWeb.metadata(id, record.createdAt) : await runtimeWeb.preview(id, record.createdAt) }
     } catch (err) { return toReply(err) }
   })
   ipcMain.on(IPC.testMode, (e) => { e.returnValue = trusted(e) ? TEST_MODE : false })
@@ -884,6 +906,7 @@ async function boot(): Promise<void> {
       webSecurity: true, allowRunningInsecureContent: false, webviewTag: false,
       navigateOnDragDrop: false, backgroundThrottling: false, disableDialogs: true, spellcheck: false, devTools: !app.isPackaged || TEST_MODE,
     } }),
+    onEscape: (sessionId) => { if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.webContents.focus(); mainWindow.webContents.send(IPC.runtimeEscape, sessionId) } },
     onAttach: (sessionId) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(IPC.navigate, { sessionId, runtime: true }) },
   })
   stopRuntimeHost = startRuntimeHost({ link, web: runtimeWeb, log })
