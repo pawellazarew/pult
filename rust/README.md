@@ -83,6 +83,19 @@ scratch=$(mktemp -d)
 чтения owner/service данных; прежний raw RPC JSON остаётся только с явным
 `--initialize-runtime`. Ограничения и приёмка — [R4-SERVICE-STATUS](../docs/rust/R4-SERVICE-STATUS.md).
 
+`agent/session list`, `stop`, `rename`, `archive`, `unarchive`, `seen` печатают
+обычный RU/EN текст; для скриптов используйте `--json`. Явный `stop --turn-id ID`
+сохраняет raw RPC JSON даже без флага. Ограничения отображения и сравнения с Node —
+[R4-AGENT-PRESENTATION](../docs/rust/R4-AGENT-PRESENTATION.md).
+
+`browser [status] [--json]` наблюдает локальный pinned MCP и Chrome, дополняя их
+полем daemon.browser, если демон отвечает. Без установки, запуска браузера и
+создания layout; договор — [R4-BROWSER-STATUS](../docs/rust/R4-BROWSER-STATUS.md).
+
+Общий owner transport читает token без FIFO/symlink зависаний; CLI display config
+ограничен 1 MiB, unsafe IO остаётся ошибкой, обычный malformed JSON — Auto.
+Договор и actual CLI проверка — [R4-CLI-OWNER-IO](../docs/rust/R4-CLI-OWNER-IO.md).
+
 `events tail` теперь повторяет пользовательский потоковый контракт TS CLI: по умолчанию
 следит за новыми событиями; `--no-follow` заканчивает replay, `--limit N` ограничивает
 число показанных событий, `--json` печатает один event на строку. Без `--json` — текст

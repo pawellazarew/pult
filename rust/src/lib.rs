@@ -17,6 +17,9 @@ pub mod codex_runtime;
 pub mod codex_worker;
 pub mod consent_store;
 mod history;
+
+/// Lossless JSON object fields for CLI responses with opaque UTF-16 metadata.
+pub use history::Fields as RawFields;
 mod host_jobs;
 pub mod host_paths;
 pub mod host_policy;
@@ -1481,7 +1484,7 @@ pub fn display_string(raw: &RawValue) -> Result<String> {
 }
 
 pub fn cli_locale(home: &Path) -> Result<&'static str> {
-    let configured = registry::Registry::configured_language(home).unwrap_or(locale::Setting::Auto);
+    let configured = registry::Registry::configured_language(home)?;
     let setting = std::env::var("PULT_LANG")
         .ok()
         .and_then(|s| locale::cli_setting(&s))

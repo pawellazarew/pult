@@ -188,9 +188,30 @@ struct State {
     generation: u64,
     identity: Identity,
 }
+#[cfg(test)]
+#[derive(Clone, Copy, Default)]
+struct StartupDiagnostic {
+    pre_import: bool,
+    post_import: bool,
+}
+#[cfg(test)]
+struct StartupSpawn;
+#[cfg(test)]
+impl crate::worker_process::SpawnPermit for StartupSpawn {}
+#[cfg(test)]
+impl crate::worker_process::SpawnGate for StartupSpawn {
+    fn enter(
+        &self,
+    ) -> Result<Box<dyn crate::worker_process::SpawnPermit + '_>, crate::worker_process::SpawnDenied>
+    {
+        Ok(Box::new(StartupSpawn))
+    }
+}
 struct Inner {
     #[cfg(test)]
     before_encode: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    startup_diagnostic: Mutex<Option<Arc<Mutex<StartupDiagnostic>>>>,
     config: Config,
     services: Services,
     state: Mutex<State>,
@@ -250,6 +271,8 @@ impl ClaudeWorker {
         Ok(Arc::new(Self(Arc::new(Inner {
             #[cfg(test)]
             before_encode: Mutex::new(None),
+            #[cfg(test)]
+            startup_diagnostic: Mutex::new(None),
             config,
             services,
             state: Mutex::new(State {
@@ -753,6 +776,26 @@ async fn run(
     )
     .await;
     cleanup(&inner, &job, &mut process).await;
+    #[cfg(test)]
+    if result.is_err() {
+        let diagnostic = inner
+            .startup_diagnostic
+            .lock()
+            .expect("synthetic startup diagnostic")
+            .clone();
+        if let Some(diagnostic) = diagnostic
+            && let Some(process) = process.as_mut()
+            && let Ok(stderr) = process.take_private_stderr()
+        {
+            // Retain only fixed synthetic phases after actual stop/reader join.
+            // Private stderr bytes, arguments and reflected errors never escape.
+            let mut observed = diagnostic.lock().expect("synthetic startup diagnostic");
+            for line in stderr.as_bytes().split(|byte| *byte == b'\n') {
+                observed.pre_import |= line == b"PULT_CLAUDE_FIXTURE_PRE_IMPORT";
+                observed.post_import |= line == b"PULT_CLAUDE_FIXTURE_POST_IMPORT";
+            }
+        }
+    }
     // Revoke/retire the process and MCP first, then clear only a reservation
     // whose input was never dispatched. CAS=1 is uncertain even if write failed.
     if job.dispatch.load(Ordering::Acquire) != 1
@@ -895,7 +938,29 @@ async fn turn(
         .map_err(|_| error("invalid_params", "invalid Claude launch policy"))?;
     let mut launch = inner.config.launch.clone();
     launch.args.extend(args.into_iter().map(Into::into));
-    match Process::spawn_owned(launch, Framing::claude()).await {
+    #[cfg(test)]
+    let diagnostic = inner
+        .startup_diagnostic
+        .lock()
+        .expect("synthetic startup diagnostic")
+        .is_some();
+    #[cfg(test)]
+    let spawning = async {
+        if diagnostic {
+            let prepared = Process::prepare_launch(
+                launch,
+                Framing::claude(),
+                crate::worker_process::StderrPolicy::PrivateTail { max_bytes: 1024 },
+            )
+            .await?;
+            Process::spawn_prepared_owned(prepared, &StartupSpawn).await
+        } else {
+            Process::spawn_owned(launch, Framing::claude()).await
+        }
+    };
+    #[cfg(not(test))]
+    let spawning = Process::spawn_owned(launch, Framing::claude());
+    match spawning.await {
         Ok(value) => *process = Some(value),
         Err(failure) => {
             *process = failure.process.map(|p| *p);

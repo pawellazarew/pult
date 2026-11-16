@@ -57,7 +57,8 @@ while True:
             if mode=='ack-first-hold':wait('start')
             if mode!='ack-only':event('turn.started',started)
         if mode in ('ack-only','missing-start-id','wrong-ack'):wait('never')
-        if mode=='duplicate-wire':
+        if mode=='duplicate-during-accept':wait('duplicate')
+        if mode in ('duplicate-wire','duplicate-during-accept'):
             sys.stdout.write('{"method":"session/event","method":"session/event","params":{}}\n');sys.stdout.flush();wait('never')
         if mode=='blocked-running':wait('running')
         if mode=='event-flood':

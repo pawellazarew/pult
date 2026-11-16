@@ -1,4 +1,6 @@
 #![forbid(unsafe_code)]
+mod cli_agent;
+mod cli_browser_status;
 mod cli_client;
 mod cli_daemon_status;
 mod cli_logs;
@@ -31,6 +33,13 @@ enum Action {
     Version,
     /// Private scoped permission MCP helper; never reads owner credentials.
     McpAsk,
+    /// Observe the local browser package and Chrome; never installs or launches.
+    Browser {
+        #[command(subcommand)]
+        action: Option<BrowserAction>,
+        #[arg(long, global = true)]
+        json: bool,
+    },
     Daemon {
         #[command(subcommand)]
         action: DaemonAction,
@@ -53,6 +62,11 @@ enum Action {
         #[command(subcommand)]
         action: PermAction,
     },
+}
+
+#[derive(Subcommand)]
+enum BrowserAction {
+    Status,
 }
 
 /// Memory administration and read-only session access.
@@ -127,7 +141,10 @@ enum AgentAction {
         #[arg(long)]
         params: String,
     },
-    List,
+    List {
+        #[arg(long)]
+        json: bool,
+    },
     /// Partial ordinary execution for the selected provider.
     Prompt {
         name: String,
@@ -155,8 +172,11 @@ enum AgentAction {
     },
     Stop {
         name: String,
+        /// Rust scoped-stop profile: retain raw RPC JSON, including stopped:false.
         #[arg(long)]
         turn_id: Option<String>,
+        #[arg(long)]
+        json: bool,
     },
     Read {
         name: String,
@@ -175,17 +195,25 @@ enum AgentAction {
         words: Vec<String>,
         #[arg(long, conflicts_with = "words")]
         title: Option<String>,
+        #[arg(long)]
+        json: bool,
     },
     Archive {
         name: String,
+        #[arg(long)]
+        json: bool,
     },
     Unarchive {
         name: String,
+        #[arg(long)]
+        json: bool,
     },
     Seen {
         name: String,
         #[arg(long)]
         unread: bool,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -286,7 +314,7 @@ async fn main() -> Result<()> {
     }
     if args.skill {
         println!(
-            "Rust core protocol 1. Use an explicit private scratch --home.\nCommands: version (also --version/-v; no home needed), daemon logs [-n N|--lines N] (bounded local owner logs; no daemon needed), agent/session start --params JSON, agent list, agent prompt NAME TEXT... [--attachments JSON] [--queue|--interrupt|--steer] [--wait --until idle,blocked,done --timeout MS --json], agent wait NAME [--until idle,blocked,done] [--timeout MS] [--json], agent stop NAME [--turn-id ID], perm list [--name NAME], perm resolve ID allow|deny [--scope once|session|rule] [--answers JSON] [--message TEXT] (partial provider permission staging), memory add|update|forget|get|list|search|history|catalog|configure --params JSON, memory context bind|issue|revoke|status --params JSON (owner administration; shared provider memory is opt-in), daemon serve, daemon status, daemon stop, catalog, events tail [--since N] [--session ID] [--json] [--no-follow] [--limit N] (follows by default), events snapshot, events history --session NAME [--before ID] [--budget BYTES], events get ID..., agent read NAME [--since N] [--format text|json], agent tree NAME [--json], agent rename NAME [TITLE] [--title TEXT], agent archive|unarchive NAME, agent seen NAME [--unread]\nPULT_MEMORY_KEY selects memory-only authentication for every RPC without reading the owner token or display config. Memory credentials allow only get/list/search/catalog; they never grant owner authority.\nOwner-token connections support memory.configure, memory.context.bind, memory.context.issue, memory.context.revoke, memory.context.status, memory.catalog, memory.add, memory.update, memory.forget, memory.get, memory.list, memory.search, memory.history, agent.read, agent.tree, agent.rename, agent.archive, agent.seen, daemon.status, daemon.stop, events.tail, events.subscribe, events.unsubscribe, events.snapshot, events.history, events.get and protocol.catalog.\nPartial owner methods: agent.start, agent.list, agent.prompt, agent.wait, agent.stop, agent.queue.send/resume/remove/move, perm.list, perm.resolve. Queue, qualified completion waits and Codex steering are available; unqualified completions fail explicitly. Waits never restore an old answer after daemon restart. Background and remaining provider parity continue.\nHistory reads per-session files, snapshots and get use the global journal.\nSubscriptions replay committed events with bounded output. live=true sends an empty-session reset.\nevents.emit requires PULT_TEST=1 and is for deterministic verification.\nJournal append is acknowledged after sync. A failed append has an unknown outcome until replay.\nOther catalogued methods return not_implemented. Owner CLI rejects scoped helper credentials; mcp-ask and memory helpers use their own purpose-specific transports.\nPrivate sessions/config are allowed only in a marked Rust scratch home. Startup recovers sessions cold and pauses queues; no provider is started. Production cutover and remaining provider parity follow later compatibility steps."
+            "Rust core protocol 1. Use an explicit private scratch --home.\nCommands: version (also --version/-v; no home needed), daemon logs [-n N|--lines N] (bounded local owner logs; no daemon needed), agent/session start --params JSON, agent list [--json], agent prompt NAME TEXT... [--attachments JSON] [--queue|--interrupt|--steer] [--wait --until idle,blocked,done --timeout MS --json], agent wait NAME [--until idle,blocked,done] [--timeout MS] [--json], agent stop NAME [--turn-id ID] [--json], perm list [--name NAME], perm resolve ID allow|deny [--scope once|session|rule] [--answers JSON] [--message TEXT] (partial provider permission staging), memory add|update|forget|get|list|search|history|catalog|configure --params JSON, memory context bind|issue|revoke|status --params JSON (owner administration; shared provider memory is opt-in), daemon serve, daemon status [--json] [--initialize-runtime], daemon stop, browser [status] [--json] (local observation only; no install or launch), catalog, events tail [--since N] [--session ID] [--json] [--no-follow] [--limit N] (follows by default), events snapshot, events history --session NAME [--before ID] [--budget BYTES], events get ID..., agent read NAME [--since N] [--format text|json], agent tree NAME [--json], agent rename NAME [TITLE] [--title TEXT] [--json], agent archive|unarchive NAME [--json], agent seen NAME [--unread] [--json]\nPULT_MEMORY_KEY selects memory-only authentication for every RPC without reading the owner token or display config. Memory credentials allow only get/list/search/catalog; they never grant owner authority.\nOwner-token connections support memory.configure, memory.context.bind, memory.context.issue, memory.context.revoke, memory.context.status, memory.catalog, memory.add, memory.update, memory.forget, memory.get, memory.list, memory.search, memory.history, agent.read, agent.tree, agent.rename, agent.archive, agent.seen, daemon.status, daemon.stop, events.tail, events.subscribe, events.unsubscribe, events.snapshot, events.history, events.get and protocol.catalog.\nPartial owner methods: agent.start, agent.list, agent.prompt, agent.wait, agent.stop, agent.queue.send/resume/remove/move, perm.list, perm.resolve. Queue, qualified completion waits and Codex steering are available; unqualified completions fail explicitly. Waits never restore an old answer after daemon restart. Background and remaining provider parity continue.\nHistory reads per-session files, snapshots and get use the global journal.\nSubscriptions replay committed events with bounded output. live=true sends an empty-session reset.\nevents.emit requires PULT_TEST=1 and is for deterministic verification.\nJournal append is acknowledged after sync. A failed append has an unknown outcome until replay.\nOther catalogued methods return not_implemented. Owner CLI rejects scoped helper credentials; mcp-ask and memory helpers use their own purpose-specific transports.\nPrivate sessions/config are allowed only in a marked Rust scratch home. Startup recovers sessions cold and pauses queues; no provider is started. Production cutover and remaining provider parity follow later compatibility steps."
         );
         return Ok(());
     }
@@ -300,6 +328,16 @@ async fn main() -> Result<()> {
         },
     }) {
         Action::Version => unreachable!("version returns before home access"),
+        Action::Browser { action: _, json } => {
+            let code = match cli_browser_status::run(&home, json).await {
+                Ok(code) => code,
+                Err(error) => {
+                    let _ = cli_client::emit(format!("Error: {error}\n"), true).await;
+                    1
+                }
+            };
+            std::process::exit(code);
+        }
         Action::Daemon {
             action: DaemonAction::Logs { n, lines },
         } => {
@@ -390,7 +428,9 @@ async fn main() -> Result<()> {
                     "agent.start",
                     parse_cli_object(&params, "agent start --params")?,
                 ),
-                AgentAction::List => ("agent.list", serde_json::json!({})),
+                AgentAction::List { json } => {
+                    std::process::exit(cli_agent::run(&home, cli_agent::Command::List, json).await);
+                }
                 AgentAction::Prompt {
                     name,
                     words,
@@ -426,12 +466,15 @@ async fn main() -> Result<()> {
                     let code = cli_wait::run(&home, &name, options.into(), None).await;
                     std::process::exit(code);
                 }
-                AgentAction::Stop { name, turn_id } => {
-                    let mut params = serde_json::json!({"name":name});
-                    if let Some(turn_id) = turn_id {
-                        params["turnId"] = serde_json::json!(turn_id);
-                    }
-                    ("agent.stop", params)
+                AgentAction::Stop {
+                    name,
+                    turn_id,
+                    json,
+                } => {
+                    std::process::exit(
+                        cli_agent::run(&home, cli_agent::Command::Stop { name, turn_id }, json)
+                            .await,
+                    );
                 }
                 AgentAction::Read {
                     name,
@@ -502,22 +545,56 @@ async fn main() -> Result<()> {
                     }
                     return Ok(());
                 }
-                AgentAction::Rename { name, words, title } => (
-                    "agent.rename",
-                    serde_json::json!({"name":name,"title":title.unwrap_or_else(||words.join(" "))}),
-                ),
-                AgentAction::Archive { name } => (
-                    "agent.archive",
-                    serde_json::json!({"name":name,"archived":true}),
-                ),
-                AgentAction::Unarchive { name } => (
-                    "agent.archive",
-                    serde_json::json!({"name":name,"archived":false}),
-                ),
-                AgentAction::Seen { name, unread } => (
-                    "agent.seen",
-                    serde_json::json!({"name":name,"unread":unread}),
-                ),
+                AgentAction::Rename {
+                    name,
+                    words,
+                    title,
+                    json,
+                } => {
+                    std::process::exit(
+                        cli_agent::run(
+                            &home,
+                            cli_agent::Command::Rename {
+                                name,
+                                title: title.unwrap_or_else(|| words.join(" ")),
+                            },
+                            json,
+                        )
+                        .await,
+                    );
+                }
+                AgentAction::Archive { name, json } => {
+                    std::process::exit(
+                        cli_agent::run(
+                            &home,
+                            cli_agent::Command::Archive {
+                                name,
+                                archived: true,
+                            },
+                            json,
+                        )
+                        .await,
+                    );
+                }
+                AgentAction::Unarchive { name, json } => {
+                    std::process::exit(
+                        cli_agent::run(
+                            &home,
+                            cli_agent::Command::Archive {
+                                name,
+                                archived: false,
+                            },
+                            json,
+                        )
+                        .await,
+                    );
+                }
+                AgentAction::Seen { name, unread, json } => {
+                    std::process::exit(
+                        cli_agent::run(&home, cli_agent::Command::Seen { name, unread }, json)
+                            .await,
+                    );
+                }
             };
             cli_request(&home, method, params).await?
         }

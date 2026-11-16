@@ -4,11 +4,11 @@ use crate::{
     cli_service,
 };
 use anyhow::{Result, ensure};
+use pult_core::RawFields;
 use serde_json::value::RawValue;
-use std::collections::HashMap;
 use std::path::Path;
 
-fn scalar(fields: &HashMap<String, Box<RawValue>>, key: &str) -> String {
+fn scalar(fields: &RawFields, key: &str) -> String {
     fields
         .get(key)
         .map(|v| {
@@ -21,7 +21,7 @@ fn scalar(fields: &HashMap<String, Box<RawValue>>, key: &str) -> String {
         .unwrap_or_else(|| "undefined".into())
 }
 fn status_text(raw: &RawValue, locale: &str) -> Result<String> {
-    let fields: HashMap<String, Box<RawValue>> = serde_json::from_str(raw.get())?;
+    let fields = RawFields::parse(raw)?;
     let uptime = fields
         .get("uptimeMs")
         .and_then(|v| serde_json::from_str::<f64>(v.get()).ok())
@@ -160,4 +160,24 @@ pub async fn run(home: &Path, json_output: bool) -> Result<i32> {
         output = cli_client::emit(text, false) => output.map_err(|_| anyhow::anyhow!("service status output failed"))?,
     }
     Ok(exit)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unrelated_utf16_keys_preserve_known_daemon_status_fields() {
+        let normal: Box<RawValue> = serde_json::from_str(
+            r#"{"version":"fixture","pid":1,"protocol":1,"uptimeMs":0,"home":"/fixture","clients":2,"subscriptions":3,"lastEventId":4}"#,
+        ).unwrap();
+        let extended =
+            RawValue::from_string(format!("{{\"\\ud800\":true,{}", &normal.get()[1..])).unwrap();
+        for locale in ["en", "ru"] {
+            assert_eq!(
+                status_text(&normal, locale).unwrap(),
+                status_text(&extended, locale).unwrap()
+            );
+        }
+    }
 }

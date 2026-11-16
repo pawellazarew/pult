@@ -297,7 +297,7 @@ try {
       [['agent', 'seen', 'alpha', '--unread'], () => oracle.manager.seen('alpha', true)],
       [['agent', 'seen', 'alpha'], () => oracle.manager.seen('alpha', false)],
     ]) {
-      const actual = JSON.parse(execFileSync(binary, ['--home', paths.home, ...args], { encoding: 'utf8', timeout: 5000 }))
+      const actual = JSON.parse(execFileSync(binary, ['--home', paths.home, ...args, '--json'], { encoding: 'utf8', timeout: 5000 }))
       assert.deepEqual(actual, wire(publicRecord(expected())))
       assert.deepEqual(sessions(), wire(oracle.registry.list()))
     }

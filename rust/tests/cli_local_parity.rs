@@ -321,7 +321,9 @@ async fn session_alias_uses_actual_agent_rpc_and_help_preserves_preview_boundary
     let mut outputs = Vec::new();
     for verb in ["agent", "session"] {
         let mut c = command(&[]);
-        c.arg("--home").arg(log.0.path()).args([verb, "list"]);
+        c.arg("--home")
+            .arg(log.0.path())
+            .args([verb, "list", "--json"]);
         outputs.push(ok(&output(c).await).to_owned());
         let help = output(command(&[verb, "prompt", "--help"])).await;
         let help = ok(&help);
