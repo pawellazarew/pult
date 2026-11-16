@@ -129,7 +129,7 @@ async fn nine_frame_completion_requires_receipt_pacing_before_consumer() {
         let w = worker(&host, home.path(), &s, None, false);
         let start_worker = w.clone();
         let start_key = key.clone();
-        let starting =
+        let mut starting =
             tokio::spawn(async move { start_worker.start(start_key, s, "normal".into()).await });
         let entered_result = tokio::time::timeout(WAIT, entered.notified()).await;
         let observation = tokio::time::timeout(
@@ -162,19 +162,18 @@ async fn nine_frame_completion_requires_receipt_pacing_before_consumer() {
             })
             .count();
         drop(release_on_unwind);
-        let started = tokio::time::timeout(WAIT, starting).await.unwrap().unwrap();
+        let started = tokio::time::timeout(WAIT, &mut starting).await;
+        let start_joined = started.is_ok();
         let outcome = match started {
-            Ok(started) => Some(
-                tokio::time::timeout(WAIT, started.done)
-                    .await
-                    .unwrap()
-                    .outcome()
-                    .clone(),
-            ),
-            Err(_) => None,
+            Ok(Ok(Ok(started))) => tokio::time::timeout(WAIT, started.done)
+                .await
+                .ok()
+                .map(|result| result.outcome().clone()),
+            _ => None,
         };
-        let closed = w.close(key).await;
+        let closed = tokio::time::timeout(WAIT, w.close(key)).await;
         let stopped = tokio::time::timeout(WAIT, host.shutdown()).await;
+        let start_drained = start_joined || tokio::time::timeout(WAIT, starting).await.is_ok();
         eprintln!(
             "controlled completion consumer metadata held_routed={held_frames} capacity=8 receipt_wait={} unsupported={}",
             waiting.is_file(),
@@ -182,7 +181,8 @@ async fn nine_frame_completion_requires_receipt_pacing_before_consumer() {
         );
         assert!(entered_result.is_ok());
         assert!(observation.is_ok());
-        assert!(closed.is_ok());
+        assert!(start_drained);
+        assert!(closed.unwrap().is_ok());
         assert!(stopped.unwrap().is_ok());
         let all_frames = std::fs::read_to_string(&wire)
             .unwrap()

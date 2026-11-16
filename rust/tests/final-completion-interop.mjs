@@ -68,7 +68,7 @@ function prepare(engine,provider,variant){
  const paths=layout(join(base,'h'));ensureLayout(paths);const cwd=join(base,'p');mkdirSync(cwd,{mode:0o700})
  const launch=join(base,'launch.jsonl'),cfg={scenario:'simple',speed:0,argvOut:launch,logOut:launch}
  for(const p of [join(cwd,'.pult-fake.json'),join(paths.home,'.pult-fake-codex.json')])writeFileSync(p,JSON.stringify(cfg))
- for(const p of [join(cwd,'.wait-text.json'),join(paths.home,'.wait-text.json')])writeFileSync(p,JSON.stringify({variant}))
+ for(const p of [join(cwd,'.wait-text.json'),join(paths.home,'.wait-text.json')])writeFileSync(p,JSON.stringify({variant,...(engine==='rust'&&provider==='codex'?{completionJournal:join(paths.home,'events/journal.jsonl'),completionTurnReceipt:join(base,'turn-receipt.json'),completionSession:'subject'}:{})}))
  return {base,paths,cwd,launch}
 }
 async function node(provider,variant){
@@ -130,6 +130,7 @@ try{
    await running.client.request('agent.start',{kind:provider,name:'subject',cwd:x.cwd,approval:'read-only',...(provider==='codex'?{model:'gpt-6-astra',effort:'low'}:{})})
    phase='agent.prompt'
    receipt=await running.client.request('agent.prompt',{name:'subject',text:'literal final completion qualification'},{timeoutMs:12000})
+   if(provider==='codex')writeFileSync(join(x.base,'turn-receipt.json'),JSON.stringify({turnId:receipt.turnId}))
    // Actual CLI reads the live session before any active-turn polling. Its
    // result must itself cross Driver close/durable completion publication.
    phase='actual CLI wait'

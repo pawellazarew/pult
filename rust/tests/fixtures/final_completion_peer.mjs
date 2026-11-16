@@ -1,7 +1,7 @@
 // Versioned controlled transformer over explicit repository fake peers.
 // Synthetic text variants; no model, account, network or real provider CLI.
 import {spawn} from 'node:child_process'
-import {readFileSync,appendFileSync,existsSync} from 'node:fs'
+import {readFileSync,appendFileSync,existsSync,writeFileSync} from 'node:fs'
 import {join,basename} from 'node:path'
 import assert from 'node:assert/strict'
 import {fileURLToPath} from 'node:url'
@@ -44,6 +44,24 @@ export function run(provider){
  // The private controlled test holds the actual consumer before recv. Native
  // frames retain their original order; RPC replies never wait on this gate.
  let nativeOutput=Promise.resolve()
+ const pacedThreads=new Set()
+ const waitColdReceipt=async e=>{
+  if(!cfg.completionJournal||pacedThreads.has(e.params.threadId))return
+  pacedThreads.add(e.params.threadId)
+  if(cfg.waitingReceipt)writeFileSync(cfg.waitingReceipt,'waiting')
+  const deadline=Date.now()+10000
+  while(Date.now()<deadline){
+   try{
+    const {turnId}=JSON.parse(readFileSync(cfg.completionTurnReceipt,'utf8'))
+    const lines=readFileSync(cfg.completionJournal,'utf8').split('\n').filter(Boolean).map(JSON.parse)
+    // Current actual prompt response + native thread, in this fresh private
+    // fixture journal. This is readiness only, never an ACK or tool authority.
+    if(typeof turnId==='string'&&lines.some(r=>r.sessionId===cfg.completionSession&&r.kind==='status.changed'&&r.data.status==='working'&&r.data.turnId===turnId)&&lines.some(r=>r.sessionId===cfg.completionSession&&r.kind==='session.started'&&r.data.providerSessionId===e.params.threadId))return
+   }catch{}
+   await new Promise(r=>setTimeout(r,5))
+  }
+  throw Error('controlled completion receipt unavailable')
+ }
  const emit=async e=>{
   if(provider==='codex'&&cfg.consumerGate&&e.method){
    while(!existsSync(cfg.consumerGate))await new Promise(r=>setTimeout(r,5))
@@ -85,10 +103,14 @@ export function run(provider){
    }
   }
   output(e)
+  // The original eight-frame turn plus the multi-item transform has nine
+  // routed frames. Let the actual consumer durably publish its cold receipt
+  // after frame one; the remaining eight then fit the unchanged worker bound.
+  if(provider==='codex'&&e.method==='turn/started')await waitColdReceipt(e)
  }
  createInterface({input:child.stdout}).on('line',line=>{
   let e;try{e=JSON.parse(line)}catch{process.stdout.write(line+'\n');return}
-  if(provider==='codex'&&cfg.consumerGate&&e.method){
+  if(provider==='codex'&&(cfg.consumerGate||cfg.completionJournal)&&e.method){
    nativeOutput=nativeOutput.then(()=>emit(e));nativeOutput.catch(()=>process.exit(1))
   }else void emit(e)
  })
