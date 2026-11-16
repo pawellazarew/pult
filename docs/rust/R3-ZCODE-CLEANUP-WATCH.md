@@ -5,7 +5,9 @@
 The one-process Route A worker also needs this notification. Its start and
 completion oneshots previously waited for the supervisor to finish cleanup,
 while that same supervisor could publish Unconfirmed and await an explicit
-retry. Only external cancellation would enter Driver close/quarantine.
+retry. Before native acceptance the independent Driver start deadline could
+eventually enter close/quarantine; after acceptance external cancellation was
+needed. The five-second observation precedes that existing30s Driver fallback.
 
 Two additional controlled actual-holder counterexamples cover Route A before
 and after native acceptance. The real holder joins0 before the outer wrapper
