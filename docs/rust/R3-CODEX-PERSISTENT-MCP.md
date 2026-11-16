@@ -54,10 +54,12 @@ human approval, including filesystem Full mode. Tool definitions themselves gran
 no read or write authority. Their presence can add prompt cost; no production
 cost or latency measurement is claimed here.
 
-Known cancellation before any input dispatch/thread RPC preserves a previously
+Known cancellation before input dispatch or a thread-mutating RPC preserves a previously
 healthy warm registration captured at that exact Job admission. Its cancelled
 Ticket still revokes and drains normally, including while waiting for the two
-memory slots. It can explicitly retry on the same provider/thread/helper after
+memory slots. Cancellation of an observational readiness/config query can also
+retain that previously healthy registration; late query replies keep their
+existing request correlation. It can explicitly retry on the same provider/thread/helper after
 peers release their slots. Initial bootstrap, actual readiness failure and
 uncertain dispatch keep conservative registration closure/quarantine.
 
