@@ -192,3 +192,23 @@ it('local full-quality capture has one outstanding job and metadata never encode
   await assert.rejects(f.web.preview('alpha', 'B'), /Экземпляр/)
   f.web.close()
 })
+
+it('native presentation does not wait for an obsolete local CDP screenshot', async () => {
+  const f = fixture()
+  await f.web.perform({ id: 'attach', sessionId: 'alpha', instanceId: 'A', action: 'attach', input: {} })
+  const captured = gate(), finish = gate()
+  const send = f.debuggerApi.sendCommand
+  f.debuggerApi.sendCommand = async method => {
+    if (method === 'Page.captureScreenshot') { captured.release(); await finish.promise }
+    return send(method)
+  }
+  const preview = f.web.preview('alpha', 'A')
+  const presented = f.web.requestView('alpha', { x: 0, y: 0, width: 640, height: 400 }, async () => ({ instanceId: 'A', authorize: async () => true }))
+  try {
+    const ready = await Promise.race([captured.promise.then(() => false), presented.then(() => f.visible())])
+    assert.equal(ready, true, 'a local observer capture must not prevent native presentation')
+  } finally {
+    finish.release()
+    try { await Promise.all([preview, presented]) } finally { f.web.close() }
+  }
+})
