@@ -79,7 +79,8 @@ preload already installed. It denies child execution, blocks system Chrome
 metadata lookup and supplies a private virtual Darwin discovery context on
 either CI OS. Forty initial cases cover disk/daemon/state/locale/JSON/text; two
 additional actual numeric-zero text cases cover the review counterexample.
-These 42 cases are compared exactly with the Rust executable. Separate actual
+Three UTF-16-key scenarios add twelve cases. All 54 are compared exactly with
+the Rust executable. Separate actual
 Node Chrome-symlink observations and a Rust actual-filesystem production helper
 test prove the matching candidate behavior; they do not pretend the strict
 fake-file seam is production discovery.
