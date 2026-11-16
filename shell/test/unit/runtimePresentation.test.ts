@@ -26,6 +26,61 @@ function fixture() {
   const web = new RuntimeWeb({ window: () => win, createView: () => view })
   return { web, visible: () => visible, sent }
 }
+it('an initial lookup cannot reopen native contents after a newer modal hide', async () => {
+  const f = fixture()
+  await f.web.perform({ id: 'attach', sessionId: 'alpha', instanceId: 'A', action: 'attach', input: {} })
+  const bounds = { x: 0, y: 0, width: 640, height: 400 }
+  await f.web.setView('alpha', bounds, 'A')
+  const entered = gate(), finish = gate()
+  let authorizations = 0
+  const show = f.web.requestView('alpha', bounds, async () => {
+    entered.release(); await finish.promise
+    return { instanceId: 'A', authorize: async () => { ++authorizations; return true } }
+  })
+  await entered.promise
+  const hide = f.web.setView('alpha', null)
+  assert.equal(f.visible(), false, 'hide does not wait for the initial lookup')
+  finish.release()
+  await Promise.all([show, hide])
+  assert.equal(f.visible(), false)
+  assert.equal(authorizations, 0)
+  f.web.close()
+})
+for (const phase of ['lookup', 'authorize'] as const) it(`an obsolete ${phase} error cannot affect a newer show`, async () => {
+  const f = fixture()
+  await f.web.perform({ id: 'attach', sessionId: 'alpha', instanceId: 'A', action: 'attach', input: {} })
+  const bounds = { x: 0, y: 0, width: 640, height: 400 }
+  const entered = gate(), finish = gate()
+  const obsolete = async (): Promise<never> => { entered.release(); await finish.promise; throw new Error('obsolete fixture read') }
+  const old = f.web.requestView('alpha', bounds, async () => {
+    if (phase === 'lookup') return obsolete()
+    return { instanceId: 'A', authorize: obsolete }
+  })
+  await entered.promise
+  const fresh = f.web.requestView('alpha', bounds, async () => ({ instanceId: 'A', authorize: async () => true }))
+  finish.release()
+  await Promise.all([old, fresh])
+  assert.equal(f.visible(), true)
+  f.web.close()
+})
+it('a current lookup error fails closed on its own native contents', async () => {
+  const f = fixture()
+  await f.web.perform({ id: 'attach', sessionId: 'alpha', instanceId: 'A', action: 'attach', input: {} })
+  const bounds = { x: 0, y: 0, width: 640, height: 400 }
+  await f.web.setView('alpha', bounds, 'A')
+  await assert.rejects(f.web.requestView('alpha', bounds, async () => { throw new Error('current fixture read') }), /current fixture read/)
+  assert.equal(f.visible(), false)
+  f.web.close()
+})
+it('the initial lookup must match the exact page incarnation before authorization', async () => {
+  const f = fixture()
+  await f.web.perform({ id: 'attach', sessionId: 'alpha', instanceId: 'A', action: 'attach', input: {} })
+  let authorizations = 0
+  await f.web.requestView('alpha', { x: 0, y: 0, width: 640, height: 400 }, async () => ({ instanceId: 'B', authorize: async () => { ++authorizations; return true } }))
+  assert.equal(f.visible(), false)
+  assert.equal(authorizations, 0)
+  f.web.close()
+})
 it('modal hide is immediate behind an owned action and supersedes a queued show', async () => {
   const f = fixture()
   await f.web.perform({ id: 'attach', sessionId: 'alpha', instanceId: 'A', action: 'attach', input: {} })

@@ -485,13 +485,16 @@ function registerIpc(): void {
       // Hiding is restrictive and must not wait for daemon IO or controller lookup.
       if (bounds === null) { await runtimeWeb.setView(id, null); return { ok: true, result: null } }
       if (!link) throw new Error(tr('Пульт ещё не готов'))
-      const result = await link.call('agent.list', {}) as { sessions?: Array<{ name?: unknown; createdAt?: unknown }> }
-      const record = result.sessions?.find((s) => s.name === id)
-      if (!record || typeof record.createdAt !== 'string') throw new Error(tr('Сессия недоступна'))
-      await runtimeWeb.setView(id, bounds, record.createdAt, () => runtimeViewAuthorized(id, record.createdAt as string,
-        () => link!.call('runtime.discover', { sessionId: id }) as Promise<{ controllers?: Record<string, string> }>,
-        () => link!.call('agent.list', {}) as Promise<{ sessions?: Array<{ name?: unknown; createdAt?: unknown }> }>,
-      ))
+      await runtimeWeb.requestView(id, bounds, async () => {
+        const result = await link!.call('agent.list', {}) as { sessions?: Array<{ name?: unknown; createdAt?: unknown }> }
+        const record = result.sessions?.find((s) => s.name === id)
+        if (!record || typeof record.createdAt !== 'string') throw new Error(tr('Сессия недоступна'))
+        const instanceId = record.createdAt
+        return { instanceId, authorize: () => runtimeViewAuthorized(id, instanceId,
+          () => link!.call('runtime.discover', { sessionId: id }) as Promise<{ controllers?: Record<string, string> }>,
+          () => link!.call('agent.list', {}) as Promise<{ sessions?: Array<{ name?: unknown; createdAt?: unknown }> }>,
+        ) }
+      })
       return { ok: true, result: null }
     } catch (err) { return toReply(err) }
   })
