@@ -26,7 +26,7 @@ const WAIT: Duration = Duration::from_secs(20);
 async fn nine_frame_completion_requires_receipt_pacing_before_consumer() {
     pult_core::panic_guard::install();
     for paced in [false, true] {
-        let home = tempfile::tempdir().unwrap();
+        let mut home = tempfile::tempdir().unwrap();
         let gate_path = home.path().join("consumer-entered");
         let waiting = home.path().join("waiting-receipt");
         let journal = home.path().join("receipt-journal.jsonl");
@@ -123,6 +123,9 @@ async fn nine_frame_completion_requires_receipt_pacing_before_consumer() {
             }
             Box::new(Identity)
         });
+        // Unknown ownership must retain the private fixture evidence, including
+        // failures before the explicit close/shutdown assertions below.
+        home.disable_cleanup(true);
         let host = CodexHost::start(selected, service).unwrap();
         let s = snapshot(home.path(), "one", Approval::ReadOnly);
         let key = ticket(&s);
@@ -174,6 +177,9 @@ async fn nine_frame_completion_requires_receipt_pacing_before_consumer() {
         let closed = tokio::time::timeout(WAIT, w.close(key)).await;
         let stopped = tokio::time::timeout(WAIT, host.shutdown()).await;
         let start_drained = start_joined || tokio::time::timeout(WAIT, starting).await.is_ok();
+        if matches!(&closed, Ok(Ok(_))) && matches!(&stopped, Ok(Ok(_))) && start_drained {
+            home.disable_cleanup(false);
+        }
         eprintln!(
             "controlled completion consumer metadata held_routed={held_frames} capacity=8 receipt_wait={} unsupported={}",
             waiting.is_file(),
