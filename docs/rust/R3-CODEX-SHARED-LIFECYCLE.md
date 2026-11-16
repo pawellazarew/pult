@@ -54,3 +54,27 @@ the real pult-worker-holder, as existing Claude vault fixtures do.
 Daemon/controller wiring, shared permission State facade and provider approval
 fixes are separate changes composed by Root. This slice adds no claim of full
 provider/queue/MCP parity or automatic daemon-wide lifecycle completion.
+
+## Controlled native fixture journal snapshots
+
+The synthetic daemon peer reads live journal receipts before native dispatch and
+permission acceptance. It now trims bytes after the last newline before UTF-8
+decoding, then parses complete nonempty JSONL rows. A malformed complete row
+still fails the peer; an unfinished UTF-8 tail cannot kill it. This matches the
+Node complete-row fixture reader and changes no production journal or authority.
+
+The actual-provider regression copies the real daemon journal only after its
+matching native thread has a durable working receipt. It adds an unfinished
+UTF-8 tail or malformed complete row to a fixed private consumer snapshot; the
+daemon's authoritative journal remains untouched. The old reader reproduces an
+actual `agent.prompt` rejection with `internal`, a dead native PID and
+`UnicodeDecodeError`. The new reader succeeds for the unfinished tail while the
+complete-corrupt control still fails closed. Normal 18-check interoperability,
+its six-second predicates, and the cold-site control remain unchanged.
+
+Failure-only check-nine observations distinguish its four RPC phases and emit
+bounded, allowlisted codes/counts and fixture reader error classes, without raw
+provider text, IDs, paths or credentials. Failed or unconfirmed scratch is
+retained. This source counterexample does not establish the natural trigger of
+the prior Linux CI rejection; a Node minor-version difference is not a cause
+claim.
