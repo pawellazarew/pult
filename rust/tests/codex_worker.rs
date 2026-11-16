@@ -1926,3 +1926,49 @@ case!(
         assert_gone(home.path());
     }
 );
+
+case!(
+    completed_native_turn_id_is_never_rebound_to_a_later_ticket,
+    {
+        let home = tempfile::tempdir().unwrap();
+        let sink = Arc::new(MemorySink::default());
+        let host = host(home.path(), sink.clone());
+        let snapshot = snapshot(home.path(), "native-reuse", Approval::ReadOnly);
+        let worker = worker(&host, home.path(), &snapshot, None, true);
+        let a = ticket(&snapshot);
+        let started = worker
+            .start(a.clone(), snapshot.clone(), "normal".into())
+            .await
+            .unwrap();
+        assert_eq!(started.done.await.outcome(), &Outcome::Success);
+        worker.close(a).await.unwrap();
+        let before = sink
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e["kind"] == "message.done")
+            .count();
+        let b = ticket(&snapshot);
+        let error = match worker
+            .start(b.clone(), snapshot, "reuse-native-id".into())
+            .await
+        {
+            Ok(_) => panic!("reused native turn ID was accepted for B"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, "start_unknown");
+        worker.close(b).await.unwrap();
+        assert_eq!(
+            sink.events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|e| e["kind"] == "message.done")
+                .count(),
+            before
+        );
+        host.shutdown().await.unwrap();
+        assert_gone(home.path());
+    }
+);

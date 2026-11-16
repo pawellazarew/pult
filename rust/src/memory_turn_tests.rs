@@ -1670,3 +1670,187 @@ async fn persistent_bridge_native_ack_and_started_cannot_substitute_for_actual_d
     bounded(handle.wait()).await.unwrap();
     f.close().await;
 }
+
+#[tokio::test]
+async fn persistent_bridge_pending_waiters_are_bounded_and_released_on_caller_drop() {
+    use std::{
+        future::Future,
+        task::{Context, Poll, Waker},
+    };
+    let mut f = Fixture::new().await;
+    let (registration, turn) = bridge_fixture(&f);
+    turn.native("native-A", true, true).unwrap();
+    let mut requests = Vec::new();
+    for n in 0..16 {
+        let mut request = Box::pin(
+            registration
+                .clone()
+                .call(bridge_envelope("native-A", &format!("pending-{n}"))),
+        );
+        assert!(matches!(
+            request
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Pending
+        ));
+        requests.push(request);
+    }
+    assert_eq!(
+        registration
+            .clone()
+            .call(bridge_envelope("native-A", "overflow"))
+            .await
+            .unwrap_err()
+            .code,
+        "capacity"
+    );
+    requests.pop();
+    let mut replacement = Box::pin(
+        registration
+            .clone()
+            .call(bridge_envelope("native-A", "replacement")),
+    );
+    assert!(matches!(
+        replacement
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop())),
+        Poll::Pending
+    ));
+    turn.close();
+    assert_eq!(bounded(replacement).await.unwrap_err().code, "forbidden");
+    for request in requests {
+        assert_eq!(bounded(request).await.unwrap_err().code, "forbidden");
+    }
+    f.close().await;
+}
+#[tokio::test]
+async fn persistent_bridge_missing_ack_and_immediate_off_revoke_never_admit_io() {
+    use std::{
+        future::Future,
+        task::{Context, Poll, Waker},
+    };
+    let mut f = Fixture::new().await;
+    let (registration, turn) = bridge_fixture(&f);
+    turn.native("native-A", false, true).unwrap();
+    turn.ledger(
+        "native-A",
+        &json!({"id":"call-A","server":"pult_memory","tool":"memory_list","arguments":{}}),
+    )
+    .unwrap();
+    let mut request = Box::pin(
+        registration
+            .clone()
+            .call(bridge_envelope("native-A", "call-A")),
+    );
+    assert!(matches!(
+        request
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop())),
+        Poll::Pending
+    ));
+    let jobs = f.control().jobs.load(Ordering::Acquire);
+    f.backend.revoke_session("chat");
+    assert_eq!(bounded(request).await.unwrap_err().code, "forbidden");
+    assert_eq!(f.control().jobs.load(Ordering::Acquire), jobs);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn persistent_bridge_closed_native_id_cannot_be_rebound_to_b_before_first_native_binding() {
+    let mut f = Fixture::new().await;
+    let (registration, a) = bridge_fixture(&f);
+    bridge_started(&a, "native-A", "call-A");
+    let snapshot = f.control().snapshot.clone();
+    a.close();
+    f.state.driver.get().unwrap().cancel(f.handle.ticket());
+    bounded(f.handle.wait()).await.unwrap();
+    let mut handle = f
+        .state
+        .driver
+        .get()
+        .unwrap()
+        .start(
+            snapshot,
+            "second".into(),
+            Arc::new(FixtureWorker(f.backend.clone())),
+        )
+        .unwrap();
+    bounded(handle.accepted()).await.unwrap();
+    let b = registration
+        .turn(
+            handle.ticket().clone(),
+            Some(crate::codex_memory::Handle::test(
+                f.backend.clone(),
+                handle.ticket().clone(),
+                Lease(f.backend.control(handle.ticket()).unwrap()),
+            )),
+        )
+        .unwrap();
+    assert_eq!(
+        b.native("native-A", true, true).unwrap_err().code,
+        "forbidden"
+    );
+    assert!(!registration.available());
+    assert!(
+        registration
+            .clone()
+            .call(bridge_envelope("native-A", "call-A"))
+            .await
+            .is_err()
+    );
+    assert!(b.native("native-B", true, true).is_err());
+    f.state.driver.get().unwrap().cancel(handle.ticket());
+    bounded(handle.wait()).await.unwrap();
+    f.close().await;
+}
+
+#[tokio::test]
+async fn persistent_bridge_ledger_overflow_closes_before_pending_calls_can_admit() {
+    let mut f = Fixture::new().await;
+    let (registration, turn) = bridge_fixture(&f);
+    turn.native("native-A", true, true).unwrap();
+    for n in 0..256 {
+        turn.ledger("native-A",&json!({"id":format!("call-{n}"),"server":"pult_memory","tool":"memory_list","arguments":{}})).unwrap();
+    }
+    assert_eq!(
+        turn.ledger(
+            "native-A",
+            &json!({"id":"overflow","server":"pult_memory","tool":"memory_list","arguments":{}})
+        )
+        .unwrap_err()
+        .code,
+        "capacity"
+    );
+    assert_eq!(
+        registration
+            .call(bridge_envelope("native-A", "call-0"))
+            .await
+            .unwrap_err()
+            .code,
+        "forbidden"
+    );
+    assert_eq!(f.control().jobs.load(Ordering::Acquire), 0);
+    assert_eq!(f.record()["version"], 1);
+    f.close().await;
+}
+#[tokio::test]
+async fn persistent_bridge_missing_or_oversize_native_arguments_close_without_io() {
+    for arguments in [None, Some(json!({"payload":"x".repeat(64*1024)}))] {
+        let mut f = Fixture::new().await;
+        let (registration, turn) = bridge_fixture(&f);
+        turn.native("native-A", true, true).unwrap();
+        let mut item = json!({"id":"call-A","server":"pult_memory","tool":"memory_list"});
+        if let Some(arguments) = arguments {
+            item["arguments"] = arguments;
+        }
+        assert!(turn.ledger("native-A", &item).is_err());
+        assert!(
+            registration
+                .call(bridge_envelope("native-A", "call-A"))
+                .await
+                .is_err()
+        );
+        assert_eq!(f.control().jobs.load(Ordering::Acquire), 0);
+        f.close().await;
+    }
+}

@@ -218,7 +218,8 @@ pub(super) async fn run(home: &Path, json: bool) -> Result<i32> {
             "PULT_MEMORY_KEY",
             "PULT_MEMORY_TURN_KEY",
             "PULT_ASK_KEY",
-            "PULT_RUNTIME_KEY"
+            "PULT_RUNTIME_KEY",
+            "PULT_CODEX_MEMORY_KEY"
         ]
         .iter()
         .all(|key| std::env::var_os(key).is_none()),

@@ -118,7 +118,7 @@ try {
     assert.throws(() => jsonl(file), SyntaxError, 'complete corrupt records must not be hidden')
     rmSync(file)
   })
-  await check('ordinary setup has real memory MCP and a distinct shared neighbor', async () => {
+  await check('ordinary setup has real per-thread memory MCP on the shared provider', async () => {
     await start('writer')
     await start('neighbor', projectA, { memory: { read: false, write: 'off' } })
     await send({ run: 'neighbor', mode: 'hold' }, {}, 'neighbor')
@@ -173,14 +173,14 @@ try {
     assert.equal(journal().filter(row => row.kind === 'message.user' && row.data.queueItemId === second.id).length, 1)
     assert.ok(alive(written.pid)); assert.ok(alive(next.pid)); assert.ok(alive(neighborPid))
   })
-  await check('steer resolves exact dedicated Lease.host and retains honest base-turn memory provenance', async () => {
+  await check('steer resolves exact shared Lease.host and retains honest base-turn memory provenance', async () => {
     const base = await send({ run: 'steer-holder', mode: 'hold' })
     const active = dispatch('steer-holder')
     const baseReceipt = journal().find(row => row.kind === 'message.user' && row.data.text.includes('steer-holder'))
     const steered = await send({ run: 'dedicated-steer', id: note.id, proposal: proposal(note, 'steer-memory-write', 'steered version three') }, { steer: true })
     assert.equal(steered.turnId, base.turnId)
     const routed = evidence().find(row => row.kind === 'steer' && row.run === 'dedicated-steer')
-    assert.equal(routed.pid, active.pid); assert.notEqual(routed.pid, neighborPid)
+    assert.equal(routed.pid, active.pid); assert.equal(routed.pid, neighborPid)
     assert.equal(routed.expectedTurnId, active.turn); assert.equal(routed.thread, active.thread)
     const pending = await card('writer')
     assert.equal(pending.input.sourceTurnId, base.turnId); assert.equal(pending.input.sourceEventId, baseReceipt.id)
@@ -276,6 +276,7 @@ try {
     assert.equal(queuedReceipt(unknown.id), undefined)
   })
   await check('explicitly edited retry gets fresh queue provenance and the following turn observes committed memory', async () => {
+    const nativeBeforeRetry = stored('writer').providerSessionId
     const edited = { run: 'edited-after-unknown', id: note.id, proposal: proposal(note, 'post-rollback-write', 'version four after explicit edit') }
     await client.request('agent.queue.move', { name: 'writer', id: unknown.id, text: JSON.stringify(edited) })
     assert.equal(stored('writer').queueDispatch, undefined)
@@ -286,7 +287,10 @@ try {
     assert.ok(receipt); assert.equal(pending.input.sourceEventId, receipt.id)
     assert.deepEqual(receipt.data.attachments, [attachment]); assert.equal(receipt.data.queueItemAt, heldBacklog.at)
     await client.request('perm.resolve', { id: pending.id, decision: 'allow', scope: 'once' })
-    assert.equal((await outcome('edited-after-unknown')).proposal.version, 4)
+    const retried = await outcome('edited-after-unknown')
+    assert.equal(retried.proposal.version, 4); assert.equal(retried.thread, nativeBeforeRetry)
+    assert.ok(evidence().some(row => row.kind === 'thread' && row.thread === nativeBeforeRetry && row.pid === retried.pid && row.method === 'thread/resume'))
+    assert.ok(evidence().some(row => row.kind === 'mcp-started' && row.thread === nativeBeforeRetry && row.pid === retried.pid))
     await terminal('writer')
     note = await memory('get', { session: 'writer', id: note.id })
     assert.equal(note.sourceEventId, receipt.id); assert.equal(note.sourceTurnId, pending.input.sourceTurnId)

@@ -1,5 +1,8 @@
 # Ordinary Codex turn memory — integration slice
 
+Persistent Codex MCP lifetime is described in [R3-CODEX-PERSISTENT-MCP.md](R3-CODEX-PERSISTENT-MCP.md).
+The dedicated memory-on lifecycle below records the earlier implementation.
+
 This step connects explicit session memory policy to an ordinary Rust Codex
 turn, its own stdio MCP server, human-approved durable proposals, and the next
 turn's catalog. It does not complete memory delivery for Claude/ZCode, queue or

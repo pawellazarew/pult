@@ -1,5 +1,8 @@
 # Daemon-owned permission lifecycle
 
+Persistent Codex MCP lifetime is described in [R3-CODEX-PERSISTENT-MCP.md](R3-CODEX-PERSISTENT-MCP.md).
+The dedicated memory-on lifecycle below records the earlier implementation.
+
 `CodexRuntime::new_daemon(..., memory, broker)` is a crate-private trusted-host
 constructor. The injected Broker, Driver and shared NetworkGuard remain daemon
 resources. `permission_broker()` returns a clone for the daemon transition;

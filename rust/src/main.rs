@@ -723,7 +723,8 @@ async fn main() -> Result<()> {
 fn reject_helper_credentials() -> Result<()> {
     anyhow::ensure!(
         std::env::var_os("PULT_ASK_KEY").is_none()
-            && std::env::var_os("PULT_RUNTIME_KEY").is_none(),
+            && std::env::var_os("PULT_RUNTIME_KEY").is_none()
+            && std::env::var_os("PULT_CODEX_MEMORY_KEY").is_none(),
         "permission/runtime credentials cannot use owner CLI commands"
     );
     Ok(())

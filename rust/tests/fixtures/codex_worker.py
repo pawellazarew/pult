@@ -105,6 +105,8 @@ for line in sys.stdin:
         turn = 'native-turn-' + str(sequence)
         text = next((item['text'] for item in params['input'] if item['type'] == 'text'), '')
         behavior = text.split(' ', 1)[0]
+        if behavior == 'reuse-native-id':
+            turn = last_turns[thread]
         if behavior == 'late' and thread in last_turns:
             old = last_turns[thread]
             notification('turn/started', thread, old, turn={'id': old, 'status': 'inProgress'})

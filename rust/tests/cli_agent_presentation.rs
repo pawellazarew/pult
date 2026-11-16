@@ -12,9 +12,10 @@ use tokio::{
     process::Command,
 };
 
-const KEYS: [&str; 4] = [
+const KEYS: [&str; 5] = [
     "PULT_ASK_KEY",
     "PULT_RUNTIME_KEY",
+    "PULT_CODEX_MEMORY_KEY",
     "PULT_MEMORY_KEY",
     "PULT_MEMORY_TURN_KEY",
 ];
@@ -156,8 +157,11 @@ async fn four_purposes_empty_and_mixed_deny_before_any_fifo_or_home_validation()
                 let mut c = f.command(&["agent"]);
                 c.args(args).env(key, "");
                 if mixed {
-                    c.env("PULT_MEMORY_KEY", "synthetic")
-                        .env("PULT_RUNTIME_KEY", "");
+                    c.env("PULT_MEMORY_KEY", "synthetic").env(
+                        "PULT_RUNTIME_KEY",
+                        "PULT_CODEX_MEMORY_KEY",
+                        "",
+                    );
                 }
                 let out = output(c).await;
                 assert_eq!(out.status.code(), Some(1));

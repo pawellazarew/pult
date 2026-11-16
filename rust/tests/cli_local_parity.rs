@@ -6,11 +6,12 @@ use std::time::Duration;
 use tokio::process::Command;
 
 const WAIT: Duration = Duration::from_secs(12);
-const KEYS: [&str; 4] = [
+const KEYS: [&str; 5] = [
     "PULT_MEMORY_KEY",
     "PULT_MEMORY_TURN_KEY",
     "PULT_ASK_KEY",
     "PULT_RUNTIME_KEY",
+    "PULT_CODEX_MEMORY_KEY",
 ];
 
 fn command(args: &[&str]) -> Command {

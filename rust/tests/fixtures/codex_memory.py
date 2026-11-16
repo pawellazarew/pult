@@ -54,7 +54,7 @@ class MCP:
         with (native / 'private-keys.jsonl').open('a') as stream:
             os.chmod(stream.name, 0o600)
             fcntl.flock(stream, fcntl.LOCK_EX)
-            stream.write(json.dumps({'pid': os.getpid(), 'key': key}) + '\n')
+            stream.write(json.dumps({'pid': os.getpid(), 'thread': config.get('_fixture_thread'), 'key': key}) + '\n')
         self.process = subprocess.Popen([config['command'], *config['args']], env={**os.environ, **config['env']}, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         threading.Thread(target=self.process.wait, daemon=True).start()
         self.lock = threading.RLock()

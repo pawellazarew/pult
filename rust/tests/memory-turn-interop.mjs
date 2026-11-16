@@ -264,7 +264,7 @@ try {
     assert.equal(outcome.proposal.isError, true)
     assert.equal((await client.request('perm.list', { name: 'writer' })).pending.length, 0)
     assert.deepEqual(await memory('get', { session: 'writer', id: note.id }), before)
-    const key = jsonl(join(native, 'private-keys.jsonl')).find(value => value.pid === outcome.pid).key
+    const key = jsonl(join(native, 'private-keys.jsonl')).find(value => value.thread === outcome.thread).key
     assert.notEqual(key, outcome.unknownStructuralId)
     const events = journal().filter(value => value.sessionId === 'writer')
     const text = JSON.stringify(events)
@@ -293,7 +293,7 @@ try {
     } finally { legacy.close() }
     await prompt('writer', { run: 'credential-hold', mode: 'hold' })
     const dispatch = evidence().find(value => value.kind === 'dispatch' && value.run === 'credential-hold')
-    const key = jsonl(join(native, 'private-keys.jsonl')).find(value => value.pid === dispatch.pid).key
+    const key = jsonl(join(native, 'private-keys.jsonl')).find(value => value.thread === dispatch.thread).key
     const turn = await raw({ codexMemory: key })
     try {
       assert.equal(turn.hello.type, 'hello_ok')
@@ -338,8 +338,8 @@ try {
     }
     const holds = ['slot-one-hold', 'slot-two-hold'].map(run => evidence().find(value => value.kind === 'dispatch' && value.run === run))
     assert.ok(holds.every(Boolean))
-    assert.notEqual(holds[0].pid, holds[1].pid)
-    const children = holds.map(hold => evidence().find(value => value.kind === 'mcp-started' && value.pid === hold.pid))
+    assert.equal(holds[0].pid, holds[1].pid); assert.notEqual(holds[0].thread, holds[1].thread)
+    const children = holds.map(hold => evidence().find(value => value.kind === 'mcp-started' && value.thread === hold.thread))
     assert.ok(children.every(Boolean))
     assert.ok(holds.every(value => alive(value.pid)))
     assert.ok(children.every(value => alive(value.mcpPid)))
@@ -397,6 +397,26 @@ try {
     assert.ok(alive(neighborPid))
     assert.equal((await session('neighbor')).status, 'working')
     assert.equal((await client.request('daemon.status')).nativeRuntime.hosts, 1)
+  })
+  await check('off-on-off keeps the same native thread and helper while every off call is denied', async () => {
+    await start('toggle', projectA, { memory: { read: false, write: 'off' } })
+    const before = await memory('get', { session: 'writer', id: note.id })
+    await prompt('toggle', { run: 'toggle-off', id: note.id, proposal: proposal(before, 'toggle-off-write', 'MUST_NOT_COMMIT') })
+    const off = await result('toggle-off', 'toggle')
+    for(const key of ['catalog','list','get','proposal']) assert.equal(off[key].isError, true)
+    assert.equal((await client.request('perm.list', { name: 'toggle' })).pending.length, 0)
+    const helper = evidence().find(row => row.kind === 'mcp-started' && row.thread === off.thread)
+    assert.equal(helper.tools.length, 5); assert.ok(alive(helper.mcpPid))
+    await memory('configure', { session: 'toggle', memory: { read: true, write: 'ask' } })
+    await prompt('toggle', { run: 'toggle-on', id: note.id })
+    const on = await result('toggle-on', 'toggle')
+    assert.equal(on.get.version, before.version); assert.equal(on.thread, off.thread); assert.equal(on.pid, off.pid)
+    await memory('configure', { session: 'toggle', memory: { read: false, write: 'off' } })
+    await prompt('toggle', { run: 'toggle-off-again', id: note.id })
+    const offAgain = await result('toggle-off-again', 'toggle')
+    assert.equal(offAgain.get.isError, true); assert.equal(offAgain.thread, off.thread); assert.equal(offAgain.pid, off.pid)
+    assert.equal(evidence().filter(row => row.kind === 'mcp-started' && row.thread === off.thread).length, 1)
+    assert.ok(alive(helper.mcpPid)); assert.deepEqual(await memory('get', { session: 'writer', id: note.id }), before)
   })
   await check('credentials and injected catalogs stay out of public journal; final shutdown reaps warm children', async () => {
     const keys = jsonl(join(native, 'private-keys.jsonl')).map(value => value.key)

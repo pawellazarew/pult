@@ -249,9 +249,18 @@ impl Tools for CodexRemote {
     }
 }
 pub async fn run_codex(home: PathBuf, key: String) -> Result<()> {
+    use std::os::fd::AsFd;
     let (mut heartbeat, _output) = codex_connect(&home, &key).await?;
+    // Duplicated descriptors avoid Rust's process-global stdout lock. A blocked
+    // helper pipe must not prevent process exit after transport revocation.
+    let input = tokio::fs::File::from_std(std::fs::File::from(
+        std::io::stdin().as_fd().try_clone_to_owned()?,
+    ));
+    let output = tokio::fs::File::from_std(std::fs::File::from(
+        std::io::stdout().as_fd().try_clone_to_owned()?,
+    ));
     tokio::select! {
-        result=mcp_stdio::serve(BufReader::new(tokio::io::stdin()),tokio::io::stdout(),Arc::new(CodexRemote{home,key}),"pult-memory")=>{result?;},
+        result=mcp_stdio::serve(BufReader::new(input),output,Arc::new(CodexRemote{home,key}),"pult-memory")=>{result?;},
         _=crate::read_line(&mut heartbeat)=>{},
     }
     Ok(())

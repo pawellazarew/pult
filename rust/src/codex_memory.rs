@@ -9,7 +9,6 @@ use crate::{
 use serde_json::Value;
 use std::{
     collections::HashMap,
-    path::PathBuf,
     sync::{
         Arc, Mutex, Weak,
         atomic::{AtomicBool, Ordering},
@@ -48,6 +47,8 @@ pub(crate) struct Registry {
     waiters: Arc<Semaphore>,
     bytes: Arc<Semaphore>,
     active_memory: Arc<Semaphore>,
+    identity_bytes: Arc<Semaphore>,
+    identities: Arc<Semaphore>,
 }
 pub(crate) struct Registration {
     registry: Weak<Registry>,
@@ -61,8 +62,16 @@ struct Binding {
     closed: bool,
     thread: Option<String>,
     active: Weak<Turn>,
+    native_ids: HashMap<String, NativeOwner>,
+}
+struct NativeOwner {
+    ticket: Ticket,
+    turn: Weak<Turn>,
+    _bytes: tokio::sync::OwnedSemaphorePermit,
+    _entry: tokio::sync::OwnedSemaphorePermit,
 }
 pub(crate) struct Turn {
+    registration: Weak<Registration>,
     backend: Weak<Backend>,
     ticket: Ticket,
     lease: Option<Handle>,
@@ -115,13 +124,15 @@ struct Call {
     arguments: Value,
 }
 impl Registry {
-    pub(crate) fn new(backend: Weak<Backend>, _program: PathBuf) -> Arc<Self> {
+    pub(crate) fn new(backend: Weak<Backend>) -> Arc<Self> {
         Arc::new(Self {
             backend,
             entries: Mutex::new(Vec::new()),
             waiters: Arc::new(Semaphore::new(16)),
             bytes: Arc::new(Semaphore::new(512 * 1024)),
             active_memory: Arc::new(Semaphore::new(2)),
+            identity_bytes: Arc::new(Semaphore::new(8 * 1024 * 1024)),
+            identities: Arc::new(Semaphore::new(8192)),
         })
     }
     pub(crate) fn register(
@@ -153,6 +164,7 @@ impl Registry {
                 closed: false,
                 thread: None,
                 active: Weak::new(),
+                native_ids: HashMap::new(),
             }),
             changed: Notify::new(),
         });
@@ -258,6 +270,7 @@ impl Registration {
         }
         let registry = self.registry.upgrade().ok_or_else(denied)?;
         let turn = Arc::new(Turn {
+            registration: Arc::downgrade(self),
             backend: registry.backend.clone(),
             ticket,
             lease,
@@ -274,6 +287,53 @@ impl Registration {
         state.active = Arc::downgrade(&turn);
         self.changed.notify_waiters();
         Ok(turn)
+    }
+    fn claim_native(&self, turn: &Turn, native: &str) -> Result<(), MemoryError> {
+        let result = (|| {
+            let mut state = self.state.lock().map_err(|_| denied())?;
+            if state.closed {
+                return Err(denied());
+            }
+            if let Some(owner) = state.native_ids.get(native) {
+                return if owner.ticket == turn.ticket && std::ptr::eq(owner.turn.as_ptr(), turn) {
+                    Ok(())
+                } else {
+                    Err(denied())
+                };
+            }
+            if state.native_ids.len() >= 1024 {
+                return Err(capacity());
+            }
+            let registry = self.registry.upgrade().ok_or_else(denied)?;
+            let bytes = registry
+                .identity_bytes
+                .clone()
+                .try_acquire_many_owned(native.len() as u32)
+                .map_err(|_| capacity())?;
+            let entry = registry
+                .identities
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| capacity())?;
+            let active = state.active.clone();
+            if !std::ptr::eq(active.as_ptr(), turn) {
+                return Err(denied());
+            }
+            state.native_ids.insert(
+                native.into(),
+                NativeOwner {
+                    ticket: turn.ticket.clone(),
+                    turn: active,
+                    _bytes: bytes,
+                    _entry: entry,
+                },
+            );
+            Ok(())
+        })();
+        if result.is_err() {
+            self.close();
+        }
+        result
     }
     pub(crate) fn available(&self) -> bool {
         self.state.lock().is_ok_and(|s| !s.closed)
@@ -439,6 +499,13 @@ impl Turn {
         self.lease.is_some()
     }
     pub(crate) fn native(&self, native: &str, ack: bool, started: bool) -> Result<(), MemoryError> {
+        if !identity(native) {
+            return Err(denied());
+        }
+        self.registration
+            .upgrade()
+            .ok_or_else(denied)?
+            .claim_native(self, native)?;
         let mut state = self.state.lock().map_err(|_| denied())?;
         if self.closed.load(Ordering::Acquire)
             || !identity(native)
@@ -456,44 +523,52 @@ impl Turn {
         if item["server"] != "pult_memory" {
             return Ok(());
         }
-        let id = item["id"]
-            .as_str()
-            .filter(|v| identity(v))
-            .ok_or_else(denied)?;
-        let tool = item["tool"]
-            .as_str()
-            .filter(|v| identity(v) && v.len() <= 128)
-            .ok_or_else(denied)?;
-        let mut state = self.state.lock().map_err(|_| denied())?;
-        if self.closed.load(Ordering::Acquire)
-            || state.native.as_deref() != Some(native)
-            || state.ledger.contains_key(id)
-        {
-            return Err(denied());
+        let result = (|| {
+            let id = item["id"]
+                .as_str()
+                .filter(|v| identity(v))
+                .ok_or_else(denied)?;
+            let tool = item["tool"]
+                .as_str()
+                .filter(|v| identity(v) && v.len() <= 128)
+                .ok_or_else(denied)?;
+            let mut state = self.state.lock().map_err(|_| denied())?;
+            if self.closed.load(Ordering::Acquire)
+                || state.native.as_deref() != Some(native)
+                || state.ledger.contains_key(id)
+            {
+                return Err(denied());
+            }
+            let arguments = item
+                .get("arguments")
+                .filter(|v| v.is_object())
+                .ok_or_else(denied)?;
+            let argument_bytes = serde_json::to_vec(arguments).map_err(|_| denied())?.len();
+            if argument_bytes > ARG_BYTES {
+                return Err(capacity());
+            }
+            let bytes = id.len() + tool.len() + argument_bytes;
+            if state.ledger.len() >= LEDGER_CALLS
+                || state.bytes.saturating_add(bytes) > LEDGER_BYTES
+            {
+                return Err(capacity());
+            }
+            state.bytes += bytes;
+            state.ledger.insert(
+                id.into(),
+                Call {
+                    tool: tool.into(),
+                    consumed: false,
+                    arguments: arguments.clone(),
+                },
+            );
+            self.changed.notify_waiters();
+            Ok(())
+        })();
+        if result.is_err() {
+            self.close();
         }
-        let arguments = item
-            .get("arguments")
-            .filter(|v| v.is_object())
-            .ok_or_else(denied)?;
-        let argument_bytes = serde_json::to_vec(arguments).map_err(|_| denied())?.len();
-        if argument_bytes > ARG_BYTES {
-            return Err(capacity());
-        }
-        let bytes = id.len() + tool.len() + argument_bytes;
-        if state.ledger.len() >= LEDGER_CALLS || state.bytes.saturating_add(bytes) > LEDGER_BYTES {
-            return Err(capacity());
-        }
-        state.bytes += bytes;
-        state.ledger.insert(
-            id.into(),
-            Call {
-                tool: tool.into(),
-                consumed: false,
-                arguments: arguments.clone(),
-            },
-        );
-        self.changed.notify_waiters();
-        Ok(())
+        result
     }
     pub(crate) fn close(&self) {
         self.closed.store(true, Ordering::Release);

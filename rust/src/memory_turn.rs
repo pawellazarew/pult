@@ -377,6 +377,7 @@ impl Backend {
         ticket: Ticket,
         snapshot: TurnSnapshot,
         public_turn: String,
+        scoped_secret: bool,
     ) -> Result<Lease, MemoryError> {
         let state = self.state.upgrade().ok_or_else(unavailable)?;
         let progress = state
@@ -384,15 +385,19 @@ impl Backend {
             .get()
             .and_then(|driver| driver.progress_for_ticket(&ticket))
             .ok_or_else(denied)?;
-        let mut random = [0u8; 32];
-        getrandom::fill(&mut random).map_err(|_| unavailable())?;
-        let secret = format!(
-            "mt_{}",
-            random
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>()
-        );
+        let secret = if scoped_secret {
+            let mut random = [0u8; 32];
+            getrandom::fill(&mut random).map_err(|_| unavailable())?;
+            format!(
+                "mt_{}",
+                random
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            )
+        } else {
+            String::new()
+        };
         let control = Arc::new(Control {
             ticket: ticket.clone(),
             snapshot,
@@ -464,9 +469,7 @@ impl Backend {
     }
     pub(crate) fn bridge(self: &Arc<Self>) -> Arc<crate::codex_memory::Registry> {
         self.bridge
-            .get_or_init(|| {
-                crate::codex_memory::Registry::new(Arc::downgrade(self), self.program.clone())
-            })
+            .get_or_init(|| crate::codex_memory::Registry::new(Arc::downgrade(self)))
             .clone()
     }
     pub(crate) fn prepare_handle(
@@ -480,7 +483,7 @@ impl Backend {
         tokio::spawn(async move {
             let result = backend
                 .clone()
-                .begin_handle(ticket.clone(), snapshot, public_turn)
+                .begin_handle(ticket.clone(), snapshot, public_turn, false)
                 .await;
             if result.is_err()
                 && let Some(control) = backend.control(&ticket)
@@ -525,7 +528,7 @@ impl Backend {
     ) -> Result<Prepared, MemoryError> {
         let lease = self
             .clone()
-            .begin_handle(ticket, snapshot, public_turn)
+            .begin_handle(ticket, snapshot, public_turn, true)
             .await?;
         let state = self.state.upgrade().ok_or_else(unavailable)?;
         Ok(Prepared {

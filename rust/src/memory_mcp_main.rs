@@ -3,6 +3,12 @@ async fn main() {
     pult_core::panic_guard::install();
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let result = async {
+        anyhow::ensure!(
+            ["PULT_MEMORY_KEY", "PULT_ASK_KEY", "PULT_RUNTIME_KEY"]
+                .iter()
+                .all(|key| std::env::var_os(key).is_none()),
+            "mixed memory helper credentials"
+        );
         let codex = args.len() == 3 && args[0] == "--home" && args[2] == "--codex-bridge";
         anyhow::ensure!(
             codex || (args.len() == 2 && args[0] == "--home"),
@@ -27,6 +33,11 @@ async fn main() {
         }
     }
     .await;
+    if result.is_ok() && args.len() == 3 && args[2] == "--codex-bridge" {
+        // All admitted memory IO is owned by the daemon. Do not wait for an
+        // uncancellable stdin/pipe worker after registration heartbeat closes.
+        std::process::exit(0);
+    }
     if result.is_err() {
         // Never print arbitrary endpoint/IO errors or reflected credentials.
         eprintln!("memory MCP is unavailable");
