@@ -1,4 +1,4 @@
-import type { RuntimeBounds } from '../../src/runtimes/types.js'
+import type { RuntimeBounds, RuntimeResult } from '../../src/runtimes/types.js'
 import type { FileListing, FilePreview } from '../../src/core/fileBrowserTypes.js'
 export type { FileListing, FilePreview, FileEntry } from '../../src/core/fileBrowserTypes.js'
 // Контракт моста `window.pult` (docs/12 §2): то, что видит интерфейс, и белый список методов демона,
@@ -228,7 +228,10 @@ export interface PultBridge {
   /** Reload only the current trusted application document. */
   reloadWindow?(): void
   /** Position the isolated native browser surface; null hides it. */
-  runtimeView?(sessionId: string, bounds: RuntimeBounds | null): Promise<void>
+  runtimeView?(sessionId: string, bounds: (RuntimeBounds & { actualSize?: boolean }) | null): Promise<void>
+  /** Bounded full-quality local observer frame; never sent to the model or journal. */
+  runtimePreview?(sessionId: string, metadataOnly?: boolean): Promise<RuntimeResult>
+  onRuntimeEscape?(handler: (sessionId: string) => void): () => void
   /** Вызов метода демона из белого списка. Отказ — `BridgeError`. */
   call(method: AllowedMethod, params?: Record<string, unknown>): Promise<unknown>
   /**
@@ -322,6 +325,8 @@ export const IPC = {
   speech: 'pult:speech',
   call: 'pult:call',
   runtimeView: 'pult:runtime-view',
+  runtimePreview: 'pult:runtime-preview',
+  runtimeEscape: 'pult:runtime-escape',
   subscribe: 'pult:subscribe',
   unsubscribe: 'pult:unsubscribe',
   event: 'pult:event',
