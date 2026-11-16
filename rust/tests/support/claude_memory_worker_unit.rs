@@ -110,6 +110,7 @@ struct Rig {
     driver: Arc<Driver>,
     worker: Arc<ClaudeWorker>,
     attachments: Vec<prompt_attachments::PromptAttachment>,
+    startup_diagnostic: Arc<Mutex<StartupDiagnostic>>,
 }
 impl Rig {
     fn new() -> Self {
@@ -228,6 +229,8 @@ impl Rig {
             },
         )
         .unwrap();
+        let startup_diagnostic = Arc::new(Mutex::new(StartupDiagnostic::default()));
+        *worker.0.startup_diagnostic.lock().unwrap() = Some(startup_diagnostic.clone());
         Self {
             _temp: temp,
             home,
@@ -238,6 +241,7 @@ impl Rig {
             driver,
             worker,
             attachments,
+            startup_diagnostic,
         }
     }
     fn start(&self, text: &str) -> crate::turn_driver::Handle {
@@ -272,6 +276,23 @@ impl Rig {
     }
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_diagnostics_retains_phases_after_actual_owned_protocol_failure() {
+    let mut f = Rig::new();
+    let inner = Arc::get_mut(&mut Arc::get_mut(&mut f.worker).unwrap().0).unwrap();
+    inner.config.launch.args[3] = "malformed-mode".into();
+    let mut turn = f.start("synthetic invalid init");
+    let terminal = tokio::time::timeout(WATCHDOG, turn.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(terminal.turn.outcome, Outcome::Failure { .. }));
+    let diagnostic = *f.startup_diagnostic.lock().unwrap();
+    assert!(diagnostic.pre_import);
+    assert!(diagnostic.post_import);
+    f.cleaned();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn catalog_is_separate_native_data_and_never_user_journal_or_private_key() {
     struct Phase(&'static str);
     impl Drop for Phase {
@@ -291,12 +312,15 @@ async fn catalog_is_separate_native_data_and_never_user_journal_or_private_key()
         .unwrap()
         .unwrap();
     if let Outcome::Failure { code, message } = &terminal.turn.outcome {
+        let startup = *f.startup_diagnostic.lock().unwrap();
         eprintln!(
-            "[memory-catalog-fixture] failure-code={code} ack-timeout={} delivery-unknown={} provider-pid-exists={} input-exists={}",
+            "[memory-catalog-fixture] failure-code={code} ack-timeout={} delivery-unknown={} provider-pid-exists={} input-exists={} pre-import-marker={} post-import-marker={}",
             message == "Claude input acknowledgement timed out",
             message == "Claude input delivery is unknown",
             f.home.join("provider.pid").is_file(),
             f.home.join("input.json").is_file(),
+            startup.pre_import,
+            startup.post_import,
         );
     }
     assert_eq!(terminal.turn.outcome, Outcome::Success);
@@ -443,6 +467,7 @@ async fn attachment_context_and_memory_stay_separate_and_slash_with_attachment_i
             .unwrap()
             .unwrap();
         if let Outcome::Failure { code, message } = &terminal.turn.outcome {
+            let startup = *f.startup_diagnostic.lock().unwrap();
             let step = std::fs::read_to_string(f.home.join("fixture-step"))
                 .ok()
                 .filter(|s| {
@@ -458,11 +483,13 @@ async fn attachment_context_and_memory_stay_separate_and_slash_with_attachment_i
                     )
                 });
             eprintln!(
-                "[memory-attachment-fixture] observe={observe} failure-code={code} ack-timeout={} delivery-unknown={} provider-pid-exists={} input-exists={} native-step={step:?}",
+                "[memory-attachment-fixture] observe={observe} failure-code={code} ack-timeout={} delivery-unknown={} provider-pid-exists={} input-exists={} native-step={step:?} pre-import-marker={} post-import-marker={}",
                 message == "Claude input acknowledgement timed out",
                 message == "Claude input delivery is unknown",
                 f.home.join("provider.pid").is_file(),
                 f.home.join("input.json").is_file(),
+                startup.pre_import,
+                startup.post_import,
             );
         }
         assert_eq!(terminal.turn.outcome, Outcome::Success);

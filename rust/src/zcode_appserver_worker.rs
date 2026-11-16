@@ -420,6 +420,78 @@ async fn await_owned<T>(
         }
     }
 }
+/// Scheduling controls scoped to an exact Ticket; absent from production builds.
+#[cfg(test)]
+pub(crate) mod fault_test {
+    use super::*;
+    use std::sync::{Condvar, LazyLock};
+
+    type HooksByTicket = Vec<(Ticket, Weak<Hook>)>;
+    static HOOKS: LazyLock<Mutex<HooksByTicket>> = LazyLock::new(Mutex::default);
+
+    pub(crate) struct Hook {
+        pause_code: Option<&'static str>,
+        pub(crate) entered: Notify,
+        release: (Mutex<bool>, Condvar),
+        pub(crate) first: Mutex<Option<String>>,
+        pub(crate) closed: AtomicBool,
+    }
+    pub(crate) struct Guard(pub(crate) Arc<Hook>);
+    impl Guard {
+        pub(crate) fn new(ticket: Ticket, pause_code: Option<&'static str>) -> Self {
+            let hook = Arc::new(Hook {
+                pause_code,
+                entered: Notify::new(),
+                release: (Mutex::new(false), Condvar::new()),
+                first: Mutex::new(None),
+                closed: AtomicBool::new(false),
+            });
+            HOOKS.lock().unwrap().push((ticket, Arc::downgrade(&hook)));
+            Self(hook)
+        }
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            *self.0.release.0.lock().unwrap() = true;
+            self.0.release.1.notify_all();
+        }
+    }
+    fn find(ticket: &Ticket) -> Option<Arc<Hook>> {
+        let mut hooks = HOOKS.lock().unwrap();
+        hooks.retain(|(_, hook)| hook.strong_count() > 0);
+        hooks
+            .iter()
+            .find(|(key, _)| key == ticket)
+            .and_then(|(_, hook)| hook.upgrade())
+    }
+    pub(super) fn after_revoke(ticket: &Ticket, code: &str) {
+        if let Some(hook) = find(ticket)
+            && hook.pause_code == Some(code)
+        {
+            hook.entered.notify_one();
+            tokio::task::block_in_place(|| {
+                let mut open = hook.release.0.lock().unwrap();
+                while !*open {
+                    open = hook.release.1.wait(open).unwrap();
+                }
+            });
+        }
+    }
+    pub(super) fn published(ticket: &Ticket, failure: Option<&WorkerError>) {
+        if let Some(hook) = find(ticket) {
+            let mut first = hook.first.lock().unwrap();
+            if first.is_none() {
+                *first = failure.map(|e| e.code.clone());
+            }
+        }
+    }
+    pub(super) fn reader_closed(ticket: &Ticket) {
+        if let Some(hook) = find(ticket) {
+            hook.closed.store(true, Ordering::Release);
+        }
+    }
+}
+
 struct Job {
     ticket: Ticket,
     generation: u64,
@@ -463,12 +535,9 @@ impl Job {
         }
     }
     fn fail(&self, failure: WorkerError) {
-        self.revoke_permissions();
-        // Revoke Ready input before waiting on any resource admission lock.
-        if let Some(a) = self.attempt.lock().expect("attempt").as_ref() {
-            a.attempt().cancel_before_spawn();
-            a.cancel_before_input();
-        }
+        #[cfg(test)]
+        let failure_code = failure.code.clone();
+        // Publish the cause before revocation wakes callbacks that can fail too.
         self.failure.send_if_modified(|current| {
             if current.is_some() {
                 return false;
@@ -476,6 +545,16 @@ impl Job {
             *current = Some(failure);
             true
         });
+        #[cfg(test)]
+        fault_test::published(&self.ticket, self.failure.borrow().as_ref());
+        self.revoke_permissions();
+        #[cfg(test)]
+        fault_test::after_revoke(&self.ticket, &failure_code);
+        // Revoke Ready input before waiting on any resource admission lock.
+        if let Some(a) = self.attempt.lock().expect("attempt").as_ref() {
+            a.attempt().cancel_before_spawn();
+            a.cancel_before_input();
+        }
         self.stop();
     }
     fn stop(&self) {
@@ -1453,6 +1532,11 @@ fn reader(
         if let Err(e) = &result {
             job.fail(error(&e.code));
         }
+        #[cfg(test)]
+        {
+            drop(events);
+            fault_test::reader_closed(&job.ticket);
+        }
         result
     })
 }
@@ -1885,9 +1969,9 @@ async fn turn(
             return Err(interrupted());
         }
         let event = tokio::select! {biased;
+            e=async {failure_rx.wait_for(|e| e.is_some()).await.ok().and_then(|e| e.clone())}=>return Err(e.unwrap_or_else(protocol)),
             v=events.recv()=>v.ok_or_else(protocol)?,
             _=cancel.changed()=>return Err(interrupted()),
-            e=async {failure_rx.wait_for(|e| e.is_some()).await.ok().and_then(|e| e.clone())}=>return Err(e.unwrap_or_else(protocol)),
             _=tokio::time::sleep_until(inner.config.start_deadline.into()),if !accepted=>return Err(error("start_unknown"))
         };
         match event {
