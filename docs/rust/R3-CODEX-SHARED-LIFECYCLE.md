@@ -1,7 +1,9 @@
 # Daemon-owned permission lifecycle
 
 Persistent Codex MCP lifetime is described in [R3-CODEX-PERSISTENT-MCP.md](R3-CODEX-PERSISTENT-MCP.md).
-The dedicated memory-on lifecycle below records the earlier implementation.
+Memory-on and memory-off now share the provider pool; each Ticket still revokes
+and drains its own authority before release. Ordinary completion retains the
+healthy provider/thread/helper; explicit runtime shutdown owns their final reap.
 
 `CodexRuntime::new_daemon(..., memory, broker)` is a crate-private trusted-host
 constructor. The injected Broker, Driver and shared NetworkGuard remain daemon
