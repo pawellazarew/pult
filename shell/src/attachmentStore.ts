@@ -1,15 +1,16 @@
 import { t as tr } from './i18n.js'
-// Вложения — снимок файла, а не обещание прочитать исходник позже. Destination всегда выбирает main.
-// Папки остаются ссылками (не копируем дерево); обычные файлы/байты живут в session-scoped attachments.
+// Small files/bytes are snapshots owned by main. Large originals and directories stay path references.
+// References never enter the cache, native image decoder or cleanup; their contents may change before provider access.
 import { randomBytes } from 'node:crypto'
 import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, unlinkSync, writeSync } from 'node:fs'
 import path from 'node:path'
 import { attachmentName, attachmentsDir, dayBytes, ensurePrivateDir, imageHeaderSize, MAX_DAY_BYTES, MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS, SESSION_NAME_RE } from './clipboardImage.js'
 import type { AttachmentInput, AttachmentResult } from './contract.js'
+import { insideAttachmentCache } from '../../src/core/attachments.js'
 
 export const MAX_ATTACHMENT_BYTES = MAX_IMAGE_BYTES
 const fail = (error: string): { error: string } => ({ error })
-const tooLarge = (): { error: string } => fail(tr('Файл больше 25 МБ. Прикрепи меньший файл или укажи путь к исходнику в тексте.'))
+const tooLarge = (): { error: string } => fail(tr('Файл больше 25 МБ. Сохрани исходник на диск и прикрепи его как файл — Пульт добавит ссылку.'))
 
 /** Имя служит только подписью/суффиксом: абсолютный путь и ../ не могут выбрать папку записи. */
 export function attachmentBaseName(raw: string): string {
@@ -26,7 +27,7 @@ function mime(name: string, bytes?: Buffer): string {
   const head = bytes && imageHeaderSize(bytes)
   if (head) return head.type === 'png' ? 'image/png' : 'image/jpeg'
   const ext = path.extname(name).toLowerCase()
-  return ({ '.pdf': 'application/pdf', '.txt': 'text/plain', '.md': 'text/markdown', '.csv': 'text/csv', '.json': 'application/json', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' } as Record<string, string>)[ext] ?? 'application/octet-stream'
+  return ({ '.pdf': 'application/pdf', '.txt': 'text/plain', '.md': 'text/markdown', '.csv': 'text/csv', '.json': 'application/json', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.mp4': 'video/mp4', '.mov': 'video/quicktime', '.webm': 'video/webm', '.mp3': 'audio/mpeg', '.wav': 'audio/wav' } as Record<string, string>)[ext] ?? 'application/octet-stream'
 }
 
 /** Только уже сохранённый файл этой сессии; все ступени ниже home должны быть настоящими папками. */
@@ -118,6 +119,18 @@ export function importAttachment(o: ImportAttachmentOptions): AttachmentResult {
       if (st.isSymbolicLink()) return fail(tr('Прикрепи сам файл: символические ссылки не копируются.'))
       if (st.isDirectory()) return { path: realpathSync(source), name, bytes: 0, mime: 'inode/directory', kind: 'directory' }
       if (!st.isFile()) return fail(tr('Можно прикрепить обычный файл или папку. Этот объект файловой системы не поддерживается.'))
+      if (st.size > MAX_ATTACHMENT_BYTES) {
+        if (!Number.isSafeInteger(st.size)) return fail(tr('Размер файла не поддерживается.'))
+        if (insideAttachmentCache(o.home, source)) return fail(tr('Большой файл из кэша Пульта нельзя прикрепить ссылкой. Выбери исходный файл вне кэша.'))
+        const original = realpathSync(source)
+        const current = lstatSync(source)
+        const resolved = lstatSync(original)
+        if (!current.isFile() || current.isSymbolicLink() || current.dev !== st.dev || current.ino !== st.ino || current.size !== st.size
+          || !resolved.isFile() || resolved.isSymbolicLink() || resolved.dev !== st.dev || resolved.ino !== st.ino || resolved.size !== st.size) {
+          return fail(tr('Файл изменился во время добавления. Перетащи его ещё раз.'))
+        }
+        return { path: original, name, bytes: st.size, mime: mime(name), kind: 'file-reference' }
+      }
     } catch { return fail(tr('Исходный файл уже исчез или недоступен. Перетащи его ещё раз.')) }
     const read = readFileBounded(source, maxBytes)
     if (!Buffer.isBuffer(read)) return read

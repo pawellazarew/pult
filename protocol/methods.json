@@ -275,7 +275,8 @@
                   "type": "string",
                   "enum": [
                     "file",
-                    "directory"
+                    "directory",
+                    "file-reference"
                   ]
                 }
               },
@@ -424,7 +425,8 @@
                         "type": "string",
                         "enum": [
                           "file",
-                          "directory"
+                          "directory",
+                          "file-reference"
                         ]
                       }
                     },
@@ -483,7 +485,8 @@
                       "type": "string",
                       "enum": [
                         "file",
-                        "directory"
+                        "directory",
+                        "file-reference"
                       ]
                     }
                   },
@@ -578,7 +581,8 @@
                         "type": "string",
                         "enum": [
                           "file",
-                          "directory"
+                          "directory",
+                          "file-reference"
                         ]
                       }
                     },
@@ -673,7 +677,8 @@
                         "type": "string",
                         "enum": [
                           "file",
-                          "directory"
+                          "directory",
+                          "file-reference"
                         ]
                       }
                     },

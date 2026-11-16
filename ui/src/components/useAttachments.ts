@@ -5,7 +5,7 @@ import type { AttachmentInput, SavedAttachment } from '../../../shell/src/contra
 import type { FilePathSource } from '../model/paths.js'
 import { insertText } from '../model/paths.js'
 import { hasFiles, pasteKind } from '../model/filePathsInput.js'
-import { AttachmentDraftOwner, MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, attachmentsOverLimit, mergeAttachments, readAttachmentDraft, saveAttachmentDraft } from '../model/attachmentDrafts.js'
+import { AttachmentDraftOwner, MAX_ATTACHMENTS, attachmentsOverLimit, mergeAttachments, readAttachmentDraft, saveAttachmentDraft } from '../model/attachmentDrafts.js'
 import type { DraftStore } from '../model/drafts.js'
 import { useFilePaths } from './useFilePaths.js'
 
@@ -71,7 +71,7 @@ export function useAttachments({ source, box, text, setText, session, persist = 
     if (!bridge) return
     let cancelled = false
     for (const item of items) {
-      if (!item.mime.startsWith('image/') || previews[item.path]) continue
+      if (item.kind !== 'file' || !item.mime.startsWith('image/') || previews[item.path]) continue
       void bridge.preview(session, item.path).then((r) => {
         if (!cancelled && 'dataUrl' in r) setPreviews((p) => ({ ...p, [item.path]: r.dataUrl }))
       }).catch(() => { /* file card remains useful without thumbnail */ })
@@ -96,7 +96,6 @@ export function useAttachments({ source, box, text, setText, session, persist = 
     for (const file of files) {
       enqueue(async () => {
         if (owner.items.length >= MAX_ATTACHMENTS) throw new Error(t`К сообщению можно прикрепить до ${MAX_ATTACHMENTS} файлов.`)
-        if (file.size > MAX_ATTACHMENT_BYTES) throw new Error(t`${file.name}: файл больше 25 МБ. Выбери файл меньшего размера.`)
         const results = await bridge.files(session, [file])
         for (const r of results) {
           if ('error' in r) throw new Error(r.error)
@@ -135,7 +134,6 @@ export function useAttachments({ source, box, text, setText, session, persist = 
       if (files.length) {
         for (const file of files) {
           try {
-            if (file.size > MAX_ATTACHMENT_BYTES) throw new Error(t`${file.name}: файл больше 25 МБ`)
             if (owner.items.length >= MAX_ATTACHMENTS) throw new Error(t`К сообщению можно прикрепить до ${MAX_ATTACHMENTS} файлов.`)
             const results = await source.attachments!.files(session, [file])
             for (const r of results) {
@@ -170,7 +168,7 @@ export function useAttachments({ source, box, text, setText, session, persist = 
     if (!source?.attachments) return [...snapshot]
     const next: SavedAttachment[] = []
     for (const item of snapshot) {
-      if (item.kind === 'directory') { next.push(item); continue }
+      if (item.kind === 'directory' || item.kind === 'file-reference') { next.push(item); continue }
       const r = await source.attachments.import(target, { path: item.path, name: item.name })
       if ('error' in r) throw new Error(r.error)
       next.push(r)

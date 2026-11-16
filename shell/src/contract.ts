@@ -303,7 +303,7 @@ export interface PultBridge {
 }
 
 export interface AttachmentInput { name?: string; path?: string; bytes?: Uint8Array }
-export interface SavedAttachment { path: string; name: string; bytes: number; mime: string; kind: 'file' | 'directory' }
+export type SavedAttachment = import('../../src/core/promptAttachments.js').PromptAttachment
 export type AttachmentResult = SavedAttachment | { error: string }
 export interface AttachmentBridge {
   /** Bytes or an existing attachment path only. Native source paths are obtained by preload/files or main/clipboard. */

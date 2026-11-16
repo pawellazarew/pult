@@ -9,11 +9,22 @@
 //   * без `rm -r`: только `unlink` файлов и `rmdir` ПУСТЫХ папок — даже ошибка в счёте возраста не снесёт дерево разом.
 
 import { chmodSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmdirSync, unlinkSync } from 'node:fs'
-import { join } from 'node:path'
+import { isAbsolute, join, resolve, sep } from 'node:path'
 import { SESSION_NAME_RE } from '../sessions/registry.js'
 
 export const ATTACHMENTS_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000
 export const ATTACHMENTS_SWEEP_MS = 24 * 60 * 60 * 1000
+
+/** Linked originals must stay outside the tree owned by retention GC, including path aliases. Metadata only. */
+export function insideAttachmentCache(home: string, source: string): boolean {
+  if (!isAbsolute(home) || !isAbsolute(source)) return false
+  const roots = [resolve(home, 'attachments')]
+  const sources = [resolve(source)]
+  try { roots.push(join(realpathSync(home), 'attachments')) } catch { /* home may not exist yet */ }
+  try { roots.push(realpathSync(join(home, 'attachments'))) } catch { /* cache may not exist */ }
+  try { sources.push(realpathSync(source)) } catch { /* caller validates availability */ }
+  return roots.some((root) => sources.some((file) => file === root || file.startsWith(root + sep)))
+}
 /** Глубина обхода: `attachments/<сессия>/<день>/<файл>` — 3; запас на случай вложенности, но не бесконечно. */
 const MAX_DEPTH = 4
 

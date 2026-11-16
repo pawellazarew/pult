@@ -52,7 +52,10 @@ The sidebar footer contains Inbox, connection status, network guard, diagnostics
 Shortcut reminders are kept in Help. Usage is in **Settings → Usage**; attachment retention is in **Settings → Files and storage**
 (7, 30 or 90 days, or forever). Retention applies to Pult’s copies and leaves original files alone.
 
-Attachments remain named cards in the conversation. Images are passed as native image input to Claude and Codex;
+Attachments remain named cards in the conversation. Local files larger than 25 MiB are attached as **links**
+to their originals, without copying their contents into Pult’s cache. Keep the original in place until the agent
+has finished; a moved, removed or size-changed file must be attached again. Small files remain cached copies.
+Large images use a file path rather than native image input. Smaller images are passed as native image input to Claude and Codex;
 file context is separate from the visible message text. Codex’s lightning menu selects **Normal** or **Fast**;
 availability and usage depend on the model and account.
 
@@ -85,6 +88,7 @@ exceeding a limit returns an error without falling back to disk. See [the develo
 - Skills in new-chat drafts, safer Escape handling and a more compact sidebar.
 - Daemon, diagnostic and provider CLI controls in the window.
 - Foldable long messages, aligned composer icons and more responsive large histories.
+- Large local files attached by reference, without an extra cached copy.
 - ZCode app resource discovery and qualified arm64 packaging.
 
 See the [release notes](docs/releases/0.3.22.md). The desktop uses the Node backend; Rust remains an isolated opt-in experimental core.
@@ -397,16 +401,17 @@ effort and access menus, ⌘⇧O the folder menu and ⌘O the system folder pick
 or use the **＋** button. Cards show names, sizes, remove buttons and PNG/JPEG thumbnails; your text stays in
 the input. You can send an attachment without text. A screenshot without a disk file needs no manual saving.
 
-Pult immediately saves file copies under `~/.pult/attachments/<session>/<date>/`, so deleting the original temporary
-file does not break the attachment. Limits: 20 files per message, 25 MB per file and 1 GB per day. Copies expire
-after 30 days; originals remain unchanged. Removing a card only removes it from the draft, keeping copies used by
+Pult saves copies of files up to 25 MiB under `~/.pult/attachments/<session>/<date>/`, so deleting their original
+temporary file does not break the attachment. Larger local files are explicitly labelled references: their contents
+are not copied and the original must stay available. Limits: 20 attachments per message and 1 GB of cached copies
+per day. Copies expire after 30 days; originals remain unchanged. Removing a card only removes it from the draft, keeping copies used by
 messages. Draft attachments survive reopening; saved files are checked before sending. In a new chat draft you can
-attach files before the chat has a name; sending copies them into the final session's folder. Directories remain
+attach files before the chat has a name; sending moves cached copies into the final session's folder and keeps references pointed at their originals. Directories remain
 explicitly labelled references rather than recursive copies. Dropping a folder outside the input selects the
 chat folder. Pasting text from Office still pastes text.
 
 Older windows retain path insertion. Update the window (Settings → Updates → «Перезапустить и обновить», Restart and
-update) for cards and memory-backed files. Each Claude session receives only its own attachment directory; Codex uses its normal sandbox access rules.
+update) for cards and memory-backed files. Cached attachments are scoped to their session. Linked originals keep the provider’s normal file-access and sandbox rules; a link does not grant access to their parent directory.
 
 | mode (window label) | Claude | Codex |
 |---|---|---|

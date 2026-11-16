@@ -41,8 +41,8 @@ export function readAttachmentDraft(store: DraftStore, session: string, now: num
       if (!x || typeof x !== 'object') return false
       const a = x as SavedAttachment
       return typeof a.path === 'string' && a.path.startsWith('/') && typeof a.name === 'string' && a.name.length < 512
-        && typeof a.bytes === 'number' && a.bytes >= 0 && a.bytes <= MAX_ATTACHMENT_BYTES && typeof a.mime === 'string'
-        && (a.kind === 'file' || a.kind === 'directory')
+        && typeof a.bytes === 'number' && Number.isSafeInteger(a.bytes) && a.bytes >= 0 && (a.kind === 'file-reference' || a.bytes <= MAX_ATTACHMENT_BYTES) && typeof a.mime === 'string'
+        && (a.kind === 'file' || a.kind === 'directory' || a.kind === 'file-reference')
     }).slice(0, MAX_RECOVERY_ATTACHMENTS)
   } catch { return [] }
 }

@@ -245,6 +245,18 @@ describe('ревью шага B: окно', () => {
     const back = draftFromSnapshot(d.id, 1, JSON.parse(JSON.stringify(draftSnapshot(d))), env())!
     assert.deepEqual(back.attachments, [att])
   })
+  it('restores a linked original from the daemon draft snapshot without copying or losing its kind', () => {
+    const reference = { path: '/originals/Large video.mov', name: 'Large video.mov', bytes: 27_282_841, mime: 'video/quicktime', kind: 'file-reference' as const }
+    const d = { ...draft(), attachments: [reference] }
+    const snap = JSON.parse(JSON.stringify(draftSnapshot(d)))
+    assert.deepEqual(draftFromSnapshot(d.id, 2, snap, env())?.attachments, [reference])
+    assert.equal(draftEmpty(d), false)
+    const malformed = [
+      { ...reference, kind: 'file' }, { ...reference, kind: 'directory' },
+      { ...reference, bytes: Number.MAX_SAFE_INTEGER + 1 }, { ...reference, bytes: -1 },
+    ]
+    assert.deepEqual(draftFromSnapshot(d.id, 2, { ...snap, attachments: [...malformed, reference] }, env())?.attachments, [reference])
+  })
   it('ссылка: счётчик строк и знаков, пока текст не трогали; полный путь в шапке (M5)', () => {
     const link = createDraft({ cwd: '/Users/user/src/very/long/path/to/acme-api', origin: { kind: 'link' }, text: 'раз\nдва\nтри' }, env())
     assert.deepEqual(linkPromptStats(link), { lines: 3, chars: 11 })

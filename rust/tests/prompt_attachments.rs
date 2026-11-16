@@ -141,6 +141,26 @@ fn maximum_count_is_twenty_and_per_file_limit_is_twenty_five_mib() {
     );
 }
 #[test]
+fn node_only_large_file_references_fail_closed_until_rust_support_is_qualified() {
+    let home = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let original = outside.path().join("original.mov");
+    fs::File::create(&original)
+        .unwrap()
+        .set_len(27_282_841)
+        .unwrap();
+    for bytes in [1_u64, 27_282_841] {
+        let reference = json!({"path": original, "name":"original.mov", "bytes":bytes,
+            "mime":"video/quicktime", "kind":"file-reference"});
+        assert_eq!(
+            validate_owned_prompt_attachments(home.path(), "alpha", Some(&json!([reference]))),
+            Err(AttachmentError::InvalidMetadata)
+        );
+    }
+    assert_eq!(fs::metadata(original).unwrap().len(), 27_282_841);
+    assert!(!home.path().join("attachments").exists());
+}
+#[test]
 fn metadata_limits_count_utf16_and_use_javascript_whitespace() {
     let home = tempfile::tempdir().unwrap();
     let a = file(home.path(), "file", b"x", "text/plain");

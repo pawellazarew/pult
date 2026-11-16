@@ -1093,4 +1093,6 @@ export const componentsEn: Readonly<Record<string, string>> = {
   "Список команд не загрузился: {0}": "Could not load the command list: {0}",
   "Список команд не загрузился": "Could not load the command list",
   "Список команд не обновился: {0}": "Could not refresh the command list: {0}",
+  "Ссылка": "Link",
+  "Оригинал файла недоступен: он мог быть перемещён или удалён. Прикрепи файл заново.": "The original file is unavailable: it may have been moved or deleted. Attach it again.",
 }

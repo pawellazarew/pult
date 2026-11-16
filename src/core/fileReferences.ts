@@ -38,6 +38,16 @@ export function referencesFile(events: readonly {kind?: string; data?: Record<st
   if (!localFilePath(source)) return false
   return events.some((e) => {
     if (e.kind !== 'message.done' && e.kind !== 'message.user') return false
+    // Structured user attachments are visible references even when the user message has no text.
+    // This authorizes only an explicit click on that exact file; never its parent directory.
+    if (e.kind === 'message.user' && Array.isArray(e.data?.['attachments']) && e.data['attachments'].some((value: unknown) => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+      const a = value as Record<string, unknown>
+      return a['kind'] === 'file-reference' && a['path'] === source
+        && typeof a['bytes'] === 'number' && Number.isSafeInteger(a['bytes']) && a['bytes'] > 25 * 1024 * 1024
+        && typeof a['name'] === 'string' && a['name'].length > 0 && a['name'].length <= 512
+        && typeof a['mime'] === 'string' && a['mime'].length > 0 && a['mime'].length <= 128
+    })) return true
     const text = e.data?.['text']
     if (typeof text !== 'string') return false
     let at = text.indexOf(':codex-file-citation{')
