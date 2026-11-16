@@ -328,6 +328,7 @@ struct Session {
     model: Option<String>,
     sandbox: Option<Value>,
     busy: Option<Ticket>,
+    memory: Option<Arc<crate::codex_memory::Registration>>,
 }
 struct Route {
     ticket: Ticket,
@@ -351,6 +352,8 @@ struct Shared {
     services: Services,
     memory: Option<Arc<dyn crate::memory_turn::TurnMemory>>,
     memory_used: AtomicBool,
+    bridge: Option<Arc<crate::codex_memory::Registry>>,
+    epoch: String,
     cleanup: Cleanup,
     storage_failed: AtomicBool,
     unsupported_background: AtomicBool,
@@ -408,6 +411,7 @@ struct Job {
     closed: watch::Sender<Closed>,
     changed: Notify,
     persistence: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    memory_turn: std::sync::OnceLock<Arc<crate::codex_memory::Turn>>,
 }
 // Only synchronous checks consume blocking-pool threads. A guard is registered
 // before spawn and moved into its closure; async cancellation cannot detach IO
@@ -451,7 +455,8 @@ impl CodexHost {
         services: Services,
         memory: Arc<dyn crate::memory_turn::TurnMemory>,
     ) -> Result<Arc<Self>, WorkerError> {
-        if config.limits.sessions != 1 || config.limits.jobs != 1 {
+        if memory.persistent().is_none() && (config.limits.sessions != 1 || config.limits.jobs != 1)
+        {
             return Err(error("invalid_params", "memory host must be dedicated"));
         }
         Self::start_inner(config, services, Some(memory))
@@ -462,10 +467,13 @@ impl CodexHost {
         memory: Option<Arc<dyn crate::memory_turn::TurnMemory>>,
     ) -> Result<Arc<Self>, WorkerError> {
         tokio::runtime::Handle::try_current().map_err(|_| unavailable())?;
-        if config
-            .launch
-            .env
-            .contains_key(std::ffi::OsStr::new("PULT_MEMORY_KEY"))
+        if [
+            "PULT_MEMORY_KEY",
+            "PULT_MEMORY_TURN_KEY",
+            "PULT_CODEX_MEMORY_KEY",
+        ]
+        .iter()
+        .any(|key| config.launch.env.contains_key(std::ffi::OsStr::new(key)))
         {
             return Err(error(
                 "invalid_params",
@@ -498,6 +506,8 @@ impl CodexHost {
             .map_err(|_| unavailable())?;
         let cleanup = connection.cleanup();
         let (client, _) = watch::channel(None);
+        let bridge = memory.as_ref().and_then(|m| m.persistent());
+        let epoch = crate::codex_memory::nonce().map_err(|_| unavailable())?;
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
                 status: HostStatus::Starting,
@@ -514,6 +524,8 @@ impl CodexHost {
             services,
             memory,
             memory_used: AtomicBool::new(false),
+            bridge,
+            epoch,
             cleanup,
             storage_failed: AtomicBool::new(false),
             unsupported_background: AtomicBool::new(false),
@@ -580,6 +592,15 @@ impl CodexHost {
                     model: None,
                     sandbox: None,
                     busy: None,
+                    memory: self
+                        .shared
+                        .bridge
+                        .as_ref()
+                        .map(|b| b.register(spec.key.clone(), &self.shared.epoch))
+                        .transpose()
+                        .map_err(|_| {
+                            error("capacity", "Codex memory registration capacity reached")
+                        })?,
                 },
             );
         }
@@ -778,7 +799,10 @@ fn begin(
             "unsupported or mismatched Codex turn snapshot",
         ));
     }
-    if shared.memory.is_some() && shared.memory_used.swap(true, Ordering::AcqRel) {
+    if shared.bridge.is_none()
+        && shared.memory.is_some()
+        && shared.memory_used.swap(true, Ordering::AcqRel)
+    {
         return Err(error("invalid_params", "memory host is single-use"));
     }
     let (cancel, _) = watch::channel(false);
@@ -811,6 +835,7 @@ fn begin(
         closed,
         changed: Notify::new(),
         persistence: Mutex::new(None),
+        memory_turn: std::sync::OnceLock::new(),
     });
     {
         let mut state = shared.state.lock().expect("Codex host state");
@@ -854,6 +879,9 @@ fn begin(
     })
 }
 fn cancel_job(job: &Job) {
+    if let Some(turn) = job.memory_turn.get() {
+        turn.close();
+    }
     job.approval_closed.send_replace(true);
     job.cancel.send_replace(true);
     job.changed.notify_waiters();
@@ -967,6 +995,14 @@ async fn route(shared: Arc<Shared>, mut connection: Connection) {
         tokio::pin!(changed);
         changed.as_mut().enable();
         if shared.state.lock().expect("Codex host state").status == HostStatus::Retiring {
+            {
+                let state = shared.state.lock().expect("Codex host state");
+                for session in state.sessions.values() {
+                    if let Some(registration) = &session.memory {
+                        registration.close();
+                    }
+                }
+            }
             connection.shutdown();
             break;
         }
@@ -1139,10 +1175,22 @@ async fn route(shared: Arc<Shared>, mut connection: Connection) {
                     if native(&shared, &job, turn).is_err() {
                         continue;
                     }
+                    if let Some(memory) = job.memory_turn.get()
+                        && memory.native(turn, false, true).is_err()
+                    {
+                        cancel_job(&job);
+                        continue;
+                    }
                 } else if turn.is_none() && method != "warning" {
                     continue;
                 }
                 if method == "item/started" {
+                    if params["item"]["type"] == "mcpToolCall"
+                        && let (Some(memory), Some(native)) = (job.memory_turn.get(), turn)
+                        && memory.ledger(native, &params["item"]).is_err()
+                    {
+                        unsupported = true;
+                    }
                     let kind = params["item"]["type"].as_str().unwrap_or("");
                     if matches!(kind, "subAgentActivity" | "collabAgentToolCall") {
                         unsupported = true;
@@ -1178,6 +1226,9 @@ async fn route(shared: Arc<Shared>, mut connection: Connection) {
                         continue;
                     }
                     job.approval_closed.send_replace(true);
+                    if let Some(memory) = job.memory_turn.get() {
+                        memory.close();
+                    }
                     unsupported |= !job.info.lock().expect("Codex job").open_tools.is_empty();
                     terminal_turn = Some(turn.to_owned());
                 }
@@ -1244,6 +1295,14 @@ async fn route(shared: Arc<Shared>, mut connection: Connection) {
             }
             shared.changed.notify_waiters();
             job.changed.notify_waiters();
+        }
+    }
+    {
+        let state = shared.state.lock().expect("Codex host state");
+        for session in state.sessions.values() {
+            if let Some(registration) = &session.memory {
+                registration.close();
+            }
         }
     }
     connection.shutdown();
@@ -1456,7 +1515,59 @@ async fn prepare(
     sender: mpsc::Sender<Envelope>,
 ) -> Result<(), WorkerError> {
     let client = ready_client(&shared, &job).await?;
-    let memory = if let Some(memory) = shared.memory.clone() {
+    if let Some(bridge) = &shared.bridge {
+        let available = shared
+            .state
+            .lock()
+            .expect("Codex host state")
+            .sessions
+            .get(&spec.key)
+            .and_then(|s| s.memory.as_ref())
+            .is_some_and(|r| r.available());
+        if !available {
+            return Err(error(
+                "memory_unavailable",
+                "Codex memory registration requires cold attachment",
+            ));
+        }
+        let ticket = job.ticket.clone();
+        let snapshot = snapshot.clone();
+        let public_id = job.public_id.clone();
+        let bridge = bridge.clone();
+        let io = CheckGuard::new(&job);
+        let cancellation = job.cancel.subscribe();
+        let lease = tokio::spawn(async move {
+            let _io = io;
+            bridge
+                .prepare(ticket, snapshot, public_id, cancellation)
+                .await
+        })
+        .await
+        .map_err(|_| unavailable())??;
+        let registration = shared
+            .state
+            .lock()
+            .expect("Codex host state")
+            .sessions
+            .get(&spec.key)
+            .and_then(|s| s.memory.clone())
+            .ok_or_else(unavailable)?;
+        let turn = registration.turn(job.ticket.clone(), lease).map_err(|_| {
+            error(
+                "memory_unavailable",
+                "Codex memory registration is unavailable",
+            )
+        })?;
+        if job.memory_turn.set(turn.clone()).is_err() {
+            turn.close();
+            return Err(unavailable());
+        }
+        if *job.cancel.borrow() {
+            turn.close();
+            return Err(unavailable());
+        }
+    }
+    let memory = if let Some(memory) = shared.memory.clone().filter(|_| shared.bridge.is_none()) {
         let io = CheckGuard::new(&job);
         let ticket = job.ticket.clone();
         let at = snapshot.clone();
@@ -1499,6 +1610,18 @@ async fn prepare(
         if let Some(memory) = &memory {
             params["config"]["mcp_servers"] = json!({"pult_memory":memory.server()});
         }
+        if shared.bridge.is_some() {
+            let registration = shared
+                .state
+                .lock()
+                .expect("Codex host state")
+                .sessions
+                .get(&spec.key)
+                .and_then(|s| s.memory.clone())
+                .ok_or_else(unavailable)?;
+            params["config"]["mcp_servers"] =
+                json!({"pult_memory":registration.server().map_err(|_|unavailable())?});
+        }
         let mut resume = existing.0.filter(|_| existing.2);
         let method = if resume.is_some() {
             "thread/resume"
@@ -1515,7 +1638,8 @@ async fn prepare(
             .await;
         // A definite no-rollout error is before any turn dispatch. Only this
         // measured resume failure permits a new thread; uncertain IO never does.
-        if resume.is_some()
+        if shared.bridge.is_none()
+            && resume.is_some()
             && matches!(&reply,Err(RpcError::Remote(error)) if error.message.to_lowercase().contains("no rollout found for thread id"))
         {
             resume = None;
@@ -1621,6 +1745,18 @@ async fn prepare(
         model.as_deref().ok_or_else(unavailable)?,
     )
     .await?;
+    if shared.bridge.is_some() {
+        let registration = shared
+            .state
+            .lock()
+            .expect("Codex host state")
+            .sessions
+            .get(&spec.key)
+            .and_then(|s| s.memory.clone())
+            .ok_or_else(unavailable)?;
+        registration.bind(&thread).map_err(|_| unavailable())?;
+        memory_ready(&client, &thread, true, shared.timeouts.control).await?;
+    }
     {
         let mut state = shared.state.lock().expect("Codex host state");
         if state.routes.contains_key(&thread) {
@@ -1670,7 +1806,11 @@ async fn prepare(
     })
     .await
     .map_err(|_| unavailable())??;
-    if let Some(memory) = shared.memory.clone() {
+    if let Some(memory) = shared
+        .memory
+        .clone()
+        .filter(|_| shared.bridge.is_none() || job.memory_turn.get().is_some_and(|t| t.enabled()))
+    {
         let io = CheckGuard::new(&job);
         let ticket = job.ticket.clone();
         let catalog = tokio::spawn(async move {
@@ -1703,7 +1843,7 @@ async fn prepare(
         let decision = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             checking.services.fresh_gate.check(&checking_job.ticket, &snapshot)
         })).unwrap_or(DispatchDecision::Deny);
-        if checking.memory.as_ref().is_some_and(|memory|!memory.check(&checking_job.ticket)) {
+        if checking.memory.as_ref().is_some_and(|memory| (checking.bridge.is_none() || checking_job.memory_turn.get().is_some_and(|t|t.enabled())) && !memory.check(&checking_job.ticket)) {
             return Err(error("memory_unavailable","memory authority changed before dispatch"));
         }
         let effective = match decision {
@@ -1773,6 +1913,17 @@ async fn prepare(
         ));
     }
     job.info.lock().expect("Codex job").acknowledged = true;
+    if let Some(turn) = job.memory_turn.get() {
+        let native = job
+            .info
+            .lock()
+            .expect("Codex job")
+            .native
+            .clone()
+            .ok_or_else(unavailable)?;
+        turn.native(&native, true, false)
+            .map_err(|_| unavailable())?;
+    }
     job.changed.notify_waiters();
     Ok(())
 }
@@ -2409,6 +2560,18 @@ async fn run_job(
             }
         }
     } else {
+        if shared.bridge.is_some() {
+            let registration = shared
+                .state
+                .lock()
+                .expect("Codex host state")
+                .sessions
+                .get(&spec.key)
+                .and_then(|s| s.memory.clone());
+            if let Some(registration) = registration {
+                registration.close();
+            }
+        }
         let uncertain = job.info.lock().expect("Codex job").uncertain_start;
         let failure = if uncertain {
             error(
@@ -2665,6 +2828,7 @@ mod blocking_check_tests {
             closed: watch::channel(Closed::Pending).0,
             changed: Notify::new(),
             persistence: Mutex::new(None),
+            memory_turn: std::sync::OnceLock::new(),
         });
         let (wire, mut peer) = crate::codex_rpc::memory_wire(2);
         let (client, mut events) = crate::codex_rpc::spawn(wire, Default::default()).unwrap();

@@ -1284,3 +1284,389 @@ async fn input_scope_gate_and_context_poison_fail_closed_without_payloads() {
         fixture.close().await;
     }
 }
+
+fn bridge_fixture(
+    f: &Fixture,
+) -> (
+    Arc<crate::codex_memory::Registration>,
+    Arc<crate::codex_memory::Turn>,
+) {
+    let registration = f
+        .backend
+        .bridge()
+        .register(f.handle.ticket().session().clone(), "fixture-host-epoch")
+        .unwrap();
+    let turn = registration
+        .turn(
+            f.handle.ticket().clone(),
+            Some(crate::codex_memory::Handle::test(
+                f.backend.clone(),
+                f.handle.ticket().clone(),
+                Lease(f.control()),
+            )),
+        )
+        .unwrap();
+    registration.bind("fixture-native-thread").unwrap();
+    (registration, turn)
+}
+fn bridge_envelope(native: &str, call: &str) -> Value {
+    json!({"name":"memory_list","arguments":{},"meta":{"threadId":"fixture-native-thread","callId":call,"x-codex-turn-metadata":{"thread_id":"fixture-native-thread","turn_id":native}}})
+}
+fn bridge_started(turn: &crate::codex_memory::Turn, native: &str, call: &str) {
+    turn.native(native, true, true).unwrap();
+    turn.ledger(
+        native,
+        &json!({"id":call,"server":"pult_memory","tool":"memory_list","arguments":{}}),
+    )
+    .unwrap();
+}
+#[tokio::test]
+async fn persistent_bridge_requires_native_started_ack_and_ledger_then_consumes_once() {
+    use std::{
+        future::Future,
+        task::{Context, Poll, Waker},
+    };
+    let mut f = Fixture::new().await;
+    let (registration, turn) = bridge_fixture(&f);
+    let request = registration
+        .clone()
+        .call(bridge_envelope("native-A", "call-A"));
+    tokio::pin!(request);
+    assert!(matches!(
+        request
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop())),
+        Poll::Pending
+    ));
+    turn.native("native-A", true, false).unwrap();
+    turn.ledger(
+        "native-A",
+        &json!({"id":"call-A","server":"pult_memory","tool":"memory_list","arguments":{}}),
+    )
+    .unwrap();
+    assert!(matches!(
+        request
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop())),
+        Poll::Pending
+    ));
+    turn.native("native-A", false, true).unwrap();
+    assert!(bounded(request).await.unwrap()["memories"].is_array());
+    assert_eq!(
+        registration
+            .clone()
+            .call(bridge_envelope("native-A", "call-A"))
+            .await
+            .unwrap_err()
+            .code,
+        "forbidden"
+    );
+    f.close().await;
+}
+#[tokio::test]
+async fn persistent_bridge_forged_metadata_without_ledger_and_dropped_waiter_do_no_io() {
+    use std::{
+        future::Future,
+        task::{Context, Poll, Waker},
+    };
+    let mut f = Fixture::new().await;
+    let (registration, turn) = bridge_fixture(&f);
+    turn.native("native-A", true, true).unwrap();
+    let reads = Arc::new(AtomicUsize::new(0));
+    let read = reads.clone();
+    *f.backend.hooks.read.lock().unwrap() = Some(Box::new(move || {
+        read.fetch_add(1, Ordering::AcqRel);
+    }));
+    let mut request = Box::pin(
+        registration
+            .clone()
+            .call(bridge_envelope("native-A", "forged-call")),
+    );
+    assert!(matches!(
+        request
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop())),
+        Poll::Pending
+    ));
+    drop(request);
+    turn.ledger(
+        "native-A",
+        &json!({"id":"forged-call","server":"pult_memory","tool":"memory_list","arguments":{}}),
+    )
+    .unwrap();
+    assert_eq!(reads.load(Ordering::Acquire), 0);
+    let mut no_ledger = Box::pin(
+        registration
+            .clone()
+            .call(bridge_envelope("native-A", "direct-public-rpc")),
+    );
+    assert!(matches!(
+        no_ledger
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop())),
+        Poll::Pending
+    ));
+    turn.close();
+    assert_eq!(bounded(no_ledger).await.unwrap_err().code, "forbidden");
+    assert_eq!(reads.load(Ordering::Acquire), 0);
+    f.close().await;
+}
+#[tokio::test]
+async fn persistent_bridge_rejects_foreign_thread_turn_tool_and_argument_meta_authority() {
+    let mut f = Fixture::new().await;
+    let (registration, turn) = bridge_fixture(&f);
+    bridge_started(&turn, "native-A", "call-A");
+    for mutation in 0..5 {
+        let mut envelope = bridge_envelope("native-A", "call-A");
+        match mutation {
+            0 => envelope["meta"]["threadId"] = json!("child-thread"),
+            1 => envelope["meta"]["x-codex-turn-metadata"]["thread_id"] = json!("child-thread"),
+            2 => envelope["meta"]["x-codex-turn-metadata"]["turn_id"] = json!("native-B"),
+            3 => envelope["name"] = json!("memory_catalog"),
+            _ => {
+                envelope["arguments"]["_meta"] = envelope["meta"].take();
+            }
+        }
+        assert_eq!(
+            bounded(registration.clone().call(envelope))
+                .await
+                .unwrap_err()
+                .code,
+            "forbidden"
+        );
+    }
+    assert!(
+        bounded(
+            registration
+                .clone()
+                .call(bridge_envelope("native-A", "call-A"))
+        )
+        .await
+        .is_ok()
+    );
+    f.close().await;
+}
+#[tokio::test]
+async fn persistent_bridge_caller_drop_after_admission_keeps_real_read_until_driver_drain() {
+    let mut f = Fixture::new().await;
+    let (registration, turn) = bridge_fixture(&f);
+    bridge_started(&turn, "native-A", "call-A");
+    let barrier = Barrier::install(&f.backend.hooks.read);
+    let request = tokio::spawn(registration.call(bridge_envelope("native-A", "call-A")));
+    barrier.entered().await;
+    request.abort();
+    let _ = request.await;
+    turn.close();
+    let closing = f.backend.drain(f.handle.ticket().clone());
+    tokio::pin!(closing);
+    use std::{
+        future::Future,
+        task::{Context, Poll, Waker},
+    };
+    assert!(matches!(
+        closing
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop())),
+        Poll::Pending
+    ));
+    assert!(f.control().jobs.load(Ordering::Acquire) > 0);
+    barrier.release();
+    bounded(closing).await.unwrap();
+    f.close().await;
+}
+#[tokio::test]
+async fn persistent_bridge_late_a_stays_denied_before_and_after_b_on_same_registration() {
+    let mut f = Fixture::new().await;
+    let (registration, a) = bridge_fixture(&f);
+    bridge_started(&a, "native-A", "call-A");
+    let snapshot = f.control().snapshot.clone();
+    a.close();
+    f.state.driver.get().unwrap().cancel(f.handle.ticket());
+    bounded(f.handle.wait()).await.unwrap();
+    assert!(
+        registration
+            .clone()
+            .call(bridge_envelope("native-A", "call-A"))
+            .await
+            .is_err()
+    );
+    let mut handle = f
+        .state
+        .driver
+        .get()
+        .unwrap()
+        .start(
+            snapshot,
+            "second".into(),
+            Arc::new(FixtureWorker(f.backend.clone())),
+        )
+        .unwrap();
+    bounded(handle.accepted()).await.unwrap();
+    let b = registration
+        .turn(
+            handle.ticket().clone(),
+            Some(crate::codex_memory::Handle::test(
+                f.backend.clone(),
+                handle.ticket().clone(),
+                Lease(f.backend.control(handle.ticket()).unwrap()),
+            )),
+        )
+        .unwrap();
+    bridge_started(&b, "native-B", "call-B");
+    assert!(
+        registration
+            .clone()
+            .call(bridge_envelope("native-A", "call-A"))
+            .await
+            .is_err()
+    );
+    assert!(
+        registration
+            .clone()
+            .call(bridge_envelope("native-B", "call-B"))
+            .await
+            .is_ok()
+    );
+    b.close();
+    f.state.driver.get().unwrap().cancel(handle.ticket());
+    bounded(handle.wait()).await.unwrap();
+    f.close().await;
+}
+
+#[tokio::test]
+async fn persistent_bridge_changed_arguments_do_not_consume_a_legitimate_call() {
+    let mut f = Fixture::new().await;
+    let (registration, turn) = bridge_fixture(&f);
+    bridge_started(&turn, "native-A", "call-A");
+    let mut forged = bridge_envelope("native-A", "call-A");
+    forged["arguments"] = json!({"scope":"global"});
+    assert_eq!(
+        registration.clone().call(forged).await.unwrap_err().code,
+        "forbidden"
+    );
+    assert!(
+        registration
+            .call(bridge_envelope("native-A", "call-A"))
+            .await
+            .is_ok()
+    );
+    f.close().await;
+}
+#[tokio::test]
+async fn persistent_bridge_readonly_proposal_is_rejected_before_backend_and_broker() {
+    let mut f = Fixture::new().await;
+    let (registration, turn) = bridge_fixture(&f);
+    turn.native("native-A", true, true).unwrap();
+    f.control().writable.store(false, Ordering::Release);
+    let calls = f.control().jobs.load(Ordering::Acquire);
+    let mut envelope = bridge_envelope("native-A", "write-call");
+    envelope["name"] = json!("memory_propose");
+    envelope["arguments"] = f.update();
+    envelope["arguments"]["operation"] = json!("update");
+    assert_eq!(
+        registration.call(envelope).await.unwrap_err().code,
+        "forbidden"
+    );
+    assert_eq!(f.control().jobs.load(Ordering::Acquire), calls);
+    assert_eq!(f.record()["version"], 1);
+    f.close().await;
+}
+struct BeforeAcceptedBridgeWorker {
+    backend: Arc<Backend>,
+    prepared: Arc<Notify>,
+    release: Arc<Notify>,
+}
+impl Worker for BeforeAcceptedBridgeWorker {
+    fn start(
+        &self,
+        ticket: Ticket,
+        snapshot: TurnSnapshot,
+        _text: String,
+    ) -> Task<Result<Started, WorkerError>> {
+        let backend = self.backend.clone();
+        let prepared = self.prepared.clone();
+        let release = self.release.clone();
+        Box::pin(async move {
+            backend
+                .prepare(ticket, snapshot, "pending-driver-turn".into())
+                .await?;
+            prepared.notify_one();
+            release.notified().await;
+            Ok(Started {
+                turn_id: "pending-driver-turn".into(),
+                done: Box::pin(std::future::pending()),
+            })
+        })
+    }
+    fn close(&self, ticket: Ticket) -> Task<Result<(), WorkerError>> {
+        self.backend.revoke(&ticket);
+        self.backend.drain(ticket)
+    }
+}
+#[tokio::test]
+async fn persistent_bridge_native_ack_and_started_cannot_substitute_for_actual_driver_accepted() {
+    use std::{
+        future::Future,
+        task::{Context, Poll, Waker},
+    };
+    let mut f = Fixture::new().await;
+    let snapshot = f.control().snapshot.clone();
+    f.state.driver.get().unwrap().cancel(f.handle.ticket());
+    bounded(f.handle.wait()).await.unwrap();
+    let prepared = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let mut handle = f
+        .state
+        .driver
+        .get()
+        .unwrap()
+        .start(
+            snapshot,
+            "new".into(),
+            Arc::new(BeforeAcceptedBridgeWorker {
+                backend: f.backend.clone(),
+                prepared: prepared.clone(),
+                release: release.clone(),
+            }),
+        )
+        .unwrap();
+    bounded(prepared.notified()).await;
+    let registration = f
+        .backend
+        .bridge()
+        .register(handle.ticket().session().clone(), "accepted-test-host")
+        .unwrap();
+    registration.bind("fixture-native-thread").unwrap();
+    let turn = registration
+        .turn(
+            handle.ticket().clone(),
+            Some(crate::codex_memory::Handle::test(
+                f.backend.clone(),
+                handle.ticket().clone(),
+                Lease(f.backend.control(handle.ticket()).unwrap()),
+            )),
+        )
+        .unwrap();
+    bridge_started(&turn, "native-A", "call-A");
+    let reads = Arc::new(AtomicUsize::new(0));
+    let read = reads.clone();
+    *f.backend.hooks.read.lock().unwrap() = Some(Box::new(move || {
+        read.fetch_add(1, Ordering::AcqRel);
+    }));
+    let mut request = Box::pin(registration.call(bridge_envelope("native-A", "call-A")));
+    assert!(matches!(
+        request
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop())),
+        Poll::Pending
+    ));
+    assert_eq!(reads.load(Ordering::Acquire), 0);
+    release.notify_one();
+    bounded(handle.accepted()).await.unwrap();
+    assert!(bounded(request).await.is_ok());
+    assert_eq!(reads.load(Ordering::Acquire), 1);
+    turn.close();
+    f.state.driver.get().unwrap().cancel(handle.ticket());
+    bounded(handle.wait()).await.unwrap();
+    f.close().await;
+}

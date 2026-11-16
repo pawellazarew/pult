@@ -18,7 +18,7 @@ for (const directory of [home, account, native, projectA, projectB]) { mkdirSync
 writeFileSync(join(home, '.rust-core-scratch'), 'pult-rust-scratch-v1\n', { mode: 0o600 })
 writeFileSync(join(home, 'config.json'), JSON.stringify({ network: { codex: { mode: 'off' }, guard: { mode: 'allow', countries: ['FI'] } }, migrations: { accessLevels: { at: '2026-11-01T00:00:00Z' } } }), { mode: 0o600 })
 const env = { ...process.env, HOME: account, PULT_TEST: '1', PULT_CODEX_BIN: join(root, 'rust/tests/fixtures/codex_memory.py'), PULT_CURL_BIN: join(root, 'rust/tests/fixtures/curl_loc_fi.sh'), OPENAI_API_KEY: 'fixture-not-a-real-account' }
-for (const key of ['PULT_MEMORY_KEY', 'PULT_MEMORY_TURN_KEY', 'PULT_HOLDER_BIN']) delete env[key]
+for (const key of ['PULT_MEMORY_KEY', 'PULT_MEMORY_TURN_KEY', 'PULT_CODEX_MEMORY_KEY', 'PULT_HOLDER_BIN']) delete env[key]
 const paths = layout(home)
 const boundedClient = original => ({ ...original, request: (method, params, options = {}) => original.request(method, params, { timeoutMs: 10000, ...options }) })
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -164,14 +164,14 @@ try {
     const dataBlock = dispatch('queued-read-two').texts[1].split('\n').slice(1).filter(line => line.startsWith('{')).map(JSON.parse)
     assert.ok(dataBlock.some(row => row.id === note.id && row.version === 2))
     assert.ok(!dispatch('queued-write').texts[1].includes('PRIVATE_DETAILS_NOT_CATALOG'))
-    assert.notEqual(written.pid, next.pid); assert.notEqual(written.pid, neighborPid)
-    assert.equal(evidence().find(row => row.kind === 'thread' && row.pid === next.pid).method, 'thread/resume')
+    assert.equal(written.pid, next.pid); assert.equal(written.pid, neighborPid); assert.equal(written.thread, next.thread)
+    assert.equal(evidence().filter(row => row.kind === 'thread' && row.thread === next.thread).length, 1)
     assert.deepEqual(stored('writer').memory, { read: true, write: 'ask' })
     assert.equal(stored('writer').title, 'Concurrent queue title'); assert.equal(stored('writer').queue?.length ?? 0, 0)
     assert.equal(stored('writer').queueDispatch, undefined)
     assert.equal(journal().filter(row => row.kind === 'message.user' && row.data.queueItemId === first.id).length, 1)
     assert.equal(journal().filter(row => row.kind === 'message.user' && row.data.queueItemId === second.id).length, 1)
-    await reaped(written.pid); await reaped(next.pid); assert.ok(alive(neighborPid))
+    assert.ok(alive(written.pid)); assert.ok(alive(next.pid)); assert.ok(alive(neighborPid))
   })
   await check('steer resolves exact dedicated Lease.host and retains honest base-turn memory provenance', async () => {
     const base = await send({ run: 'steer-holder', mode: 'hold' })
@@ -191,7 +191,7 @@ try {
     await terminal('writer')
     note = await memory('get', { session: 'writer', id: note.id })
     assert.equal(note.sourceEventId, baseReceipt.id); assert.equal(note.sourceTurnId, base.turnId)
-    await reaped(active.pid); assert.ok(alive(neighborPid)); assert.equal((await session('neighbor')).status, 'working')
+    assert.ok(alive(active.pid)); assert.ok(alive(neighborPid)); assert.equal((await session('neighbor')).status, 'working')
   })
   await check('failed queued memory turn pauses backlog before release; explicit resume reads current memory', async () => {
     await send({ run: 'failure-primer', mode: 'hold' })
@@ -209,7 +209,7 @@ try {
     assert.equal((await outcome('after-failure')).get.version, 3)
     await terminal('writer'); assert.equal(stored('writer').queue?.length ?? 0, 0)
   })
-  await check('interrupt replacement uses fresh MCP while old backlog stays paused and unchanged', async () => {
+  await check('interrupt replacement uses a fresh Ticket on the same MCP while old backlog stays paused', async () => {
     const before = await send({ run: 'interrupt-primer', mode: 'hold' })
     const old = dispatch('interrupt-primer')
     const after = await send({ run: 'after-interrupt', id: note.id }, { queue: true, attachments: [attachment] })
@@ -220,8 +220,8 @@ try {
     await terminal('writer')
     assert.equal(stored('writer').queuePaused, true); assert.deepEqual(stored('writer').queue, saved)
     assert.equal(queuedReceipt(after.id), undefined); assert.equal(dispatch('after-interrupt'), undefined)
-    assert.notEqual(dispatch('interrupt-replacement').pid, old.pid)
-    await reaped(old.pid); assert.ok(alive(neighborPid))
+    assert.equal(dispatch('interrupt-replacement').pid, old.pid); assert.equal(dispatch('interrupt-replacement').thread, old.thread)
+    assert.ok(alive(old.pid)); assert.ok(alive(neighborPid))
     await client.request('agent.queue.resume', { name: 'writer' })
     assert.equal((await outcome('after-interrupt')).get.version, 3)
     await terminal('writer'); assert.deepEqual(queuedReceipt(after.id).data.attachments, [attachment])
@@ -244,7 +244,7 @@ try {
     await reaped(dispatch('unknown-queued').pid)
   })
   await check('Node rollback and Rust restart preserve both memory policy and unknown queue metadata', async () => {
-    await client.request('agent.stop', { name: 'neighbor' }); await terminal('neighbor', 'interrupted')
+    await client.request('agent.stop', { name: 'neighbor' }); await until(async () => ['failed','interrupted'].includes((await session('neighbor')).status), 'shared neighbor stopped after provider fault')
     await client.request('daemon.stop'); client.close(); client = null
     assert.equal((await exited).code, 0)
     const config = readFileSync(join(home, 'config.json')), consentFile = join(home, 'consent.json')
@@ -268,7 +268,7 @@ try {
     assert.equal((await client.request('daemon.status')).nativeRuntime.initialized, false)
     console.log('restart: runtime cold; checking stale capability')
     const staleKey = jsonl(join(native, 'private-keys.jsonl'))[0].key
-    const stale = await raw({ memoryTurn: staleKey })
+    const stale = await raw({ codexMemory: staleKey })
     try { assert.equal(stale.hello.code, 'bad_token') } finally { stale.close() }
     console.log('restart: stale capability rejected; checking unknown queue marker')
     await assert.rejects(client.request('agent.queue.resume', { name: 'writer' }), error => error.code === 'send_unknown')
@@ -296,9 +296,9 @@ try {
     assert.equal(next.get.version, 4); assert.ok(next.catalog.memories.some(row => row.id === note.id && row.version === 4))
     assert.equal(journal().filter(row => row.kind === 'message.user' && row.data.queueItemId === unknown.id).length, 1)
   })
-  await check('all ephemeral MCP generations and dedicated processes retire without key leakage', async () => {
+  await check('final shutdown retires persistent MCP registrations and shared processes without key leakage', async () => {
     const children = evidence().filter(row => row.kind === 'mcp-started')
-    await until(() => children.every(row => !alive(row.pid) && !alive(row.mcpPid)), 'dedicated process cleanup')
+    assert.ok(children.some(row => alive(row.pid) && alive(row.mcpPid)))
     const keys = jsonl(join(native, 'private-keys.jsonl')).map(row => row.key)
     assert.equal(new Set(keys).size, keys.length)
     const publicText = JSON.stringify(journal()) + JSON.stringify(await client.request('agent.list')) + stderr
@@ -306,6 +306,8 @@ try {
     assert.equal(evidence().filter(row => row.kind === 'fixture-error').length, 0)
     assert.deepEqual(stored('writer').memory, { read: true, write: 'ask' })
     assert.equal(stored('writer').queue?.length ?? 0, 0)
+    await client.request('daemon.stop'); client.close(); client = null; await exited
+    await until(() => children.every(row => !alive(row.pid) && !alive(row.mcpPid)), 'persistent process cleanup after shutdown')
   })
   console.log(`queue memory composed passed ${passed}`)
 } catch (error) {
