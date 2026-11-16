@@ -193,6 +193,8 @@ struct State {
 struct StartupDiagnostic {
     pre_import: bool,
     post_import: bool,
+    import_before: u8,
+    import_after: u8,
 }
 #[cfg(test)]
 struct StartupSpawn;
@@ -793,6 +795,18 @@ async fn run(
             for line in stderr.as_bytes().split(|byte| *byte == b'\n') {
                 observed.pre_import |= line == b"PULT_CLAUDE_FIXTURE_PRE_IMPORT";
                 observed.post_import |= line == b"PULT_CLAUDE_FIXTURE_POST_IMPORT";
+                for (index, module) in ["JSON", "OS", "PATHLIB", "SYS", "THREADING"]
+                    .into_iter()
+                    .enumerate()
+                {
+                    // Static known markers only; no reflected stderr is retained.
+                    if line == format!("PULT_CLAUDE_FIXTURE_IMPORT_BEFORE_{module}").as_bytes() {
+                        observed.import_before |= 1 << index;
+                    }
+                    if line == format!("PULT_CLAUDE_FIXTURE_IMPORT_AFTER_{module}").as_bytes() {
+                        observed.import_after |= 1 << index;
+                    }
+                }
             }
         }
     }

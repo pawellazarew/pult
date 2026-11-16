@@ -300,6 +300,9 @@ async fn startup_diagnostics_retains_phases_after_actual_owned_protocol_failure(
     let diagnostic = *f.startup_diagnostic.lock().unwrap();
     assert!(diagnostic.pre_import);
     assert!(diagnostic.post_import);
+    // Bits: json/os/pathlib/sys/threading. Ordinary startup imports only 0/1/3.
+    assert_eq!(diagnostic.import_before, 0b01011);
+    assert_eq!(diagnostic.import_after, 0b01011);
     f.cleaned();
 }
 
@@ -325,13 +328,15 @@ async fn catalog_is_separate_native_data_and_never_user_journal_or_private_key()
     if let Outcome::Failure { code, message } = &terminal.turn.outcome {
         let startup = *f.startup_diagnostic.lock().unwrap();
         eprintln!(
-            "[memory-catalog-fixture] failure-code={code} ack-timeout={} delivery-unknown={} provider-pid-exists={} input-exists={} pre-import-marker={} post-import-marker={}",
+            "[memory-catalog-fixture] failure-code={code} ack-timeout={} delivery-unknown={} provider-pid-exists={} input-exists={} pre-import-marker={} post-import-marker={} imports-before={:05b} imports-after={:05b}",
             message == "Claude input acknowledgement timed out",
             message == "Claude input delivery is unknown",
             f.home.join("provider.pid").is_file(),
             f.home.join("input.json").is_file(),
             startup.pre_import,
             startup.post_import,
+            startup.import_before,
+            startup.import_after,
         );
     }
     assert_eq!(terminal.turn.outcome, Outcome::Success);
@@ -468,10 +473,12 @@ async fn ordinary_attachment_fixture_does_not_wait_for_optional_imports_before_a
     if let Outcome::Failure { code, message } = &terminal.turn.outcome {
         let startup = *f.startup_diagnostic.lock().unwrap();
         eprintln!(
-            "[optional-import-fixture] code={code} ack-timeout={} blocked={blocked:?} pre-import={} post-import={}",
+            "[optional-import-fixture] code={code} ack-timeout={} blocked={blocked:?} pre-import={} post-import={} imports-before={:05b} imports-after={:05b}",
             message == "Claude input acknowledgement timed out",
             startup.pre_import,
             startup.post_import,
+            startup.import_before,
+            startup.import_after,
         );
     }
     assert_eq!(terminal.turn.outcome, Outcome::Success);
@@ -531,13 +538,15 @@ async fn attachment_context_and_memory_stay_separate_and_slash_with_attachment_i
                     )
                 });
             eprintln!(
-                "[memory-attachment-fixture] observe={observe} failure-code={code} ack-timeout={} delivery-unknown={} provider-pid-exists={} input-exists={} native-step={step:?} pre-import-marker={} post-import-marker={}",
+                "[memory-attachment-fixture] observe={observe} failure-code={code} ack-timeout={} delivery-unknown={} provider-pid-exists={} input-exists={} native-step={step:?} pre-import-marker={} post-import-marker={} imports-before={:05b} imports-after={:05b}",
                 message == "Claude input acknowledgement timed out",
                 message == "Claude input delivery is unknown",
                 f.home.join("provider.pid").is_file(),
                 f.home.join("input.json").is_file(),
                 startup.pre_import,
                 startup.post_import,
+                startup.import_before,
+                startup.import_after,
             );
         }
         assert_eq!(terminal.turn.outcome, Outcome::Success);
