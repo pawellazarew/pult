@@ -883,11 +883,16 @@ async fn unqualified_native_profiles_never_open_inbox_or_owner_fallback() {
         .unwrap();
         let accepted = bounded(handle.accepted()).await.unwrap();
         assert!(accepted.user_event_id > 0);
-        assert_eq!(
-            bounded(handle.wait()).await.unwrap().turn.outcome,
-            Outcome::Success,
-            "profile={case}"
-        );
+        let outcome = bounded(handle.wait()).await.unwrap().turn.outcome;
+        if outcome != Outcome::Success {
+            let code = match &outcome {
+                Outcome::Success => "success",
+                Outcome::Interrupted => "interrupted",
+                Outcome::Failure { code, .. } => code,
+            };
+            eprintln!("[native-negative-fixture] profile={case} outcome-code={code}");
+        }
+        assert_eq!(outcome, Outcome::Success, "profile={case}");
         let proof = f.proof().unwrap();
         assert_eq!(proof["decision"], "deny", "profile={case}");
         assert!(proof.get("memoryDetails").is_none());
@@ -1358,10 +1363,20 @@ async fn native_duplicate_ids_changed_same_rpc_and_local_ninth_call_fail_closed(
         .await
         .unwrap();
         let terminal = bounded(handle.wait()).await.unwrap();
-        assert!(
-            matches!(terminal.turn.outcome,Outcome::Failure{ref code,..}if code==expected),
-            "case={case}"
+        let matches_expected = matches!(
+            &terminal.turn.outcome, Outcome::Failure { code, .. } if code == expected
         );
+        if !matches_expected {
+            let code = match &terminal.turn.outcome {
+                Outcome::Success => "success",
+                Outcome::Interrupted => "interrupted",
+                Outcome::Failure { code, .. } => code,
+            };
+            eprintln!(
+                "[native-duplicate-fixture] case={case} expected={expected} outcome-code={code}"
+            );
+        }
+        assert!(matches_expected, "case={case}");
         assert!(!f.proof().is_some_and(|p| p["decision"] == "allow"));
         assert_eq!(f.service.slots.available_permits(), 32);
         assert_eq!(f.state.permissions.get().unwrap().reserved_count(), 0);
