@@ -37,6 +37,15 @@ impl ToolError {
 pub trait Tools: Send + Sync + 'static {
     fn list(&self) -> Value;
     fn call(&self, name: String, arguments: Value) -> Task<Result<Value, ToolError>>;
+    /// Explicit metadata-aware hosts override this. Legacy tools ignore metadata.
+    fn call_metadata(
+        &self,
+        name: String,
+        arguments: Value,
+        _metadata: Value,
+    ) -> Task<Result<Value, ToolError>> {
+        self.call(name, arguments)
+    }
 }
 
 struct Protected(Task<Result<Value, ToolError>>);
@@ -186,7 +195,7 @@ where
                                 } else {
                                     let owner = tools.clone();
                                     let tool = tool.to_owned();
-                                    let future = std::panic::catch_unwind(AssertUnwindSafe(|| owner.call(tool, arguments)))
+                                    let future = std::panic::catch_unwind(AssertUnwindSafe(|| owner.call_metadata(tool, arguments, params.get("_meta").cloned().unwrap_or(Value::Null))))
                                         .unwrap_or_else(|_| Box::pin(async { Err(ToolError::Unavailable) }));
                                     jobs.spawn(async move {
                                         let payload = match Protected(future).await {

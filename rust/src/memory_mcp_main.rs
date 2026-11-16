@@ -4,14 +4,40 @@ async fn main() {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let result = async {
         anyhow::ensure!(
-            args.len() == 2 && args[0] == "--home",
+            ["PULT_MEMORY_KEY", "PULT_ASK_KEY", "PULT_RUNTIME_KEY"]
+                .iter()
+                .all(|key| std::env::var_os(key).is_none()),
+            "mixed memory helper credentials"
+        );
+        let codex = args.len() == 3 && args[0] == "--home" && args[2] == "--codex-bridge";
+        anyhow::ensure!(
+            codex || (args.len() == 2 && args[0] == "--home"),
             "memory MCP requires --home"
         );
-        let key = std::env::var("PULT_MEMORY_TURN_KEY")
-            .map_err(|_| anyhow::anyhow!("memory credential is unavailable"))?;
-        pult_core::memory_mcp::run(std::path::PathBuf::from(&args[1]), key).await
+        if codex {
+            anyhow::ensure!(
+                std::env::var_os("PULT_MEMORY_TURN_KEY").is_none(),
+                "mixed memory roles"
+            );
+            let key = std::env::var("PULT_CODEX_MEMORY_KEY")
+                .map_err(|_| anyhow::anyhow!("memory credential unavailable"))?;
+            pult_core::memory_mcp::run_codex(std::path::PathBuf::from(&args[1]), key).await
+        } else {
+            anyhow::ensure!(
+                std::env::var_os("PULT_CODEX_MEMORY_KEY").is_none(),
+                "mixed memory roles"
+            );
+            let key = std::env::var("PULT_MEMORY_TURN_KEY")
+                .map_err(|_| anyhow::anyhow!("memory credential unavailable"))?;
+            pult_core::memory_mcp::run(std::path::PathBuf::from(&args[1]), key).await
+        }
     }
     .await;
+    if result.is_ok() && args.len() == 3 && args[2] == "--codex-bridge" {
+        // All admitted memory IO is owned by the daemon. Do not wait for an
+        // uncancellable stdin/pipe worker after registration heartbeat closes.
+        std::process::exit(0);
+    }
     if result.is_err() {
         // Never print arbitrary endpoint/IO errors or reflected credentials.
         eprintln!("memory MCP is unavailable");

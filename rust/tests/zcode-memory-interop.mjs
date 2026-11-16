@@ -55,6 +55,7 @@ async function card(name, timeoutMs = 10000) {
 }
 async function check(label, run) { await run(); checks++; console.log(`pass ${label}`) }
 const proposal = commandId => ({ operation: 'add', commandId, name: 'Shared ZCode decision', summary: 'A shared decision', details: 'ZCODE_SHARED_DETAILS', reason: 'Offline owner approval fixture' })
+const warmCodex = new Map()
 async function crossRead(name, provider, run, value) {
   await prompt(name, { run, id: value.id })
   const file = provider === 'claude' ? 'claude-memory.jsonl' : 'memory-fixture.jsonl'
@@ -64,7 +65,16 @@ async function crossRead(name, provider, run, value) {
   const records = readCompleteJsonl(join(native, file))
   const helpers = records.filter(item => item.pid === outcome.pid && item.mcpPid)
   assert.ok(helpers.length, `${run} missing actual helper PID evidence`)
-  await until(() => !alive(outcome.pid) && helpers.every(item => !alive(item.mcpPid)), `${run} retained native/helper process`)
+  if (provider === 'codex') {
+    const helper = helpers.find(item => item.thread === outcome.thread)
+    assert.ok(helper, `${run} missing exact Codex thread helper`)
+    assert.ok(alive(outcome.pid) && alive(helper.mcpPid), `${run} lost its warm Codex provider/helper`)
+    const previous = warmCodex.get(name)
+    if (previous) {
+      assert.equal(outcome.pid, previous.pid); assert.equal(outcome.thread, previous.thread); assert.equal(helper.mcpPid, previous.mcpPid)
+      assert.equal(records.filter(item => item.kind === 'mcp-started' && item.thread === outcome.thread).length, 1)
+    } else warmCodex.set(name, { pid: outcome.pid, thread: outcome.thread, mcpPid: helper.mcpPid })
+  } else await until(() => !alive(outcome.pid) && helpers.every(item => !alive(item.mcpPid)), `${run} retained native/helper process`)
   assert.equal(outcome.get.id, value.id)
   assert.equal(outcome.get.details, value.details)
   assert.equal(outcome.get.version, value.version)

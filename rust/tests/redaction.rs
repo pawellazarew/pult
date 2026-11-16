@@ -369,3 +369,16 @@ fn turn_memory_capabilities_match_real_node_in_embedded_text_and_nested_property
     );
     check_values(values);
 }
+
+#[test]
+fn persistent_codex_memory_credentials_are_masked_without_hiding_email() {
+    let key = format!("cm_{}", "a".repeat(64));
+    assert_eq!(
+        redact_string(&format!("{key} owner@example.com")),
+        "<token> owner@example.com"
+    );
+    assert_eq!(
+        redact(&json!({key.clone():key,"message":format!("nested {key}")})),
+        json!({"<token>":"<redacted>","message":"nested <token>"})
+    );
+}

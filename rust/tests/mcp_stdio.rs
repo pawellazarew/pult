@@ -390,3 +390,46 @@ async fn stalled_output_deadline_cancels_active_transport_calls() {
     assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
     assert_eq!(tools.active.load(Ordering::SeqCst), 0);
 }
+
+struct MetadataHandler;
+impl Tools for MetadataHandler {
+    fn list(&self) -> Value {
+        json!([])
+    }
+    fn call(&self, _name: String, _arguments: Value) -> Task<Result<Value, ToolError>> {
+        Box::pin(async { Err(ToolError::Forbidden) })
+    }
+    fn call_metadata(
+        &self,
+        name: String,
+        arguments: Value,
+        metadata: Value,
+    ) -> Task<Result<Value, ToolError>> {
+        Box::pin(async move { Ok(json!({"name":name,"arguments":arguments,"meta":metadata})) })
+    }
+}
+#[tokio::test]
+async fn metadata_aware_stdio_keeps_native_metadata_separate_from_argument_metadata() {
+    let (client, server) = tokio::io::duplex(8192);
+    let (read, mut write) = tokio::io::split(client);
+    let (input, output) = tokio::io::split(server);
+    let serving = tokio::spawn(mcp_stdio::serve(
+        BufReader::new(input),
+        output,
+        Arc::new(MetadataHandler),
+        "metadata",
+    ));
+    let mut read = BufReader::new(read);
+    let arguments = json!({"_meta":{"threadId":"model-value"},"scope":"project"});
+    let metadata = json!({"threadId":"native-thread","callId":"native-call","x-codex-turn-metadata":{"thread_id":"native-thread","turn_id":"native-turn"}});
+    send(&mut write,json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read","arguments":arguments,"_meta":metadata}})).await;
+    let response = reply(&mut read).await;
+    let actual: Value =
+        serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        actual,
+        json!({"name":"read","arguments":arguments,"meta":metadata})
+    );
+    write.shutdown().await.unwrap();
+    serving.await.unwrap().unwrap();
+}

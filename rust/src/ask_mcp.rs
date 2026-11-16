@@ -140,6 +140,17 @@ pub async fn run(
     session: Option<String>,
     key: Option<String>,
 ) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        [
+            "PULT_MEMORY_KEY",
+            "PULT_MEMORY_TURN_KEY",
+            "PULT_CODEX_MEMORY_KEY",
+            "PULT_RUNTIME_KEY"
+        ]
+        .iter()
+        .all(|key| std::env::var_os(key).is_none()),
+        "mixed permission helper credentials"
+    );
     let client = Arc::new(Client { home, session, key });
     mcp_stdio::serve(
         BufReader::new(tokio::io::stdin()),

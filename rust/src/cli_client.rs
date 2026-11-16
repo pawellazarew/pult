@@ -187,6 +187,9 @@ pub async fn events_tail(
     // Purpose separation before any owner home/config/token read.
     if std::env::var_os("PULT_MEMORY_KEY").is_some()
         || std::env::var_os("PULT_MEMORY_TURN_KEY").is_some()
+        || std::env::var_os("PULT_CODEX_MEMORY_KEY").is_some()
+        || std::env::var_os("PULT_ASK_KEY").is_some()
+        || std::env::var_os("PULT_RUNTIME_KEY").is_some()
     {
         return Err(Error {
             exit: 1,
@@ -351,6 +354,7 @@ impl OwnerClient {
             "PULT_MEMORY_TURN_KEY",
             "PULT_ASK_KEY",
             "PULT_RUNTIME_KEY",
+            "PULT_CODEX_MEMORY_KEY",
         ]
         .iter()
         .any(|key| std::env::var_os(key).is_some())
