@@ -35,13 +35,16 @@ def fixture_rows(phase):
         path.write_bytes(data + suffix)
         path.chmod(0o400)
         (home / "journal-snapshot-evidence.json").write_text(json.dumps({"copiedWorkingReceipt": True, "mode": mode, "sourceUnchanged": (pult / "events/journal.jsonl").read_bytes() == data}))
-    return [json.loads(row) for row in path.read_text().splitlines()]
+    data = path.read_bytes()
+    end = data.rfind(b"\n")
+    return [json.loads(row) for row in data[:end + 1].decode("utf8").split("\n") if row]
 
 
 source = source.replace("elif method == 'turn/start':\n", "elif method == 'turn/start':\n        records = json.loads((pult / 'sessions.json').read_text())['sessions']\n        record = next(row for row in records if row.get('providerSessionId') == params['threadId'])\n        statuses = [json.loads(row) for row in (pult / 'events/journal.jsonl').read_text().splitlines()]\n        statuses = [row for row in statuses if row['sessionId'] == record['name'] and row['kind'] == 'status.changed']\n        assert statuses[-1]['data']['status'] == 'working', 'working status not durable before dispatch'\n")
 source = source.replace("[json.loads(row) for row in (pult / 'events/journal.jsonl').read_text().splitlines()]", "fixture_rows('turn_start_journal')", 1)
 source = source.replace("'command': 'true'", "'command': 'true', 'availableDecisions': ['accept', 'decline', 'cancel']")
 source = source.replace("elif method is None:\n", "elif method is None:\n        if frame.get('result', {}).get('decision') == 'accept':\n            journal = [json.loads(row) for row in (pult / 'events/journal.jsonl').read_text().splitlines()]\n            assert any(row['kind'] == 'permission.resolved' and row['data'].get('decision') == 'allow' for row in journal), 'permission not durable'\n")
+source = source.replace("[json.loads(row) for row in (pult / 'events/journal.jsonl').read_text().splitlines()]", "fixture_rows('permission_journal')", 1)
 sys.argv = [sys.argv[0], str(home)]
 fixture_namespace = {"pult": pult, "fixture_rows": fixture_rows}
 try:
