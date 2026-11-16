@@ -46,7 +46,8 @@ scenarios.push(
 )
 
 const run=(args,env)=>new Promise((resolve,reject)=>{const c=spawn(binary,args,{env,stdio:['ignore','pipe','pipe']});let out='',err='';c.stdout.on('data',b=>out+=b);c.stderr.on('data',b=>err+=b);c.on('error',reject);c.on('close',code=>resolve({code,out,err}))})
-let cases=0
+// An unsuccessful owned CLI may leave live writers: retain the whole oracle root.
+let cases=0, completed=false
 try{for(const [index,s]of scenarios.entries())for(const language of ['ru','en']){
  const home=join(root,`c${index}-${language}`),user=join(root,`u${index}-${language}`),bin=join(home,'fakebin');for(const p of [home,user,bin,join(home,'run'),join(home,'logs'),join(home,'events'),join(home,'service')])await fs.mkdir(p,{mode:0o700})
  await fs.writeFile(join(home,'.rust-core-scratch'),'pult-rust-scratch-v1\n',{mode:0o600})
@@ -84,5 +85,5 @@ try{for(const [index,s]of scenarios.entries())for(const language of ['ru','en'])
  if(s.profileDynamic==='update'){const i=report.items.find(i=>i.id==='update.channel');i.detail=Buffer.from(i.detail).toString();i.data.checkedAt=Buffer.from(i.data.checkedAt).toString()}
  if(s.profileDynamic==='proxy'){const i=report.items.find(i=>i.id==='net.claude');i.detail=Buffer.from(i.detail).toString()}
  try{assert.deepEqual(normalize(got),normalize(report))}catch(e){await fs.writeFile(join(root,'actual.json'),JSON.stringify(got,null,2));await fs.writeFile(join(root,'expected.json'),JSON.stringify(report,null,2));throw new Error(`case ${index}/${language}: ${e.message}\n${root}`,{cause:e})}
- const text=await run(['--home',home,'doctor',...s.net?[]:['--no-net']],env);assert.equal(text.code,actual.code);if(!s.net){let expected=Buffer.from(formatDoctor(report)+'\n').toString();if(s.missing)expected=expected.replace(/^\[FAIL\] Node:.*$/m,`[FAIL] Node: ${got.items[0].detail}`);assert.equal(text.out,expected)}if(server)await new Promise(r=>server.close(r));cases++
-}console.log(JSON.stringify({scope:'actual Rust CLI bindings vs actual Node engine; isolated Node FS/schema/service bindings, injected locate/daemon/network probe',cases}))}finally{if(process.env.KEEP_DOCTOR_ORACLE!=='1')await fs.rm(root,{recursive:true,force:true})}
+ const text=await run(['--home',home,'doctor',...s.net?[]:['--no-net']],env);assert.equal(text.code,actual.code);assert.equal(text.err,actual.err);if(!s.net){let expected=Buffer.from(formatDoctor(report)+'\n').toString();if(s.missing)expected=expected.replace(/^\[FAIL\] Node:.*$/m,`[FAIL] Node: ${got.items[0].detail}`);assert.equal(text.out,expected)}if(server)await new Promise(r=>server.close(r));cases++
+}completed=cases===scenarios.length*2;console.log(JSON.stringify({scope:'actual Rust CLI bindings vs actual Node engine; isolated Node FS/schema/service bindings, injected locate/daemon/network probe',cases}))}finally{if(completed&&process.env.KEEP_DOCTOR_ORACLE!=='1')await fs.rm(root,{recursive:true,force:true})}

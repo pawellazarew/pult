@@ -19,7 +19,7 @@ for (const directory of [home, account, native, projectA, projectB]) { mkdirSync
 writeFileSync(join(home, '.rust-core-scratch'), 'pult-rust-scratch-v1\n', { mode: 0o600 })
 writeFileSync(join(home, 'config.json'), JSON.stringify({ network: { codex: { mode: 'off' }, guard: { mode: 'allow', countries: ['FI'] } } }), { mode: 0o600 })
 const env = { ...process.env, HOME: account, PULT_TEST: '1', PULT_CODEX_BIN: join(root, 'rust/tests/fixtures/codex_memory.py'), PULT_CURL_BIN: join(root, 'rust/tests/fixtures/curl_loc_fi.sh'), OPENAI_API_KEY: 'fixture-not-a-real-account' }
-for (const key of ['PULT_MEMORY_KEY', 'PULT_MEMORY_TURN_KEY', 'PULT_HOLDER_BIN']) delete env[key]
+for (const key of ['PULT_MEMORY_KEY', 'PULT_MEMORY_TURN_KEY', 'PULT_CODEX_MEMORY_KEY', 'PULT_HOLDER_BIN']) delete env[key]
 const paths = layout(home)
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms))
 const jsonl = readCompleteJsonl
@@ -37,6 +37,7 @@ async function until(predicate, label, timeout = 10000) {
   const deadline = Date.now() + timeout
   while (!await predicate()) {
     assert.equal(child.exitCode, null, `daemon exited: ${stderr}`)
+    if(Date.now() >= deadline && client) console.error('safe statuses', JSON.stringify((await client.request('agent.list')).sessions.map(({name,status,liveApproval})=>({name,status,liveApproval}))), 'safe terminals', JSON.stringify(journal().filter(v=>v.kind==='turn.finished'||v.kind==='turn.failed'||v.kind==='error'||v.kind==='status.changed').slice(-10)))
     assert.ok(Date.now() < deadline, `${label}; fixture=${JSON.stringify(evidence().slice(-5))}; stderr=${stderr}`)
     await pause(10)
   }
@@ -137,7 +138,7 @@ try {
     assert.ok(dispatch.texts[2].startsWith('<pult_runtime_context>'))
     assert.ok(dispatch.texts[1].includes(note.id))
     assert.ok(!dispatch.texts[1].includes(note.details))
-    await until(() => !alive(dispatch.pid), 'dedicated host was not reaped')
+    assert.ok(alive(dispatch.pid)); assert.equal(dispatch.pid, neighborPid)
     assert.ok(alive(neighborPid))
   })
   await check('denied proposal leaves record unchanged; allow commits exact server provenance', async () => {
@@ -167,17 +168,18 @@ try {
     assert.equal(note.sourceCreatedAt, metadata.createdAt)
     assert.equal(note.sourceSession, 'writer')
   })
-  await check('fresh dedicated resume sees committed version and preserves ordinary shared host', async () => {
+  await check('warm shared thread sees committed version with the same provider and helper', async () => {
     const previous = evidence().filter(value => value.kind === 'thread' && value.memory)
     const nativeId = records().find(value => value.name === 'writer').providerSessionId
     await prompt('writer', { run: 'read-two', id: note.id })
     const outcome = await result('read-two', 'writer')
     assert.equal(outcome.get.version, 2)
     assert.ok(outcome.catalog.memories.some(value => value.id === note.id && value.version === 2))
-    const thread = evidence().find(value => value.kind === 'thread' && value.pid === outcome.pid)
-    assert.equal(thread.method, 'thread/resume'); assert.equal(thread.thread, nativeId)
-    assert.ok(previous.every(value => value.pid !== outcome.pid))
-    await until(() => !alive(outcome.pid), 'resumed dedicated host was not reaped')
+    const thread = evidence().find(value => value.kind === 'thread' && value.thread === nativeId)
+    assert.equal(thread.method, 'thread/start'); assert.equal(thread.thread, nativeId)
+    assert.ok(previous.some(value => value.pid === outcome.pid)); assert.equal(outcome.thread, nativeId)
+    assert.equal(evidence().filter(value => value.kind === 'thread' && value.thread === nativeId).length, 1)
+    assert.ok(alive(outcome.pid))
     assert.ok(alive(neighborPid))
   })
   await check('project and general contexts isolate details while global notes remain visible', async () => {
@@ -190,12 +192,12 @@ try {
       assert.ok(outcome.catalog.memories.some(value => value.id === globalNote.id))
     }
   })
-  await check('read-only turn hides propose and rejects direct tool calls even with ask policy', async () => {
+  await check('read-only turn keeps static inventory and rejects writes before a Broker question', async () => {
     await prompt('readonly', { run: 'readonly', id: note.id, proposal: proposal(note, 'readonly-update', 'MUST_NOT_COMMIT') })
     const outcome = await result('readonly', 'readonly')
     assert.equal(outcome.get.version, 2); assert.equal(outcome.proposal.isError, true)
     const mcp = evidence().find(value => value.kind === 'mcp-started' && value.pid === outcome.pid)
-    assert.equal(mcp.tools.length, 4); assert.ok(!mcp.tools.includes('memory_propose'))
+    assert.equal(mcp.tools.length, 5); assert.ok(mcp.tools.includes('memory_propose'))
     assert.equal((await client.request('perm.list', { name: 'readonly' })).pending.length, 0)
     assert.equal((await memory('get', { session: 'writer', id: note.id })).version, 2)
   })
@@ -262,7 +264,7 @@ try {
     assert.equal(outcome.proposal.isError, true)
     assert.equal((await client.request('perm.list', { name: 'writer' })).pending.length, 0)
     assert.deepEqual(await memory('get', { session: 'writer', id: note.id }), before)
-    const key = jsonl(join(native, 'private-keys.jsonl')).find(value => value.pid === outcome.pid).key
+    const key = jsonl(join(native, 'private-keys.jsonl')).find(value => value.thread === outcome.thread).key
     assert.notEqual(key, outcome.unknownStructuralId)
     const events = journal().filter(value => value.sessionId === 'writer')
     const text = JSON.stringify(events)
@@ -291,17 +293,17 @@ try {
     } finally { legacy.close() }
     await prompt('writer', { run: 'credential-hold', mode: 'hold' })
     const dispatch = evidence().find(value => value.kind === 'dispatch' && value.run === 'credential-hold')
-    const key = jsonl(join(native, 'private-keys.jsonl')).find(value => value.pid === dispatch.pid).key
-    const turn = await raw({ memoryTurn: key })
+    const key = jsonl(join(native, 'private-keys.jsonl')).find(value => value.thread === dispatch.thread).key
+    const turn = await raw({ codexMemory: key })
     try {
       assert.equal(turn.hello.type, 'hello_ok')
-      assert.equal(turn.hello.capabilities.supportedMethods.length, 7)
+      assert.deepEqual(turn.hello.capabilities.supportedMethods, ['codex.memory.call'])
       assert.equal((await turn.request('agent.list')).error.code, 'forbidden')
       for (const method of ['agent.recovery.get', 'agent.recovery.confirm', 'usage.get']) {
         assert.equal((await turn.request(method, { name: 'writer', recoveryId: 'zr-forged', acknowledgePossibleExecution: true })).error.code, 'forbidden')
       }
     } finally { turn.close() }
-    for (const credentials of [{ token: readFileSync(paths.token, 'utf8'), memoryTurn: key }, { memory: issued.key, memoryTurn: key }, { token: readFileSync(paths.token, 'utf8'), memory: issued.key }]) {
+    for (const credentials of [{ token: readFileSync(paths.token, 'utf8'), codexMemory: key }, { memory: issued.key, codexMemory: key }, { memoryTurn: 'mt_' + 'a'.repeat(64), codexMemory: key }, { token: readFileSync(paths.token, 'utf8'), memory: issued.key }]) {
       const mixed = await raw(credentials)
       try { assert.equal(mixed.hello.code, 'bad_token'); assert.ok(!JSON.stringify(mixed.hello).includes(key)) } finally { mixed.close() }
     }
@@ -329,20 +331,42 @@ try {
       for (const field of ['name', 'provider', 'createdAt', 'cwd']) assert.equal(after[field], before[field])
     }
   })
-  await check('two dedicated memory slots stay bounded and ordered stop cancels a third preparation', async () => {
+  await check('cancelling a warm chat waiting for peer slots keeps its exact healthy registration', async () => {
+    for(const name of ['cancel-warm', 'cancel-peer-one', 'cancel-peer-two']) await start(name)
+    await prompt('cancel-warm', { run: 'warm-before-cancel', id: note.id })
+    const before = await result('warm-before-cancel', 'cancel-warm')
+    const helper = evidence().find(row => row.kind === 'mcp-started' && row.thread === before.thread)
+    for(const name of ['cancel-peer-one', 'cancel-peer-two']) await prompt(name, { run: name, mode: 'hold' })
+    const pending = client.request('agent.prompt', { name: 'cancel-warm', text: JSON.stringify({ run: 'warm-waiting-cancel', mode: 'hold' }) }, { timeoutMs: 15000 }).then(value=>({ok:true,value}),error=>({ok:false,error}))
+    await until(() => journal().some(row=>row.sessionId==='cancel-warm' && row.kind==='message.user' && row.data.text.includes('warm-waiting-cancel')), 'warm waiting input was not durably reserved')
+    assert.ok(!evidence().some(row=>row.kind==='dispatch' && row.run==='warm-waiting-cancel'))
+    await client.request('agent.stop', { name: 'cancel-warm' })
+    assert.equal((await pending).ok, false)
+    await until(async()=>{const row=await session('cancel-warm');return row.status==='interrupted' && row.liveApproval===null}, 'warm cancelled preparation was not drained')
+    for(const name of ['cancel-peer-one', 'cancel-peer-two']) {
+      await client.request('agent.stop', { name })
+      await until(async()=>{const row=await session(name);return row.status==='interrupted' && row.liveApproval===null}, 'held peer did not release owned slot')
+    }
+    await prompt('cancel-warm', { run: 'warm-after-cancel', id: note.id })
+    const after = await result('warm-after-cancel', 'cancel-warm')
+    assert.equal(after.pid,before.pid);assert.equal(after.thread,before.thread);assert.equal(after.get.version,before.get.version)
+    assert.equal(evidence().filter(row=>row.kind==='mcp-started' && row.thread===before.thread).length,1)
+    assert.ok(alive(helper.mcpPid));assert.ok(alive(before.pid))
+  })
+  await check('two active memory slots stay bounded on the warm shared host and ordered stop cancels a third preparation', async () => {
     for (const name of ['slot-one', 'slot-two', 'slot-queued']) await start(name)
     for (const [name, run] of [['slot-one', 'slot-one-hold'], ['slot-two', 'slot-two-hold']]) {
       await prompt(name, { run, mode: 'hold' })
     }
     const holds = ['slot-one-hold', 'slot-two-hold'].map(run => evidence().find(value => value.kind === 'dispatch' && value.run === run))
     assert.ok(holds.every(Boolean))
-    assert.notEqual(holds[0].pid, holds[1].pid)
-    const children = holds.map(hold => evidence().find(value => value.kind === 'mcp-started' && value.pid === hold.pid))
+    assert.equal(holds[0].pid, holds[1].pid); assert.notEqual(holds[0].thread, holds[1].thread)
+    const children = holds.map(hold => evidence().find(value => value.kind === 'mcp-started' && value.thread === hold.thread))
     assert.ok(children.every(Boolean))
     assert.ok(holds.every(value => alive(value.pid)))
     assert.ok(children.every(value => alive(value.mcpPid)))
     const occupied = await client.request('daemon.status')
-    assert.equal(occupied.nativeRuntime.hosts, 3) // Existing shared neighbor plus two dedicated hosts.
+    assert.equal(occupied.nativeRuntime.hosts, 1) // All exact per-thread registrations share this route.
     assert.equal(occupied.nativeRuntime.activeTurns, 3)
     const ordered = await raw({ token: readFileSync(paths.token, 'utf8') })
     try {
@@ -361,16 +385,16 @@ try {
       assert.equal(cancelled.error.code, 'cancelled')
       assert.ok(!evidence().some(value => value.kind === 'dispatch' && value.run === 'slot-must-not-dispatch'))
       assert.equal(journal().filter(value => value.sessionId === 'slot-queued' && value.kind === 'message.user').length, 0)
-      assert.equal((await client.request('daemon.status')).nativeRuntime.hosts, 3)
+      assert.equal((await client.request('daemon.status')).nativeRuntime.hosts, 1)
     } finally { ordered.close() }
     for (const name of ['slot-one', 'slot-two']) await client.request('agent.stop', { name })
-    await until(() => holds.every(value => !alive(value.pid)) && children.every(value => !alive(value.mcpPid)), 'held dedicated children were not reaped')
+    assert.ok(holds.every(value => alive(value.pid))); assert.ok(children.every(value => alive(value.mcpPid)))
     for (const name of ['slot-one', 'slot-two']) assert.equal((await session(name)).status, 'interrupted')
     assert.ok(alive(neighborPid))
     assert.equal((await session('neighbor')).status, 'working')
     assert.equal((await client.request('daemon.status')).nativeRuntime.hosts, 1)
   })
-  await check('failed MCP bootstrap rejects without dispatch or automatic resend and reaps its real child', async () => {
+  await check('failed MCP readiness revokes only its helper without dispatch or automatic resend', async () => {
     await start('bad-mcp', projectA, { model: 'bad-mcp-fixture' })
     assert.equal(journal().filter(value => value.sessionId === 'bad-mcp' && value.kind === 'message.user').length, 0)
     const attempted = await client.request('agent.prompt', { name: 'bad-mcp', text: JSON.stringify({ run: 'bad-mcp-must-not-dispatch' }) }, { timeoutMs: 15000 })
@@ -383,32 +407,54 @@ try {
     const threads = evidence().filter(value => value.kind === 'thread' && value.thread === nativeId)
     assert.equal(threads.length, 1, 'bootstrap failure must not create a replacement native thread')
     const host = threads[0]
-    const mcp = evidence().find(value => value.kind === 'mcp-started' && value.pid === host.pid)
+    const mcp = evidence().find(value => value.kind === 'mcp-started' && value.thread === nativeId)
     assert.ok(mcp, 'negative status must follow actual Rust MCP initialization')
     assert.ok(mcp.tools.includes('memory_get'))
     assert.ok(evidence().some(value => value.kind === 'mcp-status' && value.pid === host.pid && value.rejected))
-    assert.equal(evidence().filter(value => value.kind === 'dispatch' && value.pid === host.pid).length, 0)
+    assert.equal(evidence().filter(value => value.kind === 'dispatch' && value.thread === nativeId).length, 0)
     assert.equal(journal().filter(value => value.sessionId === 'bad-mcp' && value.kind === 'message.user').length, 1)
     const statuses = journal().filter(value => value.sessionId === 'bad-mcp' && value.kind === 'status.changed')
     assert.equal(statuses.at(-1).data.status, 'failed')
-    await until(() => !alive(host.pid) && !alive(mcp.mcpPid), 'failed MCP bootstrap children were not reaped')
+    await until(() => !alive(mcp.mcpPid), 'failed registration helper was not reaped'); assert.ok(alive(host.pid))
     assert.ok(alive(neighborPid))
     assert.equal((await session('neighbor')).status, 'working')
     assert.equal((await client.request('daemon.status')).nativeRuntime.hosts, 1)
   })
-  await check('credentials and injected catalogs stay out of public journal and all dedicated children exit', async () => {
+  await check('off-on-off keeps the same native thread and helper while every off call is denied', async () => {
+    await start('toggle', projectA, { memory: { read: false, write: 'off' } })
+    const before = await memory('get', { session: 'writer', id: note.id })
+    await prompt('toggle', { run: 'toggle-off', id: note.id, proposal: proposal(before, 'toggle-off-write', 'MUST_NOT_COMMIT') })
+    const off = await result('toggle-off', 'toggle')
+    for(const key of ['catalog','list','get','proposal']) assert.equal(off[key].isError, true)
+    assert.equal((await client.request('perm.list', { name: 'toggle' })).pending.length, 0)
+    const helper = evidence().find(row => row.kind === 'mcp-started' && row.thread === off.thread)
+    assert.equal(helper.tools.length, 5); assert.ok(alive(helper.mcpPid))
+    await memory('configure', { session: 'toggle', memory: { read: true, write: 'ask' } })
+    await prompt('toggle', { run: 'toggle-on', id: note.id })
+    const on = await result('toggle-on', 'toggle')
+    assert.equal(on.get.version, before.version); assert.equal(on.thread, off.thread); assert.equal(on.pid, off.pid)
+    await memory('configure', { session: 'toggle', memory: { read: false, write: 'off' } })
+    await prompt('toggle', { run: 'toggle-off-again', id: note.id })
+    const offAgain = await result('toggle-off-again', 'toggle')
+    assert.equal(offAgain.get.isError, true); assert.equal(offAgain.thread, off.thread); assert.equal(offAgain.pid, off.pid)
+    assert.equal(evidence().filter(row => row.kind === 'mcp-started' && row.thread === off.thread).length, 1)
+    assert.ok(alive(helper.mcpPid)); assert.deepEqual(await memory('get', { session: 'writer', id: note.id }), before)
+  })
+  await check('credentials and injected catalogs stay out of public journal; final shutdown reaps warm children', async () => {
     const keys = jsonl(join(native, 'private-keys.jsonl')).map(value => value.key)
     const publicText = JSON.stringify(journal()) + JSON.stringify(await client.request('agent.list')) + stderr
     for (const key of keys) assert.ok(!publicText.includes(key))
     for (const event of journal().filter(value => value.kind === 'message.user')) assert.ok(!JSON.stringify(event.data).includes('Project memory:'))
     const mcpProcesses = evidence().filter(value => value.kind === 'mcp-started')
     assert.ok(mcpProcesses.length >= 8)
-    await until(() => mcpProcesses.every(value => !alive(value.pid) && !alive(value.mcpPid)), 'dedicated host or MCP child leaked')
+    assert.ok(mcpProcesses.some(value => alive(value.pid) && alive(value.mcpPid)))
     assert.ok(alive(neighborPid))
     await client.request('agent.stop', { name: 'neighbor' })
     await until(async () => (await session('neighbor')).status === 'interrupted', 'neighbor failed after dedicated hosts')
     assert.equal((await client.request('daemon.status')).nativeRuntime.hosts, 1)
     assert.equal(evidence().filter(value => value.kind === 'fixture-error').length, 0)
+    await client.request('daemon.stop'); client.close(); client = null; await exited
+    await until(() => mcpProcesses.every(value => !alive(value.pid) && !alive(value.mcpPid)), 'warm host or helper leaked after final shutdown')
   })
   console.log(`local fake overhead ${JSON.stringify(timings)}; fixture-only, no production latency claim`)
   console.log(`memory turn interop passed ${passed}`)

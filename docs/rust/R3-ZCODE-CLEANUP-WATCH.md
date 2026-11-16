@@ -1,5 +1,35 @@
 # Native ZCode cleanup uncertainty must wake both Driver waiters
 
+## Route A counterpart
+
+The one-process Route A worker also needs this notification. Its start and
+completion oneshots previously waited for the supervisor to finish cleanup,
+while that same supervisor could publish Unconfirmed and await an explicit
+retry. Before native acceptance the independent Driver start deadline could
+eventually enter close/quarantine; after acceptance external cancellation was
+needed. The five-second observation precedes that existing30s Driver fallback.
+
+Two additional controlled actual-holder counterexamples cover Route A before
+and after native acceptance. The real holder joins0 before the outer wrapper
+returns125. Before the repair, both fail a five-second observation after that
+proof: capacity remains held but Driver is still Starting/Running. Cancellation
+performed only after the observation cannot satisfy the original invariant.
+After the repair, both reach Quarantined without that cancellation, retain one
+slot and their native identity, and publish no qualified completion. Intentionally
+uncertain scratch state is retained even if an early test assertion fails.
+
+Route A uses its own private `await_owned` with the same watch-versus-result
+ordering as the app-server worker. It observes a fresh watch before handing off
+start/completion receivers. Existing unknown state and a concurrent unknown
+transition beat a ready result; Confirmed still requires the real native result.
+The prior `worker_failed` disposition for a lost completion remains unchanged.
+The supervisor, process and IO ownership are not transferred or abandoned.
+
+This corrects a separately proven notification gap. It does not identify the
+natural macOS trigger in [release qualification #162](https://github.com/pawellazarew/pult/issues/162).
+Production deadlines, process proof, acknowledgement policy and explicit retry
+rules remain unchanged. Full Rust cutover still requires R5 observation.
+
 ## Proven counterexample; CI cause remains unknown
 
 The controlled actual-holder test makes an owned wrapper return125 only after

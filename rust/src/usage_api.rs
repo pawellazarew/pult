@@ -56,8 +56,11 @@ pub(crate) async fn execute(state: Arc<State>) -> Result<Box<RawValue>, ApiError
         })?;
     let job = state.host_jobs.track();
     tokio::task::spawn_blocking(move || {
-        let _permit = permit;
+        #[cfg(test)]
+        let permit = tests::ObservedPermit::new(permit, &state);
+        // Drop admission before publishing the host job as drained.
         let _job = job;
+        let _permit = permit;
         if *state.stop.borrow() {
             return Err(ApiError {
                 code: "closed",
@@ -86,6 +89,113 @@ mod tests {
     use super::*;
     use serde_json::{Value, json};
     use std::{sync::atomic::Ordering, time::Duration};
+    struct PermitDropProbe {
+        entered: tokio::sync::Notify,
+        released: std::sync::Mutex<bool>,
+        changed: std::sync::Condvar,
+    }
+    static DROP_PROBE: std::sync::Mutex<Option<(usize, std::sync::Weak<PermitDropProbe>)>> =
+        std::sync::Mutex::new(None);
+    impl PermitDropProbe {
+        fn release(&self) {
+            *self.released.lock().unwrap() = true;
+            self.changed.notify_all();
+        }
+    }
+    struct InstalledProbe {
+        key: usize,
+        probe: Arc<PermitDropProbe>,
+    }
+    impl InstalledProbe {
+        fn new(state: &Arc<State>) -> Self {
+            let probe = Arc::new(PermitDropProbe {
+                entered: tokio::sync::Notify::new(),
+                released: std::sync::Mutex::new(false),
+                changed: std::sync::Condvar::new(),
+            });
+            let key = Arc::as_ptr(state) as usize;
+            let mut slot = DROP_PROBE.lock().unwrap();
+            assert!(slot.is_none());
+            *slot = Some((key, Arc::downgrade(&probe)));
+            Self { key, probe }
+        }
+    }
+    impl Drop for InstalledProbe {
+        fn drop(&mut self) {
+            // Unwind cannot strand the actual owned blocking read.
+            self.probe.release();
+            let mut slot = DROP_PROBE.lock().unwrap();
+            if slot.as_ref().is_some_and(|(key, _)| *key == self.key) {
+                *slot = None;
+            }
+        }
+    }
+    pub(super) struct ObservedPermit {
+        _permit: tokio::sync::OwnedSemaphorePermit,
+        probe: Option<Arc<PermitDropProbe>>,
+    }
+    impl ObservedPermit {
+        pub(super) fn new(permit: tokio::sync::OwnedSemaphorePermit, state: &Arc<State>) -> Self {
+            let key = Arc::as_ptr(state) as usize;
+            let probe = DROP_PROBE
+                .lock()
+                .unwrap()
+                .as_ref()
+                .filter(|(owner, _)| *owner == key)
+                .and_then(|(_, probe)| probe.upgrade());
+            Self {
+                _permit: permit,
+                probe,
+            }
+        }
+    }
+    impl Drop for ObservedPermit {
+        fn drop(&mut self) {
+            if let Some(probe) = &self.probe {
+                probe.entered.notify_one();
+                let mut released = probe.released.lock().unwrap();
+                while !*released {
+                    released = probe.changed.wait(released).unwrap();
+                }
+            }
+            // The actual owned semaphore permit drops only after this boundary.
+        }
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn host_drain_cannot_publish_before_the_actual_usage_admission_release() {
+        use std::{
+            future::Future,
+            task::{Context, Poll, Waker},
+        };
+        let (_home, state, _sink) = crate::runtime_journal::tests::fixture();
+        let installed = InstalledProbe::new(&state);
+        let owned_state = state.clone();
+        let task = tokio::spawn(async move { execute(owned_state).await });
+        tokio::time::timeout(Duration::from_secs(3), installed.probe.entered.notified())
+            .await
+            .unwrap();
+        let held_permits = state.usage_reads.available_permits();
+        let early_drain = {
+            let mut drain = Box::pin(state.host_jobs.wait());
+            let mut context = Context::from_waker(Waker::noop());
+            matches!(drain.as_mut().poll(&mut context), Poll::Ready(()))
+        };
+        // Capture the verdict, then always release and join the actual operation
+        // before asserting, including on the deliberately failing baseline.
+        installed.probe.release();
+        tokio::time::timeout(Duration::from_secs(3), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_or_else(|_| panic!("actual usage read"));
+        state.host_jobs.wait().await;
+        eprintln!(
+            "[usage-drop-order] admission-held={held_permits} drain-published-before-release={early_drain}"
+        );
+        assert_eq!(held_permits, 3);
+        assert_eq!(state.usage_reads.available_permits(), 4);
+        assert!(!early_drain);
+    }
     fn register(state: &State, name: &str, provider: &str) {
         let mut record = crate::registry::Record::default();
         for (key, value) in [

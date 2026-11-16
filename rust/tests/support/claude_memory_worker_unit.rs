@@ -120,6 +120,17 @@ impl Rig {
         Self::with_attachment_mode(attach, false)
     }
     fn with_attachment_mode(attach: bool, observe: bool) -> Self {
+        Self::with_attachment_dependencies(attach, observe, false)
+    }
+    fn with_attachment_dependencies(attach: bool, observe: bool, block_optional: bool) -> Self {
+        Self::with_attachment_startup(attach, observe, block_optional, false)
+    }
+    fn with_attachment_startup(
+        attach: bool,
+        observe: bool,
+        block_optional: bool,
+        site_barrier: bool,
+    ) -> Self {
         crate::panic_guard::install();
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().canonicalize().unwrap();
@@ -186,21 +197,53 @@ impl Rig {
         .map(PathBuf::from)
         .find(|p| p.is_file())
         .unwrap();
+        // Synthetic peers use stdlib only, never ambient user/global site hooks.
+        let mut args = vec!["-I".into(), "-S".into(), "-B".into()];
+        if block_optional {
+            args.push(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/claude_optional_import_barrier.py")
+                    .into_os_string(),
+            );
+        }
+        args.extend([
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/claude_worker.py")
+                .into_os_string(),
+            home.clone().into_os_string(),
+            if observe { "memory-observe" } else { "normal" }.into(),
+        ]);
+        let program = if site_barrier {
+            let site = home.join("synthetic-site");
+            std::fs::create_dir(&site).unwrap();
+            std::fs::copy(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/claude_sitecustomize.py"),
+                site.join("sitecustomize.py"),
+            )
+            .unwrap();
+            args.splice(
+                0..0,
+                [
+                    Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("tests/fixtures/claude_site_startup.sh")
+                        .into_os_string(),
+                    site.into_os_string(),
+                    python.into_os_string(),
+                ],
+            );
+            PathBuf::from("/bin/sh")
+        } else {
+            python
+        };
         let worker = ClaudeWorker::new(
             Config {
                 session: snapshot.key.clone(),
                 home: home.clone(),
                 launch: Launch {
                     holder,
-                    program: python,
-                    args: vec![
-                        "-B".into(),
-                        Path::new(env!("CARGO_MANIFEST_DIR"))
-                            .join("tests/fixtures/claude_worker.py")
-                            .into_os_string(),
-                        home.clone().into_os_string(),
-                        if observe { "memory-observe" } else { "normal" }.into(),
-                    ],
+                    program,
+                    args,
                     cwd: home.clone(),
                     env: BTreeMap::from([
                         ("PATH".into(), "/usr/bin:/bin".into()),
@@ -279,7 +322,7 @@ impl Rig {
 async fn startup_diagnostics_retains_phases_after_actual_owned_protocol_failure() {
     let mut f = Rig::new();
     let inner = Arc::get_mut(&mut Arc::get_mut(&mut f.worker).unwrap().0).unwrap();
-    inner.config.launch.args[3] = "malformed-mode".into();
+    *inner.config.launch.args.last_mut().unwrap() = "malformed-mode".into();
     let mut turn = f.start("synthetic invalid init");
     let terminal = tokio::time::timeout(WATCHDOG, turn.wait())
         .await
@@ -289,6 +332,11 @@ async fn startup_diagnostics_retains_phases_after_actual_owned_protocol_failure(
     let diagnostic = *f.startup_diagnostic.lock().unwrap();
     assert!(diagnostic.pre_import);
     assert!(diagnostic.post_import);
+    // Bits: json/os/pathlib/sys/threading. Ordinary startup imports only 0/1/3.
+    assert_eq!(diagnostic.import_before, 0b01011);
+    assert_eq!(diagnostic.import_after, 0b01011);
+    assert!(diagnostic.tail_available);
+    assert!((1..=1024).contains(&diagnostic.tail_bytes));
     f.cleaned();
 }
 
@@ -314,13 +362,17 @@ async fn catalog_is_separate_native_data_and_never_user_journal_or_private_key()
     if let Outcome::Failure { code, message } = &terminal.turn.outcome {
         let startup = *f.startup_diagnostic.lock().unwrap();
         eprintln!(
-            "[memory-catalog-fixture] failure-code={code} ack-timeout={} delivery-unknown={} provider-pid-exists={} input-exists={} pre-import-marker={} post-import-marker={}",
+            "[memory-catalog-fixture] failure-code={code} ack-timeout={} delivery-unknown={} provider-pid-exists={} input-exists={} pre-import-marker={} post-import-marker={} imports-before={:05b} imports-after={:05b} tail-available={} tail-bytes={}",
             message == "Claude input acknowledgement timed out",
             message == "Claude input delivery is unknown",
             f.home.join("provider.pid").is_file(),
             f.home.join("input.json").is_file(),
             startup.pre_import,
             startup.post_import,
+            startup.import_before,
+            startup.import_after,
+            startup.tail_available,
+            startup.tail_bytes,
         );
     }
     assert_eq!(terminal.turn.outcome, Outcome::Success);
@@ -444,6 +496,84 @@ async fn synchronous_catalog_or_fresh_check_panic_denies_without_input_and_clean
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn synthetic_fixture_startup_ignores_ambient_site_hooks_before_user_code() {
+    let f = Rig::with_attachment_startup(true, false, false, true);
+    let mut turn = f.start("/context");
+    let terminal = tokio::time::timeout(WATCHDOG, turn.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    let site_entered = f.home.join("synthetic-site/entered").is_file();
+    if let Outcome::Failure { code, message } = &terminal.turn.outcome {
+        let startup = *f.startup_diagnostic.lock().unwrap();
+        eprintln!(
+            "[site-startup-fixture] code={code} ack-timeout={} site-entered={site_entered} pre-import={} post-import={} tail-available={} tail-bytes={}",
+            message == "Claude input acknowledgement timed out",
+            startup.pre_import,
+            startup.post_import,
+            startup.tail_available,
+            startup.tail_bytes,
+        );
+    }
+    assert_eq!(terminal.turn.outcome, Outcome::Success);
+    assert!(!site_entered);
+    let input = f.input().unwrap();
+    let blocks = input["message"]["content"].as_array().unwrap();
+    assert_eq!(blocks.len(), 4);
+    assert_eq!(blocks[0]["text"], "/context");
+    assert!(blocks[1]["text"].as_str().unwrap().contains("note.txt"));
+    assert_eq!(blocks[2]["text"], CATALOG);
+    assert!(
+        blocks[3]["text"]
+            .as_str()
+            .unwrap()
+            .contains("<pult_runtime_context>")
+    );
+    f.cleaned();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ordinary_attachment_fixture_does_not_wait_for_optional_imports_before_ack() {
+    let f = Rig::with_attachment_dependencies(true, false, true);
+    let mut turn = f.start("/context");
+    let terminal = tokio::time::timeout(WATCHDOG, turn.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    let blocked = std::fs::read_to_string(f.home.join("fixture-import-blocked"))
+        .ok()
+        .filter(|value| matches!(value.as_str(), "pathlib" | "threading"));
+    if let Outcome::Failure { code, message } = &terminal.turn.outcome {
+        let startup = *f.startup_diagnostic.lock().unwrap();
+        eprintln!(
+            "[optional-import-fixture] code={code} ack-timeout={} blocked={blocked:?} pre-import={} post-import={} imports-before={:05b} imports-after={:05b} tail-available={} tail-bytes={}",
+            message == "Claude input acknowledgement timed out",
+            startup.pre_import,
+            startup.post_import,
+            startup.import_before,
+            startup.import_after,
+            startup.tail_available,
+            startup.tail_bytes,
+        );
+    }
+    assert_eq!(terminal.turn.outcome, Outcome::Success);
+    assert!(blocked.is_none());
+    let input = f.input().unwrap();
+    let blocks = input["message"]["content"].as_array().unwrap();
+    assert_eq!(blocks.len(), 4);
+    assert_eq!(blocks[0]["text"], "/context");
+    assert!(blocks[1]["text"].as_str().unwrap().contains("note.txt"));
+    assert_eq!(blocks[2]["text"], CATALOG);
+    assert!(
+        blocks[3]["text"]
+            .as_str()
+            .unwrap()
+            .contains("<pult_runtime_context>")
+    );
+    f.cleaned();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn attachment_context_and_memory_stay_separate_and_slash_with_attachment_is_ordinary() {
     // The production panic hook intentionally suppresses arbitrary payloads.
     // Keep a static fixture phase so CI failures remain actionable without secrets.
@@ -483,13 +613,17 @@ async fn attachment_context_and_memory_stay_separate_and_slash_with_attachment_i
                     )
                 });
             eprintln!(
-                "[memory-attachment-fixture] observe={observe} failure-code={code} ack-timeout={} delivery-unknown={} provider-pid-exists={} input-exists={} native-step={step:?} pre-import-marker={} post-import-marker={}",
+                "[memory-attachment-fixture] observe={observe} failure-code={code} ack-timeout={} delivery-unknown={} provider-pid-exists={} input-exists={} native-step={step:?} pre-import-marker={} post-import-marker={} imports-before={:05b} imports-after={:05b} tail-available={} tail-bytes={}",
                 message == "Claude input acknowledgement timed out",
                 message == "Claude input delivery is unknown",
                 f.home.join("provider.pid").is_file(),
                 f.home.join("input.json").is_file(),
                 startup.pre_import,
                 startup.post_import,
+                startup.import_before,
+                startup.import_after,
+                startup.tail_available,
+                startup.tail_bytes,
             );
         }
         assert_eq!(terminal.turn.outcome, Outcome::Success);

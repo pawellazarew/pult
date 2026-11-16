@@ -509,7 +509,9 @@ async fn node_dependency_selects_valid_managed_active_then_located_with_explicit
 async fn schema_generator_observes_real_file_depth_count_size_and_type_bounds() {
     let _serial = SERIAL.lock().await;
     for mode in ["depth32", "depth33", "files", "size", "total", "special"] {
-        let f = Fixture::new();
+        let mut f = Fixture::new();
+        // Retain even on an early failure: the generator may still own writers.
+        f._root.disable_cleanup(true);
         f.scenario(json!({"schemaMode":mode}));
         std::fs::write(f.user.join("secret.json"), "never hash through a symlink").unwrap();
         let out = output(f.command(&["doctor", "--json", "--no-net"])).await;
@@ -540,6 +542,10 @@ async fn schema_generator_observes_real_file_depth_count_size_and_type_bounds() 
         );
         if retained {
             assert_eq!(schema["data"]["scratchRetained"], true);
+        }
+        // Only a validated report after a successful owned CLI exit permits removal.
+        if out.status.success() {
+            f._root.disable_cleanup(false);
         }
     }
 }

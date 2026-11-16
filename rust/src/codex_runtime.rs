@@ -746,7 +746,11 @@ async fn execute(
             .map_err(|_| RuntimeError::Session)?,
         None => false,
     };
-    let memory_slot = if memory_enabled {
+    let persistent = inner
+        .memory
+        .as_ref()
+        .is_some_and(|m| m.persistent().is_some());
+    let mut memory_slot = if memory_enabled && !persistent {
         Some(tokio::select! {
             permit=inner.shared.memory_slots.clone().acquire_owned()=>permit.map_err(|_|RuntimeError::Closed)?,
             _=closed.changed()=>return Err(RuntimeError::Closed),
@@ -774,7 +778,8 @@ async fn execute(
         return Err(RuntimeError::Closed);
     }
     let pool_key = PoolKey::new(&check, env);
-    let (host, dedicated_guard) = if let Some(slot) = memory_slot {
+    let (host, dedicated_guard) = if !persistent && memory_slot.is_some() {
+        let slot = memory_slot.take().expect("dedicated slot");
         let building = inner.clone();
         let environment = pool_key.env.clone();
         let runtime = inner.runtime.clone();
@@ -852,21 +857,24 @@ async fn execute(
                 inner: Arc::downgrade(&inner),
                 gate: services.fresh_gate.clone(),
             }));
-            let host = CodexHost::start(
-                codex_worker::HostConfig {
-                    launch: Launch {
-                        holder: inner.command.holder.clone(),
-                        program: inner.command.program.clone(),
-                        args: inner.command.prefix_args.clone(),
-                        cwd: inner.deps.home.clone(),
-                        env: pool_key.env.clone(),
-                    },
-                    fingerprint: "codex-runtime-exact-route".into(),
-                    limits: inner.limits.host,
-                    timeouts: inner.limits.timeouts,
+            let host_config = codex_worker::HostConfig {
+                launch: Launch {
+                    holder: inner.command.holder.clone(),
+                    program: inner.command.program.clone(),
+                    args: inner.command.prefix_args.clone(),
+                    cwd: inner.deps.home.clone(),
+                    env: pool_key.env.clone(),
                 },
-                services,
-            )
+                fingerprint: "codex-runtime-exact-route".into(),
+                limits: inner.limits.host,
+                timeouts: inner.limits.timeouts,
+            };
+            let host = match &inner.memory {
+                Some(memory) if persistent => {
+                    CodexHost::start_with_memory(host_config, services, memory.clone())
+                }
+                _ => CodexHost::start(host_config, services),
+            }
             .map_err(|_| RuntimeError::Invalid)?;
             state.pool.push(Entry {
                 key: pool_key.clone(),
@@ -960,6 +968,7 @@ async fn execute(
     let shared = Arc::downgrade(&inner.shared);
     inner.runtime.spawn(async move {
         let _dedicated = dedicated_guard;
+        let _memory_slot = memory_slot;
         loop {
             if matches!(*progress.borrow_and_update(), Progress::Finished(_)) {
                 break;

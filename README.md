@@ -79,6 +79,16 @@ policy still applies; this does not promise removal of operating-system copies, 
 you explicitly copy elsewhere. Memory limits are 8 open chats, 512 KiB per chat snapshot and 4 MiB total;
 exceeding a limit returns an error without falling back to disk. See [the developer contract](docs/DEV.md#временные-чаты-отдельный-контур-в-памяти).
 
+## New in 0.3.22
+
+- Fixed-size browser pages with a thumbnail and a large Fit/100% view.
+- Skills in new-chat drafts, safer Escape handling and a more compact sidebar.
+- Daemon, diagnostic and provider CLI controls in the window.
+- Foldable long messages, aligned composer icons and more responsive large histories.
+- ZCode app resource discovery and qualified arm64 packaging.
+
+See the [release notes](docs/releases/0.3.22.md). The desktop uses the Node backend; Rust remains an isolated opt-in experimental core.
+
 ## New in 0.3.21
 
 - **Skills from the composer.** Type `/` in an existing chat to choose provider skills and commands. Claude uses `/name`, Codex uses `$name`.
@@ -767,8 +777,8 @@ ChatGPT Terms of Use apply to your login.
 ## Contributing & issues
 
 - **Bugs and ideas:** [GitHub Issues](https://github.com/pawellazarew/pult/issues). Please include the output of
-  `pult doctor` (it never prints tokens, emails or organization names, but it does show local paths — trim what you
-  don't want to share) and what you expected to happen.
+  `pult doctor` and what you expected to happen. Credential secrets are filtered, but the output may contain
+  email addresses, organization names and local paths. Review it and remove private details before sharing.
 - **Security issues:** please don't open a public issue — use private vulnerability reporting on the
   [Security tab](https://github.com/pawellazarew/pult/security) ("Report a vulnerability").
 - **Code:** the one check for every change is `./scripts/ci-check.sh` (the same as CI). Architecture and tests are

@@ -9,8 +9,9 @@ import select
 import subprocess
 import sys
 import threading
+import time
 
-for name in ('OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'PULT_MEMORY_KEY', 'PULT_MEMORY_TURN_KEY', 'PULT_TEST', 'PULT_CODEX_BIN', 'PULT_CURL_BIN', 'HTTPS_PROXY'):
+for name in ('OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'PULT_MEMORY_KEY', 'PULT_MEMORY_TURN_KEY', 'PULT_CODEX_MEMORY_KEY', 'PULT_TEST', 'PULT_CODEX_BIN', 'PULT_CURL_BIN', 'HTTPS_PROXY'):
     assert name not in os.environ, 'ambient authority reached fixture'
 assert not any('mt_' in arg for arg in sys.argv), 'credential in app-server argv'
 native = Path(os.environ['HOME']) / 'native'
@@ -40,27 +41,30 @@ def notice(method, thread, turn_id, **extra):
 class MCP:
     def __init__(self, config):
         assert Path(config['command']).name == 'pult-memory-mcp'
-        assert len(config['args']) == 2 and config['args'][0] == '--home'
+        self.bridge = config['args'][-1] == '--codex-bridge'
+        assert len(config['args']) == (3 if self.bridge else 2) and config['args'][0] == '--home'
         assert Path(config['args'][1]).resolve() == pult.resolve()
         assert config['default_tools_approval_mode'] == 'approve'
-        assert list(config['env']) == ['PULT_MEMORY_TURN_KEY']
-        key = config['env']['PULT_MEMORY_TURN_KEY']
-        assert key.startswith('mt_') and len(key) == 67
+        key_name = 'PULT_CODEX_MEMORY_KEY' if self.bridge else 'PULT_MEMORY_TURN_KEY'
+        assert list(config['env']) == [key_name]
+        key = config['env'][key_name]
+        assert key.startswith('cm_' if self.bridge else 'mt_') and len(key) == 67
         self.key = key
         # Deliberately private test-control evidence, never emitted to the app-server.
         with (native / 'private-keys.jsonl').open('a') as stream:
             os.chmod(stream.name, 0o600)
             fcntl.flock(stream, fcntl.LOCK_EX)
-            stream.write(json.dumps({'pid': os.getpid(), 'key': key}) + '\n')
+            stream.write(json.dumps({'pid': os.getpid(), 'thread': config.get('_fixture_thread'), 'key': key}) + '\n')
         self.process = subprocess.Popen([config['command'], *config['args']], env={**os.environ, **config['env']}, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        self.lock = threading.Lock()
+        threading.Thread(target=self.process.wait, daemon=True).start()
+        self.lock = threading.RLock()
         self.sequence = 0
         initialized = self.rpc('initialize', {'protocolVersion': '2025-06-18', 'capabilities': {}, 'clientInfo': {'name': 'local-fixture', 'version': '1'}})
         self.server = initialized['result']['serverInfo']
         assert self.server['name'] == 'pult-memory'
         self.tools = self.rpc('tools/list', {})['result']['tools']
         assert len(self.tools) in (4, 5)
-        record('mcp-started', mcpPid=self.process.pid, argv=[config['command'], *config['args']], tools=[tool['name'] for tool in self.tools])
+        record('mcp-started', thread=config.get('_fixture_thread'), mcpPid=self.process.pid, argv=[config['command'], *config['args']], tools=[tool['name'] for tool in self.tools])
 
     def rpc(self, method, params):
         with self.lock:
@@ -72,8 +76,24 @@ class MCP:
             assert response['id'] == self.sequence
             return response
 
-    def call(self, name, arguments):
-        response = self.rpc('tools/call', {'name': name, 'arguments': arguments})
+    def call(self, name, arguments, thread, turn):
+        with self.lock:
+            call_id = 'mcp-native-call-' + str(self.sequence + 1) + '-' + turn
+            notice('item/started', thread, turn, item={'type':'mcpToolCall','id':call_id,'server':'pult_memory','tool':name,'arguments':arguments,'status':'inProgress'})
+            params = {'name':name,'arguments':arguments}
+            if self.bridge:
+                params['_meta'] = {'threadId':thread,'callId':call_id,'x-codex-turn-metadata':{'thread_id':thread,'turn_id':turn}}
+            response = self.rpc('tools/call', params)
+            notice('item/completed', thread, turn, item={'type':'mcpToolCall','id':call_id,'server':'pult_memory','tool':name,'arguments':arguments,'status':'completed'})
+            # Native event queue stress has separate tests. This fixture waits
+            # for the actual durable receipt before starting another tool.
+            deadline = time.monotonic() + 10
+            while True:
+                rows = (pult / 'events/journal.jsonl').read_text().splitlines(keepends=True)
+                if any(row.endswith('\n') and (event := json.loads(row)).get('kind') == 'tool.finished' and event.get('data', {}).get('toolUseId') == call_id for row in rows):
+                    break
+                assert time.monotonic() < deadline, 'native tool receipt watchdog'
+                threading.Event().wait(0.005)
         result = response.get('result', {})
         if 'error' in response or result.get('isError'):
             return {'isError': True, 'error': result.get('content', [{}])[0].get('text', response.get('error', {}).get('message', 'MCP rejected'))}
@@ -120,14 +140,14 @@ def work(thread, turn, instruction):
         mcp = threads[thread].get('mcp')
         outcome = {'run': instruction['run'], 'thread': thread, 'turn': turn}
         if mcp:
-            outcome['catalog'] = mcp.call('memory_catalog', {})
-            outcome['list'] = mcp.call('memory_list', {})
+            outcome['catalog'] = mcp.call('memory_catalog', {}, thread, turn)
+            outcome['list'] = mcp.call('memory_list', {}, thread, turn)
             if instruction.get('id'):
-                outcome['get'] = mcp.call('memory_get', {'id': instruction['id']})
+                outcome['get'] = mcp.call('memory_get', {'id': instruction['id']}, thread, turn)
             if instruction.get('foreignId'):
-                outcome['foreign'] = mcp.call('memory_get', {'id': instruction['foreignId']})
+                outcome['foreign'] = mcp.call('memory_get', {'id': instruction['foreignId']}, thread, turn)
             if instruction.get('proposal'):
-                outcome['proposal'] = mcp.call('memory_propose', instruction['proposal'])
+                outcome['proposal'] = mcp.call('memory_propose', instruction['proposal'], thread, turn)
             if instruction.get('echoKey'):
                 unknown = 'mt_' + ('f' if mcp.key != 'mt_' + 'f' * 64 else 'e') * 64
                 ordinary = '0123456789abcdef0123456789abcdef'
@@ -135,7 +155,7 @@ def work(thread, turn, instruction):
                 for item_id in (unknown, ordinary):
                     notice('item/started', thread, turn, item={'type': 'mcpToolCall', 'id': item_id, 'server': 'pult_memory', 'tool': 'memory_get', 'arguments': arguments, 'status': 'inProgress'})
                     notice('item/completed', thread, turn, item={'type': 'mcpToolCall', 'id': item_id, 'server': 'pult_memory', 'tool': 'memory_get', 'arguments': arguments, 'status': 'completed', 'result': {'content': [{'type': 'text', 'text': mcp.key}]}})
-                outcome['proposal'] = mcp.call('memory_propose', {'operation': 'update', 'id': instruction['id'], 'expectedVersion': instruction['expectedVersion'], 'commandId': mcp.key, 'summary': 'MUST_NOT_COMMIT', 'reason': 'Credential-shaped command IDs must fail before approval'})
+                outcome['proposal'] = mcp.call('memory_propose', {'operation': 'update', 'id': instruction['id'], 'expectedVersion': instruction['expectedVersion'], 'commandId': mcp.key, 'summary': 'MUST_NOT_COMMIT', 'reason': 'Credential-shaped command IDs must fail before approval'}, thread, turn)
                 outcome['echoedKey'] = True
                 outcome['unknownStructuralId'] = unknown
                 outcome['ordinaryStructuralId'] = ordinary
@@ -168,7 +188,7 @@ for line in sys.stdin:
                 stream.write(json.dumps(thread) + '\n')
         config = params.get('config', {}).get('mcp_servers', {}).get('pult_memory')
         if config:
-            assert not threads, 'memory-enabled host must be dedicated'
+            config['_fixture_thread'] = thread
         threads[thread] = {'params': params, 'mcp': MCP(config) if config else None}
         record('thread', thread=thread, method=method, memory=bool(config))
         sandbox = {'type': {'read-only': 'readOnly', 'workspace-write': 'workspaceWrite', 'danger-full-access': 'dangerFullAccess'}[params['sandbox']]}
@@ -196,9 +216,10 @@ for line in sys.stdin:
         journal = [json.loads(value) for value in (pult / 'events/journal.jsonl').read_text().splitlines()]
         statuses = [value for value in journal if value['sessionId'] == session['name'] and value['kind'] == 'status.changed']
         assert statuses[-1]['data']['status'] == 'working'
-        assert len(texts) == (3 if threads[thread]['mcp'] else 2)
+        memory_on = session.get('memory', {}).get('read', False)
+        assert len(texts) == (3 if memory_on else 2)
         assert texts[-1].startswith('<pult_runtime_context>')
-        if threads[thread]['mcp']:
+        if memory_on:
             assert texts[1].startswith('Project memory:') and len(texts[1]) <= 4000 and len(texts[1].encode()) <= 16000
         record('dispatch', run=instruction['run'], session=session['name'], thread=thread, turn=turn, texts=texts)
         active[thread] = turn

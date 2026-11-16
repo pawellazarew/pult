@@ -10,11 +10,12 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{Child, Command},
 };
-const KEYS: [&str; 4] = [
+const KEYS: [&str; 5] = [
     "PULT_MEMORY_KEY",
     "PULT_MEMORY_TURN_KEY",
     "PULT_ASK_KEY",
     "PULT_RUNTIME_KEY",
+    "PULT_CODEX_MEMORY_KEY",
 ];
 struct Fixture {
     root: tempfile::TempDir,

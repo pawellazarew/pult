@@ -77,6 +77,9 @@ impl Prepared {
 /// Host-only boundary. Implementations own slow preparation and all admitted IO.
 /// check/revoke are prompt synchronous operations; no model params create Ticket.
 pub(crate) trait TurnMemory: Send + Sync + 'static {
+    fn persistent(&self) -> Option<Arc<crate::codex_memory::Registry>> {
+        None
+    }
     fn enabled(&self, key: SessionKey) -> Task<Result<bool, WorkerError>>;
     fn prepare(
         &self,
@@ -209,6 +212,7 @@ pub(crate) struct Backend {
     myself: Weak<Backend>,
     program: PathBuf,
     controls: Mutex<Vec<Arc<Control>>>,
+    bridge: OnceLock<Arc<crate::codex_memory::Registry>>,
     #[cfg(test)]
     hooks: Arc<tests::Hooks>,
 }
@@ -219,6 +223,7 @@ impl Backend {
             myself: myself.clone(),
             program,
             controls: Mutex::new(Vec::new()),
+            bridge: OnceLock::new(),
             #[cfg(test)]
             hooks: Arc::new(tests::Hooks::default()),
         })
@@ -367,27 +372,32 @@ impl Backend {
             .ok_or_else(denied)?;
         Self::verify_locked(state, control, record, writing)
     }
-    async fn begin(
+    async fn begin_handle(
         self: Arc<Self>,
         ticket: Ticket,
         snapshot: TurnSnapshot,
         public_turn: String,
-    ) -> Result<Prepared, MemoryError> {
+        scoped_secret: bool,
+    ) -> Result<Lease, MemoryError> {
         let state = self.state.upgrade().ok_or_else(unavailable)?;
         let progress = state
             .driver
             .get()
             .and_then(|driver| driver.progress_for_ticket(&ticket))
             .ok_or_else(denied)?;
-        let mut random = [0u8; 32];
-        getrandom::fill(&mut random).map_err(|_| unavailable())?;
-        let secret = format!(
-            "mt_{}",
-            random
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>()
-        );
+        let secret = if scoped_secret {
+            let mut random = [0u8; 32];
+            getrandom::fill(&mut random).map_err(|_| unavailable())?;
+            format!(
+                "mt_{}",
+                random
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            )
+        } else {
+            String::new()
+        };
         let control = Arc::new(Control {
             ticket: ticket.clone(),
             snapshot,
@@ -414,6 +424,8 @@ impl Backend {
         let job = control.admit()?;
         let tracked = state.host_jobs.track();
         let preparing = control.clone();
+        #[cfg(test)]
+        let hooks = self.hooks.clone();
         let result = tokio::task::spawn_blocking(move || {
             let _tracked = tracked;
             let _job = job;
@@ -439,6 +451,8 @@ impl Backend {
             let writable = policy.write == Write::Ask
                 && preparing.snapshot.settings.approval != Approval::ReadOnly;
             preparing.writable.store(writable, Ordering::Release);
+            #[cfg(test)]
+            hooks.prepared();
             Ok::<_, MemoryError>(())
         })
         .await
@@ -447,11 +461,21 @@ impl Backend {
         match result {
             Ok(()) => {
                 let state = self.state.upgrade().ok_or_else(unavailable)?;
-                Self::verify(&state, &control, false)?;
-                Ok(Prepared {
-                    writable: control.writable.load(Ordering::Acquire),
-                    server: json!({"command":self.program,"args":["--home",state.home],"env":{"PULT_MEMORY_TURN_KEY":control.secret},"default_tools_approval_mode":"approve"}),
+                let checking = control.clone();
+                let job = control.admit()?;
+                let tracked = state.host_jobs.track();
+                #[cfg(test)]
+                let hooks = self.hooks.clone();
+                tokio::task::spawn_blocking(move || {
+                    let _tracked = tracked;
+                    let _job = job;
+                    #[cfg(test)]
+                    hooks.before_post_prepare();
+                    Self::verify(&state, &checking, false)
                 })
+                .await
+                .map_err(|_| unavailable())??;
+                Ok(Lease(control))
             }
             Err(error) => {
                 control.revoke();
@@ -459,6 +483,81 @@ impl Backend {
                 Err(error)
             }
         }
+    }
+    pub(crate) fn bridge(self: &Arc<Self>) -> Arc<crate::codex_memory::Registry> {
+        self.bridge
+            .get_or_init(|| crate::codex_memory::Registry::new(Arc::downgrade(self)))
+            .clone()
+    }
+    pub(crate) fn prepare_handle(
+        self: &Arc<Self>,
+        ticket: Ticket,
+        snapshot: TurnSnapshot,
+        public_turn: String,
+    ) -> Task<Result<Lease, WorkerError>> {
+        let backend = self.clone();
+        let (send, receive) = oneshot::channel();
+        tokio::spawn(async move {
+            let result = backend
+                .clone()
+                .begin_handle(ticket.clone(), snapshot, public_turn, false)
+                .await;
+            if result.is_err()
+                && let Some(control) = backend.control(&ticket)
+            {
+                control.revoke();
+                backend.wait_drain(control).await;
+            }
+            let _ = send.send(result.map_err(worker));
+        });
+        Box::pin(async { receive.await.unwrap_or_else(|_| Err(worker(unavailable()))) })
+    }
+    pub(crate) async fn accepted_handle(&self, lease: &Lease) -> Result<(), MemoryError> {
+        Self::accepted(&lease.0).await.map(|_| ())
+    }
+    pub(crate) async fn revoked_handle(&self, lease: &Lease) {
+        loop {
+            let changed = lease.0.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if !lease.0.valid.load(Ordering::Acquire) {
+                return;
+            }
+            changed.await;
+        }
+    }
+    /// Prompt revocation observation only. Current record/policy/Driver checks
+    /// belong to owned read/propose IO before Store/Broker access, never to an
+    /// async bridge waiter or its short native-ledger admission lock.
+    pub(crate) fn handle_live(&self, lease: &Lease) -> bool {
+        lease.0.valid.load(Ordering::Acquire)
+            && self.state.upgrade().is_some_and(|state| {
+                !*state.stop.borrow()
+                    && !state.execution_storage_failed.load(Ordering::Acquire)
+                    && !state.session_memory.is_poisoned()
+            })
+    }
+    pub(crate) fn bridge_server(&self, key: &str) -> Result<Value, MemoryError> {
+        let state = self.state.upgrade().ok_or_else(unavailable)?;
+        Ok(
+            json!({"command":self.program,"args":["--home",state.home,"--codex-bridge"],"env":{"PULT_CODEX_MEMORY_KEY":key},"default_tools_approval_mode":"approve"}),
+        )
+    }
+    async fn begin(
+        self: Arc<Self>,
+        ticket: Ticket,
+        snapshot: TurnSnapshot,
+        public_turn: String,
+    ) -> Result<Prepared, MemoryError> {
+        let lease = self
+            .clone()
+            .begin_handle(ticket, snapshot, public_turn, true)
+            .await?;
+        let state = self.state.upgrade().ok_or_else(unavailable)?;
+        Ok(Prepared {
+            writable: lease.writable(),
+            server: json!({"command":self.program,"args":["--home",state.home],"env":{"PULT_MEMORY_TURN_KEY":lease.0.secret},"default_tools_approval_mode":"approve"}),
+        })
     }
     async fn wait_drain(&self, control: Arc<Control>) {
         loop {
@@ -747,6 +846,9 @@ impl Backend {
     }
 }
 impl TurnMemory for Backend {
+    fn persistent(&self) -> Option<Arc<crate::codex_memory::Registry>> {
+        self.myself.upgrade().map(|backend| backend.bridge())
+    }
     fn enabled(&self, key: SessionKey) -> Task<Result<bool, WorkerError>> {
         let state = self.state.upgrade();
         Box::pin(async move {
