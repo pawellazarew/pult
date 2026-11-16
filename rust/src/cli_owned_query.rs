@@ -144,12 +144,46 @@ async fn process_snapshot(deadline: tokio::time::Instant) -> Result<Vec<u8>> {
 }
 
 #[cfg(target_os = "macos")]
-async fn confirm_zombie_group(leader: i32) -> Result<()> {
+async fn confirm_zombie_group(
+    query: &mut Query,
+    #[cfg(test)] after_pending: Option<&(dyn Fn() + Sync)>,
+) -> Result<()> {
+    // Darwin EPERM may precede this same unreaped child's waitability. Polling
+    // and BOTH snapshots consume the existing shared one-second proof budget.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    loop {
+        ensure!(
+            tokio::time::Instant::now() < deadline,
+            "query waitability deadline"
+        );
+        if query.exited()? {
+            break;
+        }
+        #[cfg(test)]
+        if let Some(release) = after_pending {
+            release();
+        }
+        tokio::time::sleep_until(
+            (tokio::time::Instant::now() + Duration::from_millis(5)).min(deadline),
+        )
+        .await;
+    }
+    confirm_zombie_group_with_snapshot(query.group.as_raw(), deadline, process_snapshot).await
+}
+#[cfg(target_os = "macos")]
+async fn confirm_zombie_group_with_snapshot<F, Fut>(
+    leader: i32,
+    deadline: tokio::time::Instant,
+    mut snapshot: F,
+) -> Result<()>
+where
+    F: FnMut(tokio::time::Instant) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>>>,
+{
     // Retain the unreaped leader through two bounded enumerations. Any live,
     // missing, ambiguous or changing membership stays cleanup-unconfirmed.
-    let first = zombie_members(&process_snapshot(deadline).await?, leader)?;
-    let second = zombie_members(&process_snapshot(deadline).await?, leader)?;
+    let first = zombie_members(&snapshot(deadline).await?, leader)?;
+    let second = zombie_members(&snapshot(deadline).await?, leader)?;
     ensure!(
         first == second,
         "process group membership changed during proof"
@@ -178,17 +212,33 @@ impl Query {
             }
         }
     }
-    async fn cleanup(&mut self) -> anyhow::Result<std::process::ExitStatus> {
-        ensure!(self.may_signal, "query ownership is unknown");
-        match killpg(self.group, Signal::SIGKILL) {
-            Ok(()) | Err(nix::errno::Errno::ESRCH) => (),
+    async fn observed_signal(
+        &mut self,
+        observation: std::result::Result<(), nix::errno::Errno>,
+        #[cfg(test)] _after_pending: Option<&(dyn Fn() + Sync)>,
+    ) -> anyhow::Result<()> {
+        match observation {
+            Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),
             #[cfg(target_os = "macos")]
             Err(nix::errno::Errno::EPERM) => {
-                ensure!(self.exited()?, "query leader is still executing");
-                confirm_zombie_group(self.group.as_raw()).await?;
+                confirm_zombie_group(
+                    self,
+                    #[cfg(test)]
+                    _after_pending,
+                )
+                .await
             }
             Err(_) => anyhow::bail!("query group cleanup is unconfirmed"),
         }
+    }
+    async fn cleanup(&mut self) -> anyhow::Result<std::process::ExitStatus> {
+        ensure!(self.may_signal, "query ownership is unknown");
+        self.observed_signal(
+            killpg(self.group, Signal::SIGKILL),
+            #[cfg(test)]
+            None,
+        )
+        .await?;
         // No signal may target this group after releasing the leader PID.
         self.may_signal = false;
         Ok(tokio::time::timeout(CLEANUP, self.child.wait()).await??)
@@ -394,4 +444,103 @@ pub(super) async fn run_with_cancel(
             error_output.ok_or(Error::OutputUnavailable)?
         },
     })
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod waitability_tests {
+    use super::*;
+    use std::sync::Mutex;
+    fn gated_child() -> (Query, Mutex<Option<tokio::process::ChildStdin>>) {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "read marker; exit 0"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let input = Mutex::new(child.stdin.take());
+        (
+            Query {
+                group: Pid::from_raw(child.id().unwrap() as i32),
+                child,
+                may_signal: true,
+            },
+            input,
+        )
+    }
+    fn release(input: &Mutex<Option<tokio::process::ChildStdin>>) {
+        drop(input.lock().unwrap().take());
+    }
+    async fn reap(query: &mut Query) {
+        let status = tokio::time::timeout(CLEANUP, query.child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        query.may_signal = false;
+        assert!(status.success());
+    }
+    #[tokio::test]
+    async fn eperm_before_waitability_waits_for_exact_owned_child_and_real_snapshots() {
+        let (mut query, input) = gated_child();
+        let open = || release(&input);
+        // Only EPERM is injected. A real NOWAIT Pending observation releases
+        // the actual owned child; the subsequent waitability/snapshots are real.
+        let result = query
+            .observed_signal(Err(nix::errno::Errno::EPERM), Some(&open))
+            .await;
+        release(&input);
+        reap(&mut query).await;
+        assert!(
+            result.is_ok(),
+            "EPERM preceded actual query child waitability"
+        );
+    }
+
+    #[tokio::test]
+    async fn eperm_never_authorizes_a_genuinely_live_owned_query_group() {
+        let (mut query, input) = gated_child();
+        let result = query
+            .observed_signal(Err(nix::errno::Errno::EPERM), None)
+            .await;
+        let still_live = !query.exited().unwrap();
+        release(&input);
+        reap(&mut query).await;
+        assert!(result.is_err());
+        assert!(still_live);
+    }
+    #[tokio::test]
+    async fn failed_second_snapshot_never_authorizes_partial_query_cleanup_proof() {
+        let (mut query, input) = gated_child();
+        release(&input);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        while !query.exited().unwrap() {
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let mut snapshots = 0;
+        let result = confirm_zombie_group_with_snapshot(query.group.as_raw(), deadline, |until| {
+            assert_eq!(
+                until, deadline,
+                "both snapshots retain the original proof deadline"
+            );
+            snapshots += 1;
+            let second = snapshots == 2;
+            async move {
+                if second {
+                    anyhow::bail!("synthetic second query snapshot failure");
+                }
+                process_snapshot(until).await
+            }
+        })
+        .await;
+        assert!(
+            query.exited().unwrap(),
+            "the same owned leader remains unreaped"
+        );
+        reap(&mut query).await;
+        assert_eq!(snapshots, 2);
+        assert!(result.is_err());
+    }
 }

@@ -134,7 +134,7 @@ SIGINT с заблокированными auth/schema потомками, на�
 проверяются отдельно, включая прежние 20 s/60 s классы и blocked stdout.
 
 
-## Квалифицированный candidate R1/R2
+## Квалификация 0e0 (R1/R2)
 
 - Полный actual-CLI набор: 22 passed, включая 84 RU/EN парных whole-report случая.
 - CLI unit set: 47 passed, включая Timeout + joined Overflow, оба порядка reader
@@ -155,3 +155,27 @@ R1 использует детерминированный classifier/projector 
 Файлы логов и их SHA256 передаются отдельно.
 Коммитимые pin reference files — только две агрегированные схемы (1 358 692 байта),
 не весь native набор из 318 файлов; production generation остаётся квалификацией R5.
+
+
+## Узкое исправление Query EPERM
+
+Darwin EPERM может наблюдаться до waitability того же owned unreaped leader.
+Query повторяет NOWAIT check каждые 5 ms в прежнем бюджете proof 1 s; обе прежние
+zombie snapshots получают этот же deadline. До успешного proof leader не reaped;
+живой leader, ошибка snapshot и несовпавшие zombie sets остаются unconfirmed.
+Это эквивалент merged holder fix; class deadlines, byte caps, error projection и
+ownership checks не расширены.
+
+Детерминированный RED/GREEN использует настоящий owned child с закрываемым stdin
+gate и настоящие NOWAIT/две `/bin/ps` snapshots. Только результат SIGKILL (`EPERM`)
+подставлен в private decision seam; production-переменной для инъекции нет.
+Первый Pending разрешает child exit; старый immediate check возвращал ошибку,
+новый ждёт waitability. Контроли удерживают child живым и вводят ошибку второй
+snapshot; оба не дают cleanup confirmation. Это не наблюдение естественной
+Query EPERM race. Логи narrow follow-up и неизменённые 0e0 proofs передаются отдельно;
+полный composed gate выполняет Root.
+
+Narrow source квалифицирован отдельно: 50 binary units (в том числе три waitability
+контроля), shared browser/runtime/service 43, doctor cancellation/overflow два focused
+теста, Clippy all-targets -D warnings и fmt — PASS. Полный CLI набор с 84 парными
+случаями относится к сохранённому 0e0 выше; в этом follow-up он не повторялся.
