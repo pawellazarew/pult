@@ -199,7 +199,10 @@ impl Rig {
                 session: self.key.clone(),
                 home: self.home.clone(),
                 launch: Launch {
-                    holder: self.holder.clone().unwrap_or_else(|| env!("CARGO_BIN_EXE_pult-worker-holder").into()),
+                    holder: self
+                        .holder
+                        .clone()
+                        .unwrap_or_else(|| env!("CARGO_BIN_EXE_pult-worker-holder").into()),
                     program: python(),
                     args: vec![
                         "-B".into(),
@@ -305,9 +308,14 @@ fn force_unknown_holder(f: &mut Rig) {
     std::fs::copy(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/zcode_holder_forced_unknown.py"),
         &wrapper,
-    ).unwrap();
+    )
+    .unwrap();
     std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
-    std::fs::write(f.home.join("actual-holder.path"), env!("CARGO_BIN_EXE_pult-worker-holder")).unwrap();
+    std::fs::write(
+        f.home.join("actual-holder.path"),
+        env!("CARGO_BIN_EXE_pult-worker-holder"),
+    )
+    .unwrap();
     f.holder = Some(wrapper);
 }
 
@@ -322,31 +330,59 @@ async fn forced_holder_proof(f: &Rig) {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }
 
 async fn direct_unknown_cleanup_without_external_cancel(pre_start: bool) {
     let mut f = Rig::new(None);
+    // These counterexamples deliberately retain an unconfirmed owner, including
+    // on an early acceptance/proof assertion failure before the final snapshot.
+    f._temp.disable_cleanup(true);
     force_unknown_holder(&mut f);
-    let mut handle = f.start(f.worker(if pre_start { "session-only" } else { "normal" }), false);
-    if !pre_start { handle.accepted().await.unwrap(); }
+    let mut handle = f.start(
+        f.worker(if pre_start { "session-only" } else { "normal" }),
+        false,
+    );
+    if !pre_start {
+        handle.accepted().await.unwrap();
+    }
     forced_holder_proof(&f).await;
     let sid = f.record().scalar("providerSessionId");
     let observed = tokio::time::timeout(Duration::from_secs(5), handle.wait()).await;
-    let quarantined = matches!(*handle.subscribe_progress().borrow(), pult_core::turn_driver::Progress::Quarantined(_));
+    let quarantined = matches!(
+        *handle.subscribe_progress().borrow(),
+        pult_core::turn_driver::Progress::Quarantined(_)
+    );
     let retained = f.driver.active_count();
-    let no_completion = !f.events().iter().any(|event| event["data"].get("completion").is_some());
+    let no_completion = !f
+        .events()
+        .iter()
+        .any(|event| event["data"].get("completion").is_some());
     // Cleanup after the observation may request cancellation, but it cannot make
     // the original no-external-cancel invariant pass. Retain uncertain state.
     f.driver.cancel(handle.ticket());
     let _ = tokio::time::timeout(Duration::from_secs(6), handle.wait()).await;
-    let result_is_unknown = matches!(observed, Ok(Err(pult_core::turn_driver::DriverError::CleanupUnconfirmed)));
+    let result_is_unknown = matches!(
+        observed,
+        Ok(Err(pult_core::turn_driver::DriverError::CleanupUnconfirmed))
+    );
     let current_sid = f.record().scalar("providerSessionId");
-    let pid: i32 = std::fs::read_to_string(f.home.join("provider.pid")).unwrap().parse().unwrap();
-    let provider_gone = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None) == Err(nix::errno::Errno::ESRCH);
+    let pid: i32 = std::fs::read_to_string(f.home.join("provider.pid"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let provider_gone = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None)
+        == Err(nix::errno::Errno::ESRCH);
     let _retained_scratch = f._temp.keep();
-    eprintln!("[routea-cleanup-watch] pre-start={pre_start} result-unknown={result_is_unknown} quarantined={quarantined} retained-slots={retained} no-completion={no_completion} provider-gone={provider_gone}");
-    assert!(result_is_unknown, "owned unknown cleanup must wake the Driver before external cancel");
+    eprintln!(
+        "[routea-cleanup-watch] pre-start={pre_start} result-unknown={result_is_unknown} quarantined={quarantined} retained-slots={retained} no-completion={no_completion} provider-gone={provider_gone}"
+    );
+    assert!(
+        result_is_unknown,
+        "owned unknown cleanup must wake the Driver before external cancel"
+    );
     assert!(quarantined);
     assert_eq!(retained, 1);
     assert!(no_completion);
