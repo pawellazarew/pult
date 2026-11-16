@@ -584,6 +584,13 @@ pub(super) async fn run(display: &Path, json: bool, no_net: bool) -> Result<i32>
     let interrupted = *exec.cancel.borrow();
     monitor.abort();
     let _ = monitor.await;
+    if exec.schema_retained() && (interrupted || result.is_err()) {
+        let _ = cli_client::emit(
+            "Warning: schema scratch retained; bounded cleanup was not completed\n".into(),
+            true,
+        )
+        .await;
+    }
     ensure!(
         !exec.cleanup_failed(),
         "doctor child cleanup is unconfirmed; retained scratch requires inspection"
@@ -593,4 +600,76 @@ pub(super) async fn run(display: &Path, json: bool, no_net: bool) -> Result<i32>
         return Ok(130);
     }
     result
+}
+
+#[cfg(test)]
+mod combined_capture_tests {
+    use super::*;
+    use crate::cli_owned_query::{self, Error, Kind};
+    use std::os::unix::process::ExitStatusExt;
+    fn auth(primary: Option<Error>, reader: Option<Error>) -> Vec<Item> {
+        let raw = cli_owned_query::Output {
+            status: std::process::ExitStatus::from_raw(0),
+            failure: cli_owned_query::failure_kind(Kind::DoctorAuth, primary, reader),
+            stdout: br#"{"loggedIn":true}"#.to_vec(),
+            stderr: vec![],
+        };
+        claude_items(crate::doctor_exec::project(raw), Text(true))
+    }
+    #[test]
+    fn timeout_and_joined_reader_overflow_never_confirm_partial_auth() {
+        for first in [Error::Output, Error::Overflow] {
+            let second = if matches!(first, Error::Output) {
+                Error::Overflow
+            } else {
+                Error::Output
+            };
+            let joined = cli_owned_query::failure_kind(Kind::DoctorAuth, Some(first), Some(second));
+            assert!(
+                matches!(joined, Some(Error::Overflow)),
+                "every observed reader cap survives join order"
+            );
+            assert_eq!(auth(Some(Error::Timeout), joined)[0].status, "warn");
+        }
+        let items = auth(Some(Error::Timeout), Some(Error::Overflow));
+        assert_eq!(items[0].status, "warn");
+        assert_eq!(items[0].data.as_ref().unwrap()["loggedIn"], Value::Null);
+        assert_eq!(
+            auth(Some(Error::Timeout), None)[0].status,
+            "ok",
+            "source timeout-only partial stdout stays qualified"
+        );
+        assert_eq!(
+            auth(Some(Error::Timeout), Some(Error::Output))[0].status,
+            "warn",
+            "observed reader I/O failure also stays incomplete"
+        );
+        assert_eq!(
+            auth(None, Some(Error::Overflow))[0].status,
+            "warn",
+            "overflow-only control"
+        );
+    }
+    #[test]
+    fn fatal_lifecycle_observations_and_legacy_query_projection_keep_priority() {
+        for fatal in [
+            Error::Interrupted,
+            Error::Ownership,
+            Error::Cleanup,
+            Error::OutputCleanup,
+        ] {
+            let chosen =
+                cli_owned_query::failure_kind(Kind::DoctorAuth, Some(fatal), Some(Error::Overflow));
+            assert_eq!(format!("{chosen:?}"), format!("{:?}", Some(fatal)));
+            let chosen =
+                cli_owned_query::failure_kind(Kind::DoctorAuth, Some(Error::Timeout), Some(fatal));
+            assert_eq!(format!("{chosen:?}"), format!("{:?}", Some(fatal)));
+        }
+        for kind in [Kind::Service, Kind::NodeVersion] {
+            assert!(matches!(
+                cli_owned_query::failure_kind(kind, Some(Error::Timeout), Some(Error::Overflow)),
+                Some(Error::Timeout)
+            ));
+        }
+    }
 }

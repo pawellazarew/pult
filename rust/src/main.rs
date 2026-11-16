@@ -18,6 +18,7 @@ mod doctor_model;
 mod doctor_net;
 mod doctor_path;
 mod doctor_schema;
+mod doctor_schema_tree;
 mod doctor_service;
 mod doctor_toml;
 use anyhow::Result;

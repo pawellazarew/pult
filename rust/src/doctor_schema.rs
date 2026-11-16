@@ -3,53 +3,37 @@ use crate::{
     doctor_exec::{DiagnosticCommand, Executor},
     doctor_files,
     doctor_model::{Item, Text, redact},
+    doctor_schema_tree::{Fault, Tree},
 };
-use anyhow::{Result, ensure};
+use anyhow::Result;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 const EXPECTED: &str = "495ecc09e89c6fa08112a6e4b283826a953e7a6a16d082e9ee425f1346d8f0af";
-fn hash(dir: &Path) -> Result<(String, usize)> {
-    fn walk(root: &Path, dir: &Path, depth: usize, out: &mut Vec<PathBuf>) -> Result<()> {
-        ensure!(depth <= 32, "schema depth exceeds limit");
-        for e in std::fs::read_dir(dir)? {
-            let e = e?;
-            let kind = e.file_type()?;
-            if kind.is_dir() {
-                walk(root, &e.path(), depth + 1, out)?
-            } else if kind.is_file() {
-                out.push(e.path().strip_prefix(root)?.to_owned());
-                ensure!(out.len() <= 4096, "schema file count exceeds limit");
-            }
-        }
-        Ok(())
-    }
-    let mut paths = vec![];
-    walk(dir, dir, 0, &mut paths)?;
+fn hash(tree: &Tree, cancel: &impl Fn() -> bool) -> Result<(String, usize), Fault> {
+    tree.attached()?;
+    let mut paths = tree.paths();
     paths.sort_by_cached_key(|p| p.to_string_lossy().encode_utf16().collect::<Vec<_>>());
     let mut bundle = Sha256::new();
-    let mut total = 0;
+    let mut bytes = 0u64;
     for path in &paths {
-        let s = std::fs::symlink_metadata(dir.join(path))?;
-        ensure!(
-            s.is_file() && s.len() <= 8 * 1024 * 1024,
-            "schema file exceeds limit"
-        );
-        total += s.len();
-        ensure!(total <= 64 * 1024 * 1024, "schema bundle exceeds limit");
-        let body = crate::cli_client::owner_private_file::read_with_depth(
-            dir,
-            path,
-            8 * 1024 * 1024,
-            crate::cli_client::owner_private_file::Policy {
-                private_config: false,
-            },
-            32,
-        )?
-        .ok_or_else(|| anyhow::anyhow!("schema file vanished"))?;
+        if cancel() {
+            return Err(Fault::Cancelled);
+        }
+        let body = tree.read(path)?;
+        bytes = bytes
+            .checked_add(body.len() as u64)
+            .ok_or(Fault::ByteLimit)?;
+        if bytes > 64 * 1024 * 1024 {
+            return Err(Fault::ByteLimit);
+        }
+        if cancel() {
+            return Err(Fault::Cancelled);
+        }
         bundle
             .update(format!("{:x}  {}\n", Sha256::digest(body), path.to_string_lossy()).as_bytes());
     }
+    tree.attached()?;
     Ok((format!("{:x}", bundle.finalize()), paths.len()))
 }
 pub(super) async fn check(root: &Path, bin: PathBuf, exec: &Executor, t: Text) -> Result<Item> {
@@ -68,76 +52,149 @@ pub(super) async fn check(root: &Path, bin: PathBuf, exec: &Executor, t: Text) -
             out: dir.clone(),
         })
         .await;
-    let digest = match result {
-        Ok(r) => {
-            if r.code != Some(0) {
-                let tail = redact(
-                    if r.stderr.is_empty() {
-                        &r.stdout
-                    } else {
-                        &r.stderr
-                    }
-                    .trim()
-                    .split('\n')
-                    .next()
-                    .unwrap_or(""),
-                );
-                let code = r
-                    .code
-                    .map(|n| n.to_string())
-                    .unwrap_or_else(|| "null".into());
-                Ok((
-                    "unavailable",
-                    None,
-                    None,
-                    format!(
-                        "generate-json-schema вышел с кодом {code}{}",
-                        if tail.is_empty() {
-                            String::new()
-                        } else {
-                            format!(": {tail}")
+    let cancel = || *exec.cancel.borrow();
+    let mut retained = None;
+    let mut tree = None;
+    let digest = if exec.cleanup_failed() {
+        retained = Some("cleanup_unconfirmed");
+        Err(anyhow::anyhow!("doctor child cleanup is unconfirmed"))
+    } else {
+        match result {
+            Ok(r) if r.code == Some(0) => match Tree::scan(&dir, &cancel, false) {
+                Ok(snapshot) => {
+                    let digest = hash(&snapshot, &cancel);
+                    tree = Some(snapshot);
+                    match digest {
+                        Ok((_, 0)) => Ok((
+                            "unavailable",
+                            None,
+                            None,
+                            "generate-json-schema не записал ни одного файла".to_owned(),
+                            Some(0),
+                        )),
+                        Ok((actual, files)) => {
+                            let state = if actual == EXPECTED { "ok" } else { "drift" };
+                            let detail = if state == "ok" {
+                                format!(
+                                    "схема совпала со снятой 19.10.2026 ({files} файлов, codex 0.163.0-alpha.10.2)"
+                                )
+                            } else {
+                                format!(
+                                    "схема протокола РАЗОШЛАСЬ: {}… против {}… ({files} файлов против 318). Работать это не мешает, но форма сообщений могла измениться",
+                                    &actual[..16],
+                                    &EXPECTED[..16]
+                                )
+                            };
+                            Ok((state, Some(actual), Some(files), detail, None))
                         }
-                    ),
-                ))
-            } else {
-                match hash(&dir) {
-                    Ok((_, 0)) => Ok((
-                        "unavailable",
-                        None,
-                        Some(0),
-                        "generate-json-schema не записал ни одного файла".into(),
-                    )),
-                    Ok((actual, files)) => {
-                        let state = if actual == EXPECTED { "ok" } else { "drift" };
-                        let detail = if state == "ok" {
-                            format!(
-                                "схема совпала со снятой 19.10.2026 ({files} файлов, codex 0.163.0-alpha.10.2)"
-                            )
-                        } else {
-                            format!(
-                                "схема протокола РАЗОШЛАСЬ: {}… против {}… ({files} файлов против 318). Работать это не мешает, но форма сообщений могла измениться",
-                                &actual[..16],
-                                &EXPECTED[..16]
-                            )
-                        };
-                        Ok((state, Some(actual), Some(files), detail))
+                        Err(Fault::Cancelled) => Ok((
+                            "unavailable",
+                            None,
+                            None,
+                            "schema observation cancelled".to_owned(),
+                            None,
+                        )),
+                        Err(fault) => {
+                            retained = Some(fault.reason());
+                            tree = None;
+                            Ok((
+                                "unavailable",
+                                None,
+                                None,
+                                "schema observation unavailable".to_owned(),
+                                None,
+                            ))
+                        }
                     }
-                    Err(e) => Ok((
+                }
+                Err(Fault::Cancelled) => {
+                    match Tree::scan(&dir, &cancel, true) {
+                        Ok(snapshot) => tree = Some(snapshot),
+                        Err(fault) => retained = Some(fault.reason()),
+                    };
+                    Ok((
                         "unavailable",
                         None,
                         None,
-                        format!("схему не прочитать: {}", redact(&e.to_string())),
-                    )),
+                        "schema observation cancelled".to_owned(),
+                        None,
+                    ))
                 }
+                Err(fault) => {
+                    retained = Some(fault.reason());
+                    Ok((
+                        "unavailable",
+                        None,
+                        None,
+                        "schema observation unavailable".to_owned(),
+                        None,
+                    ))
+                }
+            },
+            result => {
+                // A failed/cancelled generator is joined, but its tree may be huge.
+                // Cleanup requires a COMPLETE bounded manifest even on these paths.
+                match Tree::scan(&dir, &cancel, true) {
+                    Ok(snapshot) => tree = Some(snapshot),
+                    Err(fault) => retained = Some(fault.reason()),
+                };
+                result.map(|r| {
+                    let tail = redact(
+                        if r.stderr.is_empty() {
+                            &r.stdout
+                        } else {
+                            &r.stderr
+                        }
+                        .trim()
+                        .split('\n')
+                        .next()
+                        .unwrap_or(""),
+                    );
+                    let code = r
+                        .code
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "null".into());
+                    (
+                        "unavailable",
+                        None,
+                        None,
+                        format!(
+                            "generate-json-schema вышел с кодом {code}{}",
+                            if tail.is_empty() {
+                                String::new()
+                            } else {
+                                format!(": {tail}")
+                            }
+                        ),
+                        None,
+                    )
+                })
             }
         }
-        Err(e) => Err(e),
     };
-    // An unconfirmed group may still write here. Retain it for owner inspection.
-    if !exec.cleanup_failed() {
-        std::fs::remove_dir_all(&dir)?;
+    if retained.is_none()
+        && let Some(tree) = tree
+        && let Err(fault) = tree.cleanup(&cancel)
+    {
+        retained = Some(fault.reason());
     }
-    let (state, actual, files, detail) = digest?;
+    if retained.is_some() {
+        exec.mark_schema_retained();
+    }
+    let (mut state, mut actual, mut files, mut detail, empty_files) = digest?;
+    if retained.is_some() {
+        state = "unavailable";
+        actual = None;
+        files = None;
+        detail = if t.0 {
+            "schema scratch retained: bounded inventory or cleanup was not completed"
+        } else {
+            "временный каталог схемы сохранён: ограниченная проверка или очистка не завершена"
+        }
+        .into();
+    } else if empty_files == Some(0) {
+        files = Some(0);
+    }
     let mut item = t
         .item(
             "codex.schema",
@@ -146,6 +203,12 @@ pub(super) async fn check(root: &Path, bin: PathBuf, exec: &Executor, t: Text) -
             detail,
         )
         .data(json!({"expected":EXPECTED,"actual":actual,"files":files,"state":state}));
+    if let Some(reason) = retained
+        && let Some(data) = item.data.as_mut()
+    {
+        data["scratchRetained"] = json!(true);
+        data["retainedReason"] = json!(reason);
+    }
     if state == "drift" {
         item=item.fix(format!("{}{}",t.t("сверь изменения для адаптера (node scripts/diff-codex-schema.mjs <старая> <новая> по spike/codex/schema/) ",&[]),t.t("и обнови CODEX_SCHEMA_SHA256 в src/adapters/codex/schema.ts на {0}",&[actual.as_deref().unwrap_or("")])))
     }
@@ -160,7 +223,7 @@ mod tests {
         std::fs::write(d.path().join("b.json"), b"b").unwrap();
         std::fs::write(d.path().join("a.json"), b"a").unwrap();
         assert_eq!(
-            hash(d.path()).unwrap(),
+            hash(&Tree::scan(d.path(), &|| false, false).unwrap(), &|| false).unwrap(),
             (
                 "42b8df7d402804294392835161e9f06653d83d1e1271435f2cc06292009fab90".into(),
                 2

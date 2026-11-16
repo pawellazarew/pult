@@ -232,6 +232,36 @@ async fn capture_pipe(
     }
     Ok(bytes)
 }
+pub(super) fn failure_kind(
+    kind: Kind,
+    primary: Option<Error>,
+    reader: Option<Error>,
+) -> Option<Error> {
+    if matches!(kind, Kind::Service | Kind::NodeVersion) {
+        return primary.or(reader);
+    }
+    // A deadline may win select while a completed reader error is still queued.
+    // Preserve independently observed capture failure through auth projection.
+    for error in [primary, reader].into_iter().flatten() {
+        if matches!(
+            error,
+            Error::Interrupted | Error::Ownership | Error::Cleanup | Error::OutputCleanup
+        ) {
+            return Some(error);
+        }
+    }
+    if [primary, reader]
+        .into_iter()
+        .flatten()
+        .any(|e| matches!(e, Error::Overflow))
+    {
+        return Some(Error::Overflow);
+    }
+    if matches!(primary, Some(Error::Timeout)) && reader.is_some() {
+        return reader;
+    }
+    primary.or(reader)
+}
 pub(super) async fn run(
     command: &mut Command,
     kind: Kind,
@@ -322,11 +352,11 @@ pub(super) async fn run_with_cancel(
                 }
             }
             Ok(Some(Ok((_, Err(error))))) => {
-                read_error.get_or_insert(error);
+                read_error = failure_kind(kind, read_error, Some(error));
             }
             Ok(Some(Err(_))) => {
                 *cleanup_failed = true;
-                read_error.get_or_insert(Error::Output);
+                read_error = failure_kind(kind, read_error, Some(Error::Output));
             }
             Ok(None) => break,
             Err(_) => {
@@ -340,7 +370,7 @@ pub(super) async fn run_with_cancel(
     }
     let status = cleanup.map_err(|_| Error::Cleanup)?;
     let diagnostic = !matches!(kind, Kind::Service | Kind::NodeVersion);
-    let failure = result.err().or(read_error);
+    let failure = failure_kind(kind, result.err(), read_error);
     if let Some(error) = failure
         && (!diagnostic
             || matches!(

@@ -48,7 +48,14 @@ watch cancellation и Semaphore(8). До запуска проверяются �
 использует base allowlist как safety delta к наследованию полного env в Node.
 Сигнал группе отправляется до reap лидера. Если очистка не подтверждена, итог — fatal 1,
 в том числе при SIGINT; schema scratch сохраняется. При подтверждённой отмене — 130.
-Обычные завершившиеся schema directories удаляются после joined cleanup.
+Обычные завершившиеся schema directories удаляются после joined cleanup и полного
+ограниченного inventory. Удаление идёт по сохранённому descriptor manifest снизу вверх,
+без повторного recursive walk. Root attachment проверяется до/после чтения и перед
+каждым unlink; перенос целого root или подмена его имени останавливает дальнейшую очистку.
+При превышении бюджета, нечитаемом или изменившемся
+дереве scratch сохраняется; JSON сообщает `scratchRetained`/`retainedReason`, отменённый
+CLI печатает статическое предупреждение. Маленькое дерево после SIGINT очищается только
+после подтверждённого join и полного ограниченного inventory.
 
 | Класс | Deadline | Предел вывода |
 |---|---:|---:|
@@ -62,7 +69,10 @@ watch cancellation и Semaphore(8). До запуска проверяются �
 | Existing runtime NodeVersion | 60 s | 1 MiB суммарно |
 
 Последние два прежних класса и их error projection сохранены. Overflow не становится
-успешной auth/schema/net проверкой. Version overflow отдельно даёт cli.* warn,
+успешной auth/schema/net проверкой. Наблюдённый reader overflow имеет приоритет над
+одновременным query timeout: partial auth JSON разрешён только при timeout без
+capture failure. Interrupted/ownership/cleanup остаются fatal; Service/NodeVersion
+сохраняют прежнее отображение ошибок. Version overflow отдельно даёт cli.* warn,
 `data.state: output_limit` и явный detail; обычная source presence-проверка не меняется. Partial stdout после обычного timeout сохраняет
 Node-семантику auth; incomplete/overflow output не подтверждает вход.
 
@@ -81,9 +91,11 @@ Node-семантику auth; incomplete/overflow output не подтвержд
    обычным symlink semantics по source; FIFO не открывается блокирующим способом.
 3. TOML: максимум 64 сегмента полного пути, 64 уровня value nesting и 65 536 значений;
    превышение — `codex.network` warn с parsed:false. Это ограничивает создание и
-   уничтожение дерева. Bare-value regex кэшируется. Schema: 4096 файлов, depth <= 32,
-   8 MiB на файл, 64 MiB на bundle; schema descriptor reader допускает
-   до 32 компонентов (прежний ordinary owner reader остаётся на восьми). Выход за пределы даёт unavailable, не совпавшую схему.
+   уничтожение дерева. Bare-value regex кэшируется. Schema: 8192 посещённых entries всех
+   типов, 4096 файлов, depth <= 32, 8 MiB на файл, 64 MiB на bundle (metadata и реальные
+   прочитанные байты); schema descriptor reader допускает до 32 компонентов (прежний
+   ordinary owner reader остаётся на восьми). Выход за пределы даёт unavailable,
+   не совпавшую схему.
 4. Malformed config сохраняет defaults и предупреждение, но причина стандартизована
    как `invalid JSON`: V8 error snippets могут содержать секрет из файла. Валидационные
    предупреждения сверяются с Node, включая literal JSON.stringify escaped UTF-16 в
@@ -122,16 +134,24 @@ SIGINT с заблокированными auth/schema потомками, на�
 проверяются отдельно, включая прежние 20 s/60 s классы и blocked stdout.
 
 
-## Квалифицированный candidate
+## Квалифицированный candidate R1/R2
 
-- Полный actual-CLI набор: 17 passed, включая 84 RU/EN парных whole-report случая.
-- После него узко проверены Node numeric-key warning order, exact ZCode token-key regex и version stdout/stderr
-  capacity projection отдельными actual-CLI тестами; текущий файл содержит 20 тестов.
-- CLI unit set: 40 passed. Общие регрессии: browser 12, runtime 12, service 19 passed.
-- fmt и Clippy `--all-targets -- -D warnings` проверяются на frozen source.
+- Полный actual-CLI набор: 22 passed, включая 84 RU/EN парных whole-report случая.
+- CLI unit set: 47 passed, включая Timeout + joined Overflow, оба порядка reader
+  failures, timeout-only partial-auth control и пять schema inventory/cleanup controls.
+- Общие регрессии: browser 12, runtime 12, service 19 passed; прежние 20 s/60 s
+  query classes и output projection сохранены.
+- fmt и Clippy `--all-targets -- -D warnings` проверены на этом production source.
 
-Проверки 84 случаев, дополнительные focused checks и общие регрессии имеют разные
-логи; они не выдаются за один запуск всех 19 тестов. Полную проверку скомпонованного
-source выполняет следующий gate. Файлы логов и их SHA256 передаются отдельно.
+RED-логи сохранены отдельно: partial auth ошибочно подтверждался при Timeout +
+Overflow; 8193 пустых каталога проходили schema limits; после переноса root cleanup
+удалял файл через старый FD. GREEN проверяет те же предикаты, плюс nonzero/SIGINT
+большие деревья, root move на следующем checkpoint и сохранность replacement.
+R1 использует детерминированный classifier/projector seam с настоящим auth model,
+а не заявляет пойманную естественную timing race. R2 запускает настоящий CLI и
+частные filesystem fixtures. Исходные 70c source/logs/binary сохранены неизменными.
+Полную проверку скомпонованного source выполняет следующий gate; здесь нет
+утверждения об установленном production CLI или завершённом doctor.run RPC.
+Файлы логов и их SHA256 передаются отдельно.
 Коммитимые pin reference files — только две агрегированные схемы (1 358 692 байта),
 не весь native набор из 318 файлов; production generation остаётся квалификацией R5.

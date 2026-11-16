@@ -18,6 +18,7 @@ use tokio::{
 pub(super) struct Executor {
     pub cancel: watch::Receiver<bool>,
     cleanup_fault: Arc<AtomicBool>,
+    schema_retained: Arc<AtomicBool>,
     slots: Arc<Semaphore>,
     pub env: BTreeMap<OsString, OsString>,
 }
@@ -86,12 +87,19 @@ impl Executor {
         Ok(Self {
             cancel,
             cleanup_fault: Arc::new(AtomicBool::new(false)),
+            schema_retained: Arc::new(AtomicBool::new(false)),
             slots: Arc::new(Semaphore::new(8)),
             env,
         })
     }
     pub fn mark_cleanup_fault(&self) {
         self.cleanup_fault.store(true, Ordering::Release);
+    }
+    pub fn mark_schema_retained(&self) {
+        self.schema_retained.store(true, Ordering::Release);
+    }
+    pub fn schema_retained(&self) -> bool {
+        self.schema_retained.load(Ordering::Acquire)
     }
     pub fn cleanup_failed(&self) -> bool {
         self.cleanup_fault.load(Ordering::Acquire)
@@ -212,23 +220,7 @@ impl Executor {
         );
         ensure!(!was_cancelled, "doctor interrupted");
         Ok(match result {
-            Ok(r) => Output {
-                limited: matches!(r.failure, Some(cli_owned_query::Error::Overflow)),
-                code: if r.failure.is_some() {
-                    None
-                } else {
-                    r.status.code()
-                },
-                stdout: if r
-                    .failure
-                    .is_some_and(|e| !matches!(e, cli_owned_query::Error::Timeout))
-                {
-                    String::new()
-                } else {
-                    String::from_utf8_lossy(&r.stdout).into_owned()
-                },
-                stderr: String::from_utf8_lossy(&r.stderr).into_owned(),
-            },
+            Ok(r) => project(r),
             Err(e) => Output {
                 limited: matches!(e, cli_owned_query::Error::Overflow),
                 code: None,
@@ -241,5 +233,25 @@ impl Executor {
                 .into(),
             },
         })
+    }
+}
+
+pub(super) fn project(r: cli_owned_query::Output) -> Output {
+    Output {
+        limited: matches!(r.failure, Some(cli_owned_query::Error::Overflow)),
+        code: if r.failure.is_some() {
+            None
+        } else {
+            r.status.code()
+        },
+        stdout: if r
+            .failure
+            .is_some_and(|e| !matches!(e, cli_owned_query::Error::Timeout))
+        {
+            String::new()
+        } else {
+            String::from_utf8_lossy(&r.stdout).into_owned()
+        },
+        stderr: String::from_utf8_lossy(&r.stderr).into_owned(),
     }
 }

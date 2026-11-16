@@ -527,12 +527,20 @@ async fn schema_generator_observes_real_file_depth_count_size_and_type_bounds() 
         if mode == "special" {
             assert_eq!(schema["data"]["files"], 0);
         }
-        assert!(!std::fs::read_dir(f.home.join("run")).unwrap().any(|e| {
+        let retained = std::fs::read_dir(f.home.join("run")).unwrap().any(|e| {
             e.unwrap()
                 .file_name()
                 .to_string_lossy()
                 .starts_with("codex-schema-")
-        }));
+        });
+        assert_eq!(
+            retained,
+            ["depth33", "files", "size", "total"].contains(&mode),
+            "mode={mode}"
+        );
+        if retained {
+            assert_eq!(schema["data"]["scratchRetained"], true);
+        }
     }
 }
 #[tokio::test]
@@ -712,5 +720,72 @@ async fn zcode_presence_matches_actual_node_token_key_regex_without_overlap_or_n
             expected.trim(),
             "key={key:?}"
         );
+    }
+}
+
+#[tokio::test]
+async fn schema_empty_directories_count_toward_inventory_budget_and_are_retained() {
+    let _serial = SERIAL.lock().await;
+    let f = Fixture::new();
+    f.scenario(json!({"schemaMode":"entries"}));
+    let out = output(f.command(&["doctor", "--json", "--no-net"])).await;
+    let r = report(&out);
+    let schema = item(&r, "codex.schema");
+    assert_eq!(schema["data"]["state"], "unavailable");
+    assert_eq!(schema["data"]["scratchRetained"], true);
+    assert_eq!(schema["data"]["retainedReason"], "entry_limit");
+    assert!(std::fs::read_dir(f.home.join("run")).unwrap().any(|e| {
+        e.unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("codex-schema-")
+    }));
+}
+
+#[tokio::test]
+async fn nonzero_and_cancelled_schema_generators_retain_overbudget_trees_without_recursive_cleanup()
+{
+    let _serial = SERIAL.lock().await;
+    for mode in ["entries-nonzero", "entries-cancel"] {
+        let f = Fixture::new();
+        f.scenario(json!({"schemaMode":mode}));
+        let out = if mode == "entries-cancel" {
+            let child = f
+                .command(&["doctor", "--json", "--no-net"])
+                .spawn()
+                .unwrap();
+            let pid = child.id().unwrap();
+            wait_file(&f.home.join("schema-entries-ready")).await;
+            wait_file(&f.home.join("child-codex-schema")).await;
+            nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGINT,
+            )
+            .unwrap();
+            tokio::time::timeout(Duration::from_secs(12), child.wait_with_output())
+                .await
+                .unwrap()
+                .unwrap()
+        } else {
+            output(f.command(&["doctor", "--json", "--no-net"])).await
+        };
+        assert!(std::fs::read_dir(f.home.join("run")).unwrap().any(|e| {
+            e.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("codex-schema-")
+        }));
+        if mode == "entries-cancel" {
+            assert_eq!(out.status.code(), Some(130));
+            assert!(out.stdout.is_empty());
+            assert!(String::from_utf8_lossy(&out.stderr).contains("schema scratch retained"));
+            descendants_stopped(&f);
+        } else {
+            let r = report(&out);
+            let schema = item(&r, "codex.schema");
+            assert_eq!(schema["data"]["state"], "unavailable");
+            assert_eq!(schema["data"]["scratchRetained"], true);
+            assert_eq!(schema["data"]["retainedReason"], "entry_limit");
+        }
     }
 }

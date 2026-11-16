@@ -33,6 +33,13 @@ elif name=='codex' and args==['login','status']:
 elif name=='codex' and args[:3]==['app-server','generate-json-schema','--out']:
  if scenario.get('schemaExit'):print('fixture schema failed',file=sys.stderr);sys.exit(scenario['schemaExit'])
  mode=scenario.get('schemaMode');out=pathlib.Path(args[3])
+ if mode in ['entries','entries-nonzero','entries-cancel']:
+  for i in range(8193):(out/('d'+str(i))).mkdir()
+  (out/'a.json').write_text('{}');(root/'schema-entries-ready').write_text('ready')
+  if mode=='entries-nonzero':sys.exit(7)
+  if mode=='entries-cancel':
+   child=subprocess.Popen(['/bin/sleep','120']);(root/('child-'+label)).write_text(str(child.pid));(root/('leader-'+label)).write_text(str(os.getpid()));time.sleep(120)
+  sys.exit(0)
  if mode=='files':
   for i in range(4097):(out/(str(i)+'.json')).write_text('{}')
   sys.exit(0)
