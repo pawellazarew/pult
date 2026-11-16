@@ -1483,10 +1483,12 @@ async fn actual_holder_unknown_exit_quarantines_without_external_cancel_or_repla
             .unwrap();
     if joined["real_holder_exit_zero"] != true {
         eprintln!(
-            "[forced-holder-fixture] real-holder-code={} close-observed={} owner-rebound={}",
+            "[forced-holder-fixture] real-holder-code={} close-observed={} owner-rebound={} phase={} errno={}",
             joined["real_holder_code"],
             joined["native_close_observed"],
-            joined["internal_owner_rebound"]
+            joined["internal_owner_rebound"],
+            joined["holder_failure_phase"],
+            joined["holder_failure_errno"]
         );
     }
     assert_eq!(joined["real_holder_exit_zero"], true);
@@ -1564,10 +1566,12 @@ async fn before_native_started_unknown_holder_exit_reaches_quarantine_without_st
             .unwrap();
     if joined["real_holder_exit_zero"] != true {
         eprintln!(
-            "[forced-holder-fixture] real-holder-code={} close-observed={} owner-rebound={}",
+            "[forced-holder-fixture] real-holder-code={} close-observed={} owner-rebound={} phase={} errno={}",
             joined["real_holder_code"],
             joined["native_close_observed"],
-            joined["internal_owner_rebound"]
+            joined["internal_owner_rebound"],
+            joined["holder_failure_phase"],
+            joined["holder_failure_errno"]
         );
     }
     assert_eq!(joined["real_holder_exit_zero"], true);
@@ -1636,10 +1640,12 @@ async fn unknown_cleanup_before_resources_preserves_quarantine_without_drain_ent
             .unwrap();
     if joined["real_holder_exit_zero"] != true {
         eprintln!(
-            "[forced-holder-fixture] real-holder-code={} close-observed={} owner-rebound={}",
+            "[forced-holder-fixture] real-holder-code={} close-observed={} owner-rebound={} phase={} errno={}",
             joined["real_holder_code"],
             joined["native_close_observed"],
-            joined["internal_owner_rebound"]
+            joined["internal_owner_rebound"],
+            joined["holder_failure_phase"],
+            joined["holder_failure_errno"]
         );
     }
     assert_eq!(joined["real_holder_exit_zero"], true);
