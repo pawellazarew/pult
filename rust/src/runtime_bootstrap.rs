@@ -415,6 +415,29 @@ pub fn load_claude(
     })
 }
 
+// Only the already-selected canonical app-bundled CLI owns this fallback.
+// Metadata only: normal resource symlinks follow stat semantics; no config or
+// credential contents are read/copied and no alternate app/cache is searched.
+fn bundled_zcode_builtin(program: &Path) -> Option<PathBuf> {
+    let glm = program.parent()?;
+    let resources = glm.parent()?;
+    let contents = resources.parent()?;
+    let app = contents.parent()?;
+    if program.file_name()? != "zcode.cjs"
+        || glm.file_name()? != "glm"
+        || resources.file_name()? != "Resources"
+        || contents.file_name()? != "Contents"
+        || !app.file_name()?.as_bytes().ends_with(b".app")
+    {
+        return None;
+    }
+    let candidate = resources.join("config/provider/zcode-builtin.json");
+    fs::metadata(&candidate)
+        .ok()
+        .filter(|metadata| metadata.is_file())
+        .map(|_| candidate)
+}
+
 /// Read-only selected ZCode bootstrap under the caller's Pult-home ownership
 /// lease. Resolve files only; never run CLI/version/login or read native config.
 /// Explicit ZCODE config values are extracted before BASE filtering and remain
@@ -428,7 +451,8 @@ pub fn load_zcode(
     absolute(current_exe)?;
     let home = fs::canonicalize(home).map_err(|_| StaticError::UnsafeHome)?;
     let before = home_metadata(&home)?;
-    let extra_env = crate::zcode_launch::extra_env(parent).map_err(|_| StaticError::Environment)?;
+    let mut extra_env =
+        crate::zcode_launch::extra_env(parent).map_err(|_| StaticError::Environment)?;
     let filtered = worker_env::from_parent(parent, &Environment::new())
         .map_err(|_| StaticError::Environment)?;
     let child_home = filtered
@@ -470,6 +494,16 @@ pub fn load_zcode(
             .find_map(|path| executable(&path.join("zcode")).ok())
             .ok_or(StaticError::ExecutableUnavailable)?
     };
+    if !extra_env.contains_key(OsStr::new("ZCODE_BUILTIN_PROVIDER_CONFIG_FILE"))
+        && let Some(builtin) = bundled_zcode_builtin(&zcode)
+    {
+        extra_env.insert(
+            "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE".into(),
+            builtin.into_os_string(),
+        );
+        extra_env =
+            crate::zcode_launch::extra_env(&extra_env).map_err(|_| StaticError::Environment)?;
+    }
     let after = home_metadata(&home)?;
     if (before.dev(), before.ino()) != (after.dev(), after.ino()) {
         return Err(StaticError::UnsafeHome);

@@ -916,3 +916,212 @@ fn zcode_fixture_holder_curl_require_exact_flag_and_invalid_base_env_is_not_hidd
         assert_eq!(load_zcode(&f).err(), Some(StaticError::Environment));
     }
 }
+
+fn zcode_bundle(f: &Fixture) -> (PathBuf, PathBuf) {
+    let resources = f._temp.path().join("Selected 🌊.app/Contents/Resources");
+    let program = resources.join("glm/zcode.cjs");
+    let builtin = resources.join("config/provider/zcode-builtin.json");
+    fs::create_dir_all(program.parent().unwrap()).unwrap();
+    fs::create_dir_all(builtin.parent().unwrap()).unwrap();
+    executable(&program);
+    fs::write(&builtin, b"{}").unwrap();
+    fs::set_permissions(&builtin, fs::Permissions::from_mode(0o644)).unwrap();
+    (
+        fs::canonicalize(program).unwrap(),
+        fs::canonicalize(builtin).unwrap(),
+    )
+}
+
+#[test]
+fn zcode_selected_bundle_supplies_only_builtin_config_without_parent_or_execution() {
+    let mut f = zcode_fixture();
+    let (program, builtin) = zcode_bundle(&f);
+    f.parent
+        .insert("PULT_ZCODE_BIN".into(), program.into_os_string());
+    let before = fs::read_dir(&f.home).unwrap().count();
+    let b = load_zcode(&f).unwrap();
+    assert_eq!(
+        b.extra_env
+            .get(OsStr::new("ZCODE_BUILTIN_PROVIDER_CONFIG_FILE")),
+        Some(&builtin.clone().into_os_string())
+    );
+    assert_eq!(b.extra_env.len(), 1);
+    assert!(
+        !b.extra_env
+            .contains_key(OsStr::new("ZCODE_PERSONAL_PROVIDER_CONFIG_FILE"))
+    );
+    assert_eq!(fs::read(&builtin).unwrap(), b"{}");
+    assert_eq!(fs::read_dir(&f.home).unwrap().count(), before);
+}
+
+#[test]
+fn zcode_bundle_uses_the_selected_canonical_program_for_path_and_explicit_aliases() {
+    for explicit in [false, true] {
+        let mut f = zcode_fixture();
+        let (program, builtin) = zcode_bundle(&f);
+        let alias = f.bin.join("zcode");
+        fs::remove_file(&alias).unwrap();
+        symlink(&program, &alias).unwrap();
+        if explicit {
+            f.parent
+                .insert("PULT_ZCODE_BIN".into(), alias.into_os_string());
+        }
+        let b = load_zcode(&f).unwrap();
+        assert_eq!(b.zcode, fs::canonicalize(program).unwrap());
+        assert_eq!(
+            b.extra_env
+                .get(OsStr::new("ZCODE_BUILTIN_PROVIDER_CONFIG_FILE")),
+            Some(&builtin.into_os_string())
+        );
+    }
+}
+
+#[test]
+fn zcode_bundle_preserves_explicit_builtin_and_personal_config_and_omits_ambient_authority() {
+    let mut f = zcode_fixture();
+    let (program, builtin) = zcode_bundle(&f);
+    f.parent
+        .insert("PULT_ZCODE_BIN".into(), program.into_os_string());
+    for name in [
+        "ZCODE_OFFICIAL_ENDPOINT_TOKEN",
+        "ZCODE_DATA_BASE_DIR",
+        "PULT_OWNER_TOKEN",
+        "PULT_MEMORY_KEY",
+        "NODE_OPTIONS",
+    ] {
+        f.parent.insert(name.into(), "PRIVATE_AMBIENT".into());
+    }
+    for value in ["/PRIVATE/missing-config", "PRIVATE_relative-config"] {
+        f.parent
+            .insert("ZCODE_BUILTIN_PROVIDER_CONFIG_FILE".into(), value.into());
+        f.parent.insert(
+            "ZCODE_PERSONAL_PROVIDER_CONFIG_FILE".into(),
+            "PRIVATE_explicit-personal".into(),
+        );
+        let b = load_zcode(&f).unwrap();
+        assert_eq!(b.extra_env.len(), 2);
+        assert_eq!(
+            b.extra_env
+                .get(OsStr::new("ZCODE_BUILTIN_PROVIDER_CONFIG_FILE")),
+            Some(&OsString::from(value))
+        );
+        assert_eq!(
+            b.extra_env
+                .get(OsStr::new("ZCODE_PERSONAL_PROVIDER_CONFIG_FILE")),
+            Some(&OsString::from("PRIVATE_explicit-personal"))
+        );
+        assert!(!format!("{b:?}").contains("PRIVATE"));
+    }
+    f.parent
+        .insert("ZCODE_BUILTIN_PROVIDER_CONFIG_FILE".into(), "".into());
+    let b = load_zcode(&f).unwrap();
+    assert_eq!(
+        b.extra_env
+            .get(OsStr::new("ZCODE_BUILTIN_PROVIDER_CONFIG_FILE")),
+        Some(&builtin.into_os_string())
+    );
+    assert_eq!(
+        b.extra_env.len(),
+        2,
+        "only explicitly supplied personal configuration stays personal"
+    );
+}
+
+#[test]
+fn zcode_bundle_resource_missing_directory_fifo_socket_and_dangling_link_do_not_derive() {
+    for kind in ["missing", "directory", "fifo", "socket", "dangling"] {
+        let mut f = zcode_fixture();
+        let (program, builtin) = zcode_bundle(&f);
+        f.parent
+            .insert("PULT_ZCODE_BIN".into(), program.into_os_string());
+        fs::remove_file(&builtin).unwrap();
+        let _socket = match kind {
+            "directory" => {
+                fs::create_dir(&builtin).unwrap();
+                None
+            }
+            "fifo" => {
+                assert!(
+                    std::process::Command::new("/usr/bin/mkfifo")
+                        .arg(&builtin)
+                        .env_clear()
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+                None
+            }
+            "socket" => {
+                let short = f._temp.path().join("socket");
+                let listener = std::os::unix::net::UnixListener::bind(&short).unwrap();
+                fs::rename(short, &builtin).unwrap();
+                Some(listener)
+            }
+            "dangling" => {
+                symlink(f.home.join("missing"), &builtin).unwrap();
+                None
+            }
+            _ => None,
+        };
+        assert!(load_zcode(&f).unwrap().extra_env.is_empty(), "kind={kind}");
+    }
+}
+
+#[test]
+fn zcode_bundle_resource_symlink_to_regular_file_follows_metadata_without_copying() {
+    let mut f = zcode_fixture();
+    let (program, builtin) = zcode_bundle(&f);
+    f.parent
+        .insert("PULT_ZCODE_BIN".into(), program.into_os_string());
+    let target = f.home.join("resource-target");
+    fs::write(&target, b"public resource unchanged").unwrap();
+    fs::remove_file(&builtin).unwrap();
+    symlink(&target, &builtin).unwrap();
+    let b = load_zcode(&f).unwrap();
+    assert_eq!(
+        b.extra_env
+            .get(OsStr::new("ZCODE_BUILTIN_PROVIDER_CONFIG_FILE")),
+        Some(&builtin.clone().into_os_string())
+    );
+    assert!(
+        fs::symlink_metadata(&builtin)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read(&target).unwrap(), b"public resource unchanged");
+}
+
+#[test]
+fn zcode_nonbundle_or_wrong_selected_script_never_falls_back_to_another_app() {
+    for suffix in [
+        "Plain/Contents/Resources/glm/zcode.cjs",
+        "Other.app/Contents/Resources/glm/other.cjs",
+        "Other.app/Contents/Resources/wrong/zcode.cjs",
+    ] {
+        let mut f = zcode_fixture();
+        let (_unselected, _resource) = zcode_bundle(&f);
+        let selected = f._temp.path().join(suffix);
+        fs::create_dir_all(selected.parent().unwrap()).unwrap();
+        executable(&selected);
+        f.parent
+            .insert("PULT_ZCODE_BIN".into(), selected.into_os_string());
+        assert!(load_zcode(&f).unwrap().extra_env.is_empty());
+    }
+}
+
+#[test]
+fn zcode_derived_bundle_config_revalidates_existing_extra_environment_capacity() {
+    let mut f = zcode_fixture();
+    let (program, _) = zcode_bundle(&f);
+    f.parent
+        .insert("PULT_ZCODE_BIN".into(), program.into_os_string());
+    let key = "ZCODE_BASE_URL";
+    f.parent
+        .insert(key.into(), "x".repeat(65536 - key.len() - 2).into());
+    assert!(pult_core::zcode_launch::extra_env(&f.parent).is_ok());
+    assert_eq!(load_zcode(&f).err(), Some(StaticError::Environment));
+}
