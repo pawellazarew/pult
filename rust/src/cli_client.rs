@@ -8,7 +8,7 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 #[path = "owner_private_file.rs"]
-mod owner_private_file;
+pub(super) mod owner_private_file;
 
 const HANDSHAKE: Duration = Duration::from_secs(10);
 const REPLAY_WAIT: Duration = Duration::from_secs(3);
@@ -376,6 +376,14 @@ impl OwnerClient {
     pub async fn status(
         home: &Path,
     ) -> Result<(std::path::PathBuf, &'static str, Option<Box<RawValue>>), RpcError> {
+        Self::status_with_deadline(home, None).await
+    }
+    /// Runtime status retains its source 2s handshake/request deadlines without
+    /// changing service/agent transport timing or local-error classification.
+    pub(super) async fn status_with_deadline(
+        home: &Path,
+        deadline: Option<Duration>,
+    ) -> Result<(std::path::PathBuf, &'static str, Option<Box<RawValue>>), RpcError> {
         Self::owner_purpose()?;
         let home = pult_core::checked_home(home).map_err(|_| {
             RpcError::local(
@@ -397,17 +405,27 @@ impl OwnerClient {
         let Some(token) = token else {
             return Ok((home, locale, None));
         };
-        let reply = match owner_connection_at(&home, &token).await {
+        let connection = match deadline {
+            Some(deadline) => tokio::time::timeout(deadline, owner_connection_at(&home, &token))
+                .await
+                .unwrap_or_else(|_| Err(timed_out())),
+            None => owner_connection_at(&home, &token).await,
+        };
+        let reply = match connection {
             Ok(reader) => {
                 let mut client = Self {
                     reader,
                     locale,
                     next_id: 1,
                 };
-                client
-                    .request("daemon.status", json!({}), ResponsePolicy::Ordinary)
-                    .await
-                    .ok()
+                let request = client.request("daemon.status", json!({}), ResponsePolicy::Ordinary);
+                match deadline {
+                    Some(deadline) => tokio::time::timeout(deadline, request)
+                        .await
+                        .ok()
+                        .and_then(Result::ok),
+                    None => request.await.ok(),
+                }
             }
             Err(_) => None,
         };

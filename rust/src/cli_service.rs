@@ -1,21 +1,9 @@
 //! Private, bounded service observation. No install/start/stop authority.
-use anyhow::{Context as _, Result, ensure};
-use nix::{
-    sys::signal::{Signal, killpg},
-    unistd::Pid,
-};
+use anyhow::Result;
 use regex::Regex;
-use rustix::process::{WaitId, WaitIdOptions, waitid};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::time::Duration;
-use tokio::{
-    io::{AsyncRead, AsyncReadExt},
-    process::{Child, Command},
-};
-
-const CLEANUP: Duration = Duration::from_secs(2);
+use tokio::process::Command;
 
 pub const LIMIT: usize = 1024 * 1024;
 #[derive(Clone, Serialize, PartialEq, Debug)]
@@ -442,149 +430,6 @@ fn read_file(path: &Path) -> Result<Option<String>, &'static str> {
     Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
 }
 
-// Bounded all-zombie proof copied from the reviewed memory acceptance harness;
-// the query leader remains unreaped until the last group signal.
-#[cfg(target_os = "macos")]
-fn zombie_members(bytes: &[u8], leader: i32) -> Result<std::collections::BTreeSet<u32>> {
-    use std::collections::BTreeSet;
-    let output = std::str::from_utf8(bytes).context("invalid process snapshot")?;
-    let mut pids = BTreeSet::new();
-    let mut members = BTreeSet::new();
-    for line in output.lines().filter(|line| !line.trim().is_empty()) {
-        let fields: Vec<_> = line.split_whitespace().collect();
-        ensure!(fields.len() == 3, "ambiguous process snapshot");
-        let pid: u32 = fields[0].parse().context("invalid process pid")?;
-        let group: u32 = fields[1].parse().context("invalid process group")?;
-        ensure!(
-            pid <= i32::MAX as u32 && group <= i32::MAX as u32,
-            "process id overflow"
-        );
-        ensure!(pids.insert(pid), "duplicate process snapshot pid");
-        let status = fields[2];
-        ensure!(
-            !status.is_empty() && status.bytes().all(|b| b.is_ascii_graphic()),
-            "invalid process status"
-        );
-        if group == leader as u32 {
-            ensure!(
-                pid > 0 && status.starts_with('Z'),
-                "group member still executing"
-            );
-            members.insert(pid);
-        }
-    }
-    ensure!(
-        members.contains(&(leader as u32)),
-        "owned zombie leader missing"
-    );
-    Ok(members)
-}
-
-#[cfg(target_os = "macos")]
-async fn process_snapshot(deadline: tokio::time::Instant) -> Result<Vec<u8>> {
-    const MAX_SNAPSHOT: u64 = 2 * 1024 * 1024;
-    let mut child = Command::new("/bin/ps")
-        .args(["-axo", "pid=,pgid=,stat="])
-        .env_clear()
-        .env("LC_ALL", "C")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .context("process snapshot unavailable")?;
-    let result = tokio::time::timeout_at(deadline, async {
-        let output = child
-            .stdout
-            .take()
-            .context("process snapshot stdout missing")?;
-        let mut bytes = Vec::new();
-        output
-            .take(MAX_SNAPSHOT + 1)
-            .read_to_end(&mut bytes)
-            .await?;
-        ensure!(
-            bytes.len() as u64 <= MAX_SNAPSHOT,
-            "process snapshot exceeds budget"
-        );
-        ensure!(child.wait().await?.success(), "process snapshot failed");
-        Ok(bytes)
-    })
-    .await;
-    match result {
-        Ok(Ok(bytes)) => Ok(bytes),
-        result => {
-            // Only the inspection child is reaped here, never the pinned Node
-            // leader. Failure/timeout cannot become group cleanup confirmation.
-            let _ = child.start_kill();
-            let _ = tokio::time::timeout(CLEANUP, child.wait()).await;
-            match result {
-                Ok(Err(error)) => Err(error),
-                Err(_) => anyhow::bail!("process snapshot deadline"),
-                Ok(Ok(_)) => unreachable!(),
-            }
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-async fn confirm_zombie_group(leader: i32) -> Result<()> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
-    // Retain the unreaped leader through two bounded enumerations. Any live,
-    // missing, ambiguous or changing membership stays cleanup-unconfirmed.
-    let first = zombie_members(&process_snapshot(deadline).await?, leader)?;
-    let second = zombie_members(&process_snapshot(deadline).await?, leader)?;
-    ensure!(
-        first == second,
-        "process group membership changed during proof"
-    );
-    Ok(())
-}
-
-struct Query {
-    child: Child,
-    group: Pid,
-    may_signal: bool,
-}
-impl Query {
-    fn exited(&mut self) -> anyhow::Result<bool> {
-        let pid =
-            rustix::process::Pid::from_raw(self.group.as_raw()).context("invalid query pid")?;
-        match waitid(
-            WaitId::Pid(pid),
-            WaitIdOptions::EXITED | WaitIdOptions::NOWAIT | WaitIdOptions::NOHANG,
-        ) {
-            Ok(status) => Ok(status.is_some()),
-            Err(rustix::io::Errno::INTR) => Ok(false),
-            Err(_) => {
-                self.may_signal = false;
-                anyhow::bail!("query ownership is unknown")
-            }
-        }
-    }
-    async fn cleanup(&mut self) -> anyhow::Result<std::process::ExitStatus> {
-        ensure!(self.may_signal, "query ownership is unknown");
-        match killpg(self.group, Signal::SIGKILL) {
-            Ok(()) | Err(nix::errno::Errno::ESRCH) => (),
-            #[cfg(target_os = "macos")]
-            Err(nix::errno::Errno::EPERM) => {
-                ensure!(self.exited()?, "query leader is still executing");
-                confirm_zombie_group(self.group.as_raw()).await?;
-            }
-            Err(_) => anyhow::bail!("query group cleanup is unconfirmed"),
-        }
-        // No signal may target this group after releasing the leader PID.
-        self.may_signal = false;
-        Ok(tokio::time::timeout(CLEANUP, self.child.wait()).await??)
-    }
-}
-impl Drop for Query {
-    fn drop(&mut self) {
-        if self.may_signal {
-            let _ = killpg(self.group, Signal::SIGKILL);
-        }
-    }
-}
 fn query_args(ctx: &Context) -> Vec<String> {
     if ctx.platform == "darwin" {
         vec![
@@ -631,16 +476,23 @@ fn query_env() -> std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsStr
     }
     env
 }
-async fn capture_pipe(pipe: impl AsyncRead + Unpin) -> Result<Vec<u8>, &'static str> {
-    let mut bytes = Vec::new();
-    pipe.take(LIMIT as u64 + 1)
-        .read_to_end(&mut bytes)
-        .await
-        .map_err(|_| "service manager output failed")?;
-    if bytes.len() > LIMIT {
-        return Err("service manager output exceeds 1 MiB limit");
+fn query_error(error: crate::cli_owned_query::Error) -> &'static str {
+    use crate::cli_owned_query::Error;
+    match error {
+        Error::Spawn => "service manager cannot be started",
+        Error::PidUnavailable => "service manager pid is unavailable",
+        Error::PidInvalid => "service manager pid is invalid",
+        Error::StdoutUnavailable => "service manager stdout is unavailable",
+        Error::StderrUnavailable => "service manager stderr is unavailable",
+        Error::Ownership => "service manager ownership is unknown",
+        Error::Timeout => "service manager query timed out",
+        Error::Interrupted => "service status interrupted",
+        Error::Output => "service manager output failed",
+        Error::Overflow => "service manager output exceeds 1 MiB limit",
+        Error::Cleanup => "service manager cleanup is unconfirmed",
+        Error::OutputCleanup => "service manager output cleanup timed out",
+        Error::OutputUnavailable => "service manager output is unavailable",
     }
-    Ok(bytes)
 }
 async fn query(
     ctx: &Context,
@@ -661,97 +513,20 @@ async fn query(
     {
         return Err("service manager environment exceeds limit");
     }
-    let child = Command::new(bin)
-        .args(query_args(ctx))
-        .env_clear()
-        .envs(env)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|_| "service manager cannot be started")?;
-    let group = Pid::from_raw(
-        i32::try_from(child.id().ok_or("service manager pid is unavailable")?)
-            .map_err(|_| "service manager pid is invalid")?,
-    );
-    let mut owner = Query {
-        child,
-        group,
-        may_signal: true,
-    };
-    let mut reads = tokio::task::JoinSet::new();
-    let stdout = owner
-        .child
-        .stdout
-        .take()
-        .ok_or("service manager stdout is unavailable")?;
-    let stderr = owner
-        .child
-        .stderr
-        .take()
-        .ok_or("service manager stderr is unavailable")?;
-    reads.spawn(async move { (true, capture_pipe(stdout).await) });
-    reads.spawn(async move { (false, capture_pipe(stderr).await) });
-    let mut output = None;
-    let mut error_output = None;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-    let result = loop {
-        match owner.exited() {
-            Ok(true) => break Ok(()),
-            Ok(false) => (),
-            Err(_) => break Err("service manager ownership is unknown"),
-        }
-        tokio::select! {
-            _ = tokio::time::sleep_until(deadline) => break Err("service manager query timed out"),
-            _ = interrupt.recv() => { *cancelled = true; break Err("service status interrupted"); },
-            item = reads.join_next(), if !reads.is_empty() => match item {
-                Some(Ok((out, Ok(bytes)))) => if out { output = Some(bytes); } else { error_output = Some(bytes); },
-                Some(Ok((_, Err(error)))) => break Err(error),
-                _ => break Err("service manager output failed"),
-            },
-            _ = tokio::time::sleep(Duration::from_millis(10)) => (),
-        }
-    };
-    // Even EOF/timeout/overflow/cancellation must kill descendants before reap.
-    let cleanup = owner.cleanup().await;
-    if cleanup.is_err() {
-        *cleanup_failed = true;
-        reads.abort_all();
-    }
-    let mut read_error = None;
-    loop {
-        match tokio::time::timeout(CLEANUP, reads.join_next()).await {
-            Ok(Some(Ok((out, Ok(bytes))))) => {
-                if out {
-                    output = Some(bytes);
-                } else {
-                    error_output = Some(bytes);
-                }
-            }
-            Ok(Some(Ok((_, Err(error))))) => {
-                read_error.get_or_insert(error);
-            }
-            Ok(Some(Err(_))) => {
-                *cleanup_failed = true;
-                read_error.get_or_insert("service manager output failed");
-            }
-            Ok(None) => break,
-            Err(_) => {
-                *cleanup_failed = true;
-                reads.abort_all();
-                while reads.join_next().await.is_some() {}
-                read_error = Some("service manager output cleanup timed out");
-                break;
-            }
-        }
-    }
-    let status = cleanup.map_err(|_| "service manager cleanup is unconfirmed")?;
-    result?;
-    if let Some(error) = read_error {
-        return Err(error);
-    }
+    let mut command = Command::new(bin);
+    command.args(query_args(ctx)).env_clear().envs(env);
+    let result = crate::cli_owned_query::run(
+        &mut command,
+        crate::cli_owned_query::Kind::Service,
+        cancelled,
+        cleanup_failed,
+        interrupt,
+    )
+    .await
+    .map_err(query_error)?;
+    let status = result.status;
+    let output = Some(result.stdout);
+    let error_output = Some(result.stderr);
     let output = String::from_utf8_lossy(
         output
             .as_deref()

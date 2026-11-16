@@ -1,0 +1,953 @@
+{
+  "source": "actual createManager",
+  "actions": [
+    {
+      "op": "read",
+      "expected": {
+        "usage": []
+      }
+    },
+    {
+      "op": "create",
+      "name": "z-last",
+      "provider": "zcode",
+      "archived": true,
+      "expected": {
+        "usage": [
+          {
+            "session": "z-last",
+            "provider": "zcode",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          }
+        ]
+      }
+    },
+    {
+      "op": "create",
+      "name": "a-first",
+      "provider": "codex",
+      "archived": false,
+      "expected": {
+        "usage": [
+          {
+            "session": "z-last",
+            "provider": "zcode",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          },
+          {
+            "session": "a-first",
+            "provider": "codex",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          }
+        ]
+      }
+    },
+    {
+      "op": "create",
+      "name": "claude",
+      "provider": "claude",
+      "archived": false,
+      "expected": {
+        "usage": [
+          {
+            "session": "z-last",
+            "provider": "zcode",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          },
+          {
+            "session": "a-first",
+            "provider": "codex",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          },
+          {
+            "session": "claude",
+            "provider": "claude",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          }
+        ]
+      }
+    },
+    {
+      "op": "emit",
+      "name": "a-first",
+      "data": {
+        "source": "result",
+        "totalCostUsd": 1.25,
+        "numTurns": 99,
+        "usage": {
+          "input_tokens": 1.5,
+          "output_tokens": 4,
+          "cache_read_input_tokens": null,
+          "cache_creation_input_tokens": 100
+        }
+      },
+      "parentId": "child",
+      "expected": {
+        "usage": [
+          {
+            "session": "z-last",
+            "provider": "zcode",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          },
+          {
+            "session": "a-first",
+            "provider": "codex",
+            "totalCostUsd": 1.25,
+            "inputTokens": 1.5,
+            "outputTokens": 4,
+            "cacheReadTokens": 0,
+            "turns": 1,
+            "rateLimit": null
+          },
+          {
+            "session": "claude",
+            "provider": "claude",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          }
+        ]
+      }
+    },
+    {
+      "op": "emit",
+      "name": "a-first",
+      "data": {
+        "source": "result",
+        "totalCostUsd": 0,
+        "usage": {
+          "input_tokens": -0.5,
+          "output_tokens": null,
+          "cache_read_input_tokens": 2
+        }
+      },
+      "expected": {
+        "usage": [
+          {
+            "session": "z-last",
+            "provider": "zcode",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          },
+          {
+            "session": "a-first",
+            "provider": "codex",
+            "totalCostUsd": 0,
+            "inputTokens": 1,
+            "outputTokens": 4,
+            "cacheReadTokens": 2,
+            "turns": 2,
+            "rateLimit": null
+          },
+          {
+            "session": "claude",
+            "provider": "claude",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          }
+        ]
+      }
+    },
+    {
+      "op": "emit",
+      "name": "a-first",
+      "data": {
+        "source": "result",
+        "totalCostUsd": null,
+        "usage": null
+      },
+      "expected": {
+        "usage": [
+          {
+            "session": "z-last",
+            "provider": "zcode",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          },
+          {
+            "session": "a-first",
+            "provider": "codex",
+            "totalCostUsd": 0,
+            "inputTokens": 1,
+            "outputTokens": 4,
+            "cacheReadTokens": 2,
+            "turns": 3,
+            "rateLimit": null
+          },
+          {
+            "session": "claude",
+            "provider": "claude",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          }
+        ]
+      }
+    },
+    {
+      "op": "emit",
+      "name": "a-first",
+      "data": {
+        "source": "rate_limit_event",
+        "status": "allowed",
+        "windows": {
+          "five_hour": {
+            "utilization": 0.125,
+            "future": [
+              "\ud800",
+              "🚀"
+            ]
+          },
+          "seven_day": null,
+          "opaque": {
+            "a": true
+          }
+        },
+        "resetsAt": null,
+        "ignored": "not retained"
+      },
+      "expected": {
+        "usage": [
+          {
+            "session": "z-last",
+            "provider": "zcode",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          },
+          {
+            "session": "a-first",
+            "provider": "codex",
+            "totalCostUsd": 0,
+            "inputTokens": 1,
+            "outputTokens": 4,
+            "cacheReadTokens": 2,
+            "turns": 3,
+            "rateLimit": {
+              "status": "allowed",
+              "windows": {
+                "five_hour": {
+                  "utilization": 0.125,
+                  "future": [
+                    "\ud800",
+                    "🚀"
+                  ]
+                },
+                "seven_day": null,
+                "opaque": {
+                  "a": true
+                }
+              },
+              "resetsAt": null
+            }
+          },
+          {
+            "session": "claude",
+            "provider": "claude",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          }
+        ]
+      }
+    },
+    {
+      "op": "emit",
+      "name": "a-first",
+      "data": {
+        "source": "result",
+        "totalCostUsd": -1.00005,
+        "usage": {}
+      },
+      "expected": {
+        "usage": [
+          {
+            "session": "z-last",
+            "provider": "zcode",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          },
+          {
+            "session": "a-first",
+            "provider": "codex",
+            "totalCostUsd": -1.00005,
+            "inputTokens": 1,
+            "outputTokens": 4,
+            "cacheReadTokens": 2,
+            "turns": 4,
+            "rateLimit": {
+              "status": "allowed",
+              "windows": {
+                "five_hour": {
+                  "utilization": 0.125,
+                  "future": [
+                    "\ud800",
+                    "🚀"
+                  ]
+                },
+                "seven_day": null,
+                "opaque": {
+                  "a": true
+                }
+              },
+              "resetsAt": null
+            }
+          },
+          {
+            "session": "claude",
+            "provider": "claude",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          }
+        ]
+      }
+    },
+    {
+      "op": "emit",
+      "name": "a-first",
+      "data": {
+        "source": "rate_limit_event"
+      },
+      "expected": {
+        "usage": [
+          {
+            "session": "z-last",
+            "provider": "zcode",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          },
+          {
+            "session": "a-first",
+            "provider": "codex",
+            "totalCostUsd": -1.00005,
+            "inputTokens": 1,
+            "outputTokens": 4,
+            "cacheReadTokens": 2,
+            "turns": 4,
+            "rateLimit": {}
+          },
+          {
+            "session": "claude",
+            "provider": "claude",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          }
+        ]
+      }
+    },
+    {
+      "op": "emit",
+      "name": "ghost",
+      "data": {
+        "source": "result",
+        "totalCostUsd": 3,
+        "usage": {
+          "input_tokens": 9007199254740992
+        }
+      },
+      "expected": {
+        "usage": [
+          {
+            "session": "z-last",
+            "provider": "zcode",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          },
+          {
+            "session": "a-first",
+            "provider": "codex",
+            "totalCostUsd": -1.00005,
+            "inputTokens": 1,
+            "outputTokens": 4,
+            "cacheReadTokens": 2,
+            "turns": 4,
+            "rateLimit": {}
+          },
+          {
+            "session": "claude",
+            "provider": "claude",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          }
+        ]
+      }
+    },
+    {
+      "op": "create",
+      "name": "ghost",
+      "provider": "zcode",
+      "archived": false,
+      "expected": {
+        "usage": [
+          {
+            "session": "z-last",
+            "provider": "zcode",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          },
+          {
+            "session": "a-first",
+            "provider": "codex",
+            "totalCostUsd": -1.00005,
+            "inputTokens": 1,
+            "outputTokens": 4,
+            "cacheReadTokens": 2,
+            "turns": 4,
+            "rateLimit": {}
+          },
+          {
+            "session": "claude",
+            "provider": "claude",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          },
+          {
+            "session": "ghost",
+            "provider": "claude",
+            "totalCostUsd": 3,
+            "inputTokens": 9007199254740992,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 1,
+            "rateLimit": null
+          }
+        ]
+      }
+    },
+    {
+      "op": "emit",
+      "name": "claude",
+      "data": {
+        "source": "unknown"
+      },
+      "expected": {
+        "usage": [
+          {
+            "session": "z-last",
+            "provider": "zcode",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          },
+          {
+            "session": "a-first",
+            "provider": "codex",
+            "totalCostUsd": -1.00005,
+            "inputTokens": 1,
+            "outputTokens": 4,
+            "cacheReadTokens": 2,
+            "turns": 4,
+            "rateLimit": {}
+          },
+          {
+            "session": "claude",
+            "provider": "claude",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          },
+          {
+            "session": "ghost",
+            "provider": "claude",
+            "totalCostUsd": 3,
+            "inputTokens": 9007199254740992,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 1,
+            "rateLimit": null
+          }
+        ]
+      }
+    },
+    {
+      "op": "direct",
+      "name": "claude",
+      "expected": {
+        "usage": [
+          {
+            "session": "z-last",
+            "provider": "zcode",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          },
+          {
+            "session": "a-first",
+            "provider": "codex",
+            "totalCostUsd": -1.00005,
+            "inputTokens": 1,
+            "outputTokens": 4,
+            "cacheReadTokens": 2,
+            "turns": 4,
+            "rateLimit": {}
+          },
+          {
+            "session": "claude",
+            "provider": "claude",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          },
+          {
+            "session": "ghost",
+            "provider": "claude",
+            "totalCostUsd": 3,
+            "inputTokens": 9007199254740992,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 1,
+            "rateLimit": null
+          }
+        ]
+      }
+    },
+    {
+      "op": "archive",
+      "name": "a-first",
+      "expected": {
+        "usage": [
+          {
+            "session": "z-last",
+            "provider": "zcode",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          },
+          {
+            "session": "a-first",
+            "provider": "codex",
+            "totalCostUsd": -1.00005,
+            "inputTokens": 1,
+            "outputTokens": 4,
+            "cacheReadTokens": 2,
+            "turns": 4,
+            "rateLimit": {}
+          },
+          {
+            "session": "claude",
+            "provider": "claude",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          },
+          {
+            "session": "ghost",
+            "provider": "claude",
+            "totalCostUsd": 3,
+            "inputTokens": 9007199254740992,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 1,
+            "rateLimit": null
+          }
+        ]
+      }
+    },
+    {
+      "op": "remove",
+      "name": "ghost",
+      "expected": {
+        "usage": [
+          {
+            "session": "z-last",
+            "provider": "zcode",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          },
+          {
+            "session": "a-first",
+            "provider": "codex",
+            "totalCostUsd": -1.00005,
+            "inputTokens": 1,
+            "outputTokens": 4,
+            "cacheReadTokens": 2,
+            "turns": 4,
+            "rateLimit": {}
+          },
+          {
+            "session": "claude",
+            "provider": "claude",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          }
+        ]
+      }
+    },
+    {
+      "op": "create",
+      "name": "ghost",
+      "provider": "codex",
+      "archived": false,
+      "expected": {
+        "usage": [
+          {
+            "session": "z-last",
+            "provider": "zcode",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          },
+          {
+            "session": "a-first",
+            "provider": "codex",
+            "totalCostUsd": -1.00005,
+            "inputTokens": 1,
+            "outputTokens": 4,
+            "cacheReadTokens": 2,
+            "turns": 4,
+            "rateLimit": {}
+          },
+          {
+            "session": "claude",
+            "provider": "claude",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          },
+          {
+            "session": "ghost",
+            "provider": "codex",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          }
+        ]
+      }
+    },
+    {
+      "op": "emit",
+      "name": "z-last",
+      "data": {
+        "source": "result",
+        "usage": {
+          "input_tokens": 1e+308
+        }
+      },
+      "expected": {
+        "usage": [
+          {
+            "session": "z-last",
+            "provider": "zcode",
+            "totalCostUsd": 0,
+            "inputTokens": 1e+308,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 1,
+            "rateLimit": null
+          },
+          {
+            "session": "a-first",
+            "provider": "codex",
+            "totalCostUsd": -1.00005,
+            "inputTokens": 1,
+            "outputTokens": 4,
+            "cacheReadTokens": 2,
+            "turns": 4,
+            "rateLimit": {}
+          },
+          {
+            "session": "claude",
+            "provider": "claude",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          },
+          {
+            "session": "ghost",
+            "provider": "codex",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          }
+        ]
+      }
+    },
+    {
+      "op": "emit",
+      "name": "z-last",
+      "data": {
+        "source": "result",
+        "usage": {
+          "input_tokens": 1e+308
+        }
+      },
+      "expected": {
+        "usage": [
+          {
+            "session": "z-last",
+            "provider": "zcode",
+            "totalCostUsd": 0,
+            "inputTokens": null,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 2,
+            "rateLimit": null
+          },
+          {
+            "session": "a-first",
+            "provider": "codex",
+            "totalCostUsd": -1.00005,
+            "inputTokens": 1,
+            "outputTokens": 4,
+            "cacheReadTokens": 2,
+            "turns": 4,
+            "rateLimit": {}
+          },
+          {
+            "session": "claude",
+            "provider": "claude",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          },
+          {
+            "session": "ghost",
+            "provider": "codex",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          }
+        ]
+      }
+    },
+    {
+      "op": "emit",
+      "name": "z-last",
+      "data": {
+        "source": "result",
+        "usage": {
+          "input_tokens": -1e+308
+        }
+      },
+      "expected": {
+        "usage": [
+          {
+            "session": "z-last",
+            "provider": "zcode",
+            "totalCostUsd": 0,
+            "inputTokens": null,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 3,
+            "rateLimit": null
+          },
+          {
+            "session": "a-first",
+            "provider": "codex",
+            "totalCostUsd": -1.00005,
+            "inputTokens": 1,
+            "outputTokens": 4,
+            "cacheReadTokens": 2,
+            "turns": 4,
+            "rateLimit": {}
+          },
+          {
+            "session": "claude",
+            "provider": "claude",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          },
+          {
+            "session": "ghost",
+            "provider": "codex",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          }
+        ]
+      }
+    },
+    {
+      "op": "restart",
+      "expected": {
+        "usage": [
+          {
+            "session": "z-last",
+            "provider": "zcode",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          },
+          {
+            "session": "a-first",
+            "provider": "codex",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          },
+          {
+            "session": "claude",
+            "provider": "claude",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          },
+          {
+            "session": "ghost",
+            "provider": "codex",
+            "totalCostUsd": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "turns": 0,
+            "rateLimit": null
+          }
+        ]
+      }
+    }
+  ]
+}

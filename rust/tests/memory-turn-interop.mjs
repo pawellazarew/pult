@@ -285,7 +285,7 @@ try {
       assert.equal(legacy.hello.type, 'hello_ok')
       assert.equal(legacy.hello.capabilities.supportedMethods.length, 4)
       assert.equal((await legacy.request('memory.update', { id: note.id, expectedVersion: 2, commandId: 'legacy-denied', summary: 'MUST_NOT_COMMIT', reason: 'fixture' })).error.code, 'forbidden')
-      for (const method of ['agent.recovery.get', 'agent.recovery.confirm']) {
+      for (const method of ['agent.recovery.get', 'agent.recovery.confirm', 'usage.get']) {
         assert.equal((await legacy.request(method, { name: 'writer', recoveryId: 'zr-forged', acknowledgePossibleExecution: true })).error.code, 'forbidden')
       }
     } finally { legacy.close() }
@@ -297,7 +297,7 @@ try {
       assert.equal(turn.hello.type, 'hello_ok')
       assert.equal(turn.hello.capabilities.supportedMethods.length, 7)
       assert.equal((await turn.request('agent.list')).error.code, 'forbidden')
-      for (const method of ['agent.recovery.get', 'agent.recovery.confirm']) {
+      for (const method of ['agent.recovery.get', 'agent.recovery.confirm', 'usage.get']) {
         assert.equal((await turn.request(method, { name: 'writer', recoveryId: 'zr-forged', acknowledgePossibleExecution: true })).error.code, 'forbidden')
       }
     } finally { turn.close() }

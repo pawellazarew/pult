@@ -234,7 +234,7 @@ try {
     for (const [method, params] of [
       ['memory.add', add('scope-write')], ['memory.update', { id: noteA.id, expectedVersion: 1, commandId: 'scope-update', reason: 'denied', summary: 'denied' }],
       ['memory.forget', { id: noteA.id, expectedVersion: 1, commandId: 'scope-forget', reason: 'denied' }],
-      ['memory.history', { id: noteA.id }], ['daemon.status', {}], ['daemon.stop', {}], ['events.tail', {}],
+      ['memory.history', { id: noteA.id }], ['usage.get', {}], ['daemon.status', {}], ['daemon.stop', {}], ['events.tail', {}],
       ['protocol.catalog', {}], ['memory.context.issue', { session: 'project-b' }], ['agent.archive', { name: 'project-b', archived: true }],
     ]) await denied(clientA, method, params)
     assert.deepEqual(await read(clientA, 'get', { id: noteA.id }), noteA)

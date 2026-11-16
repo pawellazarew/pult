@@ -4091,12 +4091,82 @@
     {
       "name": "usage.get",
       "node": "implemented",
-      "rust": "unported",
+      "rust": "implemented",
       "access": "owner",
       "testOnly": false,
-      "description": "Migration inventory for usage.get.",
-      "paramsSchema": null,
-      "resultSchema": null
+      "description": "Read daemon-epoch usage for all registered sessions in registry order. Restart resets totals; bounded host projection may explicitly become unavailable independently of execution.",
+      "paramsSchema": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "resultSchema": {
+        "type": "object",
+        "required": [
+          "usage"
+        ],
+        "properties": {
+          "usage": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "session",
+                "provider",
+                "totalCostUsd",
+                "inputTokens",
+                "outputTokens",
+                "cacheReadTokens",
+                "turns",
+                "rateLimit"
+              ],
+              "properties": {
+                "session": {
+                  "type": "string"
+                },
+                "provider": {
+                  "type": "string"
+                },
+                "totalCostUsd": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "inputTokens": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "outputTokens": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "cacheReadTokens": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "turns": {
+                  "type": "number"
+                },
+                "rateLimit": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "additionalProperties": true
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      }
     }
   ]
 }

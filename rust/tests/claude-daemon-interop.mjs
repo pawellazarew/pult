@@ -73,7 +73,7 @@ async function askCannotRecover(key) {
     const hello = await exchange({ type: 'hello', protocol: 1, client: 'mcp-ask', ask: key })
     assert.equal(hello.type, 'hello_ok')
     assert.deepEqual(hello.capabilities.supportedMethods, ['perm.request'])
-    for (const [id, method] of ['agent.recovery.get', 'agent.recovery.confirm'].entries()) {
+    for (const [id, method] of ['agent.recovery.get', 'agent.recovery.confirm', 'usage.get'].entries()) {
       const result = await exchange({ id, method, params: { name: 'ask', recoveryId: 'zr-forged', acknowledgePossibleExecution: true } })
       assert.equal(result.error.code, 'forbidden')
     }

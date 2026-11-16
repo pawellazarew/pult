@@ -59,11 +59,11 @@ describe('RPC catalog generation and source drift', () => {
     })
   })
 
-  it('keeps partial schemas separate from the 30 fully implemented methods', () => {
+  it('keeps partial schemas separate from the 31 fully implemented methods', () => {
     const catalog = JSON.parse(readFileSync(catalogSource, 'utf8')) as Catalog
     const implemented = catalog.methods.filter((method) => method.rust === 'implemented').map((method) => method.name)
     const partial = catalog.methods.filter((method) => method.rust === 'partial')
-    assert.equal(implemented.length, 30)
+    assert.equal(implemented.length, 31)
     assert.equal(catalog.methods.length, 101)
     assert.equal(catalog.methods.filter((method) => method.node === 'implemented').length, 85)
     assert.deepEqual(partial.map((method) => method.name), ['agent.list', 'agent.prompt', 'agent.queue.move', 'agent.queue.remove', 'agent.queue.resume', 'agent.queue.send', 'agent.start', 'agent.stop', 'agent.wait', 'perm.list', 'perm.request', 'perm.resolve'])

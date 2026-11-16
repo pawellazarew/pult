@@ -3,7 +3,7 @@ use crate::cli_client::{self, OwnerClient, ResponsePolicy, RpcError};
 use serde_json::{Value, json, value::RawValue};
 use std::path::Path;
 
-type Fields = pult_core::RawFields;
+pub(super) type Fields = pult_core::RawFields;
 pub(super) enum Command {
     List,
     Stop {
@@ -29,10 +29,10 @@ fn invalid() -> RpcError {
 fn capacity() -> RpcError {
     RpcError::local("capacity", "agent display exceeds rendering limits")
 }
-fn fields(raw: &RawValue) -> Result<Fields, RpcError> {
+pub(super) fn fields(raw: &RawValue) -> Result<Fields, RpcError> {
     Fields::parse(raw).map_err(|_| invalid())
 }
-fn object(raw: Option<&RawValue>) -> Option<Fields> {
+pub(super) fn object(raw: Option<&RawValue>) -> Option<Fields> {
     raw.filter(|v| v.get().starts_with('{'))
         .and_then(|v| fields(v).ok())
 }
@@ -40,7 +40,7 @@ fn string(raw: Option<&RawValue>) -> Option<String> {
     raw.filter(|v| v.get().starts_with('"'))
         .and_then(|v| pult_core::display_string(v).ok())
 }
-fn numeric(raw: Option<&RawValue>) -> Option<f64> {
+pub(super) fn numeric(raw: Option<&RawValue>) -> Option<f64> {
     let raw = raw?.get();
     (!raw.starts_with(['"', '[', '{']) && !matches!(raw, "null" | "true" | "false"))
         .then(|| raw.parse().ok())
@@ -120,13 +120,13 @@ fn js_string(raw: &RawValue) -> Result<String, RpcError> {
     }
     Ok(out)
 }
-fn display(raw: Option<&RawValue>) -> Result<String, RpcError> {
+pub(super) fn display(raw: Option<&RawValue>) -> Result<String, RpcError> {
     raw.map(js_string).unwrap_or_else(|| Ok("undefined".into()))
 }
 fn js_space(c: char) -> bool {
     matches!(c as u32, 0x0009..=0x000d | 0x0020 | 0x00a0 | 0x1680 | 0x2000..=0x200a | 0x2028 | 0x2029 | 0x202f | 0x205f | 0x3000 | 0xfeff)
 }
-fn number(raw: Option<&RawValue>) -> Result<f64, RpcError> {
+pub(super) fn number(raw: Option<&RawValue>) -> Result<f64, RpcError> {
     let Some(raw) = raw else {
         return Ok(f64::NAN);
     };
@@ -175,7 +175,7 @@ fn number(raw: Option<&RawValue>) -> Result<f64, RpcError> {
         f64::NAN
     })
 }
-fn truthy(raw: &RawValue) -> bool {
+pub(super) fn truthy(raw: &RawValue) -> bool {
     match raw.get() {
         "null" | "false" => false,
         "true" => true,
@@ -184,10 +184,10 @@ fn truthy(raw: &RawValue) -> bool {
         s => s.parse::<f64>().is_ok_and(|v| v != 0.0 && !v.is_nan()),
     }
 }
-fn get<'a>(fields: &'a Fields, key: &str) -> Option<&'a RawValue> {
+pub(super) fn get<'a>(fields: &'a Fields, key: &str) -> Option<&'a RawValue> {
     fields.get(key)
 }
-fn round(n: f64) -> f64 {
+pub(super) fn round(n: f64) -> f64 {
     if !n.is_finite() {
         return n;
     }
@@ -234,7 +234,7 @@ fn unread(fields: &Fields) -> bool {
     }
     id > numeric(get(fields, "lastSeenEventId")).unwrap_or(0.0)
 }
-fn push(out: &mut String, value: &str) -> Result<(), RpcError> {
+pub(super) fn push(out: &mut String, value: &str) -> Result<(), RpcError> {
     if out.len().saturating_add(value.len()) > pult_core::MAX_LINE {
         return Err(capacity());
     }
