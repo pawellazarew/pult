@@ -189,6 +189,8 @@ for line in sys.stdin:
             event('turn.completed', dict(response='native permission fixture complete', resultType='success',
                   tokenCount=1, toolCallCount=1, duration=1))
     elif method == 'session/close':
+        proof['closeReceived'] = True
+        save()
         output(dict(id=r['id'], result=dict(closed=True)))
         break
     else:

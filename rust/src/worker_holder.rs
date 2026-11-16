@@ -15,9 +15,110 @@ use std::time::{Duration, Instant};
 async fn main() {
     pult_core::panic_guard::install();
     // Arguments, spawn failures and provider stderr may contain private data.
-    // No diagnostics are copied into the holder's own protocol or stderr.
-    let code = run().await.unwrap_or(125);
+    // No arbitrary diagnostics enter the protocol/stderr; failures may emit
+    // only a fixed phase/errno hint, never private data or cleanup authority.
+    let code = match run().await {
+        Ok(code) => code,
+        Err(error) => {
+            emit_failure_observation(&error);
+            125
+        }
+    };
     std::process::exit(code);
+}
+
+fn failure_observation(error: &anyhow::Error) -> String {
+    // Compare only our fixed labels. Never expose Display, provider stderr,
+    // argv or paths. Most-specific causes precede their cleanup contexts.
+    let labels: Vec<_> = error.chain().map(ToString::to_string).collect();
+    let phase = [
+        ("process snapshot deadline", "snapshot_deadline"),
+        ("process snapshot unavailable", "snapshot_spawn"),
+        ("process snapshot stdout missing", "snapshot_pipe"),
+        ("process snapshot exceeds budget", "snapshot_budget"),
+        ("process snapshot failed", "snapshot_exit"),
+        ("invalid process snapshot", "snapshot_parse"),
+        ("ambiguous process snapshot", "snapshot_parse"),
+        ("invalid process pid", "snapshot_parse"),
+        ("invalid process group", "snapshot_parse"),
+        ("process id overflow", "snapshot_parse"),
+        ("duplicate process snapshot pid", "snapshot_parse"),
+        ("invalid process status", "snapshot_parse"),
+        ("owned zombie leader missing", "zombie_leader_missing"),
+        ("group member still executing", "group_member_running"),
+        (
+            "process group membership changed during proof",
+            "zombie_membership_changed",
+        ),
+        ("leader still executing", "leader_running"),
+        ("leader waitability deadline", "waitability_deadline"),
+        ("group TERM failed", "group_term"),
+        ("group KILL failed", "group_kill"),
+        ("leader reap failed", "leader_reap"),
+        ("provider output drain unconfirmed", "output_drain"),
+        ("provider output forwarding failed", "output_forwarding"),
+    ]
+    .into_iter()
+    .find_map(|(label, phase)| labels.iter().any(|value| value == label).then_some(phase))
+    .unwrap_or("other");
+    let errno = error
+        .downcast_ref::<std::io::Error>()
+        .and_then(std::io::Error::raw_os_error)
+        .or_else(|| error.downcast_ref::<nix::errno::Errno>().map(|e| *e as i32))
+        .map_or_else(|| "none".to_owned(), |value| value.to_string());
+    format!("PULT_HOLDER_DIAG phase={phase} errno={errno}\n")
+}
+
+fn emit_failure_observation(error: &anyhow::Error) {
+    use std::os::fd::AsFd;
+    // The forwarder can hold Rust's stderr lock while blocked. Duplicate only
+    // fd2; never mutate its shared flags or take any stdio lock for this hint.
+    let Ok(descriptor) = std::io::stderr().as_fd().try_clone_to_owned() else {
+        return;
+    };
+    let line = failure_observation(error);
+    if line.len() > 128 {
+        return;
+    }
+    let (done, observed) = std::sync::mpsc::sync_channel(1);
+    let launched = std::thread::Builder::new()
+        .name("pult-failure-observer".into())
+        .spawn(move || {
+            let mut file = std::fs::File::from(descriptor);
+            let _ = file.write_all(line.as_bytes());
+            let _ = done.send(());
+        });
+    if launched.is_ok() {
+        // Best effort only: even a full fd2 cannot postpone exit125 forever.
+        // No owned provider/process work is delegated to this detached writer.
+        let _ = observed.recv_timeout(Duration::from_millis(20));
+    }
+}
+
+#[cfg(test)]
+mod failure_observation_tests {
+    use super::failure_observation;
+
+    #[test]
+    fn specific_snapshot_cause_precedes_group_context_without_reflection() {
+        let error = anyhow::anyhow!("process snapshot deadline").context("group TERM failed");
+        assert_eq!(
+            failure_observation(&error),
+            "PULT_HOLDER_DIAG phase=snapshot_deadline errno=none\n"
+        );
+        let error = anyhow::Error::new(std::io::Error::from_raw_os_error(13))
+            .context("process snapshot unavailable")
+            .context("group KILL failed");
+        assert_eq!(
+            failure_observation(&error),
+            "PULT_HOLDER_DIAG phase=snapshot_spawn errno=13\n"
+        );
+        let error = anyhow::anyhow!("PRIVATE_PROVIDER_ARGUMENT_OR_ERROR");
+        assert_eq!(
+            failure_observation(&error),
+            "PULT_HOLDER_DIAG phase=other errno=none\n"
+        );
+    }
 }
 
 /// Keep the leader unreaped until the last group signal has been sent. Reaping
@@ -42,14 +143,30 @@ impl Group {
         }
     }
     async fn signal(&self, signal: Signal) -> Result<()> {
-        match killpg(self.id, signal) {
+        self.observed_signal(
+            killpg(self.id, signal),
+            #[cfg(test)]
+            None,
+        )
+        .await
+    }
+    async fn observed_signal(
+        &self,
+        observation: std::result::Result<(), nix::errno::Errno>,
+        #[cfg(test)] _after_pending: Option<&(dyn Fn() + Sync)>,
+    ) -> Result<()> {
+        match observation {
             Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),
             // Darwin returns EPERM even for our own all-zombie group. Do not
             // confuse that with permission denial against executing members.
             #[cfg(target_os = "macos")]
             Err(nix::errno::Errno::EPERM) => {
-                ensure!(self.exited_without_reaping()?, "leader still executing");
-                confirm_zombie_group(self.id.as_raw()).await
+                confirm_zombie_group(
+                    self,
+                    #[cfg(test)]
+                    _after_pending,
+                )
+                .await
             }
             Err(error) => Err(error.into()),
         }
@@ -190,12 +307,47 @@ async fn process_snapshot(deadline: tokio::time::Instant) -> Result<Vec<u8>> {
 }
 
 #[cfg(target_os = "macos")]
-async fn confirm_zombie_group(leader: i32) -> Result<()> {
+async fn confirm_zombie_group(
+    group: &Group,
+    #[cfg(test)] after_pending: Option<&(dyn Fn() + Sync)>,
+) -> Result<()> {
+    // Darwin can report EPERM before the same unreaped child is waitable.
+    // Waitability and BOTH snapshots share the existing one-second budget.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    loop {
+        ensure!(
+            tokio::time::Instant::now() < deadline,
+            "leader waitability deadline"
+        );
+        if group.exited_without_reaping()? {
+            break;
+        }
+        #[cfg(test)]
+        if let Some(release) = after_pending {
+            release();
+        }
+        tokio::time::sleep_until(
+            (tokio::time::Instant::now() + Duration::from_millis(5)).min(deadline),
+        )
+        .await;
+    }
+    confirm_zombie_group_with_snapshot(group.id.as_raw(), deadline, process_snapshot).await
+}
+
+#[cfg(target_os = "macos")]
+async fn confirm_zombie_group_with_snapshot<F, Fut>(
+    leader: i32,
+    deadline: tokio::time::Instant,
+    mut snapshot: F,
+) -> Result<()>
+where
+    F: FnMut(tokio::time::Instant) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>>>,
+{
     // Two identical zombie-only sets exclude a fork crossing a single process
     // enumeration. The unreaped leader retains the PGID throughout both reads.
-    let first = zombie_members(&process_snapshot(deadline).await?, leader)?;
-    let second = zombie_members(&process_snapshot(deadline).await?, leader)?;
+    let first = zombie_members(&snapshot(deadline).await?, leader)?;
+    let second = zombie_members(&snapshot(deadline).await?, leader)?;
     ensure!(
         first == second,
         "process group membership changed during proof"
@@ -405,6 +557,95 @@ async fn run() -> Result<i32> {
         // A cancelled attempt may leave forwarding threads blocked on a reader.
         // They do not own cleanup; exit terminates them after mandatory group proof.
         FinishPolicy::Cancelled => Ok(0),
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod waitability_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    fn gated_child() -> (Group, Mutex<Option<std::process::ChildStdin>>) {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "read marker"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let input = Mutex::new(child.stdin.take());
+        (
+            Group {
+                id: Pid::from_raw(child.id() as i32),
+                child,
+                reaped: false,
+            },
+            input,
+        )
+    }
+    fn release(input: &Mutex<Option<std::process::ChildStdin>>) {
+        if let Some(mut input) = input.lock().unwrap().take() {
+            input.write_all(b"\n").unwrap();
+        }
+    }
+    fn reap(group: &mut Group) {
+        let status = group.child.wait().unwrap();
+        group.reaped = true;
+        assert!(status.success());
+    }
+
+    #[tokio::test]
+    async fn eperm_before_waitability_waits_for_the_exact_owned_child_and_real_snapshots() {
+        let (mut group, input) = gated_child();
+        let open = || release(&input);
+        // Only the signal result is synthetic. The first NOWAIT observes an
+        // actual live owned child; only that observation releases its exit.
+        let result = group
+            .observed_signal(Err(nix::errno::Errno::EPERM), Some(&open))
+            .await;
+        release(&input);
+        reap(&mut group);
+        assert!(result.is_ok(), "EPERM preceded actual child waitability");
+    }
+
+    #[tokio::test]
+    async fn eperm_cannot_authorize_a_genuinely_live_owned_group() {
+        let (mut group, input) = gated_child();
+        let result = group
+            .observed_signal(Err(nix::errno::Errno::EPERM), None)
+            .await;
+        let still_live = !group.exited_without_reaping().unwrap();
+        release(&input);
+        reap(&mut group);
+        assert!(result.is_err());
+        assert!(still_live);
+    }
+
+    #[tokio::test]
+    async fn second_snapshot_failure_never_authorizes_partial_zombie_proof() {
+        let (mut group, input) = gated_child();
+        release(&input);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        while !group.exited_without_reaping().unwrap() {
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let mut snapshots = 0;
+        let result = confirm_zombie_group_with_snapshot(group.id.as_raw(), deadline, |until| {
+            snapshots += 1;
+            let second = snapshots == 2;
+            async move {
+                if second {
+                    anyhow::bail!("synthetic second snapshot failure");
+                }
+                process_snapshot(until).await
+            }
+        })
+        .await;
+        reap(&mut group);
+        assert_eq!(snapshots, 2);
+        assert!(result.is_err());
     }
 }
 
