@@ -166,28 +166,52 @@ for (const dpr of [1, 2]) describe(`fixed viewport, actual Electron display DPR 
     assert.ok(await waitFor(async () => (await probe()).width === 1100))
     await perform('navigate', { url: `${url}next` })
     assert.equal((await probe()).width, 1100)
-    await h.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setContentSize(1680, 1050))
     if (await h.win.locator('.runtime-expanded').count() === 0) await h.win.getByTestId('runtime-expand').click()
     const nativeActual = h.win.getByTestId('runtime-actual')
-    assert.ok(await waitFor(async () => await nativeActual.isEnabled()))
+    const slotSize = (): Promise<{ width: number; height: number }> => h.win.getByTestId('runtime-screen').evaluate(el => ({ width: el.clientWidth, height: el.clientHeight }))
+    const resize = async (width: number, height: number): Promise<{ width: number; height: number }> => {
+      const content = await h.app.evaluate(({ BrowserWindow }, size) => {
+        const win = BrowserWindow.getAllWindows()[0]!
+        win.setContentSize(size.width, size.height)
+        return win.getContentBounds()
+      }, { width, height })
+      assert.ok(await waitFor(() => h.win.evaluate(size => innerWidth === size.width && innerHeight === size.height, content)))
+      return content
+    }
+    // Insufficient space must deny 100%, rather than clipping human input.
+    await resize(900, 560)
+    assert.ok(await waitFor(async () => await h.win.locator('.runtime-viewport-label').textContent() === '1100 × 700'))
+    assert.ok(await waitFor(async () => await nativeActual.isDisabled()))
+    const small = await slotSize()
+    assert.ok(small.width < 1100 || small.height < 700, JSON.stringify({ small }))
+    // macOS can clamp a requested window to its work area. Qualify 100% against
+    // the measured slot, while retaining an explicit logical viewport owner.
+    const content = await resize(1680, 1050)
+    const available = await slotSize()
+    const viewport = { width: Math.min(1100, Math.floor(available.width * .8)), height: Math.min(700, Math.floor(available.height * .8)) }
+    assert.ok(viewport.width >= 240 && viewport.height >= 240, JSON.stringify({ content, available, viewport }))
+    await perform('viewport', viewport)
+    assert.ok(await waitFor(async () => { const current = await probe(); return current.width === viewport.width && current.height === viewport.height }))
+    assert.ok(await waitFor(async () => await nativeActual.isEnabled()), JSON.stringify({ content, available, viewport }))
     for (const mode of ['100%', 'Fit']) {
       await h.win.getByTestId(mode === 'Fit' ? 'runtime-fit' : 'runtime-actual').click()
       assert.ok(await waitFor(() => h.app.evaluate(({ BrowserWindow }, args) => {
         const v = BrowserWindow.getAllWindows()[0]!.contentView.children.find(v => 'webContents' in v && (v as import('electron').WebContentsView).webContents.getURL().startsWith(args.url))!
-        return v.getVisible() && (args.mode === '100%' ? v.getBounds().width === 1100 : v.getBounds().width > 1100)
-      }, { url, mode })))
-      await h.app.evaluate(async ({ BrowserWindow }, base) => {
+        const bounds = v.getBounds()
+        return v.getVisible() && (args.mode === '100%' ? bounds.width === args.viewport.width && bounds.height === args.viewport.height : bounds.width > args.viewport.width)
+      }, { url, mode, viewport })))
+      await h.app.evaluate(async ({ BrowserWindow }, args) => {
         const win = BrowserWindow.getAllWindows()[0]!
-        const v = win.contentView.children.find(v => 'webContents' in v && (v as import('electron').WebContentsView).webContents.getURL().startsWith(base)) as import('electron').WebContentsView
+        const v = win.contentView.children.find(v => 'webContents' in v && (v as import('electron').WebContentsView).webContents.getURL().startsWith(args.url)) as import('electron').WebContentsView
         await v.webContents.executeJavaScript('window.hit=null')
-        const scale = v.getBounds().width / 1100
+        const scale = v.getBounds().width / args.viewport.width
         win.focus(); v.webContents.focus()
-        v.webContents.sendInputEvent({ type: 'mouseDown', x: Math.round(1080 * scale), y: Math.round(680 * scale), button: 'left', clickCount: 1 })
-        v.webContents.sendInputEvent({ type: 'mouseUp', x: Math.round(1080 * scale), y: Math.round(680 * scale), button: 'left', clickCount: 1 })
-      }, url)
+        v.webContents.sendInputEvent({ type: 'mouseDown', x: Math.round((args.viewport.width - 20) * scale), y: Math.round((args.viewport.height - 20) * scale), button: 'left', clickCount: 1 })
+        v.webContents.sendInputEvent({ type: 'mouseUp', x: Math.round((args.viewport.width - 20) * scale), y: Math.round((args.viewport.height - 20) * scale), button: 'left', clickCount: 1 })
+      }, { url, viewport })
       assert.ok(await waitFor(async () => (await probe()).hit === 'br'), `native ${mode}`)
       await h.app.evaluate(async ({ webContents }, base) => { await webContents.getAllWebContents().find(w => w.getURL().startsWith(base))!.executeJavaScript('window.hit=null') }, url)
-      await perform('tap', { x: 1080, y: 680 })
+      await perform('tap', { x: viewport.width - 20, y: viewport.height - 20 })
       assert.equal((await probe()).hit, 'br', `CDP ${mode}`)
     }
     const c = await h.client()
@@ -197,17 +221,18 @@ for (const dpr of [1, 2]) describe(`fixed viewport, actual Electron display DPR 
     const discovery = await c.request('runtime.discover', { sessionId: 'fixed' }) as { controllers: Record<string, string> }
     assert.equal(discovery.controllers['web:fixed'], 'agent')
     const local = await h.win.evaluate(async () => window.pult!.runtimePreview!('fixed'))
-    assert.equal(local.coordinateWidth, 1100)
+    assert.equal(local.coordinateWidth, viewport.width)
+    assert.equal(local.coordinateHeight, viewport.height)
     assert.ok((local.image?.data.length ?? 0) <= 2_800_000)
     await h.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setContentSize(1680, 1050))
     const actual = h.win.getByTestId('runtime-actual')
     assert.ok(await waitFor(async () => await actual.isEnabled()))
     await actual.click()
     const img = h.win.getByTestId('runtime-screen').locator('img')
-    assert.ok(await waitFor(async () => { const box = await img.boundingBox(); return box?.width === 1100 && box?.height === 700 }))
+    assert.ok(await waitFor(async () => { const box = await img.boundingBox(); return box?.width === viewport.width && box?.height === viewport.height }))
     await h.screen(`fixed-viewport-${dpr}-observer-100`)
     await h.win.getByTestId('runtime-fit').click()
-    assert.ok(await waitFor(async () => { const box = await img.boundingBox(); return !!box && (box.width !== 1100 || box.height !== 700) }))
+    assert.ok(await waitFor(async () => { const box = await img.boundingBox(); return !!box && (box.width !== viewport.width || box.height !== viewport.height) }))
     await assert.rejects(perform('tap', { x: 20, y: 20 }), /управление|управляет/)
     await h.win.keyboard.press('Escape')
     assert.equal(await h.win.locator('.runtime-expanded').count(), 0)
