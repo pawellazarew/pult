@@ -424,6 +424,8 @@ impl Backend {
         let job = control.admit()?;
         let tracked = state.host_jobs.track();
         let preparing = control.clone();
+        #[cfg(test)]
+        let hooks = self.hooks.clone();
         let result = tokio::task::spawn_blocking(move || {
             let _tracked = tracked;
             let _job = job;
@@ -449,6 +451,8 @@ impl Backend {
             let writable = policy.write == Write::Ask
                 && preparing.snapshot.settings.approval != Approval::ReadOnly;
             preparing.writable.store(writable, Ordering::Release);
+            #[cfg(test)]
+            hooks.prepared();
             Ok::<_, MemoryError>(())
         })
         .await
@@ -457,6 +461,8 @@ impl Backend {
         match result {
             Ok(()) => {
                 let state = self.state.upgrade().ok_or_else(unavailable)?;
+                #[cfg(test)]
+                self.hooks.before_post_prepare();
                 Self::verify(&state, &control, false)?;
                 Ok(Lease(control))
             }
@@ -513,9 +519,12 @@ impl Backend {
     /// belong to owned read/propose IO before Store/Broker access, never to an
     /// async bridge waiter or its short native-ledger admission lock.
     pub(crate) fn handle_live(&self, lease: &Lease) -> bool {
-        self.state
-            .upgrade()
-            .is_some_and(|state| Self::verify(&state, &lease.0, false).is_ok())
+        lease.0.valid.load(Ordering::Acquire)
+            && self.state.upgrade().is_some_and(|state| {
+                !*state.stop.borrow()
+                    && !state.execution_storage_failed.load(Ordering::Acquire)
+                    && !state.session_memory.is_poisoned()
+            })
     }
     pub(crate) fn bridge_server(&self, key: &str) -> Result<Value, MemoryError> {
         let state = self.state.upgrade().ok_or_else(unavailable)?;

@@ -11,6 +11,8 @@ use std::{future::Future, sync::mpsc, time::Duration};
 #[derive(Default)]
 pub(super) struct Hooks {
     read: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    prepared: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    post_prepare: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     before: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     after: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
@@ -20,6 +22,12 @@ impl Hooks {
         if let Some(callback) = callback {
             callback();
         }
+    }
+    pub(super) fn prepared(&self) {
+        Self::take(&self.prepared);
+    }
+    pub(super) fn before_post_prepare(&self) {
+        Self::take(&self.post_prepare);
     }
     pub(super) fn before_read(&self) {
         Self::take(&self.read);
@@ -1915,10 +1923,7 @@ async fn persistent_bridge_unpolled_tasks_already_own_count_and_aggregate_byte_b
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn persistent_bridge_waiter_does_not_block_registry_or_actual_driver_acceptance() {
-    use std::{
-        future::Future,
-        task::{Context, Poll, Waker},
-    };
+    use std::task::{Context, Poll, Waker};
     let mut f = Fixture::new().await;
     let snapshot = f.control().snapshot.clone();
     f.state.driver.get().unwrap().cancel(f.handle.ticket());
@@ -2080,5 +2085,92 @@ async fn persistent_bridge_owned_proposal_rechecks_write_policy_before_broker() 
         "denied policy must not initialize Broker"
     );
     assert_eq!(f.record()["version"], 1);
+    f.close().await;
+}
+
+struct HandlePreparingBridgeWorker(Arc<Backend>);
+impl Worker for HandlePreparingBridgeWorker {
+    fn start(
+        &self,
+        ticket: Ticket,
+        snapshot: TurnSnapshot,
+        _text: String,
+    ) -> Task<Result<Started, WorkerError>> {
+        let backend = self.0.clone();
+        Box::pin(async move {
+            backend
+                .prepare_handle(ticket, snapshot, "prepared-handle-turn".into())
+                .await?;
+            Ok(Started {
+                turn_id: "prepared-handle-turn".into(),
+                done: Box::pin(std::future::pending()),
+            })
+        })
+    }
+    fn close(&self, ticket: Ticket) -> Task<Result<(), WorkerError>> {
+        self.0.revoke(&ticket);
+        self.0.drain(ticket)
+    }
+}
+#[tokio::test]
+async fn persistent_bridge_post_prepare_registry_verify_is_owned_and_runtime_stays_responsive() {
+    let mut f = Fixture::new().await;
+    let snapshot = f.control().snapshot.clone();
+    f.state.driver.get().unwrap().cancel(f.handle.ticket());
+    bounded(f.handle.wait()).await.unwrap();
+    let prepared = Barrier::install(&f.backend.hooks.prepared);
+    let entered = Arc::new(Notify::new());
+    let post = entered.clone();
+    *f.backend.hooks.post_prepare.lock().unwrap() = Some(Box::new(move || post.notify_one()));
+    let mut handle = f
+        .state
+        .driver
+        .get()
+        .unwrap()
+        .start(
+            snapshot,
+            "new".into(),
+            Arc::new(HandlePreparingBridgeWorker(f.backend.clone())),
+        )
+        .unwrap();
+    prepared.entered().await;
+    let control = f.backend.control(handle.ticket()).unwrap();
+    let registry_held = Arc::new(Notify::new());
+    let held = registry_held.clone();
+    let state = f.state.clone();
+    let watchdog = Arc::new(AtomicBool::new(false));
+    let fired = watchdog.clone();
+    let (start, timing) = mpsc::channel();
+    let (release, waiting) = mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let _registry = state.registry.lock().unwrap();
+        held.notify_one();
+        timing.recv_timeout(Duration::from_secs(10)).unwrap();
+        if waiting.recv_timeout(Duration::from_secs(5)).is_err() {
+            fired.store(true, Ordering::Release);
+        }
+    });
+    bounded(registry_held.notified()).await;
+    start.send(()).unwrap();
+    prepared.release();
+    bounded(entered.notified()).await;
+    let heartbeat = tokio::spawn(async { true });
+    assert!(bounded(heartbeat).await.unwrap());
+    f.state.driver.get().unwrap().cancel(handle.ticket());
+    tokio::task::yield_now().await;
+    let retained = control.jobs.load(Ordering::Acquire) > 0
+        && f.state.host_jobs.active() > 0
+        && f.state.driver.get().unwrap().active_count() > 0;
+    release.send(()).ok();
+    holder.join().unwrap();
+    let _ = bounded(handle.wait()).await;
+    assert!(
+        !watchdog.load(Ordering::Acquire),
+        "post-prepare Registry verification blocked the single Tokio runtime worker"
+    );
+    assert!(
+        retained,
+        "cancelled verification lost owned job/daemon/Driver lifetime before IO joined"
+    );
     f.close().await;
 }

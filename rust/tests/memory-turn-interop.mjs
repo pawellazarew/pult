@@ -331,6 +331,28 @@ try {
       for (const field of ['name', 'provider', 'createdAt', 'cwd']) assert.equal(after[field], before[field])
     }
   })
+  await check('cancelling a warm chat waiting for peer slots keeps its exact healthy registration', async () => {
+    for(const name of ['cancel-warm', 'cancel-peer-one', 'cancel-peer-two']) await start(name)
+    await prompt('cancel-warm', { run: 'warm-before-cancel', id: note.id })
+    const before = await result('warm-before-cancel', 'cancel-warm')
+    const helper = evidence().find(row => row.kind === 'mcp-started' && row.thread === before.thread)
+    for(const name of ['cancel-peer-one', 'cancel-peer-two']) await prompt(name, { run: name, mode: 'hold' })
+    const pending = client.request('agent.prompt', { name: 'cancel-warm', text: JSON.stringify({ run: 'warm-waiting-cancel', mode: 'hold' }) }, { timeoutMs: 15000 }).then(value=>({ok:true,value}),error=>({ok:false,error}))
+    await until(() => journal().some(row=>row.sessionId==='cancel-warm' && row.kind==='message.user' && row.data.text.includes('warm-waiting-cancel')), 'warm waiting input was not durably reserved')
+    assert.ok(!evidence().some(row=>row.kind==='dispatch' && row.run==='warm-waiting-cancel'))
+    await client.request('agent.stop', { name: 'cancel-warm' })
+    assert.equal((await pending).ok, false)
+    await until(async()=>{const row=await session('cancel-warm');return row.status==='interrupted' && row.liveApproval===null}, 'warm cancelled preparation was not drained')
+    for(const name of ['cancel-peer-one', 'cancel-peer-two']) {
+      await client.request('agent.stop', { name })
+      await until(async()=>{const row=await session(name);return row.status==='interrupted' && row.liveApproval===null}, 'held peer did not release owned slot')
+    }
+    await prompt('cancel-warm', { run: 'warm-after-cancel', id: note.id })
+    const after = await result('warm-after-cancel', 'cancel-warm')
+    assert.equal(after.pid,before.pid);assert.equal(after.thread,before.thread);assert.equal(after.get.version,before.get.version)
+    assert.equal(evidence().filter(row=>row.kind==='mcp-started' && row.thread===before.thread).length,1)
+    assert.ok(alive(helper.mcpPid));assert.ok(alive(before.pid))
+  })
   await check('two active memory slots stay bounded on the warm shared host and ordered stop cancels a third preparation', async () => {
     for (const name of ['slot-one', 'slot-two', 'slot-queued']) await start(name)
     for (const [name, run] of [['slot-one', 'slot-one-hold'], ['slot-two', 'slot-two-hold']]) {
