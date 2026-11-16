@@ -883,7 +883,28 @@ async fn unqualified_native_profiles_never_open_inbox_or_owner_fallback() {
         .unwrap();
         let accepted = bounded(handle.accepted()).await.unwrap();
         assert!(accepted.user_event_id > 0);
-        let outcome = bounded(handle.wait()).await.unwrap().turn.outcome;
+        let waited = tokio::time::timeout(Duration::from_secs(15), handle.wait()).await;
+        if !matches!(&waited, Ok(Ok(_))) {
+            let driver = match &waited {
+                Err(_) => "watchdog".to_owned(),
+                Ok(Err(error)) => error.to_string(),
+                Ok(Ok(_)) => unreachable!(),
+            };
+            let proof = f.proof();
+            let started = proof.as_ref().is_some_and(|p| p["nativeStarted"] == true);
+            let replied = proof.as_ref().is_some_and(|p| p["replied"] == true);
+            let denied = proof.as_ref().is_some_and(|p| p["decision"] == "deny");
+            let allowed = proof.as_ref().is_some_and(|p| p["decision"] == "allow");
+            let slots = f.service.slots.available_permits();
+            eprintln!(
+                "[native-negative-wait] profile={case} driver={driver} started={started} replied={replied} denied={denied} allowed={allowed} slots={slots}"
+            );
+        }
+        let outcome = waited
+            .expect("native permission owned watchdog")
+            .unwrap()
+            .turn
+            .outcome;
         if outcome != Outcome::Success {
             let code = match &outcome {
                 Outcome::Success => "success",
