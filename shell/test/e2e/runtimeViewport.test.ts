@@ -10,11 +10,12 @@ import { launch, waitFor } from './harness.js'
 import type { Harness } from './harness.js'
 import type { RuntimeResult } from '../../../src/runtimes/types.js'
 
-type NativeTracePhase = 'installed' | 'visibility' | 'bounds' | 'cdp_enter' | 'cdp_settle' | 'window_event' | 'debugger_detach' | 'predicate'
+type NativeTracePhase = 'installed' | 'contents_created' | 'attach_ready' | 'visibility' | 'bounds' | 'cdp_enter' | 'cdp_settle' | 'window_event' | 'debugger_detach' | 'predicate'
 type NativeTraceEvent = { ms: number; phase: NativeTracePhase } & Record<string, number | boolean | string>
 type NativeTrace = {
   push(phase: NativeTracePhase, data?: Record<string, number | boolean | string>): void
   snapshot(): unknown
+  owns(contents: import('electron').WebContents): boolean
 }
 type NativeTraceGlobal = typeof globalThis & { __pultNativeVisibilityTrace?: NativeTrace }
 
@@ -123,17 +124,14 @@ for (const dpr of [1, 2]) describe(`fixed viewport, actual Electron display DPR 
       const discovery = await c.request('runtime.discover', { sessionId: 'fixed' }) as { targets: Array<{ kind: string; state: string }> }
       return discovery.targets.some(t => t.kind === 'web' && t.state === 'ready')
     }))
-    await perform('attach', { url })
-    await h.win.getByTestId('runtime-expand').waitFor()
-    // Own fixture only. No new polls, CDP requests, daemon calls, or payload retention.
-    await h.app.evaluate(({ BrowserWindow }, base) => {
-      const win = BrowserWindow.getAllWindows()[0]!
-      const view = win.contentView.children.find(v => 'webContents' in v && (v as import('electron').WebContentsView).webContents.getURL() === base) as import('electron').WebContentsView | undefined
-      if (!view) throw new Error('Owned fixture view missing')
+    // Install before attach can create the fixture contents or start a thumbnail capture.
+    // Existing main UI is untouched; the next contents must later match the fixture view.
+    await h.app.evaluate(({ app, BrowserWindow }) => {
       const started = performance.now()
       const first: NativeTraceEvent[] = [], last: NativeTraceEvent[] = []
-      const counts: Record<NativeTracePhase, number> = { installed: 0, visibility: 0, bounds: 0, cdp_enter: 0, cdp_settle: 0, window_event: 0, debugger_detach: 0, predicate: 0 }
+      const counts: Record<NativeTracePhase, number> = { installed: 0, contents_created: 0, attach_ready: 0, visibility: 0, bounds: 0, cdp_enter: 0, cdp_settle: 0, window_event: 0, debugger_detach: 0, predicate: 0 }
       let total = 0, predicateErrors = 0
+      let ownedContents: import('electron').WebContents | undefined
       let firstCapture: { enteredMs: number; settledMs?: number; ok?: boolean } | undefined
       const elapsed = (): number => Math.round((performance.now() - started) * 10) / 10
       const trace: NativeTrace = {
@@ -145,28 +143,43 @@ for (const dpr of [1, 2]) describe(`fixed viewport, actual Electron display DPR 
           else { last.push(event); if (last.length > 96) last.shift() }
         },
         snapshot: () => ({ total, counts: { ...counts }, predicateErrors, firstCapture: firstCapture ? { ...firstCapture } : null, first: [...first], last: [...last] }),
+        owns: contents => ownedContents === contents,
       }
       ;(globalThis as NativeTraceGlobal).__pultNativeVisibilityTrace = trace
+      app.once('web-contents-created', (_event, contents) => {
+        ownedContents = contents
+        trace.push('contents_created')
+        const send = contents.debugger.sendCommand.bind(contents.debugger)
+        contents.debugger.sendCommand = (method, ...args) => {
+          const kind = method === 'Page.captureScreenshot' ? 'capture' : method === 'Emulation.setDeviceMetricsOverride' ? 'emulation' : 'other'
+          trace.push('cdp_enter', { kind })
+          const capture: { enteredMs: number; settledMs?: number; ok?: boolean } | undefined = kind === 'capture' && !firstCapture ? (firstCapture = { enteredMs: elapsed() }) : undefined
+          const settled = (ok: boolean): void => { if (capture) { capture.settledMs = elapsed(); capture.ok = ok }; trace.push('cdp_settle', { kind, ok }) }
+          try { return send(method, ...args).then(value => { settled(true); return value }, error => { settled(false); throw error }) }
+          catch (error) { settled(false); throw error }
+        }
+        contents.debugger.on('detach', () => trace.push('debugger_detach'))
+      })
+      trace.push('installed', { focused: BrowserWindow.getAllWindows()[0]!.isFocused() })
+    })
+    await perform('attach', { url })
+    await h.win.getByTestId('runtime-expand').waitFor()
+    // No new polls, CDP requests, daemon calls, or payload retention.
+    await h.app.evaluate(({ BrowserWindow }, base) => {
+      const win = BrowserWindow.getAllWindows()[0]!
+      const view = win.contentView.children.find(v => 'webContents' in v && (v as import('electron').WebContentsView).webContents.getURL() === base) as import('electron').WebContentsView | undefined
+      const trace = (globalThis as NativeTraceGlobal).__pultNativeVisibilityTrace
+      if (!view || !trace?.owns(view.webContents)) throw new Error('Observed contents do not match owned fixture view')
+      trace.push('attach_ready', { visible: view.getVisible(), focused: win.isFocused() })
       const visible = view.setVisible.bind(view), bounds = view.setBounds.bind(view)
       view.setVisible = value => { trace.push('visibility', { value }); return visible(value) }
       view.setBounds = value => { trace.push('bounds', { x: value.x, y: value.y, width: value.width, height: value.height }); return bounds(value) }
-      const send = view.webContents.debugger.sendCommand.bind(view.webContents.debugger)
-      view.webContents.debugger.sendCommand = (method, ...args) => {
-        const kind = method === 'Page.captureScreenshot' ? 'capture' : method === 'Emulation.setDeviceMetricsOverride' ? 'emulation' : 'other'
-        trace.push('cdp_enter', { kind })
-        const capture: { enteredMs: number; settledMs?: number; ok?: boolean } | undefined = kind === 'capture' && !firstCapture ? (firstCapture = { enteredMs: elapsed() }) : undefined
-        const settled = (ok: boolean): void => { if (capture) { capture.settledMs = elapsed(); capture.ok = ok }; trace.push('cdp_settle', { kind, ok }) }
-        try { return send(method, ...args).then(value => { settled(true); return value }, error => { settled(false); throw error }) }
-        catch (error) { settled(false); throw error }
-      }
       win.on('focus', () => trace.push('window_event', { event: 'focus' }))
       win.on('blur', () => trace.push('window_event', { event: 'blur' }))
       win.on('show', () => trace.push('window_event', { event: 'show' }))
       win.on('hide', () => trace.push('window_event', { event: 'hide' }))
       win.on('minimize', () => trace.push('window_event', { event: 'minimize' }))
       win.on('restore', () => trace.push('window_event', { event: 'restore' }))
-      view.webContents.debugger.on('detach', () => trace.push('debugger_detach'))
-      trace.push('installed', { visible: view.getVisible(), focused: win.isFocused() })
     }, url)
   })
   after(async () => { await h?.close(); await new Promise<void>(r => server.close(() => r())) })
