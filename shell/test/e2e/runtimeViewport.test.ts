@@ -10,6 +10,14 @@ import { launch, waitFor } from './harness.js'
 import type { Harness } from './harness.js'
 import type { RuntimeResult } from '../../../src/runtimes/types.js'
 
+type NativeTracePhase = 'installed' | 'visibility' | 'bounds' | 'cdp_enter' | 'cdp_settle' | 'window_event' | 'debugger_detach' | 'predicate'
+type NativeTraceEvent = { ms: number; phase: NativeTracePhase } & Record<string, number | boolean | string>
+type NativeTrace = {
+  push(phase: NativeTracePhase, data?: Record<string, number | boolean | string>): void
+  snapshot(): unknown
+}
+type NativeTraceGlobal = typeof globalThis & { __pultNativeVisibilityTrace?: NativeTrace }
+
 // Diagnostic reads never extend or turn a failed visibility assertion into a pass.
 async function boundedProof(read: () => Promise<unknown>): Promise<unknown> {
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -22,6 +30,7 @@ async function boundedProof(read: () => Promise<unknown>): Promise<unknown> {
 for (const dpr of [1, 2]) describe(`fixed viewport, actual Electron display DPR ${dpr}`, () => {
   let h: Harness
   let owner: Awaited<ReturnType<Harness['client']>> | undefined
+  let firstNativeFailure = false
   let url: string
   let loads = 0
   const server = createServer((req, res) => {
@@ -68,7 +77,8 @@ for (const dpr of [1, 2]) describe(`fixed viewport, actual Electron display DPR 
       boundedProof(() => h.app.evaluate(({ BrowserWindow }, base) => {
         const win = BrowserWindow.getAllWindows()[0]!
         const view = win.contentView.children.find(v => 'webContents' in v && (v as import('electron').WebContentsView).webContents.getURL() === base)
-        return { windowVisible: win.isVisible(), windowFocused: win.isFocused(), minimized: win.isMinimized(), content: win.getContentBounds(), exists: !!view, visible: view?.getVisible() ?? false, bounds: view?.getBounds() ?? null }
+        return { windowVisible: win.isVisible(), windowFocused: win.isFocused(), minimized: win.isMinimized(), content: win.getContentBounds(), exists: !!view, visible: view?.getVisible() ?? false, bounds: view?.getBounds() ?? null,
+          phaseTrace: (globalThis as NativeTraceGlobal).__pultNativeVisibilityTrace?.snapshot() ?? null }
       }, url)),
       boundedProof(async () => {
         if (!owner) return { controller: 'missing' }
@@ -80,8 +90,26 @@ for (const dpr of [1, 2]) describe(`fixed viewport, actual Electron display DPR 
     return JSON.stringify({ dom, native, controller })
   }
   const assertNativeVisibility = async (expected: boolean, phase: string): Promise<void> => {
-    const satisfied = await waitFor(() => h.app.evaluate(({ BrowserWindow }, args) => BrowserWindow.getAllWindows()[0]!.contentView.children.some(v => 'webContents' in v && (v as import('electron').WebContentsView).webContents.getURL() === args.url && v.getVisible()) === args.expected, { url, expected }))
-    if (!satisfied) assert.fail(`native visibility phase=${phase} expected=${expected} waitForResult=false ${await nativeProof()}`)
+    const satisfied = await waitFor(() => h.app.evaluate(({ BrowserWindow }, args) => {
+      const trace = (globalThis as NativeTraceGlobal).__pultNativeVisibilityTrace
+      try {
+        const win = BrowserWindow.getAllWindows()[0]!
+        const result = win.contentView.children.some(v => 'webContents' in v && (v as import('electron').WebContentsView).webContents.getURL() === args.url && v.getVisible()) === args.expected
+        trace?.push('predicate', { expected: args.expected, result, error: false, focused: win.isFocused() })
+        return result
+      } catch (error) { trace?.push('predicate', { expected: args.expected, error: true }); throw error }
+    }, { url, expected }))
+    if (!satisfied) {
+      const proof = await nativeProof()
+      if (!firstNativeFailure) {
+        firstNativeFailure = true
+        try {
+          mkdirSync(RESULTS, { recursive: true })
+          writeFileSync(path.join(RESULTS, `fixed-viewport-${dpr}-first-native-failure.json`), JSON.stringify({ phase, expected, waitForResult: false, proof: JSON.parse(proof) }, null, 2))
+        } catch { console.error('[native-proof-artifact] write failed') }
+      }
+      assert.fail(`native visibility phase=${phase} expected=${expected} waitForResult=false ${proof}`)
+    }
   }
   before(async () => {
     await new Promise<void>(r => server.listen(0, '127.0.0.1', r))
@@ -97,6 +125,49 @@ for (const dpr of [1, 2]) describe(`fixed viewport, actual Electron display DPR 
     }))
     await perform('attach', { url })
     await h.win.getByTestId('runtime-expand').waitFor()
+    // Own fixture only. No new polls, CDP requests, daemon calls, or payload retention.
+    await h.app.evaluate(({ BrowserWindow }, base) => {
+      const win = BrowserWindow.getAllWindows()[0]!
+      const view = win.contentView.children.find(v => 'webContents' in v && (v as import('electron').WebContentsView).webContents.getURL() === base) as import('electron').WebContentsView | undefined
+      if (!view) throw new Error('Owned fixture view missing')
+      const started = performance.now()
+      const first: NativeTraceEvent[] = [], last: NativeTraceEvent[] = []
+      const counts: Record<NativeTracePhase, number> = { installed: 0, visibility: 0, bounds: 0, cdp_enter: 0, cdp_settle: 0, window_event: 0, debugger_detach: 0, predicate: 0 }
+      let total = 0, predicateErrors = 0
+      let firstCapture: { enteredMs: number; settledMs?: number; ok?: boolean } | undefined
+      const elapsed = (): number => Math.round((performance.now() - started) * 10) / 10
+      const trace: NativeTrace = {
+        push(phase, data = {}) {
+          const event = { ms: elapsed(), phase, ...data }
+          ++total; ++counts[phase]
+          if (phase === 'predicate' && data['error'] === true) ++predicateErrors
+          if (first.length < 32) first.push(event)
+          else { last.push(event); if (last.length > 96) last.shift() }
+        },
+        snapshot: () => ({ total, counts: { ...counts }, predicateErrors, firstCapture: firstCapture ? { ...firstCapture } : null, first: [...first], last: [...last] }),
+      }
+      ;(globalThis as NativeTraceGlobal).__pultNativeVisibilityTrace = trace
+      const visible = view.setVisible.bind(view), bounds = view.setBounds.bind(view)
+      view.setVisible = value => { trace.push('visibility', { value }); return visible(value) }
+      view.setBounds = value => { trace.push('bounds', { x: value.x, y: value.y, width: value.width, height: value.height }); return bounds(value) }
+      const send = view.webContents.debugger.sendCommand.bind(view.webContents.debugger)
+      view.webContents.debugger.sendCommand = (method, ...args) => {
+        const kind = method === 'Page.captureScreenshot' ? 'capture' : method === 'Emulation.setDeviceMetricsOverride' ? 'emulation' : 'other'
+        trace.push('cdp_enter', { kind })
+        const capture: { enteredMs: number; settledMs?: number; ok?: boolean } | undefined = kind === 'capture' && !firstCapture ? (firstCapture = { enteredMs: elapsed() }) : undefined
+        const settled = (ok: boolean): void => { if (capture) { capture.settledMs = elapsed(); capture.ok = ok }; trace.push('cdp_settle', { kind, ok }) }
+        try { return send(method, ...args).then(value => { settled(true); return value }, error => { settled(false); throw error }) }
+        catch (error) { settled(false); throw error }
+      }
+      win.on('focus', () => trace.push('window_event', { event: 'focus' }))
+      win.on('blur', () => trace.push('window_event', { event: 'blur' }))
+      win.on('show', () => trace.push('window_event', { event: 'show' }))
+      win.on('hide', () => trace.push('window_event', { event: 'hide' }))
+      win.on('minimize', () => trace.push('window_event', { event: 'minimize' }))
+      win.on('restore', () => trace.push('window_event', { event: 'restore' }))
+      view.webContents.debugger.on('detach', () => trace.push('debugger_detach'))
+      trace.push('installed', { visible: view.getVisible(), focused: win.isFocused() })
+    }, url)
   })
   after(async () => { await h?.close(); await new Promise<void>(r => server.close(() => r())) })
 
