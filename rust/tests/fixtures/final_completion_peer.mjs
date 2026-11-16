@@ -1,7 +1,7 @@
 // Versioned controlled transformer over explicit repository fake peers.
 // Synthetic text variants; no model, account, network or real provider CLI.
 import {spawn} from 'node:child_process'
-import {readFileSync,appendFileSync} from 'node:fs'
+import {readFileSync,appendFileSync,existsSync} from 'node:fs'
 import {join,basename} from 'node:path'
 import assert from 'node:assert/strict'
 import {fileURLToPath} from 'node:url'
@@ -41,8 +41,13 @@ export function run(provider){
  } else process.stdin.pipe(child.stdin)
  child.stdin.on('error',()=>{})
  const output=e=>{if(Buffer.byteLength(JSON.stringify(e))>1024*1024)throw Error('controlled source frame exceeds native adapter bound');if(cfg.wire)appendFileSync(cfg.wire,JSON.stringify(e)+'\n');process.stdout.write(JSON.stringify(e)+'\n')}
- createInterface({input:child.stdout}).on('line',line=>{
-  let e;try{e=JSON.parse(line)}catch{process.stdout.write(line+'\n');return}
+ // The private controlled test holds the actual consumer before recv. Native
+ // frames retain their original order; RPC replies never wait on this gate.
+ let nativeOutput=Promise.resolve()
+ const emit=async e=>{
+  if(provider==='codex'&&cfg.consumerGate&&e.method){
+   while(!existsSync(cfg.consumerGate))await new Promise(r=>setTimeout(r,5))
+  }
   if(provider==='codex'&&pendingMemory.delete(e.id)&&e.result?.thread?.id)memoryThreads.add(e.result.thread.id)
   if(sid&&e.session_id)e.session_id=sid
   if(provider==='claude'&&inputUUID&&e.type==='result')e.user_message_uuids=[inputUUID]
@@ -80,6 +85,12 @@ export function run(provider){
    }
   }
   output(e)
+ }
+ createInterface({input:child.stdout}).on('line',line=>{
+  let e;try{e=JSON.parse(line)}catch{process.stdout.write(line+'\n');return}
+  if(provider==='codex'&&cfg.consumerGate&&e.method){
+   nativeOutput=nativeOutput.then(()=>emit(e));nativeOutput.catch(()=>process.exit(1))
+  }else void emit(e)
  })
  for(const signal of ['SIGTERM','SIGINT'])process.on(signal,()=>child.kill(signal))
  child.on('exit',(code,signal)=>{process.stdin.unpipe(child.stdin);process.stdin.pause();process.exitCode=code??(signal?1:0)})
