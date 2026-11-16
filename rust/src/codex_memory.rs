@@ -20,7 +20,7 @@ use tokio::sync::{Notify, Semaphore};
 const METHODS: [&str; 1] = ["codex.memory.call"];
 const LEDGER_CALLS: usize = 256;
 const LEDGER_BYTES: usize = 256 * 1024;
-const ARG_BYTES: usize = 64 * 1024;
+pub(crate) const ENVELOPE_BYTES: usize = 64 * 1024;
 fn denied() -> MemoryError {
     MemoryError {
         code: "forbidden",
@@ -358,23 +358,83 @@ impl Registration {
             changed.await;
         }
     }
-    pub(crate) async fn call(self: Arc<Self>, envelope: Value) -> Result<Value, MemoryError> {
-        let registry = self.registry.upgrade().ok_or_else(denied)?;
-        // The socket line is bounded too. Charge queued args+metadata before waiting.
-        let encoded = serde_json::to_vec(&envelope).map_err(|_| denied())?;
-        if encoded.len() > ARG_BYTES || !envelope.is_object() {
-            return Err(denied());
+    pub(crate) fn call(
+        self: Arc<Self>,
+        envelope: Value,
+    ) -> crate::turn_driver::Task<Result<Value, MemoryError>> {
+        // Charge before the daemon can queue this task, including unpolled tasks.
+        let admission = (|| {
+            struct Count(usize);
+            impl std::io::Write for Count {
+                fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                    self.0 = self
+                        .0
+                        .checked_add(bytes.len())
+                        .filter(|n| *n <= ENVELOPE_BYTES)
+                        .ok_or_else(|| std::io::Error::other("bridge envelope budget"))?;
+                    Ok(bytes.len())
+                }
+                fn flush(&mut self) -> std::io::Result<()> {
+                    Ok(())
+                }
+            }
+            let mut count = Count(0);
+            serde_json::to_writer(&mut count, &envelope).map_err(|_| capacity())?;
+            let name = envelope["name"]
+                .as_str()
+                .filter(|v| identity(v) && v.len() <= 128)
+                .ok_or_else(denied)?;
+            let arguments = envelope["arguments"].as_object().ok_or_else(denied)?;
+            if !matches!(
+                name,
+                "memory_catalog"
+                    | "memory_list"
+                    | "memory_search"
+                    | "memory_get"
+                    | "memory_propose"
+            ) || (name == "memory_propose"
+                && !matches!(
+                    arguments.get("operation").and_then(Value::as_str),
+                    Some("add" | "update" | "forget")
+                ))
+            {
+                return Err(denied());
+            }
+            let meta = &envelope["meta"];
+            let blob = &meta["x-codex-turn-metadata"];
+            let thread = meta["threadId"]
+                .as_str()
+                .filter(|v| identity(v))
+                .ok_or_else(denied)?;
+            if blob["thread_id"].as_str() != Some(thread)
+                || !meta["callId"].as_str().is_some_and(identity)
+                || !blob["turn_id"].as_str().is_some_and(identity)
+            {
+                return Err(denied());
+            }
+            let registry = self.registry.upgrade().ok_or_else(denied)?;
+            let slot = registry
+                .waiters
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| capacity())?;
+            let bytes = registry
+                .bytes
+                .clone()
+                .try_acquire_many_owned(count.0 as u32)
+                .map_err(|_| capacity())?;
+            Ok((slot, bytes))
+        })();
+        match admission {
+            Ok((slot, bytes)) => Box::pin(async move {
+                let _slot = slot;
+                let _bytes = bytes;
+                self.call_admitted(envelope).await
+            }),
+            Err(error) => Box::pin(async move { Err(error) }),
         }
-        let _slot = registry
-            .waiters
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| capacity())?;
-        let _bytes = registry
-            .bytes
-            .clone()
-            .try_acquire_many_owned(encoded.len() as u32)
-            .map_err(|_| capacity())?;
+    }
+    async fn call_admitted(self: Arc<Self>, envelope: Value) -> Result<Value, MemoryError> {
         let meta = &envelope["meta"];
         let thread = meta["threadId"]
             .as_str()
@@ -544,7 +604,7 @@ impl Turn {
                 .filter(|v| v.is_object())
                 .ok_or_else(denied)?;
             let argument_bytes = serde_json::to_vec(arguments).map_err(|_| denied())?.len();
-            if argument_bytes > ARG_BYTES {
+            if argument_bytes > ENVELOPE_BYTES {
                 return Err(capacity());
             }
             let bytes = id.len() + tool.len() + argument_bytes;

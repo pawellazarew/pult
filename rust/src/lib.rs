@@ -896,14 +896,18 @@ async fn connection(
             }
         };
         if let Some(lease) = &codex_memory_lease {
-            let request: Value = match serde_json::from_slice(&bytes) {
+            if bytes.len() > codex_memory::ENVELOPE_BYTES + 1024 {
+                writer.response(&json!({"id":null,"error":{"code":"capacity","message":"Codex memory request exceeds budget"}})).await?;
+                continue;
+            }
+            let mut request: Value = match serde_json::from_slice(&bytes) {
                 Ok(v) => v,
                 Err(_) => break,
             };
             let id = request
                 .get("id")
                 .cloned()
-                .filter(|v| v.is_string() || v.is_number())
+                .filter(|v| v.as_str().is_some_and(|s| s.len() <= 512) || v.is_number())
                 .unwrap_or(Value::Null);
             while responses.try_join_next().is_some() {}
             if id.is_null()
@@ -917,11 +921,11 @@ async fn connection(
                 writer.response(&json!({"id":id,"error":{"code":"capacity","message":"Codex memory capacity reached"}})).await?;
                 continue;
             }
-            let lease = lease.clone();
-            let params = request["params"].clone();
+            let params = request["params"].take();
+            let call = lease.clone().call(params);
             let writer = writer.clone();
             responses.spawn(async move {
-                let response = match lease.call(params).await {
+                let response = match call.await {
                     Ok(value) => json!({"id":id,"result":value}),
                     Err(error) => {
                         json!({"id":id,"error":{"code":error.code,"message":error.message}})

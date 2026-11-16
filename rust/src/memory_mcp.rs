@@ -240,7 +240,8 @@ impl Tools for CodexRemote {
             if reply.get("error").is_some() {
                 return Err(match reply["error"]["code"].as_str() {
                     Some("capacity") => ToolError::Capacity,
-                    Some("forbidden" | "denied") => ToolError::Forbidden,
+                    Some("forbidden" | "denied" | "not_found") => ToolError::Forbidden,
+                    Some("invalid_params") => ToolError::Invalid,
                     _ => ToolError::Unavailable,
                 });
             }

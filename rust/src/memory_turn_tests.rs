@@ -1854,3 +1854,61 @@ async fn persistent_bridge_missing_or_oversize_native_arguments_close_without_io
         f.close().await;
     }
 }
+
+#[tokio::test]
+async fn persistent_bridge_unpolled_tasks_already_own_count_and_aggregate_byte_budget() {
+    let mut f = Fixture::new().await;
+    let (registration, turn) = bridge_fixture(&f);
+    turn.native("native-A", true, true).unwrap();
+    let mut tasks = Vec::new();
+    for n in 0..16 {
+        tasks.push(
+            registration
+                .clone()
+                .call(bridge_envelope("native-A", &format!("unpolled-{n}"))),
+        );
+    }
+    assert_eq!(
+        registration
+            .clone()
+            .call(bridge_envelope("native-A", "overflow"))
+            .await
+            .unwrap_err()
+            .code,
+        "capacity"
+    );
+    drop(tasks);
+    let mut tasks = Vec::new();
+    for n in 0..8 {
+        let mut envelope = bridge_envelope("native-A", &format!("large-{n}"));
+        envelope["name"] = json!("memory_search");
+        envelope["arguments"] = json!({"query":"x".repeat(60*1024)});
+        tasks.push(registration.clone().call(envelope));
+    }
+    let mut extra = bridge_envelope("native-A", "byte-overflow");
+    extra["name"] = json!("memory_search");
+    extra["arguments"] = json!({"query":"x".repeat(60*1024)});
+    assert_eq!(
+        registration.clone().call(extra).await.unwrap_err().code,
+        "capacity"
+    );
+    drop(tasks);
+    let mut oversized = bridge_envelope("native-A", "oversized");
+    oversized["arguments"] = json!({"query":"x".repeat(64*1024)});
+    assert_eq!(
+        registration.clone().call(oversized).await.unwrap_err().code,
+        "capacity"
+    );
+    turn.ledger(
+        "native-A",
+        &json!({"id":"legitimate","server":"pult_memory","tool":"memory_list","arguments":{}}),
+    )
+    .unwrap();
+    assert!(
+        registration
+            .call(bridge_envelope("native-A", "legitimate"))
+            .await
+            .is_ok()
+    );
+    f.close().await;
+}
