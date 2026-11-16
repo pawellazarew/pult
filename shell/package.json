@@ -87,5 +87,13 @@
         "to": "speech"
       }
     ]
+  },
+  "overrides": {
+    "@electron/universal": {
+      "minimatch@>=7 <11.0.1": "11.0.1"
+    },
+    "app-builder-lib": {
+      "minimatch@>=7 <11.0.1": "11.0.1"
+    }
   }
 }
