@@ -498,7 +498,7 @@ async fn query(
     ctx: &Context,
     cancelled: &mut bool,
     cleanup_failed: &mut bool,
-    interrupt: &mut tokio::signal::unix::Signal,
+    cancellation: &mut (impl std::future::Future<Output = ()> + Unpin),
 ) -> Result<ManagerState, &'static str> {
     let bin = ctx
         .bin
@@ -515,12 +515,12 @@ async fn query(
     }
     let mut command = Command::new(bin);
     command.args(query_args(ctx)).env_clear().envs(env);
-    let result = crate::cli_owned_query::run(
+    let result = crate::cli_owned_query::run_with_cancel(
         &mut command,
         crate::cli_owned_query::Kind::Service,
         cancelled,
         cleanup_failed,
-        interrupt,
+        cancellation,
     )
     .await
     .map_err(query_error)?;
@@ -571,6 +571,16 @@ async fn query(
     })
 }
 pub async fn report(home: &Path, interrupt: &mut tokio::signal::unix::Signal) -> ServiceReport {
+    let cancellation = async {
+        interrupt.recv().await;
+    };
+    tokio::pin!(cancellation);
+    report_with_cancel(home, &mut cancellation).await
+}
+pub(super) async fn report_with_cancel(
+    home: &Path,
+    cancellation: &mut (impl std::future::Future<Output = ()> + Unpin),
+) -> ServiceReport {
     let ctx = match context() {
         Ok(ctx) => ctx,
         Err(error) => {
@@ -629,7 +639,7 @@ pub async fn report(home: &Path, interrupt: &mut tokio::signal::unix::Signal) ->
             &ctx,
             &mut report.interrupted,
             &mut report.cleanup_failed,
-            interrupt,
+            cancellation,
         )
         .await
         {

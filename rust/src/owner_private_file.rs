@@ -73,8 +73,45 @@ pub(crate) fn read(
     limit: u64,
     policy: Policy,
 ) -> Result<Option<Vec<u8>>, ReadError> {
-    if relative.is_absolute()
-        || relative.components().count() > 8
+    read_with_depth(home, relative, limit, policy, 8)
+}
+/// Closed diagnostic schema callers may admit the reviewed depth-32 bundle;
+/// ordinary owner reads retain their fixed depth-eight wrapper above.
+pub(crate) fn read_with_depth(
+    home: &Path,
+    relative: &Path,
+    limit: u64,
+    policy: Policy,
+    max_depth: usize,
+) -> Result<Option<Vec<u8>>, ReadError> {
+    if !(1..=32).contains(&max_depth)
+        || relative.is_absolute()
+        || relative.components().count() > max_depth
+        || !relative
+            .components()
+            .all(|p| matches!(p, Component::Normal(_)))
+    {
+        return Err(ReadError::Unsafe);
+    }
+    let flags =
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let directory = match open(home, flags, Mode::empty()) {
+        Ok(fd) => fd,
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(e) => return Err(open_error(e)),
+    };
+    read_from_fd(&directory, relative, limit, policy, max_depth)
+}
+pub(crate) fn read_from_fd(
+    home: &impl rustix::fd::AsFd,
+    relative: &Path,
+    limit: u64,
+    policy: Policy,
+    max_depth: usize,
+) -> Result<Option<Vec<u8>>, ReadError> {
+    if !(1..=32).contains(&max_depth)
+        || relative.is_absolute()
+        || relative.components().count() > max_depth
         || !relative
             .components()
             .all(|p| matches!(p, Component::Normal(_)))
@@ -88,11 +125,7 @@ pub(crate) fn read(
     let name = parts.pop().ok_or(ReadError::Unsafe)?;
     let flags =
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
-    let mut directory = match open(home, flags, Mode::empty()) {
-        Ok(directory) => directory,
-        Err(rustix::io::Errno::NOENT) => return Ok(None),
-        Err(error) => return Err(open_error(error)),
-    };
+    let mut directory = rustix::io::dup(home).map_err(|_| ReadError::Io)?;
     for part in parts {
         directory = match openat(&directory, part, flags, Mode::empty()) {
             Ok(directory) => directory,
