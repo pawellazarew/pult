@@ -1912,3 +1912,173 @@ async fn persistent_bridge_unpolled_tasks_already_own_count_and_aggregate_byte_b
     );
     f.close().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn persistent_bridge_waiter_does_not_block_registry_or_actual_driver_acceptance() {
+    use std::{
+        future::Future,
+        task::{Context, Poll, Waker},
+    };
+    let mut f = Fixture::new().await;
+    let snapshot = f.control().snapshot.clone();
+    f.state.driver.get().unwrap().cancel(f.handle.ticket());
+    bounded(f.handle.wait()).await.unwrap();
+    let prepared = Arc::new(Notify::new());
+    let release_worker = Arc::new(Notify::new());
+    let mut handle = f
+        .state
+        .driver
+        .get()
+        .unwrap()
+        .start(
+            snapshot,
+            "pending".into(),
+            Arc::new(BeforeAcceptedBridgeWorker {
+                backend: f.backend.clone(),
+                prepared: prepared.clone(),
+                release: release_worker.clone(),
+            }),
+        )
+        .unwrap();
+    bounded(prepared.notified()).await;
+    let control = f.backend.control(handle.ticket()).unwrap();
+    let registration = f
+        .backend
+        .bridge()
+        .register(handle.ticket().session().clone(), "held-registry-host")
+        .unwrap();
+    registration.bind("fixture-native-thread").unwrap();
+    let turn = registration
+        .turn(
+            handle.ticket().clone(),
+            Some(crate::codex_memory::Handle::test(
+                f.backend.clone(),
+                handle.ticket().clone(),
+                Lease(control.clone()),
+            )),
+        )
+        .unwrap();
+    bridge_started(&turn, "native-A", "call-A");
+    let held = Arc::new(Notify::new());
+    let entered = held.clone();
+    let state = f.state.clone();
+    let watchdog = Arc::new(AtomicBool::new(false));
+    let fired = watchdog.clone();
+    let (start, timing) = mpsc::channel();
+    let (release, waiting) = mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let _registry = state.registry.lock().unwrap();
+        entered.notify_one();
+        timing.recv_timeout(Duration::from_secs(10)).unwrap();
+        if waiting.recv_timeout(Duration::from_secs(5)).is_err() {
+            fired.store(true, Ordering::Release);
+        }
+    });
+    bounded(held.notified()).await;
+    let mut call = registration
+        .clone()
+        .call(bridge_envelope("native-A", "call-A"));
+    start.send(()).unwrap();
+    assert!(matches!(
+        call.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+        Poll::Pending
+    ));
+    drop(call);
+    // A native receipt can be published while unrelated Registry IO is held.
+    release_worker.notify_one();
+    let accepted = bounded(handle.accepted()).await.unwrap();
+    assert!(accepted.user_event_id > 0);
+    assert_eq!(control.jobs.load(Ordering::Acquire), 0);
+    turn.close();
+    f.state.driver.get().unwrap().cancel(handle.ticket());
+    release.send(()).ok();
+    holder.join().unwrap();
+    assert!(
+        !watchdog.load(Ordering::Acquire),
+        "async bridge tried to lock held Registry before pending/cancel/Accepted"
+    );
+    bounded(handle.wait()).await.unwrap();
+    f.close().await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn persistent_bridge_owned_read_rechecks_policy_changed_before_store_access() {
+    let mut f = Fixture::new().await;
+    let (registration, turn) = bridge_fixture(&f);
+    bridge_started(&turn, "native-A", "call-A");
+    let barrier = Barrier::install(&f.backend.hooks.read);
+    let call = tokio::spawn(registration.call(bridge_envelope("native-A", "call-A")));
+    barrier.entered().await;
+    f.state
+        .registry
+        .lock()
+        .unwrap()
+        .update_checked(f.handle.ticket().session(), |record| {
+            record.set_raw(
+                "memory",
+                serde_json::value::to_raw_value(&json!({"read":false,"write":"off"})).unwrap(),
+            );
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        f.control().valid.load(Ordering::Acquire),
+        "test must reach full policy check without relying on cached revocation"
+    );
+    barrier.release();
+    assert!(bounded(call).await.unwrap().is_err());
+    assert!(
+        f.state.permissions.get().is_none(),
+        "denied policy must not initialize Broker"
+    );
+    assert_eq!(f.record()["version"], 1);
+    f.close().await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn persistent_bridge_owned_proposal_rechecks_write_policy_before_broker() {
+    let mut f = Fixture::new().await;
+    let (registration, turn) = bridge_fixture(&f);
+    turn.native("native-A", true, true).unwrap();
+    let mut arguments = f.update();
+    arguments["operation"] = json!("update");
+    turn.ledger("native-A",&json!({"id":"write-A","server":"pult_memory","tool":"memory_propose","arguments":arguments})).unwrap();
+    let mut envelope = bridge_envelope("native-A", "write-A");
+    envelope["name"] = json!("memory_propose");
+    envelope["arguments"] = arguments;
+    let entered = Arc::new(Notify::new());
+    let held = entered.clone();
+    let state = f.state.clone();
+    let key = f.handle.ticket().session().clone();
+    let (release, waiting) = mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let mut registry = state.registry.lock().unwrap();
+        held.notify_one();
+        waiting.recv_timeout(Duration::from_secs(15)).unwrap();
+        registry
+            .update_checked(&key, |record| {
+                record.set_raw(
+                    "memory",
+                    serde_json::value::to_raw_value(&json!({"read":true,"write":"off"})).unwrap(),
+                );
+                Ok(())
+            })
+            .unwrap();
+    });
+    bounded(entered.notified()).await;
+    let control = f.control();
+    let call = tokio::spawn(registration.call(envelope));
+    bounded(async {
+        while control.jobs.load(Ordering::Acquire) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    release.send(()).unwrap();
+    holder.join().unwrap();
+    assert!(bounded(call).await.unwrap().is_err());
+    assert!(
+        f.state.permissions.get().is_none(),
+        "denied policy must not initialize Broker"
+    );
+    assert_eq!(f.record()["version"], 1);
+    f.close().await;
+}

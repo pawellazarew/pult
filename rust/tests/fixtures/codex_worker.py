@@ -97,6 +97,15 @@ for line in sys.stdin:
         threads[thread] = params
         cwd = str(home / 'foreign') if len(sys.argv) > 2 and sys.argv[2] == 'wrong-cwd' else params['cwd']
         send({'id': frame['id'], 'result': {'thread': {'id': thread}, 'cwd': cwd, 'model': params.get('model', 'fixture-model'), 'sandbox': sandbox, 'approvalPolicy': params['approvalPolicy']}})
+    # This protocol-only worker does not launch a memory helper. Actual helper
+    # IO/readiness/lifetime qualification is in codex_memory.py.
+    elif method == 'mcpServerStatus/list' and threads.get(params.get('threadId'), {}).get('config', {}).get('mcp_servers', {}).get('pult_memory'):
+        assert params['serverName'] == 'pult_memory' and params['limit'] == 1
+        server = threads[params['threadId']]['config']['mcp_servers']['pult_memory']
+        assert Path(server['command']).name == 'pult-memory-mcp'
+        assert server['args'][0] == '--home' and server['args'][-1] == '--codex-bridge'
+        assert list(server['env']) == ['PULT_CODEX_MEMORY_KEY']
+        send({'id':frame['id'],'result':{'data':[{'name':'pult_memory','runtimeStatus':'connected','serverInfo':{'name':'pult-memory'},'toolsError':None,'tools':{name:{} for name in ('memory_catalog','memory_list','memory_search','memory_get','memory_propose')}}],'nextCursor':None}})
     elif method == 'config/read':
         send({'id': frame['id'], 'result': {'config': {'sandbox_workspace_write': {'network_access': True, 'writable_roots': [str(home / 'owner-root')], 'exclude_slash_tmp': True}}}})
     elif method == 'turn/start':

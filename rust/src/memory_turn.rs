@@ -509,7 +509,10 @@ impl Backend {
             changed.await;
         }
     }
-    pub(crate) fn check_handle(&self, lease: &Lease) -> bool {
+    /// Prompt revocation observation only. Current record/policy/Driver checks
+    /// belong to owned read/propose IO before Store/Broker access, never to an
+    /// async bridge waiter or its short native-ledger admission lock.
+    pub(crate) fn handle_live(&self, lease: &Lease) -> bool {
         self.state
             .upgrade()
             .is_some_and(|state| Self::verify(&state, &lease.0, false).is_ok())

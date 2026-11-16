@@ -486,7 +486,7 @@ impl Registration {
                 let registered = self.changed.notified();
                 tokio::pin!(registered);
                 registered.as_mut().enable();
-                if turn.closed.load(Ordering::Acquire) || !backend.check_handle(&lease) {
+                if turn.closed.load(Ordering::Acquire) || !backend.handle_live(&lease) {
                     return Err(denied());
                 }
                 let ready = {
@@ -536,7 +536,7 @@ impl Registration {
                 let mut state = turn.state.lock().map_err(|_| denied())?;
                 if binding.closed
                     || turn.closed.load(Ordering::Acquire)
-                    || !backend.check_handle(&lease)
+                    || !backend.handle_live(&lease)
                 {
                     return Err(denied());
                 }

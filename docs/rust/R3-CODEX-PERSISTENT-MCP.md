@@ -36,6 +36,11 @@ Pending calls can wait for reordered native frames/ACK/Accepted for at most ten
 seconds. Caller Drop cancels a pending waiter before IO. After synchronous ledger
 consumption and Backend admission, the daemon owns the IO through its known
 outcome and Broker cleanup, including when the helper exits or its caller drops.
+Bridge waiters and the short ledger admission section observe only captured
+Control liveness and cheap daemon flags. They acquire no Registry, Driver or
+filesystem lock. Ledger consumption/capacity admission grants no memory operation;
+full current record/policy/Driver verification remains inside owned read/propose
+work before Store/Broker access, with the existing post-read recheck.
 An invalid/overflowed trusted native ledger closes admission before returning the
 failure. An untrusted helper argument mismatch denies only that request.
 
