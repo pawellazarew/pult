@@ -1,6 +1,6 @@
 import './queue.css'
 import { AsyncQuestion } from './AsyncQuestion.js'
-import { t } from '../lib/i18n.js'
+import { getLanguage, t } from '../lib/i18n.js'
 import { ProviderIcon } from './ProviderIcon.js'
 import { StatusDot } from './StatusDot.js'
 import type { DotState } from './StatusDot.js'
@@ -57,6 +57,8 @@ import { expireQueueEdit, queueEditKey, saveQueueEdit, startQueueEdit } from '..
 import type { QueueEditApi, QueueEditState, QueueEditStep } from '../model/queueEdit.js'
 import { errorText, isBridgeError } from '../bridge.js'
 import { explainFailure } from '../model/errors.js'
+import { compactToolFailure, toolFailureTail } from '../model/toolFailure.js'
+import type { CompactToolFailure } from '../model/toolFailure.js'
 import { PermCard } from './PermCard.js'
 import { phaseAnnouncement, phaseElapsed, phaseText } from '../model/phase.js'
 import type { TurnPhase } from '../model/phase.js'
@@ -766,7 +768,7 @@ function Item({ it, ...p }: { it: ConvItem } & ConversationProps): ReactElement 
         </div>
       )
     case 'tool':
-      return <ToolRow it={it} {...(p.loadEvents ? { loadEvents: p.loadEvents } : {})} />
+      return <ToolRow key={JSON.stringify([p.agent.name, p.agent.createdAt, it.key, it.id, it.ts, it.toolUseId])} it={it} {...(p.loadEvents ? { loadEvents: p.loadEvents } : {})} />
     case 'agent':
       return <SubAgent it={it} {...p} />
     case 'perm':
@@ -810,35 +812,51 @@ type ToolDetail = { input: Record<string, unknown>; result?: string } | 'loading
 const ToolRow = memo(function ToolRow({ it, loadEvents }: { it: ToolItem; loadEvents?: (ids: number[]) => Promise<PultEvent[]> }): ReactElement {
   const [open, setOpen] = useState(it.state === 'error')
   useEffect(() => { if (it.state === 'error') setOpen(true) }, [it.state])
-  const [detail, setDetail] = useState<ToolDetail | null>(null)
+  // A completion changes the details owner, not the row's open state or header DOM.
+  const [ownedDetail, setOwnedDetail] = useState<{ endId: number | undefined; detail: ToolDetail } | null>(null)
+  const detail = ownedDetail && ownedDetail.endId === it.endId ? ownedDetail.detail : null
+  // A request belongs to this row and completion; late responses cannot replace a newer result.
+  const request = useRef(0)
+  useEffect(() => () => { request.current += 1 }, [])
   useEffect(() => {
     if (!open || !it.elided || detail !== null || !loadEvents) return
-    setDetail('loading')
+    setOwnedDetail({ endId: it.endId, detail: 'loading' })
+    const current = ++request.current
     const ids = [...new Set([it.id, ...(it.endId !== undefined ? [it.endId] : [])])]
     loadEvents(ids).then(
       (evs) => {
+        if (request.current !== current) return
         const called = evs.find((e) => e.kind === 'tool.called')
         const finished = evs.find((e) => e.kind === 'tool.finished')
         const result = finished ? resultText(finished.data['content']) : undefined
-        setDetail({ input: obj(called?.data['input']) ?? it.input, ...(result !== undefined ? { result } : {}) })
+        setOwnedDetail({ endId: it.endId, detail: { input: obj(called?.data['input']) ?? it.input, ...(result !== undefined ? { result } : {}) } })
       },
-      () => setDetail('error'),
+      () => { if (request.current === current) setOwnedDetail({ endId: it.endId, detail: 'error' }) },
     )
   }, [open, it.elided, it.id, it.endId, it.input, detail, loadEvents])
-  // Строку раскрыли, пока инструмент шёл: конец пришёл живьём — догрузить заново, уже с выводом.
-  const endSeen = useRef(it.endId)
-  useEffect(() => {
-    if (endSeen.current === it.endId) return
-    endSeen.current = it.endId
-    setDetail(null)
-  }, [it.endId])
   const result = detail && typeof detail === 'object' ? detail.result ?? it.result : it.result
   const shown = { input: detail && typeof detail === 'object' ? detail.input : it.input, ...(result !== undefined ? { result } : {}) }
   const sum = toolSummary(it.name, it.input)
   const dur = it.endTs ? Math.max(0, Date.parse(it.endTs) - Date.parse(it.ts)) : null
-  const failure = it.state === 'error' || (it.exitCode !== undefined && it.exitCode !== 0)
+  const classified = it.state === 'error' || (it.exitCode !== undefined && it.exitCode !== 0)
     ? explainFailure(shown.result, { scope: 'tool', ...(it.exitCode !== undefined ? { exitCode: it.exitCode } : {}), ...(typeof shown.input['command'] === 'string' ? { command: shown.input['command'] } : {}) })
     : null
+  const locale = getLanguage()
+  const committed = useRef<{ endId: number | undefined; locale: string; preview: CompactToolFailure } | null>(null)
+  const currentPreview = classified ? { failure: classified, tail: toolFailureTail(shown.result), hasOutput: Boolean(shown.result) } : null
+  useLayoutEffect(() => {
+    request.current += 1
+    setOwnedDetail((owned) => owned && owned.endId !== it.endId ? null : owned)
+    if (committed.current?.endId !== it.endId) committed.current = null
+  }, [it.endId])
+  // History hydration can replace the already rendered full row with the same lite row.
+  // Retain only its committed compact presentation while events.get is pending or fails.
+  useLayoutEffect(() => {
+    if (classified && shown.result !== undefined) committed.current = { endId: it.endId, locale, preview: compactToolFailure(classified, shown.result) }
+  })
+  const preview = classified && shown.result === undefined && it.elided && committed.current?.endId === it.endId && committed.current?.locale === locale
+    ? committed.current.preview : currentPreview
+  const failure = preview?.failure ?? classified
   return (
     <div className="it it-tool" data-testid="tool-row" data-event-id={it.id}>
       <Gutter who="" cls="" ts={it.ts} />
@@ -860,7 +878,7 @@ const ToolRow = memo(function ToolRow({ it, loadEvents }: { it: ToolItem; loadEv
               <strong>{failure.title}</strong>
               <span>{failure.explanation}</span>
               <span>{failure.action}</span>
-              {shown.result ? <pre>{shown.result.split('\n').filter((line) => line.trim()).slice(-6).join('\n').slice(-1600)}</pre> : <span>{t("Подробности доступны в полном выводе.")}</span>}
+              {preview?.hasOutput ? <pre>{preview.tail}</pre> : <span>{t("Подробности доступны в полном выводе.")}</span>}
             </div>}
             <details className="tool-raw" open={!failure}>
               <summary>{t("Полный ввод и вывод")}</summary>
