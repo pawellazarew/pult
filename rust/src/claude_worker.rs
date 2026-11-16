@@ -195,6 +195,8 @@ struct StartupDiagnostic {
     post_import: bool,
     import_before: u8,
     import_after: u8,
+    tail_available: bool,
+    tail_bytes: usize,
 }
 #[cfg(test)]
 struct StartupSpawn;
@@ -792,6 +794,8 @@ async fn run(
             // Retain only fixed synthetic phases after actual stop/reader join.
             // Private stderr bytes, arguments and reflected errors never escape.
             let mut observed = diagnostic.lock().expect("synthetic startup diagnostic");
+            observed.tail_available = true;
+            observed.tail_bytes = stderr.as_bytes().len();
             for line in stderr.as_bytes().split(|byte| *byte == b'\n') {
                 observed.pre_import |= line == b"PULT_CLAUDE_FIXTURE_PRE_IMPORT";
                 observed.post_import |= line == b"PULT_CLAUDE_FIXTURE_POST_IMPORT";

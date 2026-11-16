@@ -197,7 +197,8 @@ impl Rig {
         .map(PathBuf::from)
         .find(|p| p.is_file())
         .unwrap();
-        let mut args = vec!["-B".into()];
+        // Synthetic peers use stdlib only, never ambient user/global site hooks.
+        let mut args = vec!["-I".into(), "-S".into(), "-B".into()];
         if block_optional {
             args.push(
                 Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -321,7 +322,7 @@ impl Rig {
 async fn startup_diagnostics_retains_phases_after_actual_owned_protocol_failure() {
     let mut f = Rig::new();
     let inner = Arc::get_mut(&mut Arc::get_mut(&mut f.worker).unwrap().0).unwrap();
-    inner.config.launch.args[3] = "malformed-mode".into();
+    *inner.config.launch.args.last_mut().unwrap() = "malformed-mode".into();
     let mut turn = f.start("synthetic invalid init");
     let terminal = tokio::time::timeout(WATCHDOG, turn.wait())
         .await
@@ -334,6 +335,8 @@ async fn startup_diagnostics_retains_phases_after_actual_owned_protocol_failure(
     // Bits: json/os/pathlib/sys/threading. Ordinary startup imports only 0/1/3.
     assert_eq!(diagnostic.import_before, 0b01011);
     assert_eq!(diagnostic.import_after, 0b01011);
+    assert!(diagnostic.tail_available);
+    assert!((1..=1024).contains(&diagnostic.tail_bytes));
     f.cleaned();
 }
 
@@ -359,7 +362,7 @@ async fn catalog_is_separate_native_data_and_never_user_journal_or_private_key()
     if let Outcome::Failure { code, message } = &terminal.turn.outcome {
         let startup = *f.startup_diagnostic.lock().unwrap();
         eprintln!(
-            "[memory-catalog-fixture] failure-code={code} ack-timeout={} delivery-unknown={} provider-pid-exists={} input-exists={} pre-import-marker={} post-import-marker={} imports-before={:05b} imports-after={:05b}",
+            "[memory-catalog-fixture] failure-code={code} ack-timeout={} delivery-unknown={} provider-pid-exists={} input-exists={} pre-import-marker={} post-import-marker={} imports-before={:05b} imports-after={:05b} tail-available={} tail-bytes={}",
             message == "Claude input acknowledgement timed out",
             message == "Claude input delivery is unknown",
             f.home.join("provider.pid").is_file(),
@@ -368,6 +371,8 @@ async fn catalog_is_separate_native_data_and_never_user_journal_or_private_key()
             startup.post_import,
             startup.import_before,
             startup.import_after,
+            startup.tail_available,
+            startup.tail_bytes,
         );
     }
     assert_eq!(terminal.turn.outcome, Outcome::Success);
@@ -502,10 +507,12 @@ async fn synthetic_fixture_startup_ignores_ambient_site_hooks_before_user_code()
     if let Outcome::Failure { code, message } = &terminal.turn.outcome {
         let startup = *f.startup_diagnostic.lock().unwrap();
         eprintln!(
-            "[site-startup-fixture] code={code} ack-timeout={} site-entered={site_entered} pre-import={} post-import={}",
+            "[site-startup-fixture] code={code} ack-timeout={} site-entered={site_entered} pre-import={} post-import={} tail-available={} tail-bytes={}",
             message == "Claude input acknowledgement timed out",
             startup.pre_import,
-            startup.post_import
+            startup.post_import,
+            startup.tail_available,
+            startup.tail_bytes,
         );
     }
     assert_eq!(terminal.turn.outcome, Outcome::Success);
@@ -539,12 +546,14 @@ async fn ordinary_attachment_fixture_does_not_wait_for_optional_imports_before_a
     if let Outcome::Failure { code, message } = &terminal.turn.outcome {
         let startup = *f.startup_diagnostic.lock().unwrap();
         eprintln!(
-            "[optional-import-fixture] code={code} ack-timeout={} blocked={blocked:?} pre-import={} post-import={} imports-before={:05b} imports-after={:05b}",
+            "[optional-import-fixture] code={code} ack-timeout={} blocked={blocked:?} pre-import={} post-import={} imports-before={:05b} imports-after={:05b} tail-available={} tail-bytes={}",
             message == "Claude input acknowledgement timed out",
             startup.pre_import,
             startup.post_import,
             startup.import_before,
             startup.import_after,
+            startup.tail_available,
+            startup.tail_bytes,
         );
     }
     assert_eq!(terminal.turn.outcome, Outcome::Success);
@@ -604,7 +613,7 @@ async fn attachment_context_and_memory_stay_separate_and_slash_with_attachment_i
                     )
                 });
             eprintln!(
-                "[memory-attachment-fixture] observe={observe} failure-code={code} ack-timeout={} delivery-unknown={} provider-pid-exists={} input-exists={} native-step={step:?} pre-import-marker={} post-import-marker={} imports-before={:05b} imports-after={:05b}",
+                "[memory-attachment-fixture] observe={observe} failure-code={code} ack-timeout={} delivery-unknown={} provider-pid-exists={} input-exists={} native-step={step:?} pre-import-marker={} post-import-marker={} imports-before={:05b} imports-after={:05b} tail-available={} tail-bytes={}",
                 message == "Claude input acknowledgement timed out",
                 message == "Claude input delivery is unknown",
                 f.home.join("provider.pid").is_file(),
@@ -613,6 +622,8 @@ async fn attachment_context_and_memory_stay_separate_and_slash_with_attachment_i
                 startup.post_import,
                 startup.import_before,
                 startup.import_after,
+                startup.tail_available,
+                startup.tail_bytes,
             );
         }
         assert_eq!(terminal.turn.outcome, Outcome::Success);
