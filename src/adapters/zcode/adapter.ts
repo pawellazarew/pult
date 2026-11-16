@@ -23,6 +23,8 @@
 import { spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { realpathSync, statSync } from 'node:fs'
+import { dirname, isAbsolute, resolve } from 'node:path'
 import type { PultConfig } from '../../core/config.js'
 import type { EventDraft } from '../../core/events.js'
 import type { Logger } from '../../core/log.js'
@@ -91,12 +93,25 @@ export const ZCODE_ENV_PASS: readonly string[] = [
   'ZCODE_APP_VERSION',
 ]
 
-/** Проброс конфиг-переменных zcode из окружения демона: есть значение — уходит ребёнку. */
-export function zcodeExtraEnv(parent: NodeJS.ProcessEnv = process.env): Record<string, string> {
+/** Explicit config wins; an optional selected app CLI supplies only its bundled-resource fallback. */
+export function zcodeExtraEnv(parent: NodeJS.ProcessEnv = process.env, binary?: string): Record<string, string> {
   const out: Record<string, string> = {}
   for (const k of ZCODE_ENV_PASS) {
     const v = parent[k]
     if (typeof v === 'string' && v.length) out[k] = v
+  }
+  // ZCode 0.17.1's standalone script looks in glm/provider, while the app
+  // ships the resource in Resources/config/provider. Select only the resource
+  // of the actual chosen app CLI; preserve explicit configuration and let the
+  // CLI own its usual cache, personal config and credential handling.
+  if (!out['ZCODE_BUILTIN_PROVIDER_CONFIG_FILE'] && binary && isAbsolute(binary)) {
+    try {
+      const entry = realpathSync(binary)
+      if (/\.app\/Contents\/Resources\/glm\/zcode\.cjs$/.test(entry)) {
+        const resource = resolve(dirname(entry), '..', 'config', 'provider', 'zcode-builtin.json')
+        if (statSync(resource).isFile()) out['ZCODE_BUILTIN_PROVIDER_CONFIG_FILE'] = resource
+      }
+    } catch { /* Missing resources retain the native CLI's explicit startup error. */ }
   }
   return out
 }
@@ -388,7 +403,7 @@ export function createZcodeAdapter(opts: ZcodeAdapterOptions): ProviderAdapter {
         })
         child = spawn(opts.bin, argv, {
           cwd: l.spec.cwd,
-          env: buildChildEnv(process.env, { network: l.netEnv, extra: zcodeExtraEnv() }),
+          env: buildChildEnv(process.env, { network: l.netEnv, extra: zcodeExtraEnv(process.env, opts.bin) }),
           stdio: ['pipe', 'pipe', 'pipe'],
         })
         // Шаг A: с каким уровнем ушёл процесс. Режим CLI в потоке не называет (`reported: null` — «не подтверждено»);
