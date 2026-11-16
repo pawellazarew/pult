@@ -114,11 +114,10 @@ export function RuntimePanel({ bridge, sessionId, obstructed, onClose }: { bridg
 
   useEffect(() => { setFrame(null); setFrameAt(null); setDetails(null); setExpanded(false) }, [targetId])
   const fold = useCallback((): void => { setExpanded(false); setOneToOne(false); requestAnimationFrame(() => expandButton.current?.focus()) }, [])
-  useEffect(() => bridge.onRuntimeEscape?.((id) => { if (id === sessionId) fold() }), [bridge, sessionId, fold])
-  useEffect(() => {
-    if (!expanded) return
+  useLayoutEffect(() => bridge.onRuntimeEscape?.((id) => { if (!obstructed && id === sessionId) fold() }), [bridge, sessionId, fold, obstructed])
+  useLayoutEffect(() => {
+    if (!expanded || obstructed) return
     const key = (event: KeyboardEvent): void => {
-      if (obstructed) return
       if (event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); fold() }
       if (event.key === 'Tab') {
         const controls = Array.from(panelRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), summary') ?? []).filter(el => el.getClientRects().length > 0)

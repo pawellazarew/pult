@@ -9,7 +9,7 @@ import { getLanguage, t } from '../lib/i18n.js'
 // Оформление сохраняется сразу на устройстве; срок хранения — отдельно у демона.
 // Черновик умолчаний и языка по-прежнему применяется явным сохранением.
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { FONT_SIZES } from '../model/appearance.js'
 import type { AppearancePreferences, ThemePreference, Density, UiFont, CodeFont } from '../model/appearance.js'
 import { useAppearance } from '../useAppearance.js'
@@ -555,7 +555,7 @@ export function SettingsDialog({ settings, catalog, updates, autoCheck = null, n
   const dirty = languageDraft !== language || JSON.stringify(draft) !== JSON.stringify(settingsDraft(settings)) || auto !== autoCheck || !!(guard && initialGuard && !sameGuard(guard, initialGuard))
   const close = (): void => { if (busy) return; if (dirty) setDiscard(true); else onClose() }
   const actions = useRef({ close, save }); actions.current = { close, save }
-  useEffect(() => {
+  useLayoutEffect(() => {
     const key = (e: KeyboardEvent): void => {
       if (e.key === 'Escape' && (e.target as HTMLInputElement | null)?.id === 'guard-search' && (e.target as HTMLInputElement).value) return
       if (e.key === 'Escape' || ((e.metaKey || e.ctrlKey) && e.code === 'Comma')) { e.preventDefault(); e.stopImmediatePropagation(); actions.current.close() }
