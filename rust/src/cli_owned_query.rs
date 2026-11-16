@@ -277,10 +277,10 @@ pub(super) async fn run_with_cancel(
     let stderr = owner.child.stderr.take().ok_or(Error::StderrUnavailable)?;
     let combined = matches!(kind, Kind::NodeVersion)
         .then(|| std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)));
-    let limit = if matches!(kind, Kind::Service | Kind::NodeVersion) {
-        LIMIT
-    } else {
-        4 * LIMIT
+    let limit = match kind {
+        Kind::Service | Kind::NodeVersion => LIMIT,
+        Kind::DoctorNetwork => 64 * 1024,
+        _ => 4 * LIMIT,
     };
     let stdout_budget = combined.clone();
     reads.spawn(async move { (true, capture_pipe(stdout, stdout_budget, limit).await) });

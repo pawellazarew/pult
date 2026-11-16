@@ -19,7 +19,7 @@ fn hash(dir: &Path) -> Result<(String, usize)> {
                 walk(root, &e.path(), depth + 1, out)?
             } else if kind.is_file() {
                 out.push(e.path().strip_prefix(root)?.to_owned());
-                ensure!(out.len() <= 8192, "schema file count exceeds limit");
+                ensure!(out.len() <= 4096, "schema file count exceeds limit");
             }
         }
         Ok(())
@@ -37,13 +37,14 @@ fn hash(dir: &Path) -> Result<(String, usize)> {
         );
         total += s.len();
         ensure!(total <= 64 * 1024 * 1024, "schema bundle exceeds limit");
-        let body = crate::cli_client::owner_private_file::read(
+        let body = crate::cli_client::owner_private_file::read_with_depth(
             dir,
             path,
             8 * 1024 * 1024,
             crate::cli_client::owner_private_file::Policy {
                 private_config: false,
             },
+            32,
         )?
         .ok_or_else(|| anyhow::anyhow!("schema file vanished"))?;
         bundle
@@ -132,8 +133,10 @@ pub(super) async fn check(root: &Path, bin: PathBuf, exec: &Executor, t: Text) -
         }
         Err(e) => Err(e),
     };
-    // Executor returned only after process group and all readers were joined.
-    std::fs::remove_dir_all(&dir)?;
+    // An unconfirmed group may still write here. Retain it for owner inspection.
+    if !exec.cleanup_failed() {
+        std::fs::remove_dir_all(&dir)?;
+    }
     let (state, actual, files, detail) = digest?;
     let mut item = t
         .item(

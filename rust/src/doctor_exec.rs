@@ -1,7 +1,15 @@
-//! Closed diagnostic authority; children are joined even when cancelled.
+//! Closed diagnostic authority; reports require confirmed child/reader cleanup.
 use crate::cli_owned_query::{self, Kind};
 use anyhow::{Result, anyhow, ensure};
-use std::{collections::BTreeMap, ffi::OsString, path::PathBuf, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    ffi::OsString,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 use tokio::{
     process::Command,
     sync::{Semaphore, watch},
@@ -9,6 +17,7 @@ use tokio::{
 #[derive(Clone)]
 pub(super) struct Executor {
     pub cancel: watch::Receiver<bool>,
+    cleanup_fault: Arc<AtomicBool>,
     slots: Arc<Semaphore>,
     pub env: BTreeMap<OsString, OsString>,
 }
@@ -44,6 +53,7 @@ pub(super) struct Output {
     pub code: Option<i32>,
     pub stdout: String,
     pub stderr: String,
+    pub limited: bool,
 }
 pub(super) async fn cancelled(rx: &mut watch::Receiver<bool>) {
     loop {
@@ -75,9 +85,16 @@ impl Executor {
         );
         Ok(Self {
             cancel,
+            cleanup_fault: Arc::new(AtomicBool::new(false)),
             slots: Arc::new(Semaphore::new(8)),
             env,
         })
+    }
+    pub fn mark_cleanup_fault(&self) {
+        self.cleanup_fault.store(true, Ordering::Release);
+    }
+    pub fn cleanup_failed(&self) -> bool {
+        self.cleanup_fault.load(Ordering::Acquire)
     }
     pub async fn run(&self, diagnostic: DiagnosticCommand) -> Result<Output> {
         let _slot = self
@@ -85,7 +102,16 @@ impl Executor {
             .acquire()
             .await
             .map_err(|_| anyhow!("doctor executor unavailable"))?;
+        ensure!(
+            !self.cleanup_failed(),
+            "doctor child cleanup is unconfirmed"
+        );
         ensure!(!*self.cancel.borrow(), "doctor interrupted");
+        // Closed fault selector for private actual-CLI lifecycle tests. The real
+        // owner still joins first; this injects uncertainty classification only.
+        let injected_cleanup_fault = std::env::var("PULT_TEST").as_deref() == Ok("1")
+            && std::env::var("PULT_TEST_DOCTOR_FAULT").as_deref() == Ok("cleanup-schema")
+            && matches!(&diagnostic, DiagnosticCommand::Schema { .. });
         let (bin, args, kind, provider) = match diagnostic {
             DiagnosticCommand::Shell { shell, home, user } => (
                 PathBuf::from("/usr/bin/env"),
@@ -177,19 +203,34 @@ impl Executor {
             cancelled(&mut rx),
         )
         .await;
-        ensure!(!cleanup_failed, "doctor child cleanup is unconfirmed");
+        if cleanup_failed || injected_cleanup_fault {
+            self.mark_cleanup_fault();
+        }
+        ensure!(
+            !cleanup_failed && !injected_cleanup_fault,
+            "doctor child cleanup is unconfirmed"
+        );
         ensure!(!was_cancelled, "doctor interrupted");
         Ok(match result {
             Ok(r) => Output {
+                limited: matches!(r.failure, Some(cli_owned_query::Error::Overflow)),
                 code: if r.failure.is_some() {
                     None
                 } else {
                     r.status.code()
                 },
-                stdout: String::from_utf8_lossy(&r.stdout).into_owned(),
+                stdout: if r
+                    .failure
+                    .is_some_and(|e| !matches!(e, cli_owned_query::Error::Timeout))
+                {
+                    String::new()
+                } else {
+                    String::from_utf8_lossy(&r.stdout).into_owned()
+                },
                 stderr: String::from_utf8_lossy(&r.stderr).into_owned(),
             },
             Err(e) => Output {
+                limited: matches!(e, cli_owned_query::Error::Overflow),
                 code: None,
                 stdout: String::new(),
                 stderr: match e {

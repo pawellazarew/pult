@@ -8,7 +8,7 @@ use serde_json::{Value, json, value::RawValue};
 use std::{
     fs::OpenOptions,
     io::Read,
-    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
 };
 pub(super) const LIMIT: u64 = 1024 * 1024;
@@ -61,7 +61,8 @@ pub(super) fn follow(path: &Path, limit: u64) -> Result<Option<String>> {
     Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
 }
 /// JSON.parse accepts lone UTF-16 units; only the narrow file projection is used.
-/// Rust display/OS strings follow Node's UTF-8 replacement at their output boundary.
+/// Dynamic diagnostic display/OS strings use the documented UTF-8 replacement
+/// profile. Opaque RPC fields keep RawValue/RawFields instead.
 pub(super) fn json(text: &str) -> Result<Value> {
     let _: Box<RawValue> = serde_json::from_str(text)?;
     let b = text.as_bytes();
@@ -95,8 +96,8 @@ pub(super) fn json(text: &str) -> Result<Value> {
 }
 pub(super) fn private_dir(home: &Path, name: &str) -> Result<PathBuf> {
     let path = home.join(name);
-    match std::fs::create_dir(&path) {
-        Ok(()) => std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?,
+    match std::fs::DirBuilder::new().mode(0o700).create(&path) {
+        Ok(()) => (),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (),
         Err(e) => return Err(e.into()),
     };
@@ -137,7 +138,10 @@ pub(super) fn zcode(path: &Path) -> Result<&'static str> {
     };
     Ok(
         if o.keys().any(|k| {
-            k == "zcodejwttoken" || (k.starts_with("oauth:") && k.ends_with(":access_token"))
+            k == "zcodejwttoken"
+                || k.strip_prefix("oauth:")
+                    .and_then(|s| s.strip_suffix(":access_token"))
+                    .is_some_and(|middle| !middle.contains(['\n', '\r', '\u{2028}', '\u{2029}']))
         }) {
             "yes"
         } else {
@@ -273,8 +277,13 @@ pub(super) fn permissions(root: &Path, display: &Path, t: Text) -> Item {
         ))
     }
 }
-pub(super) fn version_items(root: &Path, daemon: Option<&Value>, t: Text) -> Result<Vec<Item>> {
-    let current = root.join("current");
+pub(super) fn version_items(
+    root: &Path,
+    daemon: Option<&Value>,
+    t: Text,
+    display: &Path,
+) -> Result<Vec<Item>> {
+    let current = display.join("current");
     let mut items = vec![];
     let link = std::fs::read_link(&current).ok();
     let base =

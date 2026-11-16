@@ -33,22 +33,57 @@ impl Text {
             fix: None,
             fix_cmd: None,
             data: None,
+            raw_detail: None,
+            raw_login: None,
         }
     }
 }
-#[derive(Serialize, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug)]
 pub(super) struct Item {
     pub id: String,
     pub title: String,
     pub status: String,
     pub detail: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub fix: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub fix_cmd: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
+    // Only JS slice can split a pair; normal text remains UTF-8 for terminal IO.
+    pub raw_detail: Option<Box<serde_json::value::RawValue>>,
+    pub raw_login: Option<Box<serde_json::value::RawValue>>,
+}
+impl Serialize for Item {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut m = serializer.serialize_map(None)?;
+        m.serialize_entry("id", &self.id)?;
+        m.serialize_entry("title", &self.title)?;
+        m.serialize_entry("status", &self.status)?;
+        if let Some(raw) = &self.raw_detail {
+            m.serialize_entry("detail", raw)?
+        } else {
+            m.serialize_entry("detail", &self.detail)?
+        }
+        if let Some(f) = &self.fix {
+            m.serialize_entry("fix", f)?
+        }
+        if let Some(f) = &self.fix_cmd {
+            m.serialize_entry("fixCmd", f)?
+        }
+        if let Some(login) = &self.raw_login {
+            #[derive(Serialize)]
+            struct Login<'a> {
+                login: &'a serde_json::value::RawValue,
+            }
+            m.serialize_entry("data", &Login { login })?;
+        } else if let Some(data) = &self.data {
+            m.serialize_entry("data", data)?
+        }
+        m.end()
+    }
+}
+pub(super) fn raw_string(units: &[u16]) -> Box<serde_json::value::RawValue> {
+    serde_json::value::RawValue::from_string(pult_core::encode_js_string(units))
+        .expect("reviewed JS string encoder")
 }
 impl Item {
     pub fn cmd(mut self, cmd: impl Into<String>) -> Self {

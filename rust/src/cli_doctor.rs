@@ -28,13 +28,23 @@ fn safe_id(v: Option<&Value>) -> Option<&str> {
 }
 fn claude_items(r: super::doctor_exec::Output, t: Text) -> Vec<Item> {
     let text = r.stdout.trim();
-    let raw = files::json(text)
-        .or_else(|_| {
-            text.find('{')
-                .ok_or_else(|| anyhow!("auth JSON unavailable"))
-                .and_then(|i| files::json(&text[i..]))
-        })
-        .ok();
+    fn parsed(text: &str) -> Option<Value> {
+        let raw: Box<serde_json::value::RawValue> = serde_json::from_str(text).ok()?;
+        let fields = pult_core::RawFields::parse(&raw).ok()?;
+        let logged = fields
+            .get("loggedIn")
+            .and_then(|v| serde_json::from_str::<bool>(v.get()).ok());
+        let string = |name| {
+            fields
+                .get(name)
+                .filter(|v| v.get().starts_with('"'))
+                .and_then(|v| pult_core::display_string(v).ok())
+        };
+        Some(
+            json!({"loggedIn":logged,"subscriptionType":string("subscriptionType"),"authMethod":string("authMethod")}),
+        )
+    }
+    let raw = parsed(text).or_else(|| text.find('{').and_then(|i| parsed(&text[i..])));
     let logged = raw.as_ref().and_then(|v| v["loggedIn"].as_bool());
     let code = r
         .code
@@ -104,11 +114,17 @@ fn claude_items(r: super::doctor_exec::Output, t: Text) -> Vec<Item> {
     vec![login, subscription]
 }
 fn codex_items(r: super::doctor_exec::Output, t: Text) -> Vec<Item> {
-    let line = [&r.stdout, &r.stderr]
+    let units = [&r.stdout, &r.stderr]
         .into_iter()
-        .find_map(|s| s.split('\n').map(str::trim).find(|l| !l.is_empty()))
-        .map(|s| redact(s).chars().take(160).collect::<String>())
+        .find_map(|s| {
+            s.split('\n')
+                .map(crate::cli_runtime_files::trim)
+                .find(|l| !l.is_empty())
+        })
+        .map(|s| redact(s).encode_utf16().take(160).collect::<Vec<_>>())
         .unwrap_or_default();
+    let split_pair = std::char::decode_utf16(units.iter().copied()).any(|u| u.is_err());
+    let line = String::from_utf16_lossy(&units);
     let code = r
         .code
         .map(|v| v.to_string())
@@ -130,11 +146,81 @@ fn codex_items(r: super::doctor_exec::Output, t: Text) -> Vec<Item> {
     if r.code != Some(0) {
         login = login.cmd("codex login")
     }
+    if split_pair {
+        let mut detail = t
+            .t("код выхода {0}{1}", &[&code, ": "])
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        detail.extend(&units);
+        login.raw_detail = Some(super::doctor_model::raw_string(&detail));
+    }
     let mut out = vec![login];
     if r.code == Some(0) {
-        out.push(t.item("subscription.codex","Подписка codex","ok",t.t("{0} — ходы агентов Пульта тратят ту учётку, в которую вошёл терминальный codex",&[if line.is_empty(){&fallback}else{&line}])).data(json!({"login":line})))
+        let mut subscription=t.item("subscription.codex","Подписка codex","ok",t.t("{0} — ходы агентов Пульта тратят ту учётку, в которую вошёл терминальный codex",&[if line.is_empty(){&fallback}else{&line}])).data(json!({"login":line}));
+        if split_pair {
+            let mut detail = units.clone();
+            detail.extend(t.t("{0} — ходы агентов Пульта тратят ту учётку, в которую вошёл терминальный codex",&[""]).encode_utf16());
+            subscription.raw_detail = Some(super::doctor_model::raw_string(&detail));
+            subscription.raw_login = Some(super::doctor_model::raw_string(&units));
+        }
+        out.push(subscription);
     }
     out
+}
+fn daemon_projection(raw: &serde_json::value::RawValue) -> Result<Value> {
+    fn fields(raw: &serde_json::value::RawValue, names: &[&str]) -> Result<Value> {
+        let source = pult_core::RawFields::parse(raw)?;
+        let mut out = serde_json::Map::new();
+        for name in names {
+            if let Some(raw) = source.get(name) {
+                out.insert((*name).into(), files::json(raw.get())?);
+            }
+        }
+        Ok(Value::Object(out))
+    }
+    let source = pult_core::RawFields::parse(raw)?;
+    let mut out = serde_json::Map::new();
+    for name in ["version", "pid", "uptimeMs", "lastEventId"] {
+        if let Some(raw) = source.get(name) {
+            out.insert(name.into(), files::json(raw.get())?);
+        }
+    }
+    for (name, known) in [
+        ("node", &["path", "version", "alive", "own"][..]),
+        ("browser", &["sessions"][..]),
+    ] {
+        if let Some(raw) = source.get(name) {
+            out.insert(
+                name.into(),
+                if raw.get().starts_with('{') {
+                    fields(raw, known)?
+                } else {
+                    files::json(raw.get())?
+                },
+            );
+        }
+    }
+    if let Some(raw) = source.get("update") {
+        let update = if raw.get().starts_with('{') {
+            let f = pult_core::RawFields::parse(raw)?;
+            let mut v = fields(
+                raw,
+                &["error", "enabled", "checkedAt", "current", "available"],
+            )?;
+            if let Some(latest) = f.get("latest") {
+                v["latest"] = if latest.get().starts_with('{') {
+                    fields(latest, &["version"])?
+                } else {
+                    files::json(latest.get())?
+                };
+            }
+            v
+        } else {
+            files::json(raw.get())?
+        };
+        out.insert("update".into(), update);
+    }
+    Ok(Value::Object(out))
 }
 fn daemon_items(status: Option<&Value>, t: Text) -> Vec<Item> {
     let mut out = vec![];
@@ -234,7 +320,13 @@ fn browser_items(
     }
     Ok(out)
 }
-async fn auth(root: &Path, tools: &[Tool], exec: &Executor, t: Text) -> Result<Vec<Item>> {
+async fn auth(
+    root: &Path,
+    tools: &[Tool],
+    exec: &Executor,
+    schema_exec: &Executor,
+    t: Text,
+) -> Result<Vec<Item>> {
     let mut jobs = tokio::task::JoinSet::new();
     if let Some(bin) = tools
         .iter()
@@ -265,7 +357,7 @@ async fn auth(root: &Path, tools: &[Tool], exec: &Executor, t: Text) -> Result<V
                 ),
             ))
         });
-        let exec = exec.clone();
+        let exec = schema_exec.clone();
         let root = root.to_owned();
         jobs.spawn(async move { Ok((2, vec![doctor_schema::check(&root, bin, &exec, t).await?])) });
     }
@@ -317,19 +409,20 @@ async fn execute(
     if !paths.is_empty() {
         child_exec.env.insert("PATH".into(), paths.join(":").into());
     }
-    let exec = &child_exec;
-    let disk = crate::cli_runtime_files::observe(root)?;
-    let managed = disk
-        .active
+    let active = files::follow(&root.join("runtime/active"), 16 * 1024)?;
+    let managed = active
         .as_deref()
+        .map(files::trim_first)
+        .filter(|s| !s.is_empty())
         .and_then(crate::cli_runtime_files::program);
     let located = tools.iter().find(|t| t.name == "node").unwrap();
-    let (node_path, node_version, source) = if let Some(bin) = managed {
+    let mut selected = (located.path.clone(), located.version.clone(), "located");
+    if let Some(bin) = managed {
         if test {
             ensure!(
                 std::fs::canonicalize(&bin)?.starts_with(root),
                 "test managed node must stay in scratch home"
-            )
+            );
         }
         let r = exec
             .run(DiagnosticCommand::Version {
@@ -337,35 +430,28 @@ async fn execute(
                 node: true,
             })
             .await?;
-        (
-            Some(bin),
-            Some(r.stdout.trim().to_owned()),
-            "managed-active",
-        )
-    } else {
-        (located.path.clone(), located.version.clone(), "login-path")
-    };
+        let version = crate::cli_runtime_files::trim(&r.stdout).to_owned();
+        if r.code == Some(0) && doctor_path::node_supported(&version) {
+            selected = (Some(bin), Some(version), "managed-active");
+        }
+    }
+    let (node_path, node_version, source) = selected;
     let version = node_version.as_deref().unwrap_or("unknown");
-    let major = version
-        .trim_start_matches('v')
-        .split('.')
-        .next()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(0);
+    let supported = doctor_path::node_supported(version);
     let mut node = t
         .item(
             "node.version",
             "Node",
-            if major >= 22 { "ok" } else { "fail" },
+            if supported { "ok" } else { "fail" },
             t.t("{0} (нужен >= {1})", &[version, "22"]),
         )
         .data(json!({"path":node_path,"source":source}));
-    if major < 22 {
+    if !supported {
         node = node.cmd("brew upgrade node")
     };
     let mut items = vec![node];
     items.extend(tools.iter().map(|tool| doctor_path::item(tool, &user, t)));
-    items.extend(auth(root, &tools, exec, t).await?);
+    items.extend(auth(root, &tools, &child_exec, exec, t).await?);
     let codex_file = if test {
         root.join("codex-config.toml")
     } else {
@@ -445,12 +531,9 @@ async fn execute(
     )
     .await
     .map_err(|e| anyhow!(e.message))?;
-    let status = status
-        .as_deref()
-        .map(|r| files::json(r.get()))
-        .transpose()?;
+    let status = status.as_deref().map(daemon_projection).transpose()?;
     items.extend(daemon_items(status.as_ref(), t));
-    items.extend(files::version_items(root, status.as_ref(), t)?);
+    items.extend(files::version_items(root, status.as_ref(), t, display)?);
     items.extend(browser_items(
         root,
         display,
@@ -476,6 +559,7 @@ pub(super) async fn run(display: &Path, json: bool, no_net: bool) -> Result<i32>
     ensure!(
         [
             "PULT_MEMORY_KEY",
+            "PULT_CODEX_MEMORY_KEY",
             "PULT_MEMORY_TURN_KEY",
             "PULT_ASK_KEY",
             "PULT_RUNTIME_KEY"
@@ -486,12 +570,12 @@ pub(super) async fn run(display: &Path, json: bool, no_net: bool) -> Result<i32>
     );
     let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let (tx, rx) = tokio::sync::watch::channel(false);
+    let exec = Executor::new(rx)?;
     let monitor = tokio::spawn(async move {
         while signal.recv().await.is_some() {
             let _ = tx.send(true);
         }
     });
-    let exec = Executor::new(rx)?;
     let result = async {
         let root = pult_core::checked_home(display)?;
         execute(&root, display, json, no_net, &exec).await
@@ -500,6 +584,10 @@ pub(super) async fn run(display: &Path, json: bool, no_net: bool) -> Result<i32>
     let interrupted = *exec.cancel.borrow();
     monitor.abort();
     let _ = monitor.await;
+    ensure!(
+        !exec.cleanup_failed(),
+        "doctor child cleanup is unconfirmed; retained scratch requires inspection"
+    );
     if interrupted {
         let _ = cli_client::emit("Error: doctor interrupted\n".into(), true).await;
         return Ok(130);

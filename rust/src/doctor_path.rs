@@ -8,7 +8,6 @@ use anyhow::{Result, anyhow, ensure};
 use serde_json::json;
 use std::{
     io::Write,
-    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
 };
 pub(super) const TOOLS: [&str; 8] = [
@@ -22,6 +21,7 @@ pub(super) struct Tool {
     pub version: Option<String>,
     pub via_path: bool,
     pub tried: usize,
+    pub limited: bool,
 }
 pub(super) fn candidates(user: &Path, name: &str) -> Vec<PathBuf> {
     let local = |s: &str| user.join(s);
@@ -78,7 +78,7 @@ fn sanitize(s: &str) -> Vec<String> {
     let mut out = vec![];
     for s in s
         .split(':')
-        .map(str::trim)
+        .map(crate::cli_runtime_files::trim)
         .filter(|s| !s.is_empty() && !s.starts_with('~'))
     {
         if !out.iter().any(|v| v == s) {
@@ -93,9 +93,7 @@ pub(super) async fn login_path(
     test: bool,
     exec: &Executor,
 ) -> Result<Vec<String>> {
-    if test {
-        let path = std::env::var("PULT_TEST_DOCTOR_PATH")
-            .map_err(|_| anyhow!("test doctor requires explicit PULT_TEST_DOCTOR_PATH"))?;
+    if test && let Ok(path) = std::env::var("PULT_TEST_DOCTOR_PATH") {
         let paths = sanitize(&path);
         for path in &paths {
             ensure!(
@@ -105,7 +103,7 @@ pub(super) async fn login_path(
         }
         return Ok(paths);
     }
-    if let Some(s) = files::private_read(root, "env.json", files::LIMIT)?
+    if let Some(s) = cache_read(root)?
         && let Ok(v) = files::json(&s)
         && let Some(at) = v["capturedAt"]
             .as_str()
@@ -121,12 +119,31 @@ pub(super) async fn login_path(
             .map(|v| v.as_str().map(str::to_owned))
             .collect::<Option<Vec<_>>>();
         if let Some(paths) = paths {
+            if test {
+                for path in &paths {
+                    ensure!(
+                        std::fs::canonicalize(path)?.starts_with(root),
+                        "test cached PATH must stay in scratch home"
+                    );
+                }
+            }
             return Ok(paths);
         }
     }
-    let shell = std::env::var_os("SHELL")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/bin/zsh"));
+    let shell = if test {
+        let shell = std::env::var_os("PULT_TEST_DOCTOR_SHELL")
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow!("test doctor requires an explicit fake shell or PATH"))?;
+        ensure!(
+            std::fs::canonicalize(&shell)?.starts_with(root),
+            "test doctor shell must stay in scratch home"
+        );
+        shell
+    } else {
+        std::env::var_os("SHELL")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/bin/zsh"))
+    };
     let r = exec
         .run(DiagnosticCommand::Shell {
             shell: shell.clone(),
@@ -135,6 +152,10 @@ pub(super) async fn login_path(
         })
         .await?;
     if r.code != Some(0) {
+        ensure!(
+            !test,
+            "test doctor fake shell failed; system fallback is disabled"
+        );
         return Ok(sanitize("/usr/bin:/bin:/usr/sbin:/sbin"));
     }
     let vars = r
@@ -144,6 +165,14 @@ pub(super) async fn login_path(
         .filter(|(k, _)| !k.is_empty())
         .collect::<std::collections::BTreeMap<_, _>>();
     let paths = sanitize(vars.get("PATH").copied().unwrap_or_default());
+    if test {
+        for path in &paths {
+            ensure!(
+                std::fs::canonicalize(path)?.starts_with(root),
+                "test captured PATH must stay in scratch home"
+            );
+        }
+    }
     let secret =
         regex::Regex::new("(?i)(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)").unwrap();
     let names = vars
@@ -157,22 +186,7 @@ pub(super) async fn login_path(
         .copied()
         .collect::<Vec<_>>();
     let cache = json!({"capturedAt":now(),"shell":shell,"pathEntries":paths,"names":names,"secretNames":secrets});
-    // Existing unsafe cache is fatal above. Write only a new private scratch file;
-    // failure to cache is observational and does not change the captured PATH.
-    let path = root.join("env.json");
-    let write = || -> Result<()> {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
-            .open(path)?;
-        ensure!(f.metadata()?.is_file(), "unsafe env cache");
-        f.write_all(format!("{}\n", serde_json::to_string_pretty(&cache)?).as_bytes())?;
-        Ok(())
-    };
-    let _ = write();
+    write_cache(root, &cache)?;
     Ok(paths)
 }
 pub(super) async fn locate(
@@ -182,7 +196,7 @@ pub(super) async fn locate(
     test: bool,
     exec: &Executor,
 ) -> Result<Vec<Tool>> {
-    let mut jobs = tokio::task::JoinSet::new();
+    let mut pending = Vec::new();
     for (index, name) in TOOLS.iter().copied().enumerate() {
         let list = candidates(user, name);
         let tried = list.len();
@@ -210,10 +224,14 @@ pub(super) async fn locate(
                 "test doctor tool resolves outside scratch home"
             )
         }
+        pending.push((index, name, path, via_path, tried));
+    }
+    let mut jobs = tokio::task::JoinSet::new();
+    for (index, name, path, via_path, tried) in pending {
         let exec = exec.clone();
         jobs.spawn(async move {
             let real = path.as_deref().and_then(|p| std::fs::canonicalize(p).ok());
-            let version = if let Some(bin) = &path {
+            let (version, limited) = if let Some(bin) = &path {
                 let r = exec
                     .run(DiagnosticCommand::Version {
                         bin: bin.clone(),
@@ -221,10 +239,20 @@ pub(super) async fn locate(
                     })
                     .await?;
                 let output = format!("{}{}", r.stdout, r.stderr);
-                let first = output.trim().split('\n').next().unwrap_or("");
-                (!first.is_empty()).then(|| first.to_owned())
+                let first = crate::cli_runtime_files::trim(&output)
+                    .split('\n')
+                    .next()
+                    .unwrap_or("");
+                (
+                    if r.limited {
+                        None
+                    } else {
+                        (!first.is_empty()).then(|| first.to_owned())
+                    },
+                    r.limited,
+                )
             } else {
-                None
+                (None, false)
             };
             Ok::<_, anyhow::Error>((
                 index,
@@ -235,6 +263,7 @@ pub(super) async fn locate(
                     version,
                     via_path,
                     tried,
+                    limited,
                 },
             ))
         });
@@ -321,10 +350,24 @@ pub(super) fn item(tool: &Tool, user: &Path, t: Text) -> Item {
         .item(
             &id,
             &title,
-            if codex || zcode { "warn" } else { "ok" },
+            if codex || zcode || tool.limited {
+                "warn"
+            } else {
+                "ok"
+            },
             detail,
         )
         .data(json!({"path":path,"realpath":real,"version":version}));
+    if tool.limited {
+        item.detail.push_str(if t.0 {
+            " — diagnostic version output exceeds 4 MiB limit"
+        } else {
+            " — вывод версии больше предела 4 MiB"
+        });
+        if let Some(data) = item.data.as_mut() {
+            data["state"] = json!("output_limit");
+        }
+    }
     if codex {
         let link = user.join(".local/bin/codex");
         let link = link.display().to_string();
@@ -358,4 +401,95 @@ pub(super) fn item(tool: &Tool, user: &Path, t: Text) -> Item {
         item=item.fix(t.t("надёжнее симлинк: ln -sf {0} ~/.local/bin/zcode — Пульт найдёт бинарь и без него, но терминалу он нужен",&[&path]))
     }
     item
+}
+
+fn cache_read(root: &Path) -> Result<Option<String>> {
+    use crate::cli_client::owner_private_file::{self, Policy};
+    owner_private_file::read(
+        root,
+        Path::new("env.json"),
+        files::LIMIT,
+        Policy {
+            private_config: true,
+        },
+    )
+    .map(|b| b.map(|b| String::from_utf8_lossy(&b).into_owned()))
+    .map_err(|_| anyhow!("doctor env cache is unsafe or exceeds limit"))
+}
+fn write_cache(root: &Path, cache: &serde_json::Value) -> Result<()> {
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags, open, openat, renameat, statat, unlinkat};
+    let body = format!("{}\n", serde_json::to_string_pretty(cache)?);
+    ensure!(
+        body.len() as u64 <= files::LIMIT,
+        "doctor env cache exceeds limit"
+    );
+    let directory = open(
+        root,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let before = match statat(&directory, "env.json", AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(m) => {
+            ensure!(
+                FileType::from_raw_mode(m.st_mode as _) == FileType::RegularFile
+                    && m.st_nlink == 1
+                    && m.st_mode & 0o077 == 0
+                    && m.st_uid == nix::unistd::getuid().as_raw(),
+                "doctor env cache is unsafe"
+            );
+            Some((m.st_dev, m.st_ino))
+        }
+        Err(rustix::io::Errno::NOENT) => None,
+        Err(e) => return Err(e.into()),
+    };
+    let mut random = [0; 16];
+    getrandom::fill(&mut random).map_err(|_| anyhow!("cache scratch randomness unavailable"))?;
+    let name = format!(
+        ".doctor-env-{}",
+        random
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    );
+    let mut file = std::fs::File::from(openat(
+        &directory,
+        &name,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(0o600),
+    )?);
+    let result = (|| -> Result<()> {
+        file.write_all(body.as_bytes())?;
+        file.sync_all()?;
+        let after = match statat(&directory, "env.json", AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(m) => Some((m.st_dev, m.st_ino)),
+            Err(rustix::io::Errno::NOENT) => None,
+            Err(e) => return Err(e.into()),
+        };
+        ensure!(before == after, "doctor env cache changed during capture");
+        renameat(&directory, &name, &directory, "env.json")?;
+        Ok(())
+    })();
+    let _ = unlinkat(&directory, &name, AtFlags::empty());
+    result
+}
+
+pub(super) fn node_supported(version: &str) -> bool {
+    let version = version
+        .strip_prefix('v')
+        .unwrap_or(version)
+        .split('.')
+        .next()
+        .unwrap_or("0");
+    let version = crate::cli_runtime_files::trim(version);
+    let signed = version.starts_with(['+', '-']);
+    let digits = version
+        .as_bytes()
+        .iter()
+        .skip(usize::from(signed))
+        .take_while(|b| b.is_ascii_digit())
+        .count();
+    digits > 0
+        && version[..digits + usize::from(signed)]
+            .parse::<f64>()
+            .is_ok_and(|n| n >= 22.0)
 }

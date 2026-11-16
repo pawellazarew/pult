@@ -37,6 +37,9 @@ pub(super) async fn items(
     let c = cancelled(&mut rx);
     tokio::pin!(c);
     let r = cli_service::report_with_cancel(root, &mut c).await;
+    if r.cleanup_failed {
+        exec.mark_cleanup_fault();
+    }
     ensure!(!r.cleanup_failed, "doctor service cleanup is unconfirmed");
     ensure!(!r.interrupted, "doctor interrupted");
     let r = serde_json::to_value(r)?;
@@ -90,7 +93,7 @@ pub(super) async fn items(
     }
     items.push(launch);
     let m = r.get("manager").filter(|v| !v.is_null());
-    if m.is_none() || m.unwrap().get("error").is_some() {
+    if m.is_none_or(|m| m.get("error").is_some()) {
         items.push(
             item(
                 "warn",
@@ -107,7 +110,7 @@ pub(super) async fn items(
             .cmd("pult daemon install"),
         );
     } else {
-        let m = m.unwrap();
+        let m = m.ok_or_else(|| anyhow::anyhow!("service manager observation unavailable"))?;
         let code = m["lastExitCode"].as_i64();
         let running = !m["pid"].is_null();
         if m["loaded"] != true {
@@ -162,7 +165,7 @@ pub(super) async fn items(
             .cmd("pult daemon install"),
         )
     }
-    let saved = files::private_read(root, "node-path", 16384)?.unwrap_or_default();
+    let saved = files::follow(&root.join("node-path"), 16384)?.unwrap_or_default();
     let saved = files::trim_first(&saved);
     let node =
         |status: &str, detail: String| t.item("service.node", "Node для службы", status, detail);
@@ -187,13 +190,8 @@ pub(super) async fn items(
             )
         };
         let r = exec.run(DiagnosticCommand::SavedNode(saved.into())).await?;
-        let v = r.stdout.trim();
-        let major = v
-            .trim_start_matches('v')
-            .split('.')
-            .next()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0);
+        let v = crate::cli_runtime_files::trim(&r.stdout);
+        let supported = doctor_path::node_supported(v);
         let detail = format!(
             "{saved} ({}){}",
             if v.is_empty() {
@@ -201,20 +199,24 @@ pub(super) async fn items(
             } else {
                 super::doctor_model::redact(v)
             },
-            if major >= 22 {
+            if supported {
                 String::new()
             } else {
                 t.t(" — нужен >= 22, лаунчер будет искать другой", &[])
             }
         );
-        let mut i = node(if major >= 22 { "ok" } else { "warn" }, detail);
-        if major < 22 {
+        let mut i = node(if supported { "ok" } else { "warn" }, detail);
+        if !supported {
             i = i.cmd("brew upgrade node && pult daemon install")
         }
         items.push(i)
     }
     if r["platform"] == "linux" {
-        let user = std::env::var("USER").unwrap_or_default();
+        let user = nix::unistd::User::from_uid(nix::unistd::getuid())
+            .ok()
+            .flatten()
+            .map(|u| u.name)
+            .unwrap_or_else(|| std::env::var("USER").unwrap_or_default());
         let bin = if test {
             std::env::var_os("PULT_TEST_DOCTOR_LOGINCTL").map(PathBuf::from)
         } else {

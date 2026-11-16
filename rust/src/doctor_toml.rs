@@ -11,6 +11,7 @@ struct Parser<'a> {
     i: usize,
     line: usize,
     depth: usize,
+    nodes: usize,
 }
 impl<'a> Parser<'a> {
     fn fail<T>(&self, s: &str) -> R<T> {
@@ -54,11 +55,11 @@ impl<'a> Parser<'a> {
             }
         }
     }
-    fn string(&mut self) -> R<String> {
+    fn string(&mut self, multiline: bool) -> R<String> {
         let quote = self.bump().unwrap();
         let triple = quote.to_string().repeat(2);
         let mut out = String::new();
-        if self.at(&triple) {
+        if multiline && self.at(&triple) {
             self.i += 2;
             let close = quote.to_string().repeat(3);
             loop {
@@ -120,7 +121,7 @@ impl<'a> Parser<'a> {
         loop {
             self.spaces();
             let k = if matches!(self.peek(), Some('"' | '\'')) {
-                self.string()?
+                self.string(false)?
             } else {
                 let start = self.i;
                 while self
@@ -137,6 +138,9 @@ impl<'a> Parser<'a> {
             if ["__proto__", "constructor", "prototype"].contains(&k.as_str()) {
                 return self.fail(&format!("ключ {k} не принимается"));
             }
+            if out.len() >= 64 {
+                return self.fail("превышен предел глубины ключа");
+            }
             out.push(k);
             self.spaces();
             if !self.at(".") {
@@ -146,6 +150,10 @@ impl<'a> Parser<'a> {
         }
     }
     fn value(&mut self) -> R<Value> {
+        self.nodes += 1;
+        if self.nodes > 65536 {
+            return self.fail("превышен предел числа значений");
+        }
         self.depth += 1;
         if self.depth > 64 {
             return self.fail("превышен предел вложенности");
@@ -157,7 +165,7 @@ impl<'a> Parser<'a> {
     fn inner_value(&mut self) -> R<Value> {
         self.spaces();
         if matches!(self.peek(), Some('"' | '\'')) {
-            return self.string().map(Value::String);
+            return self.string(true).map(Value::String);
         }
         if self.at("[") {
             self.i += 1;
@@ -209,10 +217,12 @@ impl<'a> Parser<'a> {
                 return self.fail("ожидалась , или } во встроенной таблице");
             }
         }
-        let re = regex::Regex::new(r"^(?:\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}[^\s,\]}#]*|[^\s,\]}#]+)")
-            .unwrap();
+        static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+            regex::Regex::new(r"^(?:\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}[^\s,\]}#]*|[^\s,\]}#]+)")
+                .unwrap()
+        });
         let tail = &self.s[self.i..];
-        let Some(m) = re.find(tail) else {
+        let Some(m) = RE.find(tail) else {
             return self.fail("ожидалось значение");
         };
         let text = m.as_str();
@@ -229,6 +239,9 @@ fn table_at<'a>(
     path: &[String],
     line: usize,
 ) -> R<&'a mut Map<String, Value>> {
+    if path.len() > 64 {
+        return Err(format!("строка {line}: превышен предел глубины ключа"));
+    }
     let mut current = root;
     for k in path {
         let o = current
@@ -263,6 +276,7 @@ fn parse(s: &str) -> R<Value> {
         i: 0,
         line: 1,
         depth: 0,
+        nodes: 0,
     };
     let mut root = Value::Object(Map::new());
     let mut current = vec![];
@@ -302,6 +316,9 @@ fn parse(s: &str) -> R<Value> {
             }
             p.i += 1;
             let v = p.value()?;
+            if current.len() + key.len() > 64 {
+                return p.fail("превышен предел глубины ключа");
+            }
             let mut path = current.clone();
             path.extend(key);
             assign(&mut root, &path, v, p.line)?;
@@ -319,7 +336,7 @@ pub(super) fn item(path: &Path, t: Text) -> Option<Item> {
     let base = |status: &str, detail: String| {
         t.item("codex.network", "Песочница Codex и сеть", status, detail)
     };
-    let r=match parse(&text){Ok(v)=>v,Err(e)=>return Some(base("warn",format!("config.toml codex не разобран ({e}) — доступ песочницы к сокету демона не проверен")).data(json!({"parsed":false})))};
+    let r=match parse(&text){Ok(v)=>v,Err(e)=>return Some(base("warn",format!("config.toml codex не разобран ({}) — доступ песочницы к сокету демона не проверен",crate::doctor_model::redact(&e))).data(json!({"parsed":false})))};
     let mut access = r["sandbox_workspace_write"]["network_access"].as_bool();
     let mut from = "sandbox_workspace_write".to_owned();
     if let Some(profile) = r["profile"].as_str()

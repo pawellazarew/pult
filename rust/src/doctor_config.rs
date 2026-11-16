@@ -17,14 +17,55 @@ fn at<'a>(v: &'a Value, path: &str) -> Option<&'a Value> {
 fn encoded(v: Option<&Value>) -> String {
     v.map_or_else(|| "undefined".into(), Value::to_string)
 }
-fn guard_warning(raw: &Value, w: &cfg::Warning, t: Text) -> Vec<String> {
-    let g = &raw["network"]["guard"];
-    match w.code{
- W::GuardClosed=>{let why=if !g.is_object(){t.t("не объект {mode, countries}",&[])}else if !g["mode"].as_str().is_some_and(|s|["deny","allow"].contains(&s.trim().to_lowercase().as_str())){t.t(": mode = {0} — не deny|allow",&[&encoded(g.get("mode"))])}else{t.t(": countries не список",&[])};vec![t.t("config.json: network.guard {0} — страж закрыт, все ходы запрещены, пока правило не поправят («Настройки» → «Страж сети» или pult net guard)",&[&why])]},
- W::GuardEmptyAllow=>vec![t.t("config.json: network.guard — режим allow без стран: все ходы запрещены, пока не добавишь страну («Настройки» → «Страж сети»)",&[])],
- W::Filtered=>g["countries"].as_array().into_iter().flatten().filter(|v|!v.as_str().is_some_and(|s|pult_core::network_guard::COUNTRY_CODES.contains(&s.trim().to_uppercase().as_str()))).map(|v|t.t("config.json: network.guard.countries: {0} — не код страны ISO 3166-1, пропущено",&[&v.to_string()])).collect(),_=>vec![]}
+fn original_at(
+    original: Option<&serde_json::value::RawValue>,
+    path: &str,
+) -> Option<Box<serde_json::value::RawValue>> {
+    let mut value = original?.to_owned();
+    for name in path.split('.') {
+        value = pult_core::raw_field(&value, name).ok()??;
+    }
+    Some(value)
 }
-fn warnings(raw: &Value, parsed: &cfg::Parsed, t: Text) -> Vec<String> {
+fn original_encoded(
+    original: Option<&serde_json::value::RawValue>,
+    path: &str,
+    fallback: Option<&Value>,
+) -> String {
+    original_at(original, path)
+        .and_then(|raw| pult_core::stringify_js_value(&raw).ok())
+        .unwrap_or_else(|| encoded(fallback))
+}
+fn array_spellings(original: Option<&serde_json::value::RawValue>, path: &str) -> Vec<String> {
+    original_at(original, path)
+        .and_then(|raw| {
+            serde_json::from_str::<Vec<Box<serde_json::value::RawValue>>>(raw.get()).ok()
+        })
+        .unwrap_or_default()
+        .iter()
+        .map(|raw| pult_core::stringify_js_value(raw).unwrap_or_else(|_| "null".into()))
+        .collect()
+}
+fn guard_warning(
+    raw: &Value,
+    original: Option<&serde_json::value::RawValue>,
+    w: &cfg::Warning,
+    t: Text,
+) -> Vec<String> {
+    let g = &raw["network"]["guard"];
+    match w.code {
+        W::GuardClosed=>{let why=if !g.is_object(){t.t("не объект {mode, countries}",&[])}else if !g["mode"].as_str().is_some_and(|s|["deny","allow"].contains(&s.trim().to_lowercase().as_str())){t.t(": mode = {0} — не deny|allow",&[&original_encoded(original,"network.guard.mode",g.get("mode"))])}else{t.t(": countries не список",&[])};vec![t.t("config.json: network.guard {0} — страж закрыт, все ходы запрещены, пока правило не поправят («Настройки» → «Страж сети» или pult net guard)",&[&why])]},
+        W::GuardEmptyAllow=>vec![t.t("config.json: network.guard — режим allow без стран: все ходы запрещены, пока не добавишь страну («Настройки» → «Страж сети»)",&[])],
+        W::Filtered=>{let source=array_spellings(original,"network.guard.countries");g["countries"].as_array().into_iter().flatten().enumerate().filter(|(_,v)|!v.as_str().is_some_and(|s|pult_core::network_guard::COUNTRY_CODES.contains(&s.trim().to_uppercase().as_str()))).map(|(i,v)|t.t("config.json: network.guard.countries: {0} — не код страны ISO 3166-1, пропущено",&[source.get(i).unwrap_or(&v.to_string())])).collect()},
+        _=>vec![],
+    }
+}
+fn warnings(
+    raw: &Value,
+    original: Option<&serde_json::value::RawValue>,
+    parsed: &cfg::Parsed,
+    t: Text,
+) -> Vec<String> {
     let mut out = vec![];
     let mut filtered = std::collections::BTreeSet::new();
     for w in &parsed.warnings {
@@ -33,7 +74,7 @@ fn warnings(raw: &Value, parsed: &cfg::Parsed, t: Text) -> Vec<String> {
         }
         let f = w.field.as_str();
         if f.starts_with("network.guard") && w.code != W::LegacyGuardOverridden {
-            out.extend(guard_warning(raw, w, t));
+            out.extend(guard_warning(raw, original, w, t));
             continue;
         }
         let message = if f.starts_with("network.") {
@@ -46,7 +87,7 @@ fn warnings(raw: &Value, parsed: &cfg::Parsed, t: Text) -> Vec<String> {
                 _ => &parsed.config.network.zcode,
             };
             match w.code{
- W::EmptyProxy=>format!("config.json: {f} не непустая строка — прокси нет, прямой путь"),W::AutoWithoutProxy=>format!("config.json: {f} = auto без proxy — прокси нет, взят off (прямой путь)"),W::RequiredProxyMissing=>format!("config.json: network.{p}.mode = required без proxy — ходы {p} запрещены, пока не задан network.{p}.proxy (или mode \"off\")"),W::InvalidValue=>format!("config.json: {f} = {} — не auto|required|off, взят {}",encoded(at(raw,f)),crate::doctor_net::mode(profile.mode)),W::Filtered=>{let Some(a)=at(raw,f).and_then(Value::as_array)else{out.push(format!("config.json: {f}: не список строк — пропущено"));continue};for v in a{if !v.as_str().is_some_and(|s|!s.trim().is_empty()&&!s.trim().chars().any(|c|cfg::js_space(c)||c==',')){out.push(format!("config.json: {f}: {} — пропущено",v));}}continue},W::LegacyGuardOverridden=>"config.json: есть и guardCountries, и network.guard — действует network.guard, guardCountries не читается (его можно убрать)".into(),_=>format!("config.json: {f} не объект — профиль по умолчанию")}
+ W::EmptyProxy=>format!("config.json: {f} не непустая строка — прокси нет, прямой путь"),W::AutoWithoutProxy=>format!("config.json: {f} = auto без proxy — прокси нет, взят off (прямой путь)"),W::RequiredProxyMissing=>format!("config.json: network.{p}.mode = required без proxy — ходы {p} запрещены, пока не задан network.{p}.proxy (или mode \"off\")"),W::InvalidValue=>format!("config.json: {f} = {} — не auto|required|off, взят {}",original_encoded(original,f,at(raw,f)),crate::doctor_net::mode(profile.mode)),W::Filtered=>{let Some(a)=at(raw,f).and_then(Value::as_array)else{out.push(format!("config.json: {f}: не список строк — пропущено"));continue};let source=array_spellings(original,f);for (index,v) in a.iter().enumerate(){if !v.as_str().is_some_and(|s|!s.trim().is_empty()&&!s.trim().chars().any(|c|cfg::js_space(c)||c==',')){out.push(format!("config.json: {f}: {} — пропущено",source.get(index).unwrap_or(&v.to_string())));}}continue},W::LegacyGuardOverridden=>"config.json: есть и guardCountries, и network.guard — действует network.guard, guardCountries не читается (его можно убрать)".into(),_=>format!("config.json: {f} не объект — профиль по умолчанию")}
         } else if f.starts_with("newSession") {
             let suffix = f.strip_prefix("newSession").unwrap();
             let path = suffix;
@@ -55,7 +96,13 @@ fn warnings(raw: &Value, parsed: &cfg::Parsed, t: Text) -> Vec<String> {
                     .and_then(Value::as_str)
                     .unwrap_or("ask");
                 let word = match approval {
-                    "workspace" => t.t("правки в папке без вопросов", &[]),
+                    "workspace" => {
+                        if t.0 {
+                            "edit project files without asking".into()
+                        } else {
+                            "правки в папке без вопросов".into()
+                        }
+                    }
                     "read-only" => t.t("только чтение", &[]),
                     _ => t.t("спрашивать", &[]),
                 };
@@ -100,12 +147,82 @@ fn warnings(raw: &Value, parsed: &cfg::Parsed, t: Text) -> Vec<String> {
     }
     out.into_iter().map(|s| redact(&s)).collect()
 }
+// Ignore opaque extension subtrees before decoding semantic values. A valid
+// deep extension must never erase a known required route or guard as "malformed".
+fn projection(raw: &serde_json::value::RawValue, at: &str) -> Result<Value> {
+    let keys: &[&str] = match at {
+        "" => &[
+            "language",
+            "network",
+            "guardCountries",
+            "autoTitle",
+            "notify",
+            "notifyCommand",
+            "watchdog",
+            "mcp",
+            "updates",
+            "disk",
+            "attachments",
+            "newSession",
+            "warmTtlMs",
+            "permTimeoutMs",
+            "subagentGraceMs",
+            "backgroundMaxMs",
+        ],
+        "network" => &["claude", "codex", "opencode", "zcode", "guard"],
+        "network.claude" | "network.codex" | "network.opencode" | "network.zcode" => {
+            &["mode", "proxy", "noProxy"]
+        }
+        "network.guard" => &["mode", "countries"],
+        "notify" => &["minTurnSeconds", "sound"],
+        "watchdog" => &["silenceMinutes"],
+        "mcp" => &["servers"],
+        "updates" => &["check", "url"],
+        "attachments" => &["retentionDays"],
+        "newSession" => &["rememberLast", "defaults"],
+        "newSession.defaults" => &["provider", "claude", "codex", "zcode"],
+        "newSession.defaults.claude"
+        | "newSession.defaults.codex"
+        | "newSession.defaults.zcode" => {
+            &["model", "effort", "approval", "mode", "browser", "worktree"]
+        }
+        _ => {
+            return files::json(raw.get()).map_err(|_| {
+                anyhow::anyhow!("doctor known config value exceeds JSON decoding limits")
+            });
+        }
+    };
+    if raw.get().starts_with('[') {
+        return Ok(Value::Array(vec![]));
+    }
+    if !raw.get().starts_with('{') {
+        return files::json(raw.get());
+    }
+    let fields = pult_core::RawFields::parse(raw)?;
+    let mut out = serde_json::Map::new();
+    for name in keys {
+        if let Some(raw) = fields.get(name) {
+            let next = if at.is_empty() {
+                (*name).to_owned()
+            } else {
+                format!("{at}.{name}")
+            };
+            out.insert((*name).into(), projection(raw, &next)?);
+        }
+    }
+    Ok(Value::Object(out))
+}
 pub(super) fn load(root: &Path) -> Result<(RuntimeConfig, Text, Vec<String>)> {
     let source = files::private_read(root, "config.json", files::LIMIT)?;
-    let decoded = source.as_deref().map(files::json);
-    let malformed = decoded.as_ref().is_some_and(Result::is_err);
-    let raw = decoded
-        .and_then(Result::ok)
+    let syntax = source
+        .as_deref()
+        .map(serde_json::from_str::<Box<serde_json::value::RawValue>>);
+    let malformed = syntax.as_ref().is_some_and(Result::is_err);
+    let original = syntax.and_then(Result::ok);
+    let raw = original
+        .as_deref()
+        .map(|raw| projection(raw, ""))
+        .transpose()?
         .unwrap_or_else(|| serde_json::json!({}));
     let parsed = cfg::parse(&raw);
     let setting = std::env::var("PULT_LANG")
@@ -126,7 +243,7 @@ pub(super) fn load(root: &Path) -> Result<(RuntimeConfig, Text, Vec<String>)> {
         }
     };
     let t = Text(english);
-    let mut warnings = warnings(&raw, &parsed, t);
+    let mut warnings = warnings(&raw, original.as_deref(), &parsed, t);
     if malformed {
         warnings.insert(
             0,
