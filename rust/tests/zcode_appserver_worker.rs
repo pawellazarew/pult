@@ -1669,3 +1669,49 @@ async fn unknown_cleanup_before_resources_preserves_quarantine_without_drain_ent
         1
     );
 }
+
+#[tokio::test]
+async fn protocol_fault_during_owned_acceptance_preserves_the_first_failure() {
+    let f = Rig::new(false);
+    let block = Block::new();
+    let held = block.clone();
+    let worker = f.worker_with("duplicate-during-accept", move |_, services| {
+        services.store = Arc::new(HoldingStore {
+            inner: services.store.clone(),
+            block: held,
+            accept: true,
+        });
+    });
+    let mut handle = f.start(worker.clone());
+    bounded(block.entered.notified()).await;
+    std::fs::write(f.home.join("duplicate.release"), "").unwrap();
+    let pid: u32 = std::fs::read_to_string(f.home.join("provider.pid"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while alive(pid) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("protocol failure must stop its owned provider before acceptance resumes");
+    block.release();
+    let _ = bounded(handle.accepted()).await;
+    let outcome = bounded(handle.wait()).await.unwrap().turn.outcome;
+    let code = match &outcome {
+        Outcome::Success => "success",
+        Outcome::Interrupted => "interrupted",
+        Outcome::Failure { code, .. } => code,
+    };
+    eprintln!("[owned-acceptance-fault] outcome-code={code}");
+    assert!(matches!(outcome, Outcome::Failure { ref code, .. } if code == "protocol_error"));
+    assert_eq!(
+        f.proof()
+            .iter()
+            .filter(|frame| frame["method"] == "session/send")
+            .count(),
+        1
+    );
+    assert!(worker.is_retired());
+}
