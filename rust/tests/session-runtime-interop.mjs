@@ -1,7 +1,7 @@
 import { readCompleteJsonl } from './support/complete-jsonl.mjs'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdtempSync, mkdirSync, chmodSync, writeFileSync, readFileSync, existsSync, rmSync, realpathSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, chmodSync, writeFileSync, readFileSync, existsSync, rmSync, realpathSync, openSync, fstatSync, readSync, closeSync, constants } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import net from 'node:net'
@@ -9,6 +9,8 @@ const { connectClient } = await import('../../dist/cli/client.js')
 const { layout } = await import('../../dist/core/paths.js')
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const binary = resolve(process.argv[2])
+const coldSiteBarrier = process.argv[3] === '--cold-peer-site-barrier'
+assert.ok(process.argv[3] === undefined || coldSiteBarrier, 'unknown private fixture mode')
 const temp = mkdtempSync('/tmp/r3-session-')
 chmodSync(temp, 0o700)
 const home = join(temp, 'home'), account = join(temp, 'account'), native = join(account, 'native'), project = join(temp, 'project')
@@ -34,7 +36,72 @@ async function until(check, label) {
   while (!await check()) { assert.equal(child.exitCode, null, `daemon exited: ${stderr}`); assert.ok(Date.now() < deadline, label); await pause(10) }
 }
 const journal = () => readCompleteJsonl(join(home, 'events/journal.jsonl'))
-async function check(label, run) { await run(); checks++; console.log(`pass ${label}`) }
+async function check(label, run) {
+  // The new controlled regression needs only cold setup and the actual unknown
+  // retry lifecycle. Normal mode retains every one of its original 18 checks.
+  if (coldSiteBarrier && !['creates and lists cold metadata without a provider or receipt', 'unknown native delivery remains actionable and cannot Resume automatically'].includes(label)) return
+  await run(); checks++; console.log(`pass ${label}`)
+}
+// Failure-only private-fixture projection. Never print native arguments/config,
+// user text, capability values, IDs, paths or reflected backend messages.
+function boundedFile(path, offset = 0, limit = 256 * 1024) {
+  let fd
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+    const info = fstatSync(fd)
+    if (!info.isFile() || info.size < offset || info.size - offset > limit) return null
+    const data = Buffer.alloc(info.size - offset)
+    const count = readSync(fd, data, 0, data.length, offset)
+    return data.subarray(0, count).toString('utf8')
+  } catch { return null } finally { if (fd !== undefined) closeSync(fd) }
+}
+function fileOffset(path) {
+  let fd
+  try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); const info = fstatSync(fd); return info.isFile() ? info.size : 0 }
+  catch { return 0 } finally { if (fd !== undefined) closeSync(fd) }
+}
+function boundedRows(path, offset) {
+  const text = boundedFile(path, offset)
+  if (text === null) return null
+  const lines = text.slice(0, text.lastIndexOf('\n') + 1).split('\n').filter(Boolean)
+  if (lines.length > 256) return null
+  try { return lines.map(line => JSON.parse(line)) } catch { return null }
+}
+async function unknownDrainDiagnostic(nativeOffset, journalOffset) {
+  const unavailable = () => ({})
+  const [list, status] = await Promise.all([
+    client.request('agent.list', {}, { timeoutMs: 500 }).catch(unavailable),
+    client.request('daemon.status', {}, { timeoutMs: 500 }).catch(unavailable),
+  ])
+  const row = Array.isArray(list.sessions) ? list.sessions.find(row => row.name === 'one') ?? {} : {}
+  const methods = ['initialize', 'initialized', 'thread/start', 'thread/resume', 'config/read', 'mcpServerStatus/list', 'turn/start', 'turn/interrupt', 'turn/steer']
+  const counts = Object.fromEntries(methods.map(name => [name, 0]))
+  const nativeRows = boundedRows(join(native, 'messages.jsonl'), nativeOffset)
+  for (const frame of nativeRows ?? []) if (methods.includes(frame.method)) counts[frame.method]++
+  const events = boundedRows(join(home, 'events/journal.jsonl'), journalOffset)
+  const codes = new Set(['unavailable', 'provider_unavailable', 'memory_unavailable', 'start_unknown', 'send_unknown', 'interrupted', 'cancelled', 'storage_unavailable', 'thread_store_rejected', 'cleanup_timeout', 'cleanup_unconfirmed', 'unsupported', 'capacity', 'invalid_params'])
+  let failureCode = 'none'
+  for (const event of events ?? []) {
+    const code = event?.data?.code ?? event?.data?.errorCode ?? event?.data?.error?.code
+    if (typeof code === 'string') failureCode = codes.has(code) ? code : 'other'
+  }
+  let recordedNativePidAlive = false
+  try {
+    const ids = JSON.parse(boundedFile(join(native, 'pids.json'), 0, 1024) ?? 'null')
+    if (Array.isArray(ids) && Number.isSafeInteger(ids[1]) && ids[1] > 1 && ids[1] < 2147483648) { process.kill(ids[1], 0); recordedNativePidAlive = true }
+  } catch {}
+  const knownStatuses = new Set(['cold', 'working', 'idle', 'failed', 'interrupted', 'done', 'blocked', 'starting', 'waiting'])
+  console.error('[unknown-drain-fixture] ' + JSON.stringify({
+    phase: 'edited_unknown_cold_retry', status: knownStatuses.has(row.status) ? row.status : 'other',
+    queueCount: Array.isArray(row.queue) ? Math.min(row.queue.length, 129) : -1,
+    queuePaused: row.queuePaused === true,
+    activeTurns: Number.isSafeInteger(status.nativeRuntime?.activeTurns) ? status.nativeRuntime.activeTurns : -1,
+    hosts: Number.isSafeInteger(status.nativeRuntime?.hosts) ? status.nativeRuntime.hosts : -1,
+    failureCode, nativeRowsAvailable: nativeRows !== null, nativeMethodCounts: counts,
+    journalRowsAvailable: events !== null, recordedNativePidAlive,
+    controlledSiteHookEntered: existsSync(join(temp, 'cold-site', 'entered')),
+  }))
+}
 async function nativeCli(args, extra = {}) {
   const process = spawn(binary, ['--home', home, ...args], { env: { ...env, ...extra }, stdio: ['ignore', 'pipe', 'pipe'] })
   let stdout = '', stderr = ''
@@ -270,12 +337,34 @@ try {
     const { createRegistry } = await import('../../dist/sessions/registry.js')
     const rollback = createRegistry(paths)
     assert.equal(rollback.get('one').queueDispatch.id, uncertain.id, 'Node normalization lost rollback guard')
+    const nativeOffset = fileOffset(join(native, 'messages.jsonl'))
+    const journalOffset = fileOffset(join(home, 'events/journal.jsonl'))
+    if (coldSiteBarrier) {
+      const site = join(temp, 'cold-site'), shim = join(temp, 'cold-peer-shim')
+      mkdirSync(site, { mode: 0o700 })
+      writeFileSync(join(site, 'sitecustomize.py'), readFileSync(join(root, 'rust/tests/fixtures/claude_sitecustomize.py')), { mode: 0o600 })
+      const quote = value => "'" + value.replaceAll("'", "'\\''") + "'"
+      // Preserve the actual peer's shebang. Only this explicit private test mode
+      // introduces ambient startup state; production environment policy is intact.
+      writeFileSync(shim, '#!/bin/sh\nexec /bin/sh ' + quote(join(root, 'rust/tests/fixtures/claude_site_startup.sh')) + ' ' + quote(site) + ' ' + quote(join(root, 'rust/tests/fixtures/codex_daemon.py')) + ' "$@"\n', { mode: 0o700 })
+      env.PULT_CODEX_BIN = shim
+    }
     launch(); await until(() => existsSync(paths.sock) && existsSync(paths.token), 'restart after unknown')
     client = await connectClient(paths, { timeoutMs: 3000 })
     await assert.rejects(client.request('agent.queue.resume', { name: 'one' }), e => e.code === 'send_unknown')
     await client.request('agent.queue.move', { name: 'one', id: uncertain.id, text: 'explicitly changed after unknown' })
     await client.request('agent.queue.resume', { name: 'one' })
-    await until(async () => !(await row('one')).queue?.length && (await row('one')).status === 'idle', 'edited unknown item did not drain')
+    try {
+      await until(async () => !(await row('one')).queue?.length && (await row('one')).status === 'idle', 'edited unknown item did not drain')
+    } catch (error) {
+      try { await unknownDrainDiagnostic(nativeOffset, journalOffset) } catch { console.error('[unknown-drain-fixture] diagnostic-unavailable') }
+      throw error
+    }
+    if (coldSiteBarrier) {
+      assert.equal(existsSync(join(temp, 'cold-site', 'entered')), false, 'isolated peer executed ambient site hook')
+      const dispatched = boundedRows(join(native, 'messages.jsonl'), nativeOffset)
+      assert.ok(dispatched?.some(frame => frame?.method === 'turn/start'), 'controlled cold retry did not reach actual native dispatch')
+    }
   })
   await check('scoped memory credentials cannot execute owner session commands', async () => {
     await client.request('memory.context.bind', { session: 'one', enabled: true })

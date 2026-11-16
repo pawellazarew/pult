@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/python3 -ISB
 """Executable daemon fixture. All work stays in the isolated test account."""
 import os
 import pathlib
