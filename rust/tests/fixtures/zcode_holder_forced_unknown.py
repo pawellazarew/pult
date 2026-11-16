@@ -75,6 +75,7 @@ stderr_reader.join(timeout=1)
 phases = {'snapshot_deadline', 'snapshot_spawn', 'snapshot_pipe', 'snapshot_budget',
           'snapshot_exit', 'snapshot_parse', 'zombie_leader_missing',
           'group_member_running', 'zombie_membership_changed', 'leader_running',
+          'waitability_deadline',
           'group_term', 'group_kill', 'leader_reap', 'output_drain',
           'output_forwarding', 'other'}
 observations = []

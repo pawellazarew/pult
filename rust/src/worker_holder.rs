@@ -51,6 +51,7 @@ fn failure_observation(error: &anyhow::Error) -> String {
             "zombie_membership_changed",
         ),
         ("leader still executing", "leader_running"),
+        ("leader waitability deadline", "waitability_deadline"),
         ("group TERM failed", "group_term"),
         ("group KILL failed", "group_kill"),
         ("leader reap failed", "leader_reap"),
@@ -152,7 +153,7 @@ impl Group {
     async fn observed_signal(
         &self,
         observation: std::result::Result<(), nix::errno::Errno>,
-        #[cfg(test)] after_pending: Option<&(dyn Fn() + Sync)>,
+        #[cfg(test)] _after_pending: Option<&(dyn Fn() + Sync)>,
     ) -> Result<()> {
         match observation {
             Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),
@@ -160,13 +161,12 @@ impl Group {
             // confuse that with permission denial against executing members.
             #[cfg(target_os = "macos")]
             Err(nix::errno::Errno::EPERM) => {
-                let waitable = self.exited_without_reaping()?;
-                #[cfg(test)]
-                if !waitable && let Some(release) = after_pending {
-                    release();
-                }
-                ensure!(waitable, "leader still executing");
-                confirm_zombie_group(self.id.as_raw()).await
+                confirm_zombie_group(
+                    self,
+                    #[cfg(test)]
+                    _after_pending,
+                )
+                .await
             }
             Err(error) => Err(error.into()),
         }
@@ -307,9 +307,31 @@ async fn process_snapshot(deadline: tokio::time::Instant) -> Result<Vec<u8>> {
 }
 
 #[cfg(target_os = "macos")]
-async fn confirm_zombie_group(leader: i32) -> Result<()> {
+async fn confirm_zombie_group(
+    group: &Group,
+    #[cfg(test)] after_pending: Option<&(dyn Fn() + Sync)>,
+) -> Result<()> {
+    // Darwin can report EPERM before the same unreaped child is waitable.
+    // Waitability and BOTH snapshots share the existing one-second budget.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
-    confirm_zombie_group_with_snapshot(leader, deadline, process_snapshot).await
+    loop {
+        ensure!(
+            tokio::time::Instant::now() < deadline,
+            "leader waitability deadline"
+        );
+        if group.exited_without_reaping()? {
+            break;
+        }
+        #[cfg(test)]
+        if let Some(release) = after_pending {
+            release();
+        }
+        tokio::time::sleep_until(
+            (tokio::time::Instant::now() + Duration::from_millis(5)).min(deadline),
+        )
+        .await;
+    }
+    confirm_zombie_group_with_snapshot(group.id.as_raw(), deadline, process_snapshot).await
 }
 
 #[cfg(target_os = "macos")]
