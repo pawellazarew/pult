@@ -24,6 +24,9 @@ async fn run(private_mode: Option<&str>) {
     let expected = match private_mode {
         None => "session runtime interop passed 18",
         Some("--cold-peer-site-barrier") => "session runtime interop passed 2",
+        Some("--journal-unfinished-tail" | "--journal-corrupt-complete") => {
+            "session runtime interop passed 2"
+        }
         _ => panic!("unknown private fixture mode"),
     };
     assert!(String::from_utf8_lossy(&output.stdout).contains(expected));
@@ -37,4 +40,10 @@ async fn session_commands_interoperate_with_real_node_client_and_fake_provider()
 #[tokio::test]
 async fn edited_unknown_cold_retry_has_no_ambient_python_site_dependency() {
     run(Some("--cold-peer-site-barrier")).await;
+}
+
+#[tokio::test]
+async fn actual_provider_reads_only_complete_copied_journal_rows() {
+    run(Some("--journal-corrupt-complete")).await;
+    run(Some("--journal-unfinished-tail")).await;
 }
