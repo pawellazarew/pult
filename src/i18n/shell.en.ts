@@ -2,6 +2,8 @@ export const shellEn: Readonly<Record<string, string>> = {
   "Неверная команда": "Invalid command",
   "Браузер занят; повтори действие": "Browser is busy; try again",
   "Крупный кадр превышает предел качества": "Large frame exceeds the quality budget",
+  "Экземпляр сессии изменился; подключи браузер заново": "The session instance changed; reconnect the browser",
+  "Размер области страницы ещё недоступен": "The page surface size is not available yet",
   "Точка за пределами страницы": "Point is outside the page",
   "Сначала возьми управление браузером": "Take browser control first",
   "Некорректный профиль сети.": "Invalid network profile.",
