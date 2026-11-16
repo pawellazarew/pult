@@ -16,8 +16,8 @@ use crate::worker_process::{Launch, SpawnDenied, SpawnGate, SpawnPermit};
 use crate::zcode_appserver_protocol::{SessionMode, Workspace};
 use crate::zcode_appserver_worker::{self, ZcodeAppServerWorker};
 use crate::zcode_host_services::{
-    Attempt, Error as OwnerError, IdleRecoveryPermit, MissingAfterJoin, OwnerConfirmedRecovery,
-    RecoveryWarningReceipt, ZcodeOwner,
+    AppServerAttempt, Attempt, Error as OwnerError, IdleRecoveryPermit, MissingAfterJoin,
+    OwnerConfirmedRecovery, RecoveryWarningReceipt, ZcodeOwner,
 };
 use crate::zcode_launch::{self, ContextLanguage};
 use crate::zcode_worker::{Config, ProviderSignal, Services, ZcodeWorker};
@@ -28,7 +28,7 @@ use std::{
     ops::{Deref, DerefMut},
     path::PathBuf,
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -319,6 +319,7 @@ struct Inner {
     shared: Arc<Shared>,
     owner: OnceCell<Arc<ZcodeOwner>>,
     memory: Option<Arc<crate::memory_turn::Backend>>,
+    native_permissions: Option<Arc<crate::zcode_native_permissions::Service>>,
     runtime: tokio::runtime::Handle,
 }
 pub struct ZcodeRuntime {
@@ -337,7 +338,9 @@ impl ZcodeRuntime {
         guard: Arc<NetworkGuard>,
         limits: Limits,
     ) -> Result<Self, RuntimeError> {
-        Self::construct(deps, command, config, parent, extra, guard, limits, None)
+        Self::construct(
+            deps, command, config, parent, extra, guard, limits, None, None,
+        )
     }
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_daemon(
@@ -349,6 +352,7 @@ impl ZcodeRuntime {
         guard: Arc<NetworkGuard>,
         limits: Limits,
         memory: Arc<crate::memory_turn::Backend>,
+        native_permissions: Arc<crate::zcode_native_permissions::Service>,
     ) -> Result<Self, RuntimeError> {
         Self::construct(
             deps,
@@ -359,6 +363,7 @@ impl ZcodeRuntime {
             guard,
             limits,
             Some(memory),
+            Some(native_permissions),
         )
     }
     #[allow(clippy::too_many_arguments)]
@@ -371,6 +376,7 @@ impl ZcodeRuntime {
         guard: Arc<NetworkGuard>,
         limits: Limits,
         memory: Option<Arc<crate::memory_turn::Backend>>,
+        native_permissions: Option<Arc<crate::zcode_native_permissions::Service>>,
     ) -> Result<Self, RuntimeError> {
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| RuntimeError::Invalid)?;
         if !deps.home.is_absolute()
@@ -420,6 +426,7 @@ impl ZcodeRuntime {
                 shared,
                 owner: OnceCell::new(),
                 memory,
+                native_permissions,
                 runtime,
             }),
         })
@@ -1248,6 +1255,42 @@ async fn prepare(
             let resources =
                 crate::zcode_memory_resources::Factory::new(memory, key_for_build.clone())
                     .map_err(|_| RuntimeError::Unsupported)?;
+            let native_permissions = building.native_permissions.clone();
+            let reply_gate: Option<zcode_appserver_worker::ReplyGateFactory> =
+                native_permissions.as_ref().map(|_service| {
+                    let shared = weak.clone();
+                    let source = source.clone();
+                    let owner = owner.clone();
+                    let initial = snapshot_for_build.clone();
+                    #[cfg(test)]
+                    let hook = Arc::downgrade(_service);
+                    #[cfg(test)]
+                    let first = AtomicBool::new(true);
+                    Arc::new(move || {
+                        #[cfg(test)]
+                        if first.swap(false, Ordering::AcqRel)
+                            && let Some(service) = hook.upgrade()
+                        {
+                            service.before_native_binder();
+                        }
+                        let shared = shared.upgrade().ok_or_else(runtime_worker_error)?;
+                        Ok(Arc::new(RuntimeReply {
+                            shared,
+                            source: source.clone(),
+                            owner: owner.clone(),
+                            initial: initial.clone(),
+                        })
+                            as Arc<dyn zcode_appserver_worker::ReplyGate>)
+                    }) as zcode_appserver_worker::ReplyGateFactory
+                });
+            let interactions = native_permissions
+                .as_ref()
+                .map(|s| s.scoped(key_for_build.clone()))
+                .unwrap_or_else(|| Arc::new(zcode_appserver_worker::DenyInteractions));
+            let permission_slots = native_permissions.as_ref().map(|s| s.slots());
+            let permission_timeout = native_permissions
+                .as_ref()
+                .map(|_| Duration::from_secs(600));
             let input_source = source.clone();
             let input_shared = weak.clone();
             let app_owner = owner.clone();
@@ -1273,6 +1316,7 @@ async fn prepare(
                         captured_approval: snapshot_for_build.settings.approval,
                         start_deadline: deadline,
                         reverse_timeout: Duration::from_secs(30),
+                        permission_timeout,
                         attachments: input.metadata.attachments.clone(),
                         language: match building.config.language {
                             crate::runtime_config::Language::En => ContextLanguage::En,
@@ -1315,7 +1359,9 @@ async fn prepare(
                                 deadline,
                             }))
                         }),
-                        interactions: Arc::new(zcode_appserver_worker::DenyInteractions),
+                        reply_gate,
+                        permission_slots,
+                        interactions,
                         redactors: Arc::new(|| Box::new(crate::zcode_events::LogRedactor)),
                         fatal_storage: Arc::new(move || {
                             if let Some(d) = driver.upgrade() {
@@ -1519,6 +1565,128 @@ fn runtime_worker_error() -> WorkerError {
     WorkerError {
         code: "cancelled".into(),
         message: "ZCode source revoked".into(),
+    }
+}
+/// Actual private Runtime source witness. No caller-provided brand or strong
+/// Shared back-edge: persistent Worker/source capabilities must not form a cycle.
+pub(crate) struct RuntimeSourceBinding {
+    shared: Weak<Shared>,
+    source: Arc<Source>,
+}
+
+impl RuntimeSourceBinding {
+    pub(crate) fn matches_current(&self, attempt: &Attempt) -> bool {
+        let Some(shared) = self.shared.upgrade() else {
+            return false;
+        };
+        let Ok(entries) = shared.state.lock() else {
+            return false;
+        };
+        entries.get(&self.source.key).is_some_and(|entry| {
+            self.source.selected == DispatchRoute::AppServer
+                && !*shared.closed.borrow()
+                && !shared.blocked.load(Ordering::Acquire)
+                && !entry.quarantined
+                && entry.recovering.is_none()
+                && source_entry(entry, &self.source, attempt)
+                && bound_attempt(entry, attempt)
+        })
+    }
+}
+/// Ephemeral gate only: construct in a blocking closure from a WeakShared
+/// factory, then drop the borrowed permit and gate before any human/IO await.
+struct RuntimeReply {
+    shared: Arc<Shared>,
+    source: Arc<Source>,
+    owner: Arc<ZcodeOwner>,
+    initial: TurnSnapshot,
+}
+
+impl RuntimeReply {
+    fn bind_accepted(
+        &self,
+        attempt: AppServerAttempt,
+        native: crate::zcode_host_services::Acceptance,
+        accepted: zcode_appserver_worker::ObservedRunning,
+        generation: u64,
+    ) -> Result<Arc<crate::zcode_host_services::AcceptedNativeSource>, WorkerError> {
+        if generation != attempt.attempt().generation() {
+            return Err(runtime_worker_error());
+        }
+        let witness = RuntimeSourceBinding {
+            shared: Arc::downgrade(&self.shared),
+            source: self.source.clone(),
+        };
+        self.owner
+            .bind_app_server_accepted(&attempt, native, accepted, witness)
+            .map_err(|_| runtime_worker_error())
+    }
+    fn enter<'a>(
+        &'a self,
+        accepted: &crate::zcode_host_services::AcceptedNativeSource,
+    ) -> Result<std::sync::MutexGuard<'a, RuntimeState>, WorkerError> {
+        let witness = accepted.runtime();
+        let entries = self
+            .shared
+            .state
+            .lock()
+            .map_err(|_| runtime_worker_error())?;
+        let entry = entries
+            .get(&self.source.key)
+            .ok_or_else(runtime_worker_error)?;
+        let attempt = accepted.attempt().attempt();
+        let stamp = entry.route.as_ref().ok_or_else(runtime_worker_error)?;
+        if !Weak::ptr_eq(&witness.shared, &Arc::downgrade(&self.shared))
+            || !Arc::ptr_eq(&witness.source, &self.source)
+            || self.source.selected != DispatchRoute::AppServer
+            || *self.shared.closed.borrow()
+            || self.shared.blocked.load(Ordering::Acquire)
+            || entry.quarantined
+            || entry.recovering.is_some()
+            || !entry
+                .worker
+                .as_ref()
+                .is_some_and(|w| w.route() == DispatchRoute::AppServer)
+            || !source_entry(entry, &self.source, attempt)
+            || !bound_attempt(entry, attempt)
+            || entry.expected_resume.as_ref().map(|s| s.as_deref())
+                != Some(attempt.resume_session_id())
+            || !self.shared.guard.is_current(&stamp.0)
+            || self
+                .shared
+                .driver
+                .snapshot_for_dispatch(accepted.ticket())
+                .as_ref()
+                != Some(&self.initial)
+            || accepted.initial() != &self.initial
+        {
+            return Err(runtime_worker_error());
+        }
+        Ok(entries)
+    }
+}
+
+struct RuntimeReplyHeld<'a> {
+    _admission: std::sync::MutexGuard<'a, RuntimeState>,
+}
+impl zcode_appserver_worker::ReplyPermit for RuntimeReplyHeld<'_> {}
+impl zcode_appserver_worker::ReplyGate for RuntimeReply {
+    fn bind_accepted(
+        &self,
+        attempt: AppServerAttempt,
+        native: crate::zcode_host_services::Acceptance,
+        accepted: zcode_appserver_worker::ObservedRunning,
+        generation: u64,
+    ) -> Result<Arc<crate::zcode_host_services::AcceptedNativeSource>, WorkerError> {
+        RuntimeReply::bind_accepted(self, attempt, native, accepted, generation)
+    }
+    fn enter(
+        &self,
+        source: &crate::zcode_host_services::AcceptedNativeSource,
+    ) -> Result<Box<dyn zcode_appserver_worker::ReplyPermit + '_>, WorkerError> {
+        Ok(Box::new(RuntimeReplyHeld {
+            _admission: RuntimeReply::enter(self, source)?,
+        }))
     }
 }
 struct RuntimeInput {

@@ -123,6 +123,14 @@ pub trait ScopedResources: Send + Sync {
         ticket: &Ticket,
         generation: u64,
     ) -> Result<Box<dyn ResourcePermit + 'a>, WorkerError>;
+    fn check_reply<'a>(
+        &'a self,
+        _: &'a crate::zcode_host_services::AppServerReplyFrontier<'_>,
+        _: &Ticket,
+        _: u64,
+    ) -> Result<Box<dyn ResourcePermit + 'a>, WorkerError> {
+        Err(unavailable())
+    }
     fn revoke(&self, ticket: &Ticket, generation: u64);
     fn drain(&self, ticket: Ticket, generation: u64) -> Task<Result<(), WorkerError>>;
 }
@@ -130,34 +138,150 @@ pub trait ScopedResources: Send + Sync {
 pub struct ReverseContext {
     pub ticket: Ticket,
     pub generation: u64,
+    pub(crate) pending: Option<Arc<NativePending>>,
+}
+/// Actual first host observation of this owned Driver Running receipt.
+/// No public constructor, Clone, Debug or serde; never restamped by a slow binder.
+pub struct ObservedRunning {
+    accepted: crate::turn_driver::Accepted,
+    observed_at: Instant,
+}
+impl ObservedRunning {
+    pub(crate) fn accepted(&self) -> &crate::turn_driver::Accepted {
+        &self.accepted
+    }
+    pub(crate) fn observed_at(&self) -> Instant {
+        self.observed_at
+    }
+    pub(crate) fn deadline(&self, admitted: Instant, timeout: Duration) -> Instant {
+        admitted.max(self.observed_at) + timeout
+    }
+}
+/// Separate post-accepted source gate, created only for a short blocking scope.
+pub trait ReplyPermit {}
+pub trait ReplyGate: Send + Sync {
+    fn bind_accepted(
+        &self,
+        attempt: AppServerAttempt,
+        native: crate::zcode_host_services::Acceptance,
+        accepted: ObservedRunning,
+        generation: u64,
+    ) -> Result<Arc<crate::zcode_host_services::AcceptedNativeSource>, WorkerError>;
+    fn enter(
+        &self,
+        source: &crate::zcode_host_services::AcceptedNativeSource,
+    ) -> Result<Box<dyn ReplyPermit + '_>, WorkerError>;
+}
+pub type ReplyGateFactory = Arc<dyn Fn() -> Result<Arc<dyn ReplyGate>, WorkerError> + Send + Sync>;
+/// One immutable wire request and its separate one-use reply action. No JSON ctor.
+pub(crate) struct NativePending {
+    pub(crate) request: Arc<ReverseRequest>,
+    pub(crate) ticket: Ticket,
+    pub(crate) generation: u64,
+    pub(crate) source: std::sync::OnceLock<Arc<crate::zcode_host_services::AcceptedNativeSource>>,
+    pub(crate) action: std::sync::OnceLock<crate::turn_driver::NativeReplyAction>,
+    pub(crate) expires: std::sync::OnceLock<Instant>,
+    pub(crate) changed: Notify,
+    gate: Mutex<()>,
+    state: AtomicU8,
+    _local: tokio::sync::OwnedSemaphorePermit,
+    _global: tokio::sync::OwnedSemaphorePermit,
+}
+impl NativePending {
+    pub(crate) fn valid(&self) -> bool {
+        self.state.load(Ordering::Acquire) == 0
+    }
+    pub(crate) fn revoke(&self) {
+        let _gate = self
+            .gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = self
+            .state
+            .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire);
+        if let Some(action) = self.action.get() {
+            action.cancel();
+        }
+        self.changed.notify_waiters();
+    }
+    fn bind(
+        &self,
+        source: Arc<crate::zcode_host_services::AcceptedNativeSource>,
+        expires: Instant,
+    ) -> Result<(), WorkerError> {
+        let _gate = self.gate.lock().map_err(|_| interrupted())?;
+        if !self.valid()
+            || source.ticket() != &self.ticket
+            || source.generation() != self.generation
+        {
+            return Err(interrupted());
+        }
+        let ReverseRequest::Permission {
+            session_id,
+            payload: codec::NativePermissionPayload::Retained(data),
+            ..
+        } = &*self.request
+        else {
+            return Err(protocol());
+        };
+        if session_id != source.native_session_id()
+            || data.untrusted_turn_id().as_deref() != Some(source.native_turn_id())
+        {
+            return Err(protocol());
+        }
+        self.source.set(source).map_err(|_| protocol())?;
+        self.expires.set(expires).map_err(|_| protocol())?;
+        self.action
+            .set(crate::turn_driver::NativeReplyAction::new(
+                self.ticket.clone(),
+                expires,
+            ))
+            .map_err(|_| protocol())?;
+        Ok(())
+    }
 }
 pub struct BoundReverseReply {
     id: RequestId,
-    bytes: Vec<u8>,
+    body: ReplyBody,
+}
+enum ReplyBody {
+    Conservative(Vec<u8>),
+    Approved(crate::zcode_native_permissions::NativeApprovalReceipt),
 }
 impl BoundReverseReply {
-    /// V1 deliberately has no grant/modified-input constructor.
+    /// Conservative public constructor; native data alone cannot approve a call.
     pub fn default_deny(request: &ReverseRequest) -> Result<Self, WorkerError> {
         Ok(Self {
             id: request.id().clone(),
-            bytes: request.default_deny().map_err(|_| protocol())?,
+            body: ReplyBody::Conservative(request.default_deny().map_err(|_| protocol())?),
         })
+    }
+    pub(crate) fn approved_once(
+        receipt: crate::zcode_native_permissions::NativeApprovalReceipt,
+    ) -> Self {
+        Self {
+            id: receipt.pending().request.id().clone(),
+            body: ReplyBody::Approved(receipt),
+        }
     }
 }
 pub trait NativeInteractions: Send + Sync {
     fn handle(
         &self,
         context: ReverseContext,
-        request: ReverseRequest,
+        request: Arc<ReverseRequest>,
     ) -> Task<Result<BoundReverseReply, WorkerError>>;
     fn revoke(&self, ticket: &Ticket, generation: u64);
+    fn drain(&self, _: Ticket, _: u64) -> Task<Result<(), WorkerError>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 pub struct DenyInteractions;
 impl NativeInteractions for DenyInteractions {
     fn handle(
         &self,
         _: ReverseContext,
-        request: ReverseRequest,
+        request: Arc<ReverseRequest>,
     ) -> Task<Result<BoundReverseReply, WorkerError>> {
         Box::pin(async move { BoundReverseReply::default_deny(&request) })
     }
@@ -172,6 +296,7 @@ pub struct Config {
     pub captured_approval: Approval,
     pub start_deadline: Instant,
     pub reverse_timeout: Duration,
+    pub permission_timeout: Option<Duration>,
     pub attachments: Vec<PromptAttachment>,
     pub language: ContextLanguage,
 }
@@ -183,6 +308,8 @@ pub struct Services {
     pub gate: Arc<dyn DispatchGate>,
     pub spawn_gate: SpawnGateFactory,
     pub input_gate: InputGateFactory,
+    pub reply_gate: Option<ReplyGateFactory>,
+    pub permission_slots: Option<Arc<tokio::sync::Semaphore>>,
     pub resources: Arc<dyn ScopedResources>,
     pub interactions: Arc<dyn NativeInteractions>,
     pub redactors: Arc<dyn Fn() -> Box<dyn zcode_events::Redactor> + Send + Sync>,
@@ -215,6 +342,7 @@ struct Wire {
     observer: AppServerNativeObserver,
     sid: String,
     reverse_ids: Vec<RequestId>,
+    permission_ids: Vec<String>,
 }
 enum Event {
     Accepted(AppServerStartedEvidence),
@@ -313,12 +441,29 @@ struct Job {
     reader_task: Mutex<Option<JoinHandle<Result<(), WorkerError>>>>,
     writer_task: Mutex<Option<JoinHandle<Result<(), WorkerError>>>>,
     reverse_tasks: Mutex<Vec<JoinHandle<Result<(), WorkerError>>>>,
+    accepted_source: watch::Sender<Option<Arc<crate::zcode_host_services::AcceptedNativeSource>>>,
+    running_observed: watch::Sender<Option<Instant>>,
+    permission_calls: Mutex<Vec<std::sync::Weak<NativePending>>>,
+    permission_slots: Arc<tokio::sync::Semaphore>,
 }
 impl Job {
     fn cancelled(&self) -> bool {
         *self.cancel.borrow()
     }
+    fn revoke_permissions(&self) {
+        let calls = self
+            .permission_calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter_map(std::sync::Weak::upgrade)
+            .collect::<Vec<_>>();
+        for call in calls {
+            call.revoke();
+        }
+    }
     fn fail(&self, failure: WorkerError) {
+        self.revoke_permissions();
         // Revoke Ready input before waiting on any resource admission lock.
         if let Some(a) = self.attempt.lock().expect("attempt").as_ref() {
             a.attempt().cancel_before_spawn();
@@ -339,6 +484,7 @@ impl Job {
         }
     }
     fn cancel(&self) {
+        self.revoke_permissions();
         let _ = self
             .publication
             .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire);
@@ -364,6 +510,11 @@ impl ZcodeAppServerWorker {
                 .contains_key(std::ffi::OsStr::new("PULT_MEMORY_KEY"))
             || config.reverse_timeout.is_zero()
             || config.reverse_timeout > Duration::from_secs(120)
+            || config
+                .permission_timeout
+                .is_some_and(|d| d.is_zero() || d > Duration::from_secs(600))
+            || (services.reply_gate.is_some() != config.permission_timeout.is_some())
+            || (services.reply_gate.is_some() != services.permission_slots.is_some())
         {
             return Err(unavailable());
         }
@@ -453,6 +604,10 @@ impl Worker for ZcodeAppServerWorker {
                 reader_task: Mutex::new(None),
                 writer_task: Mutex::new(None),
                 reverse_tasks: Mutex::new(Vec::new()),
+                accepted_source: watch::channel(None).0,
+                running_observed: watch::channel(None).0,
+                permission_calls: Mutex::new(Vec::new()),
+                permission_slots: Arc::new(tokio::sync::Semaphore::new(8)),
             });
             state.used = true;
             state.active = Some(job.clone());
@@ -688,6 +843,7 @@ async fn close_native(job: &Job) {
     }
 }
 fn revoke(inner: &Inner, job: &Job) {
+    job.revoke_permissions();
     if job.closing.swap(true, Ordering::AcqRel) {
         return;
     }
@@ -741,6 +897,19 @@ async fn cleanup(inner: &Inner, job: &Job) {
         job.closed.send_replace(Closed::Unconfirmed);
         job.retry.notified().await;
         job.closed.send_replace(Closed::Pending);
+    }
+    let interactions = inner.services.interactions.clone();
+    let ticket = job.ticket.clone();
+    let generation = job.generation;
+    if external(
+        inner,
+        job,
+        Box::pin(async move { interactions.drain(ticket, generation).await }),
+    )
+    .await
+    .is_err()
+    {
+        fatal(inner, job);
     }
     let resources = inner.services.resources.clone();
     let ticket = job.ticket.clone();
@@ -877,6 +1046,166 @@ async fn rpc(
     }
     tokio::select! {r=recv=>r.map_err(|_|protocol()),_=cancel.changed()=>Err(interrupted()),_=failure_rx.changed()=>Err(failure_rx.borrow().clone().unwrap_or_else(protocol)),_=tokio::time::sleep_until(inner.config.start_deadline.into())=>Err(error("start_unknown"))}
 }
+async fn owned_blocking<T: Send + 'static>(
+    inner: &Arc<Inner>,
+    job: &Arc<Job>,
+    f: impl FnOnce() -> Result<T, WorkerError> + Send + 'static,
+) -> Result<T, WorkerError> {
+    match tokio::task::spawn_blocking(f).await {
+        Ok(r) => r,
+        Err(_) => {
+            fatal(inner, job);
+            Err(error("storage_unavailable"))
+        }
+    }
+}
+fn queue_deny(request: &ReverseRequest, tx: &mpsc::Sender<Write>) -> Result<(), WorkerError> {
+    let frame = framing()?
+        .prepare_raw(request.default_deny().map_err(|_| protocol())?)
+        .map_err(|_| protocol())?;
+    tx.try_send(Write {
+        frame,
+        first_input: false,
+    })
+    .map_err(|_| error("capacity"))
+}
+fn preaccepted_expired(already_observed: bool, observed: Instant, cutoff: Instant) -> bool {
+    !already_observed && observed >= cutoff
+}
+async fn await_source(
+    inner: &Arc<Inner>,
+    job: &Arc<Job>,
+    call: &NativePending,
+    admitted: Instant,
+    already_observed: bool,
+) -> Result<Arc<crate::zcode_host_services::AcceptedNativeSource>, WorkerError> {
+    let mut source = job.accepted_source.subscribe();
+    let mut observed = job.running_observed.subscribe();
+    let mut cancel = job.cancel.subscribe();
+    let before = inner
+        .config
+        .start_deadline
+        .min(admitted + inner.config.reverse_timeout);
+    loop {
+        let changed = call.changed.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        if !call.valid()
+            || job.cancelled()
+            || job.closing.load(Ordering::Acquire)
+            || job.failure.borrow().is_some()
+        {
+            return Err(interrupted());
+        }
+        let stamp = *observed.borrow_and_update();
+        // A waiting pre-accepted call cannot be revived by a receipt first seen
+        // after its pre-accept expiry. A fresh mid-turn call has no old start bound.
+        if stamp.is_some_and(|at| preaccepted_expired(already_observed, at, before)) {
+            return Err(error("interaction_timeout"));
+        }
+        let cutoff = stamp
+            .map(|at| {
+                admitted.max(at)
+                    + inner
+                        .config
+                        .permission_timeout
+                        .unwrap_or(inner.config.reverse_timeout)
+            })
+            .unwrap_or(before);
+        if Instant::now() >= cutoff {
+            return Err(error("interaction_timeout"));
+        }
+        if let Some(s) = source.borrow_and_update().clone() {
+            return Ok(s);
+        }
+        tokio::select! {biased;
+            r=observed.changed()=>if r.is_err(){return Err(interrupted());},
+            r=source.changed()=>if r.is_err(){return Err(interrupted());},
+            _=cancel.changed()=>return Err(interrupted()),
+            _=changed=>{},
+            _=tokio::time::sleep_until(cutoff.into())=>{
+                if observed.has_changed().unwrap_or(false){continue;}
+                return Err(error("interaction_timeout"));
+            }
+        }
+    }
+}
+fn permission_preflight(inner: &Inner, job: &Job, call: &NativePending) -> Result<(), WorkerError> {
+    if job.cancelled()
+        || job.closing.load(Ordering::Acquire)
+        || job.failure.borrow().is_some()
+        || !call.valid()
+    {
+        return Err(interrupted());
+    }
+    let source = call.source.get().ok_or_else(unavailable)?;
+    let frontier = inner
+        .services
+        .owner
+        .prepare_app_server_reply(source)
+        .map_err(|e| error(e.code()))?;
+    let factory = inner.services.reply_gate.as_ref().ok_or_else(unavailable)?;
+    let gate = factory()?;
+    let _runtime = gate.enter(source)?;
+    let _resources =
+        inner
+            .services
+            .resources
+            .check_reply(&frontier, &call.ticket, call.generation)?;
+    Ok(())
+}
+fn approve_handoff(
+    inner: &Inner,
+    job: &Job,
+    receipt: crate::zcode_native_permissions::NativeApprovalReceipt,
+    expected: &Arc<NativePending>,
+    tx: &mpsc::Sender<Write>,
+) -> Result<(), WorkerError> {
+    if !Arc::ptr_eq(receipt.pending(), expected) {
+        return Err(protocol());
+    }
+    let call = receipt.pending();
+    let source = call.source.get().ok_or_else(unavailable)?;
+    let id = match call.request.id() {
+        RequestId::String(s) => serde_json::json!(s),
+        RequestId::Integer(n) => serde_json::json!(n),
+    };
+    let mut bytes = serde_json::to_vec(&json!({"id":id,"result":{"decision":"allow"}}))
+        .map_err(|_| protocol())?;
+    bytes.push(b'\n');
+    let frame = framing()?.prepare_raw(bytes).map_err(|_| protocol())?;
+    // Build and keep the ephemeral Runtime gate only in this blocking closure.
+    let frontier = inner
+        .services
+        .owner
+        .prepare_app_server_reply(source)
+        .map_err(|e| error(e.code()))?;
+    let gate = inner.services.reply_gate.as_ref().ok_or_else(unavailable)?()?;
+    let _runtime = gate.enter(source)?;
+    let _resources =
+        inner
+            .services
+            .resources
+            .check_reply(&frontier, &call.ticket, call.generation)?;
+    let _pending = call.gate.lock().map_err(|_| interrupted())?;
+    if !call.valid()
+        || job.cancelled()
+        || job.closing.load(Ordering::Acquire)
+        || job.failure.borrow().is_some()
+        || Instant::now() >= *call.expires.get().ok_or_else(unavailable)?
+    {
+        return Err(interrupted());
+    }
+    let _seal = frontier
+        .seal(call.action.get().ok_or_else(unavailable)?)
+        .ok_or_else(interrupted)?;
+    call.state.store(1, Ordering::Release);
+    tx.try_send(Write {
+        frame,
+        first_input: false,
+    })
+    .map_err(|_| error("capacity"))
+}
 fn reverse(
     inner: Arc<Inner>,
     job: Arc<Job>,
@@ -885,18 +1214,12 @@ fn reverse(
     tx: mpsc::Sender<Write>,
 ) -> Result<(), WorkerError> {
     if job.closing.load(Ordering::Acquire) {
-        let frame = framing()?
-            .prepare_raw(request.default_deny().map_err(|_| protocol())?)
-            .map_err(|_| protocol())?;
-        tx.try_send(Write {
-            frame,
-            first_input: false,
-        })
-        .map_err(|_| error("capacity"))?;
-        return Ok(());
+        return queue_deny(&request, &tx);
     }
     let id = request.id().clone();
-    {
+    let bridge = inner.services.reply_gate.is_some()
+        && matches!(&request, ReverseRequest::Permission { .. });
+    let eligible = {
         let mut w = wire.lock().map_err(|_| protocol())?;
         if w.reverse_ids.len() >= 128 || w.reverse_ids.contains(&id) {
             return Err(protocol());
@@ -910,69 +1233,125 @@ fn reverse(
             return Err(protocol());
         }
         w.reverse_ids.push(id.clone());
+        if bridge {
+            if let ReverseRequest::Permission {
+                request_id,
+                payload: codec::NativePermissionPayload::Retained(data),
+                ..
+            } = &request
+            {
+                if w.permission_ids.len() >= 128 || w.permission_ids.contains(request_id) {
+                    return Err(protocol());
+                }
+                w.permission_ids.push(request_id.clone());
+                data.untrusted_origin().is_none()
+                    && data
+                        .untrusted_turn_id()
+                        .as_deref()
+                        .is_some_and(|tid| w.observer.matching_started_turn() == Some(tid))
+            } else {
+                false
+            }
+        } else {
+            true
+        }
+    };
+    if !eligible {
+        return queue_deny(&request, &tx);
     }
+    // This short clock snapshot defines admission: publication cannot change
+    // between the presence bit and captured Instant, even when stamps are equal.
+    let observed = job.running_observed.borrow();
+    let admitted = Instant::now();
+    let already_observed = observed.is_some();
+    drop(observed);
+    let request = Arc::new(request);
+    let pending = if bridge {
+        let local = job
+            .permission_slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| error("capacity"))?;
+        let global = inner
+            .services
+            .permission_slots
+            .as_ref()
+            .ok_or_else(unavailable)?
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| error("capacity"))?;
+        let call = Arc::new(NativePending {
+            request: request.clone(),
+            ticket: job.ticket.clone(),
+            generation: job.generation,
+            source: std::sync::OnceLock::new(),
+            action: std::sync::OnceLock::new(),
+            expires: std::sync::OnceLock::new(),
+            changed: Notify::new(),
+            gate: Mutex::new(()),
+            state: AtomicU8::new(0),
+            _local: local,
+            _global: global,
+        });
+        job.permission_calls
+            .lock()
+            .map_err(|_| protocol())?
+            .push(Arc::downgrade(&call));
+        Some(call)
+    } else {
+        None
+    };
+    // Fail before spawn if registration is poisoned; no callbacks before install.
+    let mut reverse_tasks = job.reverse_tasks.lock().map_err(|_| protocol())?;
+    let (start, begin) = oneshot::channel();
     let j = job.clone();
     let handle = tokio::spawn(async move {
-        let result = async {
-        let context = ReverseContext {
-            ticket: j.ticket.clone(),
-            generation: j.generation,
-        };
-        let handler = inner.services.interactions.clone();
-        // Own callback construction/poll through cancellation and timeout. A
-        // timeout does not abort the admitted callback; stop still waits for it.
-        let mut work = tokio::spawn(async move { handler.handle(context, request).await });
-        let mut cancel = j.cancel.subscribe();
-        let timeout = if j.publication.load(Ordering::Acquire) == 0 {
-            inner.config.reverse_timeout.min(
-                inner
-                    .config
-                    .start_deadline
-                    .saturating_duration_since(Instant::now()),
-            )
-        } else {
-            inner.config.reverse_timeout
-        };
-        let reply = tokio::select! {
-            r=&mut work=>r,
-            _=cancel.changed()=>{let _=work.await;return Ok(());},
-            _=tokio::time::sleep(timeout)=>{j.fail(error("interaction_timeout"));let _=work.await;return Ok(());}
-        };
-        let reply = match reply {
-            Ok(Ok(r)) => r,
-            Ok(Err(e)) => {
-                return Err(e);
-            }
-            Err(_) => {
-                fatal(&inner, &j);
-                return Err(error("storage_unavailable"));
-            }
-        };
-        if j.cancelled() || j.closing.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        if reply.id != id {
+        if begin.await.is_err() {
             return Err(protocol());
         }
-        let frame = framing()?
-            .prepare_raw(reply.bytes)
-            .map_err(|_| protocol())?;
-        tx.try_send(Write {
-            frame,
-            first_input: false,
-        })
-        .map_err(|_| error("capacity"))?;
-        Ok(())
+        let result=async{
+            let timeout=if let Some(call)=&pending{
+                let source=await_source(&inner,&j,call,admitted,already_observed).await?;
+                let deadline=source.deadline(admitted,inner.config.permission_timeout.ok_or_else(unavailable)?);
+                call.bind(source,deadline)?;
+                let checking=inner.clone();let checking_job=j.clone();let checking_call=call.clone();
+                owned_blocking(&inner,&j,move||permission_preflight(&checking,&checking_job,&checking_call)).await?;
+                deadline.saturating_duration_since(Instant::now())
+            }else if j.publication.load(Ordering::Acquire)==0{
+                inner.config.reverse_timeout.min(inner.config.start_deadline.saturating_duration_since(Instant::now()))
+            }else{inner.config.reverse_timeout};
+            let context=ReverseContext{ticket:j.ticket.clone(),generation:j.generation,pending:pending.clone()};
+            let handler=inner.services.interactions.clone();
+            let mut work=tokio::spawn(async move{handler.handle(context,request).await});
+            let mut cancel=j.cancel.subscribe();
+            let reply=tokio::select!{
+                r=&mut work=>r,
+                _=cancel.changed()=>{if let Some(call)=&pending{call.revoke();}let _=work.await;return Ok(());},
+                _=tokio::time::sleep(timeout)=>{if let Some(call)=&pending{call.revoke();}j.fail(error("interaction_timeout"));let _=work.await;return Ok(());}
+            };
+            let reply=match reply{Ok(Ok(r))=>r,Ok(Err(e))=>return Err(e),Err(_)=>{fatal(&inner,&j);return Err(error("storage_unavailable"));}};
+            if j.cancelled() || j.closing.load(Ordering::Acquire){return Ok(());}
+            if reply.id!=id{return Err(protocol());}
+            match reply.body{
+                ReplyBody::Conservative(bytes)=>{
+                    let frame=framing()?.prepare_raw(bytes).map_err(|_|protocol())?;
+                    tx.try_send(Write{frame,first_input:false}).map_err(|_|error("capacity"))?;
+                }
+                ReplyBody::Approved(receipt)=>{
+                    let call=pending.ok_or_else(protocol)?;let admitting=inner.clone();let scope=j.clone();
+                    owned_blocking(&inner,&j,move||approve_handoff(&admitting,&scope,receipt,&call,&tx)).await?;
+                }
+            }
+            Ok(())
         }.await;
         if let Err(e) = &result {
             j.fail(error(&e.code));
         }
         result
     });
-    job.reverse_tasks
-        .lock()
-        .map_err(|_| protocol())?
-        .push(handle);
+    reverse_tasks.push(handle);
+    drop(reverse_tasks);
+    let _ = start.send(());
     Ok(())
 }
 fn reader(
@@ -1077,27 +1456,31 @@ fn reader(
         result
     })
 }
-async fn receipt_ready(inner: &Inner, job: &Job) -> bool {
-    let Some(mut progress) = inner
+async fn receipt_ready(inner: &Inner, job: &Job) -> Option<ObservedRunning> {
+    let mut progress = inner
         .services
         .driver
         .upgrade()
-        .and_then(|d| d.progress_for_ticket(&job.ticket))
-    else {
-        return false;
-    };
+        .and_then(|d| d.progress_for_ticket(&job.ticket))?;
     let mut cancel = job.cancel.subscribe();
     loop {
         if job.cancelled() {
-            return false;
+            return None;
         }
         let p = progress.borrow_and_update().clone();
         match p {
-            Progress::Running(a) => return a.turn_id == job.public_turn && a.user_event_id > 0,
+            Progress::Running(a) => {
+                return (a.turn_id == job.public_turn && a.user_event_id > 0).then(|| {
+                    ObservedRunning {
+                        accepted: a,
+                        observed_at: Instant::now(),
+                    }
+                });
+            }
             Progress::Starting => {}
-            _ => return false,
+            _ => return None,
         }
-        tokio::select! {_=cancel.changed()=>return false,r=progress.changed()=>if r.is_err(){return false;}}
+        tokio::select! {_=cancel.changed()=>return None,r=progress.changed()=>if r.is_err(){return None;}}
     }
 }
 type StartReply = Arc<Mutex<Option<oneshot::Sender<Result<Started, WorkerError>>>>>;
@@ -1262,6 +1645,7 @@ async fn turn(
         observer,
         sid: native_sid.clone(),
         reverse_ids: Vec::new(),
+        permission_ids: Vec::new(),
     }));
     *job.wire.lock().expect("wire") = Some(wire.clone());
     let (writes, write_rx) = mpsc::channel(QUEUE);
@@ -1551,8 +1935,20 @@ async fn turn(
                     }),
                 }));
                 accepted = true;
-                if !receipt_ready(&inner, &job).await {
-                    return Err(interrupted());
+                let actual = receipt_ready(&inner, &job).await.ok_or_else(interrupted)?;
+                job.running_observed
+                    .send_replace(Some(actual.observed_at()));
+                if let Some(factory) = inner.services.reply_gate.clone() {
+                    let a = attempt.clone();
+                    let generation = job.generation;
+                    let source = owned_blocking(&inner, &job, move || {
+                        factory()?.bind_accepted(a, receipt, actual, generation)
+                    })
+                    .await?;
+                    if job.cancelled() || job.closing.load(Ordering::Acquire) {
+                        return Err(interrupted());
+                    }
+                    job.accepted_source.send_replace(Some(source));
                 }
                 let started =
                     json!({"type":"turn.started","sessionId":native_sid,"turnId":tid,"payload":{}});
@@ -1965,5 +2361,41 @@ mod cleanup_wait_tests {
             panic!("missing cleanup proof authorized a result");
         };
         assert_eq!(error.code, "cleanup_unconfirmed");
+    }
+}
+
+#[cfg(test)]
+mod native_permission_clock_tests {
+    use super::*;
+    #[test]
+    fn exact_preaccepted_cutoff_and_equal_stamps_cannot_revive_a_waiting_permission() {
+        let cutoff = Instant::now();
+        assert!(preaccepted_expired(false, cutoff, cutoff));
+        assert!(!preaccepted_expired(
+            false,
+            cutoff - Duration::from_nanos(1),
+            cutoff
+        ));
+        let admitted = cutoff + Duration::from_secs(1);
+        let observed = admitted; // equal values do not establish causal observation
+        assert!(preaccepted_expired(false, observed, cutoff));
+        assert!(!preaccepted_expired(true, observed, cutoff));
+    }
+    #[test]
+    fn delayed_binder_uses_first_observed_receipt_and_cannot_extend_expired_action() {
+        let binder_returns = Instant::now();
+        let observed_at = binder_returns - Duration::from_secs(80);
+        let admitted = observed_at + Duration::from_secs(1);
+        let observed = ObservedRunning {
+            accepted: crate::turn_driver::Accepted {
+                turn_id: "clock-only".into(),
+                user_event_id: 1,
+            },
+            observed_at,
+        };
+        let expiry = observed.deadline(admitted, Duration::from_secs(60));
+        assert_eq!(expiry, admitted + Duration::from_secs(60));
+        assert!(expiry < binder_returns);
+        assert_ne!(expiry, binder_returns + Duration::from_secs(60));
     }
 }

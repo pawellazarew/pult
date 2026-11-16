@@ -359,6 +359,46 @@ impl SpawnAction {
     }
 }
 
+/// One native permission reply handoff. Neither input nor memory mutation authority.
+/// Its lifetime is the request's own expiry, independent of the process start deadline.
+pub(crate) struct NativeReplyAction {
+    ticket: Ticket,
+    deadline: std::time::Instant,
+    state: std::sync::atomic::AtomicU8,
+}
+
+impl NativeReplyAction {
+    pub(crate) fn new(ticket: Ticket, deadline: std::time::Instant) -> Self {
+        Self {
+            ticket,
+            deadline,
+            state: std::sync::atomic::AtomicU8::new(0),
+        }
+    }
+    pub(crate) fn cancel(&self) -> bool {
+        self.state
+            .compare_exchange(
+                0,
+                2,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    }
+    fn seal(&self) -> bool {
+        std::time::Instant::now() < self.deadline
+            && self
+                .state
+                .compare_exchange(
+                    0,
+                    1,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                )
+                .is_ok()
+    }
+}
+
 /// Trusted-host admission for the first native input after an owned process
 /// spawn. Construction inherits the exact process action's ticket and absolute
 /// deadline; it does not enqueue, poll, write or acknowledge native input.
@@ -652,6 +692,38 @@ impl Driver {
             return None;
         }
         Some(accepted)
+    }
+    /// Host policy/Runtime/lease and pending-call gates must already be held.
+    /// This is one bounded enqueue seal, not a pipe-write or tool-execution receipt.
+    pub(crate) fn seal_native_reply(
+        &self,
+        ticket: &Ticket,
+        expected: &TurnSnapshot,
+        accepted: &Accepted,
+        action: &NativeReplyAction,
+    ) -> bool {
+        let state = self.inner.state.lock().expect("driver state mutex");
+        if state.closed || state.storage_failed || &action.ticket != ticket {
+            return false;
+        }
+        let Some(active) = state.core.active(ticket) else {
+            return false;
+        };
+        if active.phase() != crate::turn_coordinator::Phase::Running
+            || active.cancel_requested()
+            || active.snapshot() != expected
+            || active.provider_turn_id() != Some(accepted.turn_id.as_str())
+        {
+            return false;
+        }
+        let Some(control) = state.jobs.get(ticket) else {
+            return false;
+        };
+        let actual = control.progress.borrow();
+        matches!(&*actual, Progress::Running(value) if value == accepted)
+            && accepted.user_event_id > 0
+            && accepted.user_event_id <= 9_007_199_254_740_991
+            && action.seal()
     }
     /// Bounded in-memory linearization against Driver cancel/fault/shutdown.
     /// Host policy/filesystem callbacks and launch validation must finish first.
