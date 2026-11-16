@@ -1370,6 +1370,126 @@ async fn native_duplicate_ids_changed_same_rpc_and_local_ninth_call_fail_closed(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_reader_capacity_survives_closed_events_after_owned_binder() {
+    let f = Fixture::new().await;
+    let binder = BlockingGuard::new(&f.service.hooks.binder);
+    let mut handle = bounded(f.runtime.execute(
+        f.key.clone(),
+        Input {
+            text: json!({"id":f.note["id"],"count":9,"holdFault":true}).to_string(),
+            metadata: Default::default(),
+        },
+    ))
+    .await
+    .unwrap();
+    bounded(handle.accepted()).await.unwrap();
+    binder.entered().await;
+    let fault =
+        crate::zcode_appserver_worker::fault_test::Guard::new(handle.ticket().clone(), None);
+    bounded(async {
+        while f.service.slots.available_permits() != 31 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    std::fs::write(
+        f.state.home.join("native-permission-release-fault"),
+        b"release",
+    )
+    .unwrap();
+    // Reclaimed raw calls prove reader failure revoked its pending calls while
+    // the owned binder still prevents the turn from polling the closed queue.
+    bounded(async {
+        while f.service.slots.available_permits() != 32
+            || !fault.0.closed.load(std::sync::atomic::Ordering::Acquire)
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    let first = fault.0.first.lock().unwrap().clone();
+    drop(binder);
+    let terminal = bounded(handle.wait()).await.unwrap();
+    eprintln!(
+        "[fault-priority] reader-first={first:?} terminal={:?}",
+        terminal.turn.outcome
+    );
+    assert_eq!(first.as_deref(), Some("capacity"));
+    assert!(
+        matches!(&terminal.turn.outcome, Outcome::Failure { code, .. } if code == "capacity"),
+        "reader capacity was replaced: {:?}",
+        terminal.turn.outcome
+    );
+    assert!(!f.proof().is_some_and(|p| p["decision"] == "allow"));
+    assert_eq!(f.state.permissions.get().unwrap().reserved_count(), 0);
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn native_revoke_callback_cannot_publish_before_its_primary_failure() {
+    let f = Fixture::new().await;
+    let binder = BlockingGuard::new(&f.service.hooks.binder);
+    let mut handle = bounded(f.runtime.execute(
+        f.key.clone(),
+        Input {
+            text: json!({"id":f.note["id"],"count":9,"holdFault":true}).to_string(),
+            metadata: Default::default(),
+        },
+    ))
+    .await
+    .unwrap();
+    bounded(handle.accepted()).await.unwrap();
+    binder.entered().await;
+    let fault = crate::zcode_appserver_worker::fault_test::Guard::new(
+        handle.ticket().clone(),
+        Some("capacity"),
+    );
+    let observation = fault.0.clone();
+    bounded(async {
+        while f.service.slots.available_permits() != 31 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    std::fs::write(
+        f.state.home.join("native-permission-release-fault"),
+        b"release",
+    )
+    .unwrap();
+    bounded(observation.entered.notified()).await;
+    // A real await_source callback has handled revocation. Its recursive
+    // fail(interrupted) must not publish ahead of the primary failure.
+    bounded(async {
+        while observation.first.lock().unwrap().is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    let first = observation.first.lock().unwrap().clone();
+    drop(fault);
+    bounded(async {
+        while !observation
+            .closed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    drop(binder);
+    bounded(handle.wait()).await.unwrap();
+    assert!(!f.proof().is_some_and(|p| p["decision"] == "allow"));
+    assert_eq!(f.state.permissions.get().unwrap().reserved_count(), 0);
+    f.finish().await;
+    eprintln!("[fault-priority] revoke-first={first:?}");
+    assert_eq!(
+        first.as_deref(),
+        Some("capacity"),
+        "revocation callback replaced primary failure"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn driver_reply_action_is_single_use_without_becoming_human_approval() {
     let f = Fixture::new().await;
     let mut handle = f.start().await;
