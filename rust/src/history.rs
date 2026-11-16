@@ -136,7 +136,7 @@ pub(crate) fn compact_raw(value: &RawValue) -> Result<Raw> {
 }
 
 pub(crate) fn normalize(value: &RawValue) -> Result<Raw> {
-    Ok(transform(value, None)?.0)
+    Ok(transform(value, None, false)?.0)
 }
 
 #[derive(Clone, Default)]
@@ -265,10 +265,27 @@ fn entries(value: &RawValue) -> Result<Fields> {
 /// cannot overflow the daemon's stack. As in Node's plain-object assignment,
 /// a __proto__ key does not become an own output property.
 fn clip(value: &RawValue, limit: usize) -> Result<(Raw, bool)> {
-    transform(value, Some(limit))
+    transform(value, Some(limit), false)
 }
 
-fn transform(value: &RawValue, limit: Option<usize>) -> Result<(Raw, bool)> {
+/// Diagnostic JSON.stringify ordering; legacy normalization/truncation stay unchanged.
+pub(crate) fn stringify(value: &RawValue) -> Result<Raw> {
+    Ok(transform(value, None, true)?.0)
+}
+fn index_key(key: &[u16]) -> Option<u32> {
+    if key.is_empty()
+        || key.len() > 10
+        || (key.len() > 1 && key[0] == u16::from(b'0'))
+        || !key
+            .iter()
+            .all(|u| (u16::from(b'0')..=u16::from(b'9')).contains(u))
+    {
+        return None;
+    }
+    let n = String::from_utf16(key).ok()?.parse::<u32>().ok()?;
+    (n != u32::MAX).then_some(n)
+}
+fn transform(value: &RawValue, limit: Option<usize>, stringify_order: bool) -> Result<(Raw, bool)> {
     enum Work {
         Value(Raw),
         Literal(String),
@@ -296,11 +313,16 @@ fn transform(value: &RawValue, limit: Option<usize>) -> Result<(Raw, bool)> {
             b'{' => {
                 out.push('{');
                 work.push(Work::Literal("}".into()));
-                let fields: Vec<_> = Fields::parse(&value)?
+                let mut fields: Vec<_> = Fields::parse(&value)?
                     .0
                     .into_iter()
                     .filter(|(name, _)| limit.is_none() || *name != key("__proto__"))
                     .collect();
+                if stringify_order {
+                    fields.sort_by_cached_key(|(name, _)| {
+                        index_key(name).map(|n| (false, n)).unwrap_or((true, 0))
+                    });
+                }
                 for (at, (name, value)) in fields.into_iter().enumerate().rev() {
                     work.push(Work::Value(value));
                     work.push(Work::Literal(format!(
