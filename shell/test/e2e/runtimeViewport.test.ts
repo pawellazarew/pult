@@ -218,8 +218,12 @@ for (const dpr of [1, 2]) describe(`fixed viewport, actual Electron display DPR 
       }
     }
     await h.win.evaluate(() => window.dispatchEvent(new CustomEvent('pult:settings', { detail: 'voice' })))
+    const settings = h.win.getByTestId('settings-dialog')
+    assert.ok(await waitFor(() => settings.isVisible()), 'settings must be committed before its Escape transition')
     await assertNativeVisibility(false, 'modal_hide')
     await h.win.keyboard.press('Escape')
+    assert.ok(await waitFor(async () => await settings.count() === 0), 'Escape closes settings before restoring the browser')
+    assert.equal(await h.win.locator('.runtime-expanded').count(), 1, 'settings Escape must preserve the expanded browser')
     await assertNativeVisibility(true, 'modal_restore')
     // Own scratch daemon only: null-hide cannot wait for any daemon RPC.
     const daemon = h.daemonPid()
