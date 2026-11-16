@@ -123,6 +123,14 @@ impl Rig {
         Self::with_attachment_dependencies(attach, observe, false)
     }
     fn with_attachment_dependencies(attach: bool, observe: bool, block_optional: bool) -> Self {
+        Self::with_attachment_startup(attach, observe, block_optional, false)
+    }
+    fn with_attachment_startup(
+        attach: bool,
+        observe: bool,
+        block_optional: bool,
+        site_barrier: bool,
+    ) -> Self {
         crate::panic_guard::install();
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().canonicalize().unwrap();
@@ -204,13 +212,36 @@ impl Rig {
             home.clone().into_os_string(),
             if observe { "memory-observe" } else { "normal" }.into(),
         ]);
+        let program = if site_barrier {
+            let site = home.join("synthetic-site");
+            std::fs::create_dir(&site).unwrap();
+            std::fs::copy(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/claude_sitecustomize.py"),
+                site.join("sitecustomize.py"),
+            )
+            .unwrap();
+            args.splice(
+                0..0,
+                [
+                    Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("tests/fixtures/claude_site_startup.sh")
+                        .into_os_string(),
+                    site.into_os_string(),
+                    python.into_os_string(),
+                ],
+            );
+            PathBuf::from("/bin/sh")
+        } else {
+            python
+        };
         let worker = ClaudeWorker::new(
             Config {
                 session: snapshot.key.clone(),
                 home: home.clone(),
                 launch: Launch {
                     holder,
-                    program: python,
+                    program,
                     args,
                     cwd: home.clone(),
                     env: BTreeMap::from([
@@ -457,6 +488,41 @@ async fn synchronous_catalog_or_fresh_check_panic_denies_without_input_and_clean
         assert!(f.input().is_none());
         f.cleaned();
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn synthetic_fixture_startup_ignores_ambient_site_hooks_before_user_code() {
+    let f = Rig::with_attachment_startup(true, false, false, true);
+    let mut turn = f.start("/context");
+    let terminal = tokio::time::timeout(WATCHDOG, turn.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    let site_entered = f.home.join("synthetic-site/entered").is_file();
+    if let Outcome::Failure { code, message } = &terminal.turn.outcome {
+        let startup = *f.startup_diagnostic.lock().unwrap();
+        eprintln!(
+            "[site-startup-fixture] code={code} ack-timeout={} site-entered={site_entered} pre-import={} post-import={}",
+            message == "Claude input acknowledgement timed out",
+            startup.pre_import,
+            startup.post_import
+        );
+    }
+    assert_eq!(terminal.turn.outcome, Outcome::Success);
+    assert!(!site_entered);
+    let input = f.input().unwrap();
+    let blocks = input["message"]["content"].as_array().unwrap();
+    assert_eq!(blocks.len(), 4);
+    assert_eq!(blocks[0]["text"], "/context");
+    assert!(blocks[1]["text"].as_str().unwrap().contains("note.txt"));
+    assert_eq!(blocks[2]["text"], CATALOG);
+    assert!(
+        blocks[3]["text"]
+            .as_str()
+            .unwrap()
+            .contains("<pult_runtime_context>")
+    );
+    f.cleaned();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
