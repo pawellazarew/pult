@@ -89,7 +89,7 @@ deadline; bytes already delivered cannot be retracted.
 
 Actual Node24 public-CLI oracle runs through only a private fake owner socket;
 its preload forbids every subprocess/autostart/provider/manager attempt. It
-checks80 RU/EN/text/JSON cases, aliases, exact RPC params, Unicode padding,
+checks96 RU/EN/text/JSON cases, aliases, exact RPC params, Unicode padding,
 context/attention/approval/worktree fields, rename/seen/archive/stop and error
 exits. Controlled peers supply opaque UTF-16 extensions. The baseline Rust
 default-JSON versus Node text mismatch was observed before implementation.
@@ -103,3 +103,5 @@ its real parse failure; its backend/alias assertions remain unchanged.
 
 This is CLI presentation qualification over current RPCs, not a claim of full
 provider/background/native policy parity or production cutover.
+
+Unknown UTF-16 object keys are retained in raw JSON and ignored when selecting known display fields. The shared CLI response parser reuses the existing lossless history parser, including last-duplicate-key semantics. Actual paired cases cover outer hello/result/error envelopes, list rows and nested context/attention/worktree metadata.

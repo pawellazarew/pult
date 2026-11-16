@@ -54,7 +54,8 @@ finally:
         stop_owned()
         status = child.wait()
 
-proof = {'real_holder_exit_zero': status == 0,
+proof = {'real_holder_code': status,
+         'real_holder_exit_zero': status == 0,
          'native_close_observed': (home / 'closed.entered').is_file(),
          'internal_owner_rebound': True}
 with os.fdopen(os.open(home / 'forced-holder-proof.tmp',

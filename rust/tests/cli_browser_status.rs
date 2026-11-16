@@ -507,5 +507,5 @@ async fn actual_public_node_cli_matches_browser_status_without_real_chrome_disco
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(out.stdout,b"browser status oracle: 42 paired Node/Rust cases + explicit layout profile + 4 Node production Chrome symlink observations\n");
+    assert_eq!(out.stdout,b"browser status oracle: 54 paired Node/Rust cases + explicit layout profile + 4 Node production Chrome symlink observations\n");
 }

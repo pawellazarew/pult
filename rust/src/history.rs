@@ -140,9 +140,9 @@ pub(crate) fn normalize(value: &RawValue) -> Result<Raw> {
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct Fields(Vec<(Key, Raw)>);
+pub struct Fields(Vec<(Key, Raw)>);
 impl Fields {
-    pub(crate) fn parse(value: &RawValue) -> Result<Self> {
+    pub fn parse(value: &RawValue) -> Result<Self> {
         ensure!(value.get().starts_with('{'), "event must be a JSON object");
         let text = value.get();
         let bytes = text.as_bytes();
@@ -186,11 +186,14 @@ impl Fields {
     pub(crate) fn set(&mut self, name: &str, value: Raw) {
         self.set_key(key(name), value);
     }
-    pub(crate) fn get(&self, name: &str) -> Option<&RawValue> {
+    pub fn get(&self, name: &str) -> Option<&RawValue> {
         let name = key(name);
         self.0.iter().find(|(k, _)| *k == name).map(|(_, v)| &**v)
     }
-    pub(crate) fn remove(&mut self, name: &str) -> Option<Raw> {
+    pub fn contains_key(&self, name: &str) -> bool {
+        self.get(name).is_some()
+    }
+    pub fn remove(&mut self, name: &str) -> Option<Raw> {
         let name = key(name);
         let at = self.0.iter().position(|(k, _)| *k == name)?;
         Some(self.0.remove(at).1)

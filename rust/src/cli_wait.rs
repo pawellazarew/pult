@@ -1,11 +1,10 @@
 //! Private CLI composition, not an advertisement of a qualified agent.wait backend.
 use crate::cli_client::{self, OwnerClient, ResponsePolicy, RpcError};
 use serde_json::{Value, json, value::RawValue};
-use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::Path;
 
-type Fields = HashMap<String, Box<RawValue>>;
+type Fields = pult_core::RawFields;
 pub struct Options {
     pub until: Option<String>,
     pub timeout: Option<String>,
@@ -15,7 +14,7 @@ fn invalid() -> RpcError {
     RpcError::local("invalid_response", "invalid agent wait response")
 }
 fn fields(raw: &RawValue) -> Result<Fields, RpcError> {
-    serde_json::from_str(raw.get()).map_err(|_| invalid())
+    Fields::parse(raw).map_err(|_| invalid())
 }
 fn js_space(ch: char) -> bool {
     matches!(ch as u32, 0x0009..=0x000d | 0x0020 | 0x00a0 | 0x1680 | 0x2000..=0x200a | 0x2028 | 0x2029 | 0x202f | 0x205f | 0x3000 | 0xfeff)
@@ -143,7 +142,8 @@ fn javascript_string(raw: &RawValue) -> Result<String, RpcError> {
             }
             b'{' => {
                 let end = object_end(bytes, at);
-                let object: Fields = serde_json::from_str(&text[at..end]).map_err(|_| invalid())?;
+                let raw: &RawValue = serde_json::from_str(&text[at..end]).map_err(|_| invalid())?;
+                let object = fields(raw)?;
                 if object.contains_key("toString") {
                     return Err(invalid());
                 }
@@ -174,7 +174,7 @@ fn javascript_string(raw: &RawValue) -> Result<String, RpcError> {
     Ok(out)
 }
 fn nullish<'a>(f: &'a Fields, key: &str) -> Option<&'a RawValue> {
-    f.get(key).map(|v| &**v).filter(|v| v.get() != "null")
+    f.get(key).filter(|v| v.get() != "null")
 }
 fn text(f: &Fields, key: &str, default: &str) -> Result<String, RpcError> {
     nullish(f, key)
@@ -308,7 +308,6 @@ enum Reply {
 }
 fn prompt_turn(f: &Fields) -> Result<&RawValue, RpcError> {
     f.get("turnId")
-        .map(|raw| &**raw)
         .filter(|raw| raw.get().starts_with('"') && raw.get() != "\"\"")
         .ok_or_else(|| RpcError::local("invalid_response", "invalid agent prompt response"))
 }
@@ -328,7 +327,7 @@ async fn execute(
             let f = fields(&raw)?;
             let id = f
                 .get("id")
-                .map(|v| javascript_string(v))
+                .map(javascript_string)
                 .transpose()?
                 .unwrap_or_else(|| "undefined".into());
             emit(

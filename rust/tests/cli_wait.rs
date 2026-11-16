@@ -176,7 +176,7 @@ async fn raw_json_keeps_lone_utf16_and_unknown_fields_while_text_uses_terminal_r
         let peer = tokio::spawn(async move {
             let mut reader = accept(fake.listener).await;
             frame(&mut reader).await;
-            reader.get_mut().write_all(br#"{"id":1,"result":{"name":"chat","status":"idle","reason":"matched","text":"\ud800","extension":{"raw":"\udfff"}}}
+            reader.get_mut().write_all(br#"{"id":1,"\udfff":2,"result":{"name":"chat","status":"idle","reason":"matched","text":"\ud800","\ud800":1,"extension":{"raw":"\udfff","\udfff":false}}}
 "#).await.unwrap();
             eof(&mut reader).await;
         });
@@ -185,7 +185,7 @@ async fn raw_json_keeps_lone_utf16_and_unknown_fields_while_text_uses_terminal_r
             assert_output(
                 &out,
                 0,
-                "{\"name\":\"chat\",\"status\":\"idle\",\"reason\":\"matched\",\"text\":\"\\ud800\",\"extension\":{\"raw\":\"\\udfff\"}}\n",
+                "{\"name\":\"chat\",\"status\":\"idle\",\"reason\":\"matched\",\"text\":\"\\ud800\",\"\\ud800\":1,\"extension\":{\"raw\":\"\\udfff\",\"\\udfff\":false}}\n",
                 "",
             );
         } else {

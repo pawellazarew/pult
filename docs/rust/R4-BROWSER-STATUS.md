@@ -79,7 +79,8 @@ preload already installed. It denies child execution, blocks system Chrome
 metadata lookup and supplies a private virtual Darwin discovery context on
 either CI OS. Forty initial cases cover disk/daemon/state/locale/JSON/text; two
 additional actual numeric-zero text cases cover the review counterexample.
-These 42 cases are compared exactly with the Rust executable. Separate actual
+Three UTF-16-key scenarios add twelve cases. All 54 are compared exactly with
+the Rust executable. Separate actual
 Node Chrome-symlink observations and a Rust actual-filesystem production helper
 test prove the matching candidate behavior; they do not pretend the strict
 fake-file seam is production discovery.
@@ -102,3 +103,5 @@ provider/account, OS service manager or diagnostic network probe is exercised.
 The full doctor proposal remains in the migration workspace at
 `STATE/R4-DOCTOR-IMPLEMENTATION-PROPOSAL.md`; this command does not satisfy its
 complete offline-plus-network gate or activate `doctor.run`.
+
+Unknown UTF-16 keys in package metadata, daemon status and browser state preserve the pinned version and known display fields. Whole browser JSON remains opaque. Three additional actual Node/Rust scenarios add twelve RU/EN/text/JSON comparisons.
