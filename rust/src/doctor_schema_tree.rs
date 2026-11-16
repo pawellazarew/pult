@@ -49,6 +49,8 @@ struct Identity {
     kind: FileType,
 }
 impl Identity {
+    // stat field widths differ across Darwin/Linux ABIs; retain the same normalization.
+    #[allow(clippy::unnecessary_cast)]
     fn of(s: &Stat) -> Self {
         Self {
             device: s.st_dev as u64,
