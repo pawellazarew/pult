@@ -96,6 +96,10 @@ scratch=$(mktemp -d)
 ограничен 1 MiB, unsafe IO остаётся ошибкой, обычный malformed JSON — Auto.
 Договор и actual CLI проверка — [R4-CLI-OWNER-IO](../docs/rust/R4-CLI-OWNER-IO.md).
 
+`runtime [status] [--json]` наблюдает managed Node и daemon Node, запускает только
+закрытый `active -v`, без install/update/layout writes. Pin встроен в binary;
+договор и controlled Node/Rust corpus — [R4-RUNTIME-STATUS](../docs/rust/R4-RUNTIME-STATUS.md).
+
 `events tail` теперь повторяет пользовательский потоковый контракт TS CLI: по умолчанию
 следит за новыми событиями; `--no-follow` заканчивает replay, `--limit N` ограничивает
 число показанных событий, `--json` печатает один event на строку. Без `--json` — текст

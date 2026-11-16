@@ -175,7 +175,7 @@ pub(super) fn number(raw: Option<&RawValue>) -> Result<f64, RpcError> {
         f64::NAN
     })
 }
-fn truthy(raw: &RawValue) -> bool {
+pub(super) fn truthy(raw: &RawValue) -> bool {
     match raw.get() {
         "null" | "false" => false,
         "true" => true,
