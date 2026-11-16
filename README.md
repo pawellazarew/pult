@@ -777,8 +777,8 @@ ChatGPT Terms of Use apply to your login.
 ## Contributing & issues
 
 - **Bugs and ideas:** [GitHub Issues](https://github.com/pawellazarew/pult/issues). Please include the output of
-  `pult doctor` (it never prints tokens, emails or organization names, but it does show local paths — trim what you
-  don't want to share) and what you expected to happen.
+  `pult doctor` and what you expected to happen. Credential secrets are filtered, but the output may contain
+  email addresses, organization names and local paths. Review it and remove private details before sharing.
 - **Security issues:** please don't open a public issue — use private vulnerability reporting on the
   [Security tab](https://github.com/pawellazarew/pult/security) ("Report a vulnerability").
 - **Code:** the one check for every change is `./scripts/ci-check.sh` (the same as CI). Architecture and tests are
