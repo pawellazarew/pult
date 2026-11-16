@@ -10,6 +10,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const entry = join(root, 'dist/cli/main.js')
 await access(entry)
 const rust = process.argv[2]
+const only = process.argv[3]
 const token = 'a'.repeat(64)
 const row = (values={}) => ({session:'one',provider:'claude',turns:2,totalCostUsd:1.23445,inputTokens:3,outputTokens:4,cacheReadTokens:5,rateLimit:null,...values})
 let seed=0x123456789abcdefn
@@ -27,6 +28,13 @@ const cases = [
  {name:'rounding',result:{usage:[...[-0,-0.000001,0.00005,1.00005,1.23445,2.675,1e21,999999999999999900000,1e-300,...samples].map(totalCostUsd=>row({totalCostUsd})),row({session:'🙂e\u0301',turns:1000,rateLimit:{windows:{five_hour:{utilization:-0.005},seven_day:{utilization:0.125}}}})]}},
  {name:'opaque',result:{usage:[row({rateLimit:{status:'future',windows:{five_hour:{utilization:'0.5'},seven_day:{utilization:null},lone:'\ud800'},resetsAt:null}})],future:{lone:'\ud800'}}},
  {name:'coercions',result:{usage:[row({session:['x',null,2],turns:true,totalCostUsd:['0x2'],inputTokens:{},outputTokens:null,cacheReadTokens:false}),row({totalCostUsd:'Infinity',rateLimit:{windows:{five_hour:{utilization:1e308},seven_day:{utilization:-1e308}}}})]}},
+ ...[
+  {name:'utf16-key-top',result:{usage:[row()],['\ud800']:1}},
+  {name:'utf16-key-row',result:{usage:[row({['\ud800']:1})]}},
+  {name:'utf16-key-rate',result:{usage:[row({rateLimit:{['\ud800']:1,windows:{five_hour:{utilization:0.5}}}})]}},
+  {name:'utf16-key-windows',result:{usage:[row({rateLimit:{windows:{['\ud800']:1,five_hour:{utilization:0.5}}}})]}},
+  {name:'utf16-key-five-hour',result:{usage:[row({rateLimit:{windows:{five_hour:{['\ud800']:1,utilization:0.5},seven_day:{['\udfff']:2,utilization:0.25}}}})]}},
+ ],
  ...['timeout','blocked_network','provider_unavailable','limited','unavailable','capacity'].map(code=>({name:`error-${code}`,error:{code,message:'Controlled error'}})),
 ].map(c=>({...c,method:'usage.get',args:[]}))
 const errorExit = code => code==='timeout'?2:1
@@ -84,7 +92,7 @@ async function run(kind, scenario, locale, json, alias, scratch) {
     assert.equal(status.signal, null, `${kind} watchdog ${scenario.name}`); assert.ifError(peerError)
     assert.equal(requests.length, 1)
     const result = { code: status.code, stdout: Buffer.concat(stdout).toString(), stderr: Buffer.concat(stderr).toString() }
-    assert.equal(result.code, scenario.error ? errorExit(scenario.error.code) : 0)
+    assert.equal(result.code, scenario.error ? errorExit(scenario.error.code) : 0, `${kind}/${scenario.name}/${locale}/${json}`)
     if (scenario.error) assert.equal(result.stderr, `pult: ${scenario.error.code} — Controlled error\n`)
     else {
       assert.equal(result.stderr, '')
@@ -101,6 +109,7 @@ async function run(kind, scenario, locale, json, alias, scratch) {
 }
 let count = 0
 for (const scenario of cases) {
+  if (only && scenario.name !== only) continue
   const scratch = await mkdtemp('/tmp/r4agent-')
   try {
     for (const dir of ['home', 'home/run', 'user']) await mkdir(join(scratch, dir), { mode: 0o700 })

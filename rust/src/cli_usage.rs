@@ -1,11 +1,20 @@
 //! Usage presentation shares the bounded JS coercion used by agent CLI.
-use crate::cli_agent::{display, fields, get, number, numeric, object, push, round};
+use crate::cli_agent::{display, number, numeric, push, round};
 use crate::cli_client::{self, OwnerClient, ResponsePolicy, RpcError};
 use serde_json::{json, value::RawValue};
 use std::path::Path;
 
 fn invalid() -> RpcError {
     RpcError::local("invalid_response", "invalid usage response")
+}
+fn field(raw: &RawValue, key: &str) -> Result<Option<Box<RawValue>>, RpcError> {
+    pult_core::raw_field(raw, key).map_err(|_| invalid())
+}
+fn object_field(raw: Option<&RawValue>, key: &str) -> Result<Option<Box<RawValue>>, RpcError> {
+    match raw.filter(|value| value.get().starts_with('{')) {
+        Some(value) => field(value, key),
+        None => Ok(None),
+    }
 }
 fn fixed4(value: f64) -> String {
     if !value.is_finite() || value.abs() >= 1e21 {
@@ -45,10 +54,8 @@ fn render(raw: &RawValue, ru: bool, json_output: bool) -> Result<String, RpcErro
     if json_output {
         return Ok(format!("{}\n", raw.get()));
     }
-    let result = fields(raw)?;
-    let rows: Vec<Box<RawValue>> =
-        serde_json::from_str(get(&result, "usage").ok_or_else(invalid)?.get())
-            .map_err(|_| invalid())?;
+    let rows = field(raw, "usage")?.ok_or_else(invalid)?;
+    let rows: Vec<Box<RawValue>> = serde_json::from_str(rows.get()).map_err(|_| invalid())?;
     if rows.is_empty() {
         return Ok(if ru {
             "расхода пока нет\n"
@@ -59,21 +66,20 @@ fn render(raw: &RawValue, ru: bool, json_output: bool) -> Result<String, RpcErro
     }
     let mut out = String::new();
     for row in rows {
-        let row = fields(&row)?;
-        let session = display(get(&row, "session"))?;
+        let session = display(field(&row, "session")?.as_deref())?;
         let session = format!(
             "{session}{}",
             " ".repeat(16usize.saturating_sub(session.encode_utf16().count()))
         );
-        let turns = display(get(&row, "turns"))?;
+        let turns = display(field(&row, "turns")?.as_deref())?;
         let turns = format!(
             "{}{turns}",
             " ".repeat(3usize.saturating_sub(turns.encode_utf16().count()))
         );
-        let cost = fixed4(number(get(&row, "totalCostUsd"))?);
-        let input = display(get(&row, "inputTokens"))?;
-        let output = display(get(&row, "outputTokens"))?;
-        let cache = display(get(&row, "cacheReadTokens"))?;
+        let cost = fixed4(number(field(&row, "totalCostUsd")?.as_deref())?);
+        let input = display(field(&row, "inputTokens")?.as_deref())?;
+        let output = display(field(&row, "outputTokens")?.as_deref())?;
+        let cache = display(field(&row, "cacheReadTokens")?.as_deref())?;
         push(
             &mut out,
             &if ru {
@@ -86,17 +92,15 @@ fn render(raw: &RawValue, ru: bool, json_output: bool) -> Result<String, RpcErro
                 )
             },
         )?;
-        let limit = object(get(&row, "rateLimit"));
-        let windows = limit.as_ref().and_then(|l| object(get(l, "windows")));
-        let util = |key| {
-            windows
-                .as_ref()
-                .and_then(|w| object(get(w, key)))
-                .map(|w| pct(get(&w, "utilization")))
-                .unwrap_or_else(|| "—".into())
+        let limit = field(&row, "rateLimit")?;
+        let windows = object_field(limit.as_deref(), "windows")?;
+        let util = |key| -> Result<String, RpcError> {
+            let window = object_field(windows.as_deref(), key)?;
+            let utilization = object_field(window.as_deref(), "utilization")?;
+            Ok(pct(utilization.as_deref()))
         };
-        let five = util("five_hour");
-        let seven = util("seven_day");
+        let five = util("five_hour")?;
+        let seven = util("seven_day")?;
         push(
             &mut out,
             &if ru {

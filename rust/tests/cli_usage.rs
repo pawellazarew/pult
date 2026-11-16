@@ -53,7 +53,7 @@ async fn actual_public_node_cli_usage_matches_rust() {
     );
     assert_eq!(
         out.stdout,
-        b"usage presentation oracle: 44 paired Node/Rust cases\n"
+        b"usage presentation oracle: 64 paired Node/Rust cases\n"
     );
 }
 #[tokio::test]

@@ -1502,6 +1502,12 @@ pub async fn request_with_params(
     request_with_locale(home, method, params, None).await
 }
 
+/// Select one ordinary object field without rejecting unrelated UTF-16 keys.
+/// Preserves raw values and JSON.parse's last-duplicate-key-wins semantics.
+pub fn raw_field(raw: &RawValue, key: &str) -> Result<Option<Box<RawValue>>> {
+    history::field(raw, key)
+}
+
 pub fn display_string(raw: &RawValue) -> Result<String> {
     Ok(String::from_utf16_lossy(&journal::decode_js_string(raw)?))
 }
