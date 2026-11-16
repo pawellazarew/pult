@@ -461,9 +461,20 @@ impl Backend {
         match result {
             Ok(()) => {
                 let state = self.state.upgrade().ok_or_else(unavailable)?;
+                let checking = control.clone();
+                let job = control.admit()?;
+                let tracked = state.host_jobs.track();
                 #[cfg(test)]
-                self.hooks.before_post_prepare();
-                Self::verify(&state, &control, false)?;
+                let hooks = self.hooks.clone();
+                tokio::task::spawn_blocking(move || {
+                    let _tracked = tracked;
+                    let _job = job;
+                    #[cfg(test)]
+                    hooks.before_post_prepare();
+                    Self::verify(&state, &checking, false)
+                })
+                .await
+                .map_err(|_| unavailable())??;
                 Ok(Lease(control))
             }
             Err(error) => {

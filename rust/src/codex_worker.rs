@@ -398,6 +398,10 @@ enum Closed {
     Confirmed,
     Unconfirmed,
 }
+struct MemoryRegistration {
+    registration: Arc<crate::codex_memory::Registration>,
+    healthy_warm: bool,
+}
 struct Job {
     ticket: Ticket,
     public_id: String,
@@ -412,6 +416,7 @@ struct Job {
     changed: Notify,
     persistence: Mutex<Option<tokio::task::JoinHandle<()>>>,
     memory_turn: std::sync::OnceLock<Arc<crate::codex_memory::Turn>>,
+    memory_registration: std::sync::OnceLock<MemoryRegistration>,
 }
 // Only synchronous checks consume blocking-pool threads. A guard is registered
 // before spawn and moved into its closure; async cancellation cannot detach IO
@@ -836,6 +841,7 @@ fn begin(
         changed: Notify::new(),
         persistence: Mutex::new(None),
         memory_turn: std::sync::OnceLock::new(),
+        memory_registration: std::sync::OnceLock::new(),
     });
     {
         let mut state = shared.state.lock().expect("Codex host state");
@@ -857,6 +863,14 @@ fn begin(
         let session = state.sessions.get_mut(&spec.key).ok_or_else(unavailable)?;
         if session.busy.is_some() {
             return Err(error("busy", "Codex session already owns a turn"));
+        }
+        if let Some(registration) = &session.memory {
+            job.memory_registration
+                .set(MemoryRegistration {
+                    registration: registration.clone(),
+                    healthy_warm: session.attached && session.confirmed && registration.available(),
+                })
+                .map_err(|_| unavailable())?;
         }
         session.busy = Some(ticket.clone());
         state.jobs.insert(ticket, job.clone());
@@ -1516,15 +1530,12 @@ async fn prepare(
 ) -> Result<(), WorkerError> {
     let client = ready_client(&shared, &job).await?;
     if let Some(bridge) = &shared.bridge {
-        let available = shared
-            .state
-            .lock()
-            .expect("Codex host state")
-            .sessions
-            .get(&spec.key)
-            .and_then(|s| s.memory.as_ref())
-            .is_some_and(|r| r.available());
-        if !available {
+        let registration = job
+            .memory_registration
+            .get()
+            .map(|admission| admission.registration.clone())
+            .ok_or_else(unavailable)?;
+        if !registration.available() {
             return Err(error(
                 "memory_unavailable",
                 "Codex memory registration requires cold attachment",
@@ -1544,13 +1555,10 @@ async fn prepare(
         })
         .await
         .map_err(|_| unavailable())??;
-        let registration = shared
-            .state
-            .lock()
-            .expect("Codex host state")
-            .sessions
-            .get(&spec.key)
-            .and_then(|s| s.memory.clone())
+        let registration = job
+            .memory_registration
+            .get()
+            .map(|admission| admission.registration.clone())
             .ok_or_else(unavailable)?;
         let turn = registration.turn(job.ticket.clone(), lease).map_err(|_| {
             error(
@@ -1611,13 +1619,10 @@ async fn prepare(
             params["config"]["mcp_servers"] = json!({"pult_memory":memory.server()});
         }
         if shared.bridge.is_some() {
-            let registration = shared
-                .state
-                .lock()
-                .expect("Codex host state")
-                .sessions
-                .get(&spec.key)
-                .and_then(|s| s.memory.clone())
+            let registration = job
+                .memory_registration
+                .get()
+                .map(|admission| admission.registration.clone())
                 .ok_or_else(unavailable)?;
             params["config"]["mcp_servers"] =
                 json!({"pult_memory":registration.server().map_err(|_|unavailable())?});
@@ -1746,13 +1751,10 @@ async fn prepare(
     )
     .await?;
     if shared.bridge.is_some() {
-        let registration = shared
-            .state
-            .lock()
-            .expect("Codex host state")
-            .sessions
-            .get(&spec.key)
-            .and_then(|s| s.memory.clone())
+        let registration = job
+            .memory_registration
+            .get()
+            .map(|admission| admission.registration.clone())
             .ok_or_else(unavailable)?;
         registration.bind(&thread).map_err(|_| unavailable())?;
         memory_ready(&client, &thread, true, shared.timeouts.control).await?;
@@ -2560,18 +2562,6 @@ async fn run_job(
             }
         }
     } else {
-        if shared.bridge.is_some() {
-            let registration = shared
-                .state
-                .lock()
-                .expect("Codex host state")
-                .sessions
-                .get(&spec.key)
-                .and_then(|s| s.memory.clone());
-            if let Some(registration) = registration {
-                registration.close();
-            }
-        }
         let uncertain = job.info.lock().expect("Codex job").uncertain_start;
         let failure = if uncertain {
             error(
@@ -2581,6 +2571,19 @@ async fn run_job(
         } else {
             prepared.err().unwrap_or_else(unavailable)
         };
+        if let Some(admission) = job.memory_registration.get() {
+            let never_sent = {
+                let info = job.info.lock().expect("Codex job");
+                !info.dispatched && !info.thread_inflight && !info.uncertain_start
+            };
+            let keep_healthy = admission.healthy_warm
+                && failure.code == "interrupted"
+                && never_sent
+                && admission.registration.available();
+            if !keep_healthy {
+                admission.registration.close();
+            }
+        }
         let _ = started.send(Err(failure));
         cancel_job(&job);
     }
@@ -2829,6 +2832,7 @@ mod blocking_check_tests {
             changed: Notify::new(),
             persistence: Mutex::new(None),
             memory_turn: std::sync::OnceLock::new(),
+            memory_registration: std::sync::OnceLock::new(),
         });
         let (wire, mut peer) = crate::codex_rpc::memory_wire(2);
         let (client, mut events) = crate::codex_rpc::spawn(wire, Default::default()).unwrap();

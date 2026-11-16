@@ -54,7 +54,14 @@ human approval, including filesystem Full mode. Tool definitions themselves gran
 no read or write authority. Their presence can add prompt cost; no production
 cost or latency measurement is claimed here.
 
-Failure during preparation closes that registration. The helper observes closure
+Known cancellation before any input dispatch/thread RPC preserves a previously
+healthy warm registration captured at that exact Job admission. Its cancelled
+Ticket still revokes and drains normally, including while waiting for the two
+memory slots. It can explicitly retry on the same provider/thread/helper after
+peers release their slots. Initial bootstrap, actual readiness failure and
+uncertain dispatch keep conservative registration closure/quarantine.
+
+Failure of the registration during preparation closes that registration. The helper observes closure
 through its bootstrap socket and exits while the shared provider and other
 threads remain alive. That failed thread reports `memory_unavailable` until a cold
 pool attach can install a fresh registration. There is no automatic replay,
@@ -74,7 +81,7 @@ also reject mixed purpose environments. Versions remain local observations.
 | --- | --- |
 | Registrations | 32 per host, 256 daemon-wide; no live eviction |
 | Memory-on Tickets | 2 across Codex hosts, retained through owned drain |
-| Backend turns / concurrent calls | existing 4 / 16 |
+| Backend turns / concurrent calls | existing 4 / 16 per turn |
 | Pending bridge calls | 16 daemon-wide, 512 KiB total queued envelopes |
 | One envelope / native argument object | 64 KiB |
 | One identity / tool name | 512 / 128 bytes |
