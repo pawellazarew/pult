@@ -530,6 +530,9 @@ describe('окно: рабочие сценарии', () => {
     await input.fill('Округление вниз')
     await h.win.getByTestId('feed').click()
     assert.ok(await waitFor(async () => (await titleOf()) === 'Округление вниз', 5000), 'уход фокуса не сохранил название')
+    // RPC confirms the daemon mutation before renameAgent's follow-up agent.list reaches React.
+    // Exercise Escape against the renamed UI, rather than opening the dialog on its previous snapshot.
+    assert.ok(await waitFor(async () => (await title.textContent()) === 'Округление вниз', 5000), 'окно не показало сохранённое название')
     assert.equal(await h.win.getByTestId('confirm-stop').count(), 0)
 
     // Названия не уникальны — в «Остановить ход?» рядом с названием стоит имя.
