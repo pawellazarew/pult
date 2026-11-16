@@ -11,6 +11,8 @@ const rust = process.argv[2]
 const pin = (await readFile(join(root, 'runtime.env'), 'utf8')).match(/^PULT_NODE_VERSION=(.*)$/m)[1]
 const token = 'a'.repeat(64)
 const cases = [
+  { name: 'opaque daemon key', daemon: { '\ud800': 1, version: 'test', node: { path: '/fixture/node', version: 'v24.0.0', alive: true, own: true } } },
+  { name: 'opaque node key', daemon: { version: 'test', node: { '\udfff': 1, path: '/fixture/node', version: 'v24.0.0', alive: true, own: true } } },
   { name: 'missing pointer' },
   { name: 'empty pointer', pointer: ' \t\nignored' },
   { name: 'missing binary', active: true, missing: true },

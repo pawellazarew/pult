@@ -7,15 +7,10 @@ use crate::{
 use anyhow::{Result, anyhow, ensure};
 use serde::Serialize;
 use serde_json::value::RawValue;
-use std::{
-    collections::{BTreeMap, HashMap},
-    path::Path,
-    time::Duration,
-};
+use std::{collections::BTreeMap, path::Path, time::Duration};
 use tokio::process::Command;
 const PIN: &str = include_str!("../../runtime.env");
 const RESTART: &str = "pult daemon stop && pult daemon start";
-type Fields = HashMap<String, Box<RawValue>>;
 
 fn parse_pin(text: &str) -> Result<String> {
     ensure!(text.len() <= 64 * 1024, "runtime pin exceeds size limit");
@@ -104,11 +99,11 @@ struct Report {
     installed: Vec<String>,
     daemon: Option<Box<RawValue>>,
 }
-fn object(raw: &RawValue) -> Fields {
-    serde_json::from_str(raw.get()).unwrap_or_default()
+fn field(raw: &RawValue, name: &str) -> Option<Box<RawValue>> {
+    pult_core::raw_field(raw, name).ok().flatten()
 }
-fn display(fields: &Fields, name: &str) -> Result<String> {
-    cli_agent::display(fields.get(name).map(|v| &**v))
+fn display(raw: &RawValue, name: &str) -> Result<String> {
+    cli_agent::display(field(raw, name).as_deref())
         .map_err(|_| anyhow!("invalid runtime daemon status"))
 }
 fn daemon_line(status: Option<&RawValue>, english: bool) -> Result<String> {
@@ -120,21 +115,19 @@ fn daemon_line(status: Option<&RawValue>, english: bool) -> Result<String> {
         }
         .into());
     };
-    let status = object(status);
-    let node = status.get("node").filter(|node| cli_agent::truthy(node));
+    let node = field(status, "node").filter(|node| cli_agent::truthy(node));
     let Some(node) = node else {
-        let version = display(&status, "version")?;
+        let version = display(status, "version")?;
         return Ok(if english {
             format!("Daemon {version} does not report its node (version older than 0.2.18)")
         } else {
             format!("демон {version} не сообщает свой node (версия старше 0.2.18)")
         });
     };
-    let node = object(node);
     let path = display(&node, "path")?;
     let version = display(&node, "version")?;
-    let alive = node.get("alive").is_some_and(|v| cli_agent::truthy(v));
-    let own = node.get("own").is_some_and(|v| cli_agent::truthy(v));
+    let alive = field(&node, "alive").is_some_and(|v| cli_agent::truthy(&v));
+    let own = field(&node, "own").is_some_and(|v| cli_agent::truthy(&v));
     Ok(match (english, alive, own) {
         (true, false, _) => {
             format!("Daemon node {path} ({version}) was removed or replaced — restart: {RESTART}")
@@ -291,8 +284,7 @@ pub(super) async fn run(home: &Path, json: bool) -> Result<i32> {
     };
     let daemon = status
         .as_deref()
-        .map(object)
-        .and_then(|mut f| f.remove("node"))
+        .and_then(|status| field(status, "node"))
         .filter(|v| v.get() != "null");
     let platform = platform();
     let report = Report {

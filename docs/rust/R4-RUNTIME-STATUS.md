@@ -92,7 +92,7 @@ Caller не outer-cancel-ит query owner. После SIGINT новый status R
 `rust/tests/cli-runtime-status-oracle.mjs` запускает настоящую public Node CLI на
 private homes/fake `-v`/Unix peer; preload запрещает все прочие child calls и
 проверяет точный Node child env allowlist. Тот же corpus сравнивает Rust JSON/text,
-RU/EN, exit и filesystem snapshots:80 paired cases, включая внешний/relative/
+RU/EN, exit и filesystem snapshots:88 paired cases, включая внешний/relative/
 symlink executable, foreign-platform имя, version mismatch, stderr и combined cap,
 old/dead/own/system daemon, unknown fields и isolated UTF-16 surrogates.
 
@@ -111,3 +111,5 @@ cargo test --manifest-path rust/Cargo.toml --locked --bin pultd-rust cli_runtime
 Помимо этих проверок нужны existing service/browser/agent/owner/wait/events CLI
 regressions и all-targets Clippy/fmt. Перенос runtime install/update остаётся следующим
 самостоятельным functional slice.
+
+Opaque UTF-16 extension keys at both daemon.status and node levels retain the complete JSON node and known text fields. The shared raw selector uses the existing lossless history parser with last-duplicate semantics. Two key cases add eight actual RU/EN/text/JSON comparisons.

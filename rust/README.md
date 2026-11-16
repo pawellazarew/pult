@@ -6,7 +6,7 @@
 `events.subscribe`, `events.unsubscribe`, `events.snapshot`, `events.history`, `events.get`,
 `agent.rename`, `agent.archive`, `agent.seen`, `agent.read`, `agent.tree` и `protocol.catalog`. Также добавлены M1-хранилище памяти и read-only ключи доверенных сессий с каталогом;
 договоры — [M1-MEMORY](../docs/rust/M1-MEMORY.md) и
-[M2-READ-CONTEXT](../docs/rust/M2-READ-CONTEXT.md). Всего Rust поддерживает 30 методов
+[M2-READ-CONTEXT](../docs/rust/M2-READ-CONTEXT.md). Всего Rust поддерживает 31 метод
 из 101; ещё 12 экспериментальных partial RPC включают обычные Claude/Codex/ZCode turns,
 общую очередь, Codex steering и ограниченный `agent.wait`. Интеграция провайдеров —
 [R3-NATIVE-PROVIDERS](../docs/rust/R3-NATIVE-PROVIDERS.md). Журнал использует нынешний формат `events/journal.jsonl`.
@@ -140,7 +140,7 @@ JSON lock содержит PID и время старта процесса, со
 
 Подписки используют ограниченный общий писатель и durable-курсор. Договор приведён в
 [R2-SUBSCRIPTIONS](../docs/rust/R2-SUBSCRIPTIONS.md). Live-канал пока выдаёт reset и пустой
-снимок, поскольку Rust ещё не исполняет сессии.
+снимок. Проекция live-снимка остаётся частью R4.
 
 Снимок, история окна и исходные события описаны в [R2-HISTORY](../docs/rust/R2-HISTORY.md).
 Реестр, миграция доступа, восстановление очереди и метаданные сессий описаны в
@@ -174,3 +174,8 @@ Native transport и lifecycle process group описаны в
 [допуск первого input](../docs/rust/R3-INPUT-FRONTIER.md) и
 [совместная проверка через holder](../docs/rust/R3-ZCODE-WIRE-INTEGRATION.md).
 Эти слои не включают Route B в runtime и не закрывают доставку общей памяти ZCode.
+
+`usage [--json]` читает расход текущего запуска демона. После перезапуска счётчики
+начинаются с нуля, как в нынешнем Node manager. Чтение ограничено четырьмя заданиями,
+ответ — размером frame. Переполнение optional-проекции делает статистику недоступной
+до перезапуска, исполнение продолжает работать. [Договор usage](../docs/rust/R4-USAGE.md).

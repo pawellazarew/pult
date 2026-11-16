@@ -250,7 +250,7 @@ async fn actual_public_node_oracle_matches_both_status_spellings_and_locales() {
     );
     assert_eq!(
         out.stdout,
-        b"runtime status oracle: 80 exact paired Node/Rust cases\n"
+        b"runtime status oracle: 88 exact paired Node/Rust cases\n"
     );
 }
 #[tokio::test]
