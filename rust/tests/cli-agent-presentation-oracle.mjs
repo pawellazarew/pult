@@ -64,7 +64,9 @@ async function run(kind, scenario, locale, json, alias, scratch) {
   Object.assign(env, { HOME: join(scratch, 'user'), PULT_HOME: kind === 'node' ? home : join(scratch, 'protected'), PULT_LANG: locale, PULT_TEST: '1' })
   const sockets = new Set(), requests = []
   let peerError
+  let phase = 'waiting-for-client'
   const server = net.createServer(socket => {
+    phase = 'connected'
     sockets.add(socket); socket.on('error', () => {})
     let buffer = ''
     socket.on('data', bytes => { try {
@@ -73,14 +75,17 @@ async function run(kind, scenario, locale, json, alias, scratch) {
       while (buffer.includes('\n')) {
         const end = buffer.indexOf('\n'), frame = JSON.parse(buffer.slice(0, end)); buffer = buffer.slice(end + 1)
         if (frame.type === 'hello') {
+          phase = 'hello-received'
           assert.equal(frame.token, token)
           socket.write(JSON.stringify({ type: 'hello_ok', protocol: 1, daemon: { version: 'fixture', pid: 1, startedAt: 'fixture' } }) + '\n')
         } else {
+          phase = 'request-received'
           requests.push(frame)
           assert.equal(requests.length, 1, 'no retry or extra diagnostic/mutation RPC')
           assert.equal(frame.method, scenario.method); assert.equal(frame.locale, locale)
           assert.deepEqual(frame.params, scenario.params ?? (kind === 'node' ? undefined : {}))
           socket.write(JSON.stringify({ id: frame.id, ...(scenario.error ? { error: scenario.error } : { result: scenario.result }) }) + '\n')
+          phase = 'response-enqueued'
         }
       }
     } catch (e) { peerError ??= e; socket.destroy() } })
@@ -94,7 +99,15 @@ async function run(kind, scenario, locale, json, alias, scratch) {
     for (const [stream, target] of [[child.stdout, stdout], [child.stderr, stderr]]) stream.on('data', b => { bytes += b.length; assert.ok(bytes <= 2 * 1024 * 1024); target.push(b) })
     const status = await new Promise((resolve, reject) => {
       child.once('error', reject); child.once('close', (code, signal) => { clearTimeout(timer); resolve({ code, signal }) })
-      timer = setTimeout(() => child.kill('SIGKILL'), 8000)
+      timer = setTimeout(() => {
+        const size = chunks => chunks.reduce((total, chunk) => total + chunk.length, 0)
+        process.stderr.write(JSON.stringify({ oracleWatchdog: {
+          kind, scenario: scenario.name, locale, json, alias, phase,
+          requests: requests.length, stdoutBytes: size(stdout), stderrBytes: size(stderr),
+          peerError: Boolean(peerError),
+        } }) + '\n')
+        child.kill('SIGKILL')
+      }, 8000)
     })
     assert.equal(status.signal, null, `${kind} watchdog ${scenario.name}`); assert.ifError(peerError)
     assert.equal(requests.length, 1)
