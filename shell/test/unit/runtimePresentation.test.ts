@@ -13,6 +13,7 @@ function gate() {
 function fixture() {
   let url = ''
   let visible = false
+  let escapes = 0
   let bounds = { x: 0, y: 0, width: 1280, height: 800 }
   const sent: string[] = []
   const captures: unknown[] = [], qualities: number[] = []
@@ -31,8 +32,9 @@ function fixture() {
   })
   const view = { webContents: wc, setBounds: (next: typeof bounds) => { bounds = { ...next } }, getBounds: () => ({ ...bounds }), setVisible: (next: boolean) => { visible = next }, getVisible: () => visible } as unknown as WebContentsView
   const win = Object.assign(new EventEmitter(), { isDestroyed: () => false, getContentBounds: () => ({ width: 1280, height: 900 }), contentView: { addChildView: noop, removeChildView: noop } }) as unknown as BrowserWindow
-  const web = new RuntimeWeb({ window: () => win, createView: () => view })
-  return { web, visible: () => visible, sent, debuggerApi, captures, qualities, wc, view, image }
+  let nextView = view
+  const web = new RuntimeWeb({ window: () => win, createView: () => nextView, onEscape: () => { ++escapes } })
+  return { web, visible: () => visible, escapes: () => escapes, sent, debuggerApi, captures, qualities, wc, view, image, replaceView: (next: WebContentsView) => { nextView = next } }
 }
 it('a missing page cannot authorize bounds inherited by a future incarnation', async () => {
   const f = fixture()
@@ -320,4 +322,61 @@ it('native preview rejects a JPEG whose pixels do not match the logical viewport
   f.wc.capturePage = async () => ({ ...f.image(), resize: () => f.image(640, 400) })
   try { await assert.rejects(f.web.preview('alpha', 'A'), /Крупный кадр/) }
   finally { f.web.close() }
+})
+
+it('Escape folds an owned human presentation while its emulation layout is temporarily hidden', async () => {
+  const f = fixture()
+  await f.web.perform({ id: 'attach', sessionId: 'alpha', instanceId: 'A', action: 'attach', input: {} })
+  const bounds = { x: 0, y: 0, width: 640, height: 400 }
+  const owner = async () => ({ instanceId: 'A', authorize: async () => true })
+  await f.web.requestView('alpha', bounds, owner)
+  const entered = gate(), finish = gate(), send = f.debuggerApi.sendCommand
+  let held = false, prevented = false
+  f.debuggerApi.sendCommand = async (method, params) => {
+    if (method === 'Emulation.setDeviceMetricsOverride' && !held) { held = true; entered.release(); await finish.promise }
+    return send(method, params)
+  }
+  const layout = f.web.requestView('alpha', bounds, owner)
+  await entered.promise
+  assert.equal(f.visible(), false)
+  f.wc.emit('before-input-event', { preventDefault: () => { prevented = true } }, { type: 'keyDown', key: 'Escape' })
+  try { assert.deepEqual({ escapes: f.escapes(), prevented }, { escapes: 1, prevented: true }) }
+  finally { finish.release(); try { await layout } finally { f.web.close() } }
+})
+
+it('Escape cannot fold a never-presented page or a newer synchronous null-hide', async () => {
+  const f = fixture()
+  await f.web.perform({ id: 'attach', sessionId: 'alpha', instanceId: 'A', action: 'attach', input: {} })
+  let prevented = false
+  const escape = (): void => { f.wc.emit('before-input-event', { preventDefault: () => { prevented = true } }, { type: 'keyDown', key: 'Escape' }) }
+  escape()
+  assert.deepEqual({ escapes: f.escapes(), prevented }, { escapes: 0, prevented: false })
+  const bounds = { x: 0, y: 0, width: 640, height: 400 }
+  await f.web.setView('alpha', bounds)
+  const entered = gate(), finish = gate(), send = f.debuggerApi.sendCommand
+  let held = false
+  f.debuggerApi.sendCommand = async (method, params) => { if (method === 'Emulation.setDeviceMetricsOverride' && !held) { held = true; entered.release(); await finish.promise }; return send(method, params) }
+  const layout = f.web.setView('alpha', bounds)
+  await entered.promise
+  const hide = f.web.setView('alpha', null)
+  escape()
+  try { assert.deepEqual({ escapes: f.escapes(), prevented }, { escapes: 0, prevented: false }) }
+  finally { finish.release(); try { await Promise.all([layout, hide]) } finally { f.web.close() } }
+})
+
+it('Escape from a stale WebContents cannot fold the new page with the same session name', async () => {
+  const f = fixture(), fresh = fixture()
+  const bounds = { x: 0, y: 0, width: 640, height: 400 }
+  await f.web.perform({ id: 'attach-a', sessionId: 'alpha', instanceId: 'A', action: 'attach', input: {} })
+  await f.web.requestView('alpha', bounds, async () => ({ instanceId: 'A', authorize: async () => true }))
+  f.replaceView(fresh.view)
+  await f.web.perform({ id: 'attach-b', sessionId: 'alpha', instanceId: 'B', action: 'attach', input: {} })
+  await f.web.requestView('alpha', bounds, async () => ({ instanceId: 'B', authorize: async () => true }))
+  let stalePrevented = false, freshPrevented = false
+  try {
+    f.wc.emit('before-input-event', { preventDefault: () => { stalePrevented = true } }, { type: 'keyDown', key: 'Escape' })
+    assert.deepEqual({ escapes: f.escapes(), stalePrevented }, { escapes: 0, stalePrevented: false })
+    fresh.wc.emit('before-input-event', { preventDefault: () => { freshPrevented = true } }, { type: 'keyDown', key: 'Escape' })
+    assert.deepEqual({ escapes: f.escapes(), freshPrevented }, { escapes: 1, freshPrevented: true })
+  } finally { f.web.close(); fresh.web.close() }
 })
