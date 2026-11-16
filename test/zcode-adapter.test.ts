@@ -2,12 +2,12 @@
 // Ни одного настоящего хода, ни одного обращения в сеть: страж инъецируется.
 
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
 import { createZcodeAdapter } from '../dist/adapters/zcode/adapter.js'
-import { ZCODE_ENV_PASS } from '../dist/adapters/zcode/adapter.js'
+import { zcodeExtraEnv, ZCODE_ENV_PASS } from '../dist/adapters/zcode/adapter.js'
 import type { AdapterDeps, AppliedInfo, ProviderAdapter } from '../dist/adapters/types.js'
 import { defaultConfig } from '../dist/core/config.js'
 import type { PultConfig } from '../dist/core/config.js'
@@ -320,5 +320,53 @@ describe('адаптер zcode × доступ (шаг A, PR #39)', () => {
       assert.deepEqual(applied[1], { approval: 'full', reported: null, fresh: true, full: true })
       assert.equal(r.adapter.activeAccess?.('w'), null, 'процесс хода вышел — за работой никого')
     } finally { await r.adapter.shutdown(); r.remove() }
+  })
+})
+
+
+describe('ZCode app bundled provider resource', () => {
+  const byBinary = zcodeExtraEnv
+  function bundle() {
+    const dir = mkdtempSync(join(tmpdir(), 'pt-zcb-'))
+    const resources = join(dir, 'ZCode.app', 'Contents', 'Resources')
+    const binary = join(resources, 'glm', 'zcode.cjs')
+    const config = join(resources, 'config', 'provider', 'zcode-builtin.json')
+    mkdirSync(join(resources, 'glm'), { recursive: true })
+    mkdirSync(join(resources, 'config', 'provider'), { recursive: true })
+    writeFileSync(config, '{}\n')
+    const quote = (v: string): string => "'" + v.replaceAll("'", "'\\''") + "'"
+    writeFileSync(binary, '#!/bin/sh\n[ -f "$ZCODE_BUILTIN_PROVIDER_CONFIG_FILE" ] || exit 3\nexec ' + quote(process.execPath) + ' ' + quote(FAKE_ZCODE) + ' "$@"\n')
+    chmodSync(binary, 0o700)
+    return { dir, binary, config }
+  }
+  it('resolves only the selected app resource, including a CLI symlink; explicit configuration wins', () => {
+    const b = bundle()
+    try {
+      const alias = join(b.dir, 'zcode')
+      symlinkSync(b.binary, alias)
+      assert.equal(byBinary({}, alias)['ZCODE_BUILTIN_PROVIDER_CONFIG_FILE'], realpathSync(b.config))
+      assert.deepEqual(byBinary({ ZCODE_BUILTIN_PROVIDER_CONFIG_FILE: '/explicit/config.json', ZCODE_OFFICIAL_ENDPOINT_TOKEN: 'synthetic-secret' }, b.binary), { ZCODE_BUILTIN_PROVIDER_CONFIG_FILE: '/explicit/config.json' })
+      rmSync(b.config)
+      mkdirSync(b.config)
+      assert.deepEqual(byBinary({}, b.binary), {}, 'a directory is not a provider configuration file')
+      rmSync(b.config, { recursive: true })
+      assert.deepEqual(byBinary({}, b.binary), {})
+      assert.deepEqual(byBinary({}, 'zcode'), {})
+    } finally { rmSync(b.dir, { recursive: true, force: true }) }
+  })
+  it('a real spawned app CLI receives its bundled config without inherited ZCode environment', async () => {
+    const b = bundle()
+    const saved = new Map(ZCODE_ENV_PASS.map(k => [k, process.env[k]]))
+    for (const k of ZCODE_ENV_PASS) delete process.env[k]
+    const r = rig({ scenario: 'simple', bin: b.binary })
+    try {
+      await r.adapter.startSession(spec(r))
+      const turn = await r.adapter.send('w', 'synthetic config bootstrap')
+      assert.equal((await turn.done).ok, true, 'selected app resource must reach the actual spawned CLI')
+      assert.equal(r.runs()[0]?.env['ZCODE_BUILTIN_PROVIDER_CONFIG_FILE'], realpathSync(b.config))
+    } finally {
+      await r.adapter.shutdown(); r.remove(); rmSync(b.dir, { recursive: true, force: true })
+      for (const [k, v] of saved) { if (v === undefined) delete process.env[k]; else process.env[k] = v }
+    }
   })
 })
