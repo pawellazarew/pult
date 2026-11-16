@@ -1,6 +1,5 @@
 //! Owner-only read-only event subscription client. No daemon spawn/retry/provider access.
 use serde_json::{Value, json, value::RawValue};
-use std::collections::HashMap;
 use std::io::Write;
 use std::os::fd::AsFd;
 use std::path::Path;
@@ -14,7 +13,7 @@ mod owner_private_file;
 const HANDSHAKE: Duration = Duration::from_secs(10);
 const REPLAY_WAIT: Duration = Duration::from_secs(3);
 const OUTPUT_WAIT: Duration = Duration::from_secs(2);
-type Fields = HashMap<String, Box<RawValue>>;
+type Fields = pult_core::RawFields;
 #[derive(Debug)]
 pub struct Error {
     pub exit: i32,
@@ -45,7 +44,8 @@ fn timed_out() -> Error {
     }
 }
 fn fields(bytes: &[u8]) -> Result<Fields, Error> {
-    serde_json::from_slice(bytes).map_err(|_| invalid())
+    let raw: Box<RawValue> = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    Fields::parse(&raw).map_err(|_| invalid())
 }
 fn value(v: &RawValue) -> Result<Value, Error> {
     serde_json::from_str(v.get()).map_err(|_| invalid())
@@ -303,7 +303,7 @@ async fn owner_connection_at(home: &Path, token: &str) -> Result<BufReader<UnixS
     .await?;
     let mut reader = BufReader::new(socket);
     let hello = fields(&bounded_line(&mut reader).await?)?;
-    if hello.get("type").map(|v| value(v)).transpose()? != Some(json!("hello_ok"))
+    if hello.get("type").map(value).transpose()? != Some(json!("hello_ok"))
         || integer(&hello, "protocol")? != pult_core::PROTOCOL
     {
         return Err(invalid());

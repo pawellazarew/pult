@@ -1,9 +1,9 @@
 //! Owner CLI presentation over existing RPCs. No backend or provider authority.
 use crate::cli_client::{self, OwnerClient, ResponsePolicy, RpcError};
 use serde_json::{Value, json, value::RawValue};
-use std::{collections::HashMap, path::Path};
+use std::path::Path;
 
-type Fields = HashMap<String, Box<RawValue>>;
+type Fields = pult_core::RawFields;
 pub(super) enum Command {
     List,
     Stop {
@@ -30,7 +30,7 @@ fn capacity() -> RpcError {
     RpcError::local("capacity", "agent display exceeds rendering limits")
 }
 fn fields(raw: &RawValue) -> Result<Fields, RpcError> {
-    serde_json::from_str(raw.get()).map_err(|_| invalid())
+    Fields::parse(raw).map_err(|_| invalid())
 }
 fn object(raw: Option<&RawValue>) -> Option<Fields> {
     raw.filter(|v| v.get().starts_with('{'))
@@ -185,7 +185,7 @@ fn truthy(raw: &RawValue) -> bool {
     }
 }
 fn get<'a>(fields: &'a Fields, key: &str) -> Option<&'a RawValue> {
-    fields.get(key).map(|v| &**v)
+    fields.get(key)
 }
 fn round(n: f64) -> f64 {
     if !n.is_finite() {

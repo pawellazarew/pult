@@ -39,6 +39,10 @@ const edgeRows = [
   { title: 'missing-fields', ...extra },
 ]
 const cases = [
+  { name: 'utf16-key-error', args: ['list'], method: 'agent.list', opaqueEnvelope: true, error: { code: 'limited', message: 'Controlled error', ['\ud800']: 1 } },
+  { name: 'utf16-key-top', args: ['list'], method: 'agent.list', result: { sessions: [record()], ['\ud800']: 1 } },
+  { name: 'utf16-key-row', args: ['list'], method: 'agent.list', result: { sessions: [record({ ['\ud800']: 1 })] } },
+  { name: 'utf16-key-metadata', opaqueEnvelope: true, args: ['list'], method: 'agent.list', result: { sessions: [record({ context: context({ used: 125, window: 1000, ['\ud800']: 1 }), attention: { kind: 'done', id: 9, ['\ud800']: 1 }, lastSeenEventId: 8, worktree: { path: '/fixture/a b', branch: 'topic', ['\udfff']: 2 } })] } },
   { name: 'empty', args: ['list'], method: 'agent.list', result: { sessions: [], ...extra } },
   { name: 'basic', args: ['list'], method: 'agent.list', result: { sessions: [record()], ...extra } },
   { name: 'decorated', args: ['list'], method: 'agent.list', result: { sessions: rows, ...extra } },
@@ -77,14 +81,14 @@ async function run(kind, scenario, locale, json, alias, scratch) {
         if (frame.type === 'hello') {
           phase = 'hello-received'
           assert.equal(frame.token, token)
-          socket.write(JSON.stringify({ type: 'hello_ok', protocol: 1, daemon: { version: 'fixture', pid: 1, startedAt: 'fixture' } }) + '\n')
+          socket.write(JSON.stringify({ ...(scenario.opaqueEnvelope ? { ['\udfff']: 1 } : {}), type: 'hello_ok', protocol: 1, daemon: { version: 'fixture', pid: 1, startedAt: 'fixture' } }) + '\n')
         } else {
           phase = 'request-received'
           requests.push(frame)
           assert.equal(requests.length, 1, 'no retry or extra diagnostic/mutation RPC')
           assert.equal(frame.method, scenario.method); assert.equal(frame.locale, locale)
           assert.deepEqual(frame.params, scenario.params ?? (kind === 'node' ? undefined : {}))
-          socket.write(JSON.stringify({ id: frame.id, ...(scenario.error ? { error: scenario.error } : { result: scenario.result }) }) + '\n')
+          socket.write(JSON.stringify({ ...(scenario.opaqueEnvelope ? { ['\udfff']: 1 } : {}), id: frame.id, ...(scenario.error ? { error: scenario.error } : { result: scenario.result }) }) + '\n')
           phase = 'response-enqueued'
         }
       }

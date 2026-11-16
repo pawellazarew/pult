@@ -102,3 +102,5 @@ provider/account, OS service manager or diagnostic network probe is exercised.
 The full doctor proposal remains in the migration workspace at
 `STATE/R4-DOCTOR-IMPLEMENTATION-PROPOSAL.md`; this command does not satisfy its
 complete offline-plus-network gate or activate `doctor.run`.
+
+Unknown UTF-16 keys in package metadata, daemon status and browser state preserve the pinned version and known display fields. Whole browser JSON remains opaque. Three additional actual Node/Rust scenarios add twelve RU/EN/text/JSON comparisons.

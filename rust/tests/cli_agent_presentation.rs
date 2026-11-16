@@ -433,6 +433,6 @@ async fn actual_public_node_cli_oracle_matches_rust() {
     );
     assert_eq!(
         out.stdout,
-        b"agent presentation oracle: 80 paired Node/Rust cases\n"
+        b"agent presentation oracle: 96 paired Node/Rust cases\n"
     );
 }

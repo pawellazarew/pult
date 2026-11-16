@@ -12,6 +12,9 @@ await access(entry)
 const rust = process.argv[2]
 const version = '0.0.84', token = 'a'.repeat(64)
 const scenarios = [
+  { name: 'opaque package key', expectedInstalled: true, package: JSON.stringify({version, ['\ud800']: 1}) },
+  { name: 'opaque daemon status key', package: null, online: true, statusExtra: { ['\ud800']: 1 }, browser: { state: 'installed', sessions: 1 } },
+  { name: 'opaque browser key', package: null, online: true, browser: { state: 'installed', sessions: 1, ['\udfff']: 2 } },
   { name: 'missing offline', package: null },
   { name: 'installed offline with Chrome', package: version, chrome: true },
   { name: 'wrong disk pin', package: '0.0.83' },
@@ -57,7 +60,7 @@ async function run(kind, scenario, locale, json, fixture) {
           if (frame.type === 'hello') { assert.equal(frame.token, token); socket.write('{"type":"hello_ok","protocol":1}\n') }
           else {
             requests.push(frame); assert.equal(requests.length, 1); assert.equal(frame.method, 'daemon.status'); assert.deepEqual(frame.params, kind === 'node' ? undefined : {}); assert.equal(frame.locale, locale)
-            const wire = JSON.stringify({ id: frame.id, result: { ...(scenario.browser === undefined ? {} : { browser: scenario.browser }), unrelated: { retainedByDaemon: true } } })
+            const wire = JSON.stringify({ id: frame.id, result: { ...scenario.statusExtra, ...(scenario.browser === undefined ? {} : { browser: scenario.browser }), unrelated: { retainedByDaemon: true } } })
             socket.write((scenario.browserRaw ? wire.replace('"browser":0', '"browser":' + scenario.browserRaw) : wire) + '\n')
           }
         }
@@ -75,7 +78,7 @@ async function run(kind, scenario, locale, json, fixture) {
     const status = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', (code, signal) => { clearTimeout(timer); resolve({ code, signal }) }); timer = setTimeout(() => child.kill('SIGKILL'), 8000) })
     assert.equal(status.signal, null); assert.equal(status.code, 0); assert.ifError(error); assert.equal(requests.length, scenario.online ? 1 : 0)
     const result = { code: status.code, stdout: Buffer.concat(stdout).toString(), stderr: Buffer.concat(stderr).toString() }; assert.equal(result.stderr, '')
-    if (json) assert.deepEqual(JSON.parse(result.stdout), { installed: scenario.package === version && !scenario.noCli, version, path: prefix, chrome: scenario.chrome ? chrome : null, daemon: scenario.browser ?? null })
+    if (json) assert.deepEqual(JSON.parse(result.stdout), { installed: scenario.expectedInstalled ?? (scenario.package === version && !scenario.noCli), version, path: prefix, chrome: scenario.chrome ? chrome : null, daemon: scenario.browser ?? null })
     else { const lines = result.stdout.trimEnd().split('\n'); assert.equal(lines.length, 2); assert.ok(lines[0].startsWith(`[${scenario.browser?.state === 'failed' || (!['installed','installing'].includes(scenario.browser?.state) && scenario.browser?.sessions > 0) ? 'warn' : 'ok  '}] ${locale === 'ru' ? 'Браузер агента' : 'Agent browser'}:`)); assert.ok(lines[1].includes(locale === 'ru' ? 'Chrome для браузера агента' : 'Chrome for agent browser')) }
     return result
   } finally {

@@ -17,6 +17,9 @@ pub mod codex_runtime;
 pub mod codex_worker;
 pub mod consent_store;
 mod history;
+
+/// Lossless JSON object fields for CLI responses with opaque UTF-16 metadata.
+pub use history::Fields as RawFields;
 mod host_jobs;
 pub mod host_paths;
 pub mod host_policy;

@@ -844,14 +844,14 @@ alias `session` и ограниченное чтение `daemon logs`. Кома
 ошибок. [Договор и границы приёмки](rust/R4-SERVICE-STATUS.md).
 
 Команды `agent/session list`, `stop`, `rename`, `archive`, `unarchive`, `seen`
-получили обычный текстовый вывод и `--json`; 80 сравнений с public Node CLI
+получили обычный текстовый вывод и `--json`; 96 сравнений с public Node CLI
 проверяют формат, RU/EN, attention/context и Unicode. Явный Rust `stop --turn-id`
 сохраняет прежний raw JSON. Глубина и число узлов ограничены только для текстового
 отображения; `--json` сохраняет исходный ответ.
 [Договор команд чатов](rust/R4-AGENT-PRESENTATION.md).
 
 Локальный `browser [status] [--json]` показывает pinned MCP, наличие Chrome и
-сообщённый daemon.browser: 42 сравнения с public Node CLI. Команда не создаёт
+сообщённый daemon.browser: 54 сравнения с public Node CLI. Команда не создаёт
 layout, не устанавливает и не запускает браузер; реальная обнаруженная программа
 проверяется только по метаданным. [Договор browser status](rust/R4-BROWSER-STATUS.md).
 

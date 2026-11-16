@@ -4,7 +4,6 @@ use anyhow::{Result, anyhow, ensure};
 use rustix::fs::{AtFlags, FileType, Mode, OFlags, open, openat, statat};
 use serde_json::value::RawValue;
 use std::{
-    collections::HashMap,
     fs::File,
     io::Read,
     path::{Component, Path, PathBuf},
@@ -14,9 +13,9 @@ const VERSION: &str = "0.0.84";
 const PACKAGE: &str = "@playwright/mcp 0.0.84";
 const PACKAGE_LIMIT: u64 = 1024 * 1024;
 const PACKAGE_DIR: &str = "mcp/playwright-mcp-0.0.84/node_modules/@playwright/mcp";
-type Fields = HashMap<String, Box<RawValue>>;
+type Fields = pult_core::RawFields;
 fn fields(raw: &RawValue) -> Result<Fields> {
-    serde_json::from_str(raw.get()).map_err(|_| anyhow!("invalid browser status response"))
+    Fields::parse(raw).map_err(|_| anyhow!("invalid browser status response"))
 }
 fn parent(
     root: &Path,
@@ -122,7 +121,11 @@ fn installed(root: &Path) -> Result<bool> {
     };
     // Node decodes file bytes with UTF-8 replacement. Unknown values remain raw
     // so unrelated valid JS strings do not invalidate the pinned version field.
-    let fields: Fields = match serde_json::from_str(&String::from_utf8_lossy(&bytes)) {
+    let raw: Box<RawValue> = match serde_json::from_str(&String::from_utf8_lossy(&bytes)) {
+        Ok(raw) => raw,
+        Err(_) => return Ok(false),
+    };
+    let fields = match Fields::parse(&raw) {
         Ok(fields) => fields,
         Err(_) => return Ok(false),
     };
@@ -228,7 +231,7 @@ fn text(
         .map(fields)
         .transpose()?
         .unwrap_or_default();
-    let state = projection.get("state").map(|v| display(v)).transpose()?;
+    let state = projection.get("state").map(display).transpose()?;
     let state = if object.is_none() {
         if installed { "installed" } else { "missing" }
     } else {
@@ -269,7 +272,7 @@ fn text(
             let error = projection
                 .get("error")
                 .filter(|v| v.get() != "null")
-                .map(|v| display(v))
+                .map(display)
                 .transpose()?
                 .unwrap_or_else(|| {
                     if english {
