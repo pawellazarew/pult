@@ -24,8 +24,60 @@ function fixture() {
   const view = { webContents: wc, setBounds: noop, setVisible: (next: boolean) => { visible = next }, getVisible: () => visible } as unknown as WebContentsView
   const win = Object.assign(new EventEmitter(), { isDestroyed: () => false, getContentBounds: () => ({ width: 1280, height: 900 }), contentView: { addChildView: noop, removeChildView: noop } }) as unknown as BrowserWindow
   const web = new RuntimeWeb({ window: () => win, createView: () => view })
-  return { web, visible: () => visible, sent }
+  return { web, visible: () => visible, sent, debuggerApi }
 }
+it('a missing page cannot authorize bounds inherited by a future incarnation', async () => {
+  const f = fixture()
+  let authorizations = 0
+  await f.web.requestView('alpha', { x: 0, y: 0, width: 640, height: 400 }, async () => ({ instanceId: 'A', authorize: async () => { ++authorizations; return true } }))
+  await f.web.perform({ id: 'attach-new', sessionId: 'alpha', instanceId: 'B', action: 'attach', input: {} })
+  try { assert.deepEqual({ authorizations, visibleAfterNewPage: f.visible() }, { authorizations: 0, visibleAfterNewPage: false }) }
+  finally { f.web.close() }
+})
+for (const layoutFails of [false, true]) it(`obsolete cleanup layout ${layoutFails ? 'failure' : 'completion'} cannot reject a newer intent`, async () => {
+  const f = fixture()
+  await f.web.perform({ id: 'attach', sessionId: 'alpha', instanceId: 'A', action: 'attach', input: {} })
+  const entered = gate(), finish = gate(), original = f.debuggerApi.sendCommand
+  let held = false
+  f.debuggerApi.sendCommand = async method => {
+    if (method === 'Emulation.setDeviceMetricsOverride' && !held) {
+      held = true; entered.release(); await finish.promise
+      if (layoutFails) throw new Error('obsolete layout fixture')
+    }
+    return original(method)
+  }
+  const bounds = { x: 0, y: 0, width: 640, height: 400 }
+  const old = f.web.requestView('alpha', bounds, async () => { throw new Error('obsolete lookup fixture') })
+  await entered.promise
+  const hide = f.web.setView('alpha', null)
+  assert.equal(f.visible(), false)
+  const fresh = f.web.requestView('alpha', bounds, async () => ({ instanceId: 'A', authorize: async () => true }))
+  finish.release()
+  const results = await Promise.allSettled([old, hide, fresh])
+  try {
+    assert.deepEqual(results.map(r => r.status), ['fulfilled', 'fulfilled', 'fulfilled'])
+    assert.equal(f.visible(), true)
+  } finally { f.web.close() }
+})
+it('an obsolete shown-layout failure cannot reject a newer hide and show', async () => {
+  const f = fixture()
+  await f.web.perform({ id: 'attach', sessionId: 'alpha', instanceId: 'A', action: 'attach', input: {} })
+  const entered = gate(), finish = gate(), original = f.debuggerApi.sendCommand
+  let held = false
+  f.debuggerApi.sendCommand = async method => {
+    if (method === 'Emulation.setDeviceMetricsOverride' && !held) { held = true; entered.release(); await finish.promise; throw new Error('obsolete shown-layout fixture') }
+    return original(method)
+  }
+  const bounds = { x: 0, y: 0, width: 640, height: 400 }
+  const old = f.web.requestView('alpha', bounds, async () => ({ instanceId: 'A', authorize: async () => true }))
+  await entered.promise
+  const hide = f.web.setView('alpha', null)
+  const fresh = f.web.requestView('alpha', bounds, async () => ({ instanceId: 'A', authorize: async () => true }))
+  finish.release()
+  const results = await Promise.allSettled([old, hide, fresh])
+  try { assert.deepEqual(results.map(r => r.status), ['fulfilled', 'fulfilled', 'fulfilled']); assert.equal(f.visible(), true) }
+  finally { f.web.close() }
+})
 it('an initial lookup cannot reopen native contents after a newer modal hide', async () => {
   const f = fixture()
   await f.web.perform({ id: 'attach', sessionId: 'alpha', instanceId: 'A', action: 'attach', input: {} })

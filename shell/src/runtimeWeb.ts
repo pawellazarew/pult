@@ -89,8 +89,8 @@ export class RuntimeWeb {
         try {
           const ownership = await lookup()
           if (!current()) return
-          if (page && ownership.instanceId !== undefined && page.instanceId !== ownership.instanceId) {
-            page.view.setVisible(false)
+          if (ownership.instanceId !== undefined && (!page || page.instanceId !== ownership.instanceId)) {
+            page?.view.setVisible(false)
             this.bounds.delete(sessionId)
             if (this.active === sessionId) this.active = null
             return
@@ -103,14 +103,15 @@ export class RuntimeWeb {
           this.bounds.delete(sessionId)
           if (this.active === sessionId) this.active = null
           page?.view.setVisible(false)
-          await this.layout()
+          try { await this.layout() } catch (layoutError) { if (!current()) return; throw layoutError }
+          if (!current()) return
           throw error
         }
       }
       if (!current()) return
       if (bounds) { this.bounds.set(sessionId, { ...bounds, actualSize: (raw as { actualSize?: unknown }).actualSize === true }); this.active = sessionId }
       else { this.bounds.delete(sessionId); if (this.active === sessionId) this.active = null }
-      await this.layout()
+      try { await this.layout() } catch (error) { if (!current()) return; throw error }
     })
   }
 
