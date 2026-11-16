@@ -125,13 +125,32 @@ export class RuntimeWeb {
     if (current) return current
     const frame: Promise<RuntimeResult> = this.serial<RuntimeResult>(async () => {
       const page = this.get(runtimeSessionId(sessionId), instanceId)
-      if (!page.view.webContents.debugger.isAttached()) await this.layout()
-      const result = await this.command(page, 'Page.captureScreenshot', { format: 'jpeg', quality: 90, fromSurface: true, captureBeyondViewport: false })
-      const data = result['data']
-      if (typeof data !== 'string' || data.length > 2_800_000) throw new Error(tr('Крупный кадр превышает предел качества'))
-      const pixels = imageHeaderSize(Buffer.from(data, 'base64'))
+      const wc = page.view.webContents
+      const metadata = (): RuntimeResult => ({ ...this.status(page), coordinateWidth: page.viewport.width, coordinateHeight: page.viewport.height })
+      // Human contents must never be hidden, resized, or captured by an observer poll.
+      if (page.view.getVisible()) return metadata()
+      const bounds = page.view.getBounds()
+      if (bounds.width !== page.viewport.width || bounds.height !== page.viewport.height || page.scale !== 1 || !wc.debugger.isAttached()) {
+        // A null-hide can precede a rejected/full queue. Repair only this hidden page;
+        // a global layout would disturb another session's visible human contents.
+        page.view.setBounds({ x: 0, y: 0, ...page.viewport })
+        await this.command(page, 'Emulation.setDeviceMetricsOverride', { ...page.viewport, deviceScaleFactor: 1, mobile: false, scale: 1 })
+        if (this.get(sessionId, instanceId) !== page) throw new Error(tr('Экземпляр сессии изменился; подключи браузер заново'))
+        page.scale = 1
+      }
+      if (page.view.getVisible()) return metadata()
+      // Electron 45.3.3 copies the available surface without waiting on the CDP
+      // screenshot command that can hold this queue for its entire 10s timeout.
+      const captured = await wc.capturePage(undefined, { stayHidden: true, stayAwake: true })
+      if (this.get(sessionId, instanceId) !== page) throw new Error(tr('Экземпляр сессии изменился; подключи браузер заново'))
+      const raw = captured.getSize()
+      if (captured.isEmpty() || raw.width < page.viewport.width || raw.height < page.viewport.height) throw new Error(tr('Размер области страницы ещё недоступен'))
+      const jpeg = captured.resize({ width: page.viewport.width, height: page.viewport.height }).toJPEG(90)
+      const data = jpeg.toString('base64')
+      const pixels = imageHeaderSize(jpeg)
+      if (data.length > 2_800_000 || pixels?.width !== page.viewport.width || pixels.height !== page.viewport.height) throw new Error(tr('Крупный кадр превышает предел качества'))
       return { ...this.status(page), coordinateWidth: page.viewport.width, coordinateHeight: page.viewport.height,
-        image: { data, mimeType: 'image/jpeg' }, ...(pixels ? { width: pixels.width, height: pixels.height } : {}) }
+        image: { data, mimeType: 'image/jpeg' }, width: pixels.width, height: pixels.height }
     }).finally(() => { if (this.localFrames.get(key) === frame) this.localFrames.delete(key) })
     this.localFrames.set(key, frame)
     return frame
