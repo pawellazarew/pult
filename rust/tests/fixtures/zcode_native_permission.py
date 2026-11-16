@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import socket
+import time
 
 assert sys.argv[1:] == ['app-server', '--stdio']
 assert not any(k in os.environ for k in ('PULT_MEMORY_KEY', 'PULT_MEMORY_TURN_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY'))
@@ -156,6 +157,9 @@ for line in sys.stdin:
         expected_replies = instruction.get('count', 1)
         assert 1 <= expected_replies <= 9
         for i in range(expected_replies):
+            if instruction.get('holdFault') and i == 1:
+                while not (home / 'native-permission-release-fault').exists():
+                    time.sleep(0.002)
             suffix = '' if expected_replies == 1 else '-'+str(i)
             permission['requestId'] = 'native-permission-request'+suffix
             permission['toolCallId'] = 'native-memory-call'+suffix
@@ -185,6 +189,8 @@ for line in sys.stdin:
             event('turn.completed', dict(response='native permission fixture complete', resultType='success',
                   tokenCount=1, toolCallCount=1, duration=1))
     elif method == 'session/close':
+        proof['closeReceived'] = True
+        save()
         output(dict(id=r['id'], result=dict(closed=True)))
         break
     else:

@@ -17,6 +17,46 @@ const CHILD_HOME: &str = "PULT_WORKER_PROCESS_TEST_HOME";
 const DEADLINE: Duration = Duration::from_secs(12);
 
 #[tokio::test]
+async fn holder_failure_observer_cannot_block_exit_on_full_stderr() {
+    use std::io::Write;
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
+    let (mut writing, _unread) = UnixStream::pair().unwrap();
+    // Only this test-owned socket changes flags; parent's fd2 is untouched.
+    writing.set_nonblocking(true).unwrap();
+    let mut filled = 0usize;
+    loop {
+        match writing.write(&[b'x'; 4096]) {
+            Ok(count) => {
+                filled += count;
+                assert!(filled < 8 * 1024 * 1024);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(_) => panic!("synthetic stderr fill failed"),
+        }
+    }
+    writing.set_nonblocking(false).unwrap();
+    let mut holder = Command::new(env!("CARGO_BIN_EXE_pult-worker-holder"))
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(OwnedFd::from(writing)))
+        .spawn()
+        .unwrap();
+    // Missing owner reaches actual holder Err; its diagnostic writer remains
+    // blocked because the full socket's peer is retained and never drained.
+    let status = match tokio::time::timeout(DEADLINE, holder.wait()).await {
+        Ok(status) => status.unwrap(),
+        Err(_) => {
+            let _ = holder.start_kill();
+            let _ = holder.wait().await;
+            panic!("failure observer blocked holder exit");
+        }
+    };
+    assert_eq!(status.code(), Some(125));
+}
+
+#[tokio::test]
 async fn claude_large_native_input_uses_stdin_with_independent_output_budget() {
     use pult_core::worker_process::Framing;
     let home = tempfile::tempdir().unwrap();
