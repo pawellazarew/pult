@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { runtimeBounds, runtimeNumber, runtimeSessionId, runtimeWebPartition, runtimeWebUrl } from '../../src/runtimeWebPolicy.js'
+import { runtimeBounds, runtimeFit, runtimeInputPoint, runtimeNumber, runtimeSessionId, runtimeWebPartition, runtimeWebUrl } from '../../src/runtimeWebPolicy.js'
 
 describe('isolated runtime browser policy', () => {
   it('allows local and remote http(s), denies privileged schemes and credential URLs', () => {
@@ -31,5 +31,18 @@ describe('isolated runtime browser policy', () => {
     assert.equal(runtimeNumber(undefined, 100, 0, 1000), 100)
     assert.throws(() => runtimeNumber('100', 0, 0, 1000))
     assert.throws(() => runtimeNumber(1001, 0, 0, 1000))
+  })
+})
+
+describe('fixed logical browser presentation', () => {
+  it('letterboxes the native surface without changing the page size', () => {
+    assert.deepEqual(runtimeFit({ x: 10, y: 20, width: 640, height: 600 }, { width: 1280, height: 800 }), { x: 10, y: 120, width: 640, height: 400, scale: .5 })
+    assert.equal(runtimeFit({ x: 0, y: 0, width: 2560, height: 1600 }, { width: 1280, height: 800 }).scale, 2)
+    assert.equal(runtimeFit({ x: 0, y: 0, width: 2560, height: 1600 }, { width: 1280, height: 800 }, true).scale, 1)
+    assert.equal(runtimeFit({ x: 0, y: 0, width: 640, height: 400 }, { width: 1280, height: 800 }, true).scale, .5)
+  })
+  it('transforms both event positions exactly once, never applies Retina DPR or document scroll', () => {
+    assert.deepEqual(runtimeInputPoint({ x: 1260, y: 780 }, { width: 1280, height: 800 }, .5), { x: 630, y: 390 })
+    for (const point of [{ x: -1, y: 0 }, { x: 1280, y: 1 }, { x: 1, y: 800 }, { x: NaN, y: 1 }]) assert.throws(() => runtimeInputPoint(point, { width: 1280, height: 800 }, .5))
   })
 })

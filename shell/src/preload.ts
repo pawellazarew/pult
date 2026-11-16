@@ -51,6 +51,15 @@ const bridge: PultBridge = {
     unwrap(await ipcRenderer.invoke(IPC.runtimeView, sessionId, bounds) as CallReply)
   },
 
+  async runtimePreview(sessionId, metadataOnly) {
+    return unwrap(await ipcRenderer.invoke(IPC.runtimePreview, sessionId, metadataOnly) as CallReply) as import('../../src/runtimes/types.js').RuntimeResult
+  },
+  onRuntimeEscape(handler) {
+    const listener = (_event: IpcRendererEvent, sessionId: string): void => handler(sessionId)
+    ipcRenderer.on(IPC.runtimeEscape, listener)
+    return () => ipcRenderer.removeListener(IPC.runtimeEscape, listener)
+  },
+
   async call(method: AllowedMethod, params?: Record<string, unknown>): Promise<unknown> {
     return unwrap((await ipcRenderer.invoke(IPC.call, method, params)) as CallReply)
   },

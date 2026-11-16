@@ -1,7 +1,8 @@
+import { t as tr } from './i18n.js'
 import type { BrowserWindow, Session, WebContents, WebContentsView } from 'electron'
 import type { RuntimeBounds, RuntimeHostJob, RuntimeResult } from '../../src/runtimes/types.js'
 import { imageHeaderSize } from './clipboardImage.js'
-import { runtimeBounds, runtimeNumber, runtimeSessionId, runtimeWebUrl } from './runtimeWebPolicy.js'
+import { runtimeBounds, runtimeFit, runtimeInputPoint, runtimeNumber, runtimeSessionId, runtimeWebUrl } from './runtimeWebPolicy.js'
 
 /** Creation is synchronous: only these contents skip the app:// renderer's navigation ban. */
 let creatingRuntimeContents = false
@@ -19,6 +20,8 @@ type BrowserPage = {
   refs: Map<string, number>
   snapshot: number
   invalidation: number
+  viewport: { width: number; height: number }
+  scale: number
 }
 interface AxNode {
   ignored?: boolean
@@ -31,25 +34,87 @@ export interface RuntimeWebOptions {
   window(): BrowserWindow | null
   createView(sessionId: string, instanceId: string): WebContentsView
   onAttach?(sessionId: string): void
+  onEscape?(sessionId: string): void
 }
 
 /** The web host accepts operations, never raw JavaScript, CDP commands or contents IDs. */
 export class RuntimeWeb {
   private readonly pages = new Map<string, BrowserPage>()
-  private readonly bounds = new Map<string, RuntimeBounds>()
+  private readonly bounds = new Map<string, RuntimeBounds & { actualSize?: boolean }>()
   private readonly windows = new WeakSet<BrowserWindow>()
   private active: string | null = null
+  private readonly presentationRevision = new Map<string, number>()
+
+  private pending: Promise<unknown> = Promise.resolve()
+  private queued = 0
+  private readonly localFrames = new Map<string, Promise<RuntimeResult>>()
+  private serial<T>(run: () => Promise<T>): Promise<T> {
+    if (this.queued >= 16) return Promise.reject(new Error(tr('Браузер занят; повтори действие')))
+    ++this.queued
+    const next = this.pending.catch(() => {}).then(run)
+    this.pending = next
+    return next.finally(() => { --this.queued })
+  }
 
   constructor(private readonly options: RuntimeWebOptions) {}
 
-  setView(sessionId: string, raw: unknown): void {
+  setView(sessionId: string, raw: unknown, instanceId?: string, authorize?: () => Promise<boolean>): Promise<void> {
     runtimeSessionId(sessionId)
-    const win = this.options.window()
-    if (!win || win.isDestroyed()) throw new Error('Окно Пульта закрыто')
-    const bounds = runtimeBounds(raw, win.getContentBounds())
-    if (bounds) { this.bounds.set(sessionId, bounds); this.active = sessionId }
-    else { this.bounds.delete(sessionId); if (this.active === sessionId) this.active = null }
-    this.layout()
+    const revision = (this.presentationRevision.get(sessionId) ?? 0) + 1
+    this.presentationRevision.set(sessionId, revision)
+    // Modal/collapse must hide immediately, even while a navigation owns the queue.
+    if (raw === null) {
+      this.bounds.delete(sessionId)
+      if (this.active === sessionId) this.active = null
+      const page = this.pages.get(sessionId)
+      if (page && !page.view.webContents.isDestroyed()) page.view.setVisible(false)
+    }
+    return this.serial(async () => {
+      if (this.presentationRevision.get(sessionId) !== revision) return
+      const win = this.options.window()
+      if (!win || win.isDestroyed()) throw new Error('Окно Пульта закрыто')
+      const page = this.pages.get(sessionId)
+      const bounds = runtimeBounds(raw, win.getContentBounds())
+      if (page && instanceId !== undefined && page.instanceId !== instanceId) {
+        page.view.setVisible(false)
+        this.bounds.delete(sessionId)
+        if (this.active === sessionId) this.active = null
+        return
+      }
+      if (bounds && authorize && !await authorize()) {
+        this.bounds.delete(sessionId)
+        if (this.active === sessionId) this.active = null
+        page?.view.setVisible(false)
+        await this.layout()
+        throw new Error(tr('Сначала возьми управление браузером'))
+      }
+      if (this.presentationRevision.get(sessionId) !== revision || this.pages.get(sessionId) !== page) return
+      if (bounds) { this.bounds.set(sessionId, { ...bounds, actualSize: (raw as { actualSize?: unknown }).actualSize === true }); this.active = sessionId }
+      else { this.bounds.delete(sessionId); if (this.active === sessionId) this.active = null }
+      await this.layout()
+    })
+  }
+
+  /** Trusted local observer only: full-size bounded frame, never the MCP image budget. */
+  metadata(sessionId: string, instanceId: string): Promise<RuntimeResult> {
+    return this.serial(async () => { const page = this.get(runtimeSessionId(sessionId), instanceId); if (!page.view.webContents.debugger.isAttached()) await this.layout(); return { ...this.status(page), coordinateWidth: page.viewport.width, coordinateHeight: page.viewport.height } })
+  }
+  preview(sessionId: string, instanceId: string): Promise<RuntimeResult> {
+    const key = JSON.stringify([sessionId, instanceId])
+    const current = this.localFrames.get(key)
+    if (current) return current
+    const frame: Promise<RuntimeResult> = this.serial<RuntimeResult>(async () => {
+      const page = this.get(runtimeSessionId(sessionId), instanceId)
+      if (!page.view.webContents.debugger.isAttached()) await this.layout()
+      const result = await this.command(page, 'Page.captureScreenshot', { format: 'jpeg', quality: 90, fromSurface: true, captureBeyondViewport: false })
+      const data = result['data']
+      if (typeof data !== 'string' || data.length > 2_800_000) throw new Error(tr('Крупный кадр превышает предел качества'))
+      const pixels = imageHeaderSize(Buffer.from(data, 'base64'))
+      return { ...this.status(page), coordinateWidth: page.viewport.width, coordinateHeight: page.viewport.height,
+        image: { data, mimeType: 'image/jpeg' }, ...(pixels ? { width: pixels.width, height: pixels.height } : {}) }
+    }).finally(() => { if (this.localFrames.get(key) === frame) this.localFrames.delete(key) })
+    this.localFrames.set(key, frame)
+    return frame
   }
 
   available(): boolean {
@@ -57,12 +122,21 @@ export class RuntimeWeb {
     return !!win && !win.isDestroyed()
   }
 
-  private layout(): void {
+  private async layout(): Promise<void> {
+    // No previous session may remain above the trusted UI during async CDP work.
+    for (const page of this.pages.values()) if (!page.view.webContents.isDestroyed()) page.view.setVisible(false)
     for (const [id, page] of this.pages) {
       if (page.view.webContents.isDestroyed()) continue
       const bounds = this.bounds.get(id)
-      if (bounds) page.view.setBounds(bounds)
-      page.view.setVisible(id === this.active && !!bounds)
+      const shown = id === this.active && !!bounds
+      const draw = bounds ? runtimeFit(bounds, page.viewport, bounds.actualSize) : { x: 0, y: 0, ...page.viewport, scale: 1 }
+      page.view.setVisible(false)
+      page.view.setBounds({ x: draw.x, y: draw.y, width: draw.width, height: draw.height })
+      if (page.view.webContents.getURL()) {
+        await this.command(page, 'Emulation.setDeviceMetricsOverride', { ...page.viewport, deviceScaleFactor: 1, mobile: false, scale: draw.scale })
+        page.scale = draw.scale
+      }
+      page.view.setVisible(shown && id === this.active && bounds === this.bounds.get(id))
     }
   }
 
@@ -84,9 +158,12 @@ export class RuntimeWeb {
     const win = this.options.window()
     if (!win || win.isDestroyed()) throw new Error('Для встроенного браузера открой окно Пульта')
     const view = createRuntimeWebView(() => this.options.createView(sessionId, instanceId))
-    const page: BrowserPage = { instanceId, view, window: win, logs: [], refs: new Map(), snapshot: 0, invalidation: 0 }
+    const page: BrowserPage = { instanceId, view, window: win, logs: [], refs: new Map(), snapshot: 0, invalidation: 0, viewport: { width: 1280, height: 800 }, scale: 1 }
     const wc = view.webContents
     this.harden(wc, wc.session)
+    wc.setZoomMode('isolated')
+    wc.setZoomFactor(1)
+    wc.debugger.on('detach', () => { page.view.setVisible(false); page.refs.clear(); ++page.invalidation })
     const push = (kind: string, text: string): void => {
       page.logs.push({ kind, text: text.slice(0, 2000) })
       if (page.logs.length > 100) page.logs.shift()
@@ -96,7 +173,14 @@ export class RuntimeWeb {
     const invalidate = (): void => { page.refs.clear(); ++page.invalidation }
     wc.on('did-start-navigation', invalidate)
     wc.on('did-navigate-in-page', invalidate)
-    wc.on('before-input-event', invalidate)
+    wc.on('before-input-event', (event, input) => {
+      invalidate()
+      if ((input.control || input.meta) && ['+', '=', '-', '0'].includes(input.key)) { event.preventDefault(); return }
+      if (input.type === 'keyDown' && input.key === 'Escape' && page.view.getVisible()) {
+        event.preventDefault()
+        this.options.onEscape?.(sessionId)
+      }
+    })
     wc.on('before-mouse-event', invalidate)
     wc.on('render-process-gone', (_e, details) => { invalidate(); push('crash', details.reason) })
     wc.once('destroyed', () => { if (this.pages.get(sessionId) === page) this.pages.delete(sessionId) })
@@ -114,10 +198,9 @@ export class RuntimeWeb {
       }
     })
     win.contentView.addChildView(view)
-    view.setBounds(this.bounds.get(sessionId) ?? { x: 0, y: 0, width: 1024, height: 700 })
+    view.setBounds({ x: 0, y: 0, width: 1280, height: 800 })
     view.setVisible(false)
     this.pages.set(sessionId, page)
-    this.layout()
     this.options.onAttach?.(sessionId)
     return page
   }
@@ -178,7 +261,11 @@ export class RuntimeWeb {
     return { url: page.view.webContents.getURL(), title: page.view.webContents.getTitle() }
   }
 
-  async perform(job: RuntimeHostJob): Promise<RuntimeResult> {
+  perform(job: RuntimeHostJob, validate?: () => Promise<void>): Promise<RuntimeResult> {
+    return this.serial(async () => { await validate?.(); return this.performNow(job) })
+  }
+
+  private async performNow(job: RuntimeHostJob): Promise<RuntimeResult> {
     const id = runtimeSessionId(job.sessionId)
     const instanceId = job.instanceId ?? ''
     if (typeof instanceId !== 'string' || instanceId.length > 256) throw new Error('Неверный экземпляр сессии')
@@ -198,21 +285,27 @@ export class RuntimeWeb {
       const page = this.create(id, instanceId)
       // A newly created WebContentsView has no renderer until its first load.
       // Sending CDP before loadURL can wait forever on that missing renderer.
-      if (!page.view.webContents.getURL() || url) await this.navigate(page, url ?? 'about:blank')
+      if (!page.view.webContents.getURL()) await this.navigate(page, 'about:blank')
+      await page.view.webContents.setVisualZoomLevelLimits(1, 1)
+      await this.layout()
+      if (url) await this.navigate(page, url)
       await this.command(page, 'Network.enable')
       return this.status(page)
     }
     const page = this.get(id, instanceId)
     const wc = page.view.webContents
+    if (!wc.debugger.isAttached()) await this.layout()
     switch (action) {
-      case 'navigate': await this.navigate(page, runtimeWebUrl(input['url'])); break
+      case 'navigate': await this.navigate(page, runtimeWebUrl(input['url'])); await this.layout(); break
       case 'reload': await this.command(page, 'Page.reload'); break
       case 'back': if (wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack(); break
       case 'forward': if (wc.navigationHistory.canGoForward()) wc.navigationHistory.goForward(); break
       case 'viewport': {
-        const width = Math.round(runtimeNumber(input['width'], 1024, 240, 2560))
-        const height = Math.round(runtimeNumber(input['height'], 700, 240, 2560))
-        await this.command(page, 'Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false })
+        const width = Math.round(runtimeNumber(input['width'], 1280, 240, 2560))
+        const height = Math.round(runtimeNumber(input['height'], 800, 240, 2560))
+        page.viewport = { width, height }
+        page.refs.clear(); ++page.invalidation
+        await this.layout()
         return { ...this.status(page), width, height }
       }
       case 'inspect': {
@@ -231,9 +324,9 @@ export class RuntimeWeb {
       case 'screenshot': {
         const metrics = await this.command(page, 'Page.getLayoutMetrics')
         const viewport = (metrics['cssVisualViewport'] ?? metrics['cssLayoutViewport']) as { clientWidth?: number; clientHeight?: number } | undefined
-        const coordinateWidth = Number(viewport?.clientWidth)
-        const coordinateHeight = Number(viewport?.clientHeight)
-        if (!Number.isFinite(coordinateWidth) || coordinateWidth <= 0 || !Number.isFinite(coordinateHeight) || coordinateHeight <= 0) throw new Error('Размер области страницы ещё недоступен')
+        const coordinateWidth = page.viewport.width
+        const coordinateHeight = page.viewport.height
+        if (!Number.isFinite(Number(viewport?.clientWidth)) || Number(viewport?.clientWidth) <= 0 || !Number.isFinite(coordinateWidth) || coordinateWidth <= 0 || !Number.isFinite(coordinateHeight) || coordinateHeight <= 0) throw new Error('Размер области страницы ещё недоступен')
         const snapshot = (data: string): RuntimeResult => {
           const pixels = imageHeaderSize(Buffer.from(data, 'base64'))
           return { ...this.status(page), coordinateWidth, coordinateHeight,
@@ -265,8 +358,11 @@ export class RuntimeWeb {
           x = runtimeNumber(input['x'], -1, 0, 4096)
           y = runtimeNumber(input['y'], -1, 0, 4096)
         }
-        await this.command(page, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 })
-        await this.command(page, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 })
+        const point = runtimeInputPoint({ x, y }, page.viewport, page.scale)
+        // Electron 45.3.3's emulated surface requires presentation-scaled CDP
+        // positions (qualified against native clicks); do not multiply by DPR.
+        await this.command(page, 'Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 })
+        await this.command(page, 'Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', clickCount: 1 })
         break
       }
       case 'type': {
@@ -279,7 +375,8 @@ export class RuntimeWeb {
         const deltaY = runtimeNumber(input['deltaY'], 500, -5000, 5000)
         const x = runtimeNumber(input['x'], 100, 0, 4096)
         const y = runtimeNumber(input['y'], 100, 0, 4096)
-        await this.command(page, 'Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaX, deltaY })
+        const point = runtimeInputPoint({ x, y }, page.viewport, page.scale)
+        await this.command(page, 'Input.dispatchMouseEvent', { type: 'mouseWheel', ...point, deltaX, deltaY })
         break
       }
       case 'button': {
@@ -307,5 +404,6 @@ export class RuntimeWeb {
     }
     this.pages.clear()
     this.bounds.clear()
+    this.presentationRevision.clear()
   }
 }

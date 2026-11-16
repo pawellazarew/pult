@@ -14,9 +14,11 @@ export function startRuntimeHost(options: { link: DaemonLink; web: RuntimeWeb; l
         for (const job of reply.jobs ?? []) {
           if (stopped) break
           // A takeover/Stop can invalidate an already-polled job before execution.
-          try { await options.link.call('runtime.host.begin', { id: job.id }) } catch { continue }
           try {
-            const result = await options.web.perform(job)
+            const result = await options.web.perform(job, async () => {
+              if (stopped) throw new Error('Runtime host stopped')
+              await options.link.call('runtime.host.begin', { id: job.id })
+            })
             await options.link.call('runtime.host.complete', { id: job.id, result })
           } catch (error) {
             await options.link.call('runtime.host.complete', { id: job.id, error: (error as Error).message.slice(0, 1000) }).catch(() => {})
