@@ -88,7 +88,9 @@ async function node(provider,variant){
   assert.ok(pids.length>0);await bounded((async()=>{while(pids.some(alive))await pause(10)})(),'fake process survived',3000)
  }
 }
+let daemonSequence=0
 async function daemon(x,provider){
+ const sequence=++daemonSequence
  const env={...process.env,HOME:account,PULT_TEST:'1',PULT_CURL_BIN:join(root,'rust/tests/fixtures/curl_loc_fi.sh')}
  for(const p of ['claude','codex','zcode'])env[`PULT_${p.toUpperCase()}_BIN`]=p===provider?join(peers,`${p}.mjs`):join(x.base,`missing-${p}`)
  const child=spawn(binary,['--home',x.paths.home,'daemon','serve'],{env,stdio:['ignore','ignore','pipe']});let stderr='';child.stderr.on('data',b=>stderr=(stderr+b).slice(-4000))
@@ -98,7 +100,20 @@ async function daemon(x,provider){
   await bounded((async()=>{while(!existsSync(x.paths.sock)||!existsSync(x.paths.token)){assert.equal(child.exitCode,null,stderr);await pause(10)}})(),'daemon startup')
   client=await connectClient(x.paths,{timeoutMs:10000})
   if(waitE2E){const owner=client;client={...owner,request:(method,params,options)=>owner.request(method,params,{timeoutMs:10000,...options})}}
-  return {client,child,stop:async()=>{client.close();child.kill('SIGTERM');await bounded(exited,'daemon join',10000)}}
+  return {client,child,stop:async()=>{
+   client.close()
+   const signalSent=child.kill('SIGTERM')
+   try{await bounded(exited,'daemon join',10000)}catch(error){
+    // Failure-only metadata distinguishes the original and reopened daemon.
+    // Provider output, journal contents and authentication data stay private.
+    console.error('completion daemon shutdown metadata',JSON.stringify({
+     sequence,provider,scenario:x.base.slice(temp.length+1),pid:child.pid,
+     signalSent,killed:child.killed,exitCode:child.exitCode,signalCode:child.signalCode,
+     socketExists:existsSync(x.paths.sock),tokenExists:existsSync(x.paths.token),stderrBytes:Buffer.byteLength(stderr)
+    }))
+    throw error
+   }
+  }}
  }catch(error){client?.close();if(child.exitCode===null)child.kill('SIGTERM');await bounded(exited,'failed startup join');throw error}
 }
 let checks=0,complete=false,waitChecks=0,promptChecks=0,unknownChecks=0,restartChecks=0
@@ -109,14 +124,19 @@ try{
   const oracle=await node(provider,variant),x=prepare('rust',provider,variant)
   writeFileSync(join(x.paths.home,'.rust-core-scratch'),'pult-rust-scratch-v1\n',{mode:0o600})
   writeFileSync(join(x.paths.home,'config.json'),JSON.stringify({network:{[provider]:{mode:'off'},guard:{mode:'allow',countries:['FI']}}}),{mode:0o600})
-  let running=await daemon(x,provider),receipt,event
+  let running=await daemon(x,provider),receipt,event,bodyError
+  let phase='agent.start'
   try{
    await running.client.request('agent.start',{kind:provider,name:'subject',cwd:x.cwd,approval:'read-only',...(provider==='codex'?{model:'gpt-6-astra',effort:'low'}:{})})
+   phase='agent.prompt'
    receipt=await running.client.request('agent.prompt',{name:'subject',text:'literal final completion qualification'},{timeoutMs:12000})
    // Actual CLI reads the live session before any active-turn polling. Its
    // result must itself cross Driver close/durable completion publication.
+   phase='actual CLI wait'
    const waited=waitE2E?await cli(x.paths,['wait','subject','--json']):null
+   phase='owned turn cleanup'
    await bounded((async()=>{while((await running.client.request('daemon.status')).nativeRuntime.activeTurns!==0)await pause(10)})(),'Rust owned turn cleanup')
+   phase='qualified journal assertions'
    const journal=rows(join(x.paths.home,'events/journal.jsonl'));event=journal.filter(e=>e.kind==='status.changed').at(-1)
    const completion=event.data.completion
    assert.equal(completion.version,1);assert.equal(completion.incarnation,JSON.parse(readFileSync(join(x.paths.home,'sessions.json'),'utf8')).sessions[0].createdAt)
@@ -133,11 +153,13 @@ try{
    if(waitE2E){
     exactWait(waited,event,oracle.outcome);waitChecks++
     assert.equal((await running.client.request('daemon.status')).nativeRuntime.activeTurns,0)
+    phase='actual CLI unknown wait'
     const unknown=await cli(x.paths,['wait','subject','--until','UNKNOWN','--timeout=0','--json'])
     if(oracle.outcome.ok)statusTimeout(unknown,event.data.status);else exactWait(unknown,event,oracle.outcome)
     unknownChecks++
     if(variant==='divergent'){
      const before=journal.filter(e=>e.kind==='message.user').length
+     phase='actual CLI prompt wait'
      const prompted=await cli(x.paths,['prompt','subject','literal final completion qualification','--wait','--json'])
      const after=rows(join(x.paths.home,'events/journal.jsonl')),next=after.filter(e=>e.kind==='status.changed').at(-1)
      assert.equal(after.filter(e=>e.kind==='message.user').length,before+1,'prompt --wait duplicated input')
@@ -147,7 +169,17 @@ try{
      assert.equal((await running.client.request('daemon.status')).nativeRuntime.activeTurns,0)
     }
    }
-  }finally{await running.stop();if(waitE2E)await peerCleanup(x)}
+  }catch(error){
+   bodyError=error
+   console.error('completion body failure metadata',JSON.stringify({provider,variant,phase,name:error.name,code:error.code??null}))
+   throw error
+  }finally{
+   try{await running.stop()}catch(error){
+    if(bodyError)throw new AggregateError([bodyError,error],'completion body and daemon shutdown failed')
+    throw error
+   }
+   if(waitE2E)await peerCleanup(x)
+  }
   // Actual old Node EventStore + status/attention reducers must preserve the
   // additive data without changing existing UI/reducer behavior or event kind.
   const old=createStore(x.paths)
