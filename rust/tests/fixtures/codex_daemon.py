@@ -10,12 +10,12 @@ for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "PULT_MEMORY_KEY", "PULT_TES
 home = pathlib.Path(os.environ["HOME"]) / "native"
 pult = home.parent.parent / "home"
 source = pathlib.Path(__file__).with_name("codex_worker.py").read_text()
-fixture_phase = "bootstrap"
+last_journal_read_phase = "bootstrap"
 
 
 def fixture_rows(phase):
-    global fixture_phase
-    fixture_phase = phase
+    global last_journal_read_phase
+    last_journal_read_phase = phase
     path = pult / "events/journal.jsonl"
     control = home / "journal-snapshot-mode"
     if control.exists() and phase == "turn_start_journal":
@@ -52,5 +52,10 @@ try:
 except BaseException as error:
     classes = ("UnicodeDecodeError", "JSONDecodeError", "AssertionError", "KeyError")
     kind = type(error).__name__
-    (home / "fixture-read-error.json").write_text(json.dumps({"phase": fixture_phase, "errorClass": kind if kind in classes else "other"}))
+    # Context only: a later unrelated exception may follow a successful read.
+    # Failure diagnostics must never replace the original provider exception.
+    try:
+        (home / "fixture-read-error.json").write_text(json.dumps({"lastJournalReadPhase": last_journal_read_phase, "errorClass": kind if kind in classes else "other"}))
+    except OSError:
+        pass
     raise
