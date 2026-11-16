@@ -273,14 +273,34 @@ impl Rig {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn catalog_is_separate_native_data_and_never_user_journal_or_private_key() {
+    struct Phase(&'static str);
+    impl Drop for Phase {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                eprintln!("[memory-catalog-fixture] failed phase={}", self.0);
+            }
+        }
+    }
+    let mut phase = Phase("setup");
     let f = Rig::new();
     let text = "literal user 🌊";
+    phase.0 = "terminal";
     let mut turn = f.start(text);
     let terminal = tokio::time::timeout(WATCHDOG, turn.wait())
         .await
         .unwrap()
         .unwrap();
+    if let Outcome::Failure { code, message } = &terminal.turn.outcome {
+        eprintln!(
+            "[memory-catalog-fixture] failure-code={code} ack-timeout={} delivery-unknown={} provider-pid-exists={} input-exists={}",
+            message == "Claude input acknowledgement timed out",
+            message == "Claude input delivery is unknown",
+            f.home.join("provider.pid").is_file(),
+            f.home.join("input.json").is_file(),
+        );
+    }
     assert_eq!(terminal.turn.outcome, Outcome::Success);
+    phase.0 = "native-blocks";
     let native = f.input().unwrap();
     let blocks = native["message"]["content"].as_array().unwrap();
     assert_eq!(blocks.len(), 3);
@@ -293,6 +313,7 @@ async fn catalog_is_separate_native_data_and_never_user_journal_or_private_key()
             .contains("<pult_runtime_context>")
     );
     assert!(native.get("system").is_none());
+    phase.0 = "journal";
     let rows = f.sink.0.lock().unwrap();
     assert_eq!(
         rows.iter().find(|v| v["kind"] == "message.user").unwrap()["data"]["text"],
@@ -305,6 +326,7 @@ async fn catalog_is_separate_native_data_and_never_user_journal_or_private_key()
     drop(rows);
     assert_eq!(f.mcp.catalog_calls.load(Ordering::Acquire), 1);
     assert_eq!(f.mcp.check_calls.load(Ordering::Acquire), 1);
+    phase.0 = "cleanup";
     f.cleaned();
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -436,9 +458,10 @@ async fn attachment_context_and_memory_stay_separate_and_slash_with_attachment_i
                     )
                 });
             eprintln!(
-                "[memory-attachment-fixture] observe={observe} failure-code={code} ack-timeout={} delivery-unknown={} input-exists={} native-step={step:?}",
+                "[memory-attachment-fixture] observe={observe} failure-code={code} ack-timeout={} delivery-unknown={} provider-pid-exists={} input-exists={} native-step={step:?}",
                 message == "Claude input acknowledgement timed out",
                 message == "Claude input delivery is unknown",
+                f.home.join("provider.pid").is_file(),
                 f.home.join("input.json").is_file(),
             );
         }
