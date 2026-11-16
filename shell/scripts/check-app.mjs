@@ -130,6 +130,8 @@ async function launchChecks() {
   const env = {
     ...process.env,
     PULT_TEST: '1',
+    // Assertions below match RU diagnostics; don't inherit the caller/system locale.
+    PULT_LANG: 'ru',
     PULT_HOME: home,
     PULT_UI_ROOT: evil,
     PULT_NODE: process.execPath,
