@@ -1,5 +1,9 @@
 # Synthetic native Claude protocol; no model or account access.
+__import__('sys').stderr.write('PULT_CLAUDE_FIXTURE_PRE_IMPORT\n')
+__import__('sys').stderr.flush()
 import json, os, pathlib, sys, threading
+sys.stderr.write('PULT_CLAUDE_FIXTURE_POST_IMPORT\n')
+sys.stderr.flush()
 home = pathlib.Path(sys.argv[1])
 mode = sys.argv[2]
 args = sys.argv[3:]
