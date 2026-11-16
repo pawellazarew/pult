@@ -58,8 +58,9 @@ pub(crate) async fn execute(state: Arc<State>) -> Result<Box<RawValue>, ApiError
     tokio::task::spawn_blocking(move || {
         #[cfg(test)]
         let permit = tests::ObservedPermit::new(permit, &state);
-        let _permit = permit;
+        // Drop admission before publishing the host job as drained.
         let _job = job;
+        let _permit = permit;
         if *state.stop.borrow() {
             return Err(ApiError {
                 code: "closed",
