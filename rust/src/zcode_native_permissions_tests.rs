@@ -896,10 +896,16 @@ async fn unqualified_native_profiles_never_open_inbox_or_owner_fallback() {
             let denied = proof.as_ref().is_some_and(|p| p["decision"] == "deny");
             let allowed = proof.as_ref().is_some_and(|p| p["decision"] == "allow");
             let close_received = proof.as_ref().is_some_and(|p| p["closeReceived"] == true);
-            let cleanup = match handle.progress() {
-                crate::turn_driver::Progress::Quarantined(Outcome::Failure { code, .. }) => code,
-                _ => "other".into(),
-            };
+            let cleanup =
+                match handle.progress() {
+                    crate::turn_driver::Progress::Quarantined(Outcome::Failure {
+                        code, ..
+                    }) if code == "cleanup_unconfirmed" => "cleanup_unconfirmed",
+                    crate::turn_driver::Progress::Quarantined(Outcome::Failure {
+                        code, ..
+                    }) if code == "cleanup_timeout" => "cleanup_timeout",
+                    _ => "other",
+                };
             let slots = f.service.slots.available_permits();
             eprintln!(
                 "[native-negative-wait] profile={case} driver={driver} started={started} replied={replied} denied={denied} allowed={allowed} slots={slots} close-received={close_received} cleanup-code={cleanup}"
