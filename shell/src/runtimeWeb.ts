@@ -59,7 +59,16 @@ export class RuntimeWeb {
   constructor(private readonly options: RuntimeWebOptions) {}
 
   setView(sessionId: string, raw: unknown, instanceId?: string, authorize?: () => Promise<boolean>): Promise<void> {
+    return this.present(sessionId, raw, async () => ({ instanceId, authorize }))
+  }
+
+  requestView(sessionId: string, raw: unknown, lookup: () => Promise<{ instanceId: string; authorize: () => Promise<boolean> }>): Promise<void> {
+    return this.present(sessionId, raw, lookup)
+  }
+
+  private present(sessionId: string, raw: unknown, lookup: () => Promise<{ instanceId?: string; authorize?: () => Promise<boolean> }>): Promise<void> {
     runtimeSessionId(sessionId)
+    // Reserve the intent before any lookup; newer restrictive UI always supersedes it.
     const revision = (this.presentationRevision.get(sessionId) ?? 0) + 1
     this.presentationRevision.set(sessionId, revision)
     // Modal/collapse must hide immediately, even while a navigation owns the queue.
@@ -75,20 +84,30 @@ export class RuntimeWeb {
       if (!win || win.isDestroyed()) throw new Error('Окно Пульта закрыто')
       const page = this.pages.get(sessionId)
       const bounds = runtimeBounds(raw, win.getContentBounds())
-      if (page && instanceId !== undefined && page.instanceId !== instanceId) {
-        page.view.setVisible(false)
-        this.bounds.delete(sessionId)
-        if (this.active === sessionId) this.active = null
-        return
+      const current = (): boolean => this.presentationRevision.get(sessionId) === revision && this.pages.get(sessionId) === page
+      if (bounds) {
+        try {
+          const ownership = await lookup()
+          if (!current()) return
+          if (page && ownership.instanceId !== undefined && page.instanceId !== ownership.instanceId) {
+            page.view.setVisible(false)
+            this.bounds.delete(sessionId)
+            if (this.active === sessionId) this.active = null
+            return
+          }
+          const allowed = !ownership.authorize || await ownership.authorize()
+          if (!current()) return
+          if (!allowed) throw new Error(tr('Сначала возьми управление браузером'))
+        } catch (error) {
+          if (!current()) return
+          this.bounds.delete(sessionId)
+          if (this.active === sessionId) this.active = null
+          page?.view.setVisible(false)
+          await this.layout()
+          throw error
+        }
       }
-      if (bounds && authorize && !await authorize()) {
-        this.bounds.delete(sessionId)
-        if (this.active === sessionId) this.active = null
-        page?.view.setVisible(false)
-        await this.layout()
-        throw new Error(tr('Сначала возьми управление браузером'))
-      }
-      if (this.presentationRevision.get(sessionId) !== revision || this.pages.get(sessionId) !== page) return
+      if (!current()) return
       if (bounds) { this.bounds.set(sessionId, { ...bounds, actualSize: (raw as { actualSize?: unknown }).actualSize === true }); this.active = sessionId }
       else { this.bounds.delete(sessionId); if (this.active === sessionId) this.active = null }
       await this.layout()
