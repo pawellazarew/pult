@@ -335,3 +335,72 @@ export function checkErrorText(code: string | null, message: string): string {
   if (code === 'method_not_allowed') return tr('это окно не умеет проверять обновления (оболочка старше 0.1.14) — в терминале: pult update --check')
   return message
 }
+
+
+/** Only daemon-reported byte progress; preparation and installation never borrow a download percentage. */
+export interface UpdateActivityView {
+  state: 'downloading' | 'preparing' | 'verifying' | 'installing'
+  text: string
+  percent: number | null
+  artifact: 'package' | 'app' | null
+}
+
+function downloadActivity(raw: unknown): UpdateActivityView {
+  const p = raw && typeof raw === 'object' ? raw as Record<string, unknown> : null
+  const artifact = p?.['artifact'] === 'package' || p?.['artifact'] === 'app' ? p['artifact'] : null
+  const valid = p && artifact && Number.isSafeInteger(p['received']) && Number.isSafeInteger(p['total'])
+    && (p['received'] as number) >= 0 && (p['total'] as number) > 0 && (p['received'] as number) <= (p['total'] as number)
+    && Number.isInteger(p['percent']) && (p['percent'] as number) >= 0 && (p['percent'] as number) <= 100
+    && (p['percent'] === 100 ? p['received'] === p['total'] : p['percent'] === Math.min(99, Math.floor((p['received'] as number) * 100 / (p['total'] as number))))
+  const percent = valid ? p['percent'] as number : null
+  if (percent === 100) return { state: 'preparing', percent: null, artifact,
+    text: artifact === 'app' ? tr('Подготавливаю окно Пульта…') : tr('Подготавливаю пакет Пульта…') }
+  return { state: 'downloading', percent, artifact,
+    text: artifact === 'app' ? tr('Скачиваю окно Пульта…') : artifact === 'package' ? tr('Скачиваю пакет Пульта…') : tr('Скачиваю обновление…') }
+}
+
+export function updateActivity(u: UpdateStatus | null | undefined): UpdateActivityView | null {
+  if (!u || u.apply.state === 'failed') return null
+  if (u.apply.state === 'waiting') return u.staged?.state === 'downloading' && u.staged.to === u.latest?.version ? downloadActivity(u.staged.progress) : null
+  const app = u.app?.applying
+  if (app) {
+    if (app.step === 'download') return downloadActivity(app.progress)
+    const text = app.step === 'verify' ? tr('Проверяю загрузку…')
+      : app.step === 'stage' ? tr('Подготавливаю окно Пульта…')
+      : app.step === 'quit' ? tr('Закрываю прежнее окно…')
+      : app.step === 'swap' ? tr('Устанавливаю окно Пульта…')
+      : app.step === 'launch' ? tr('Запускаю новое окно…')
+      : app.step === 'health' ? tr('Проверяю новое окно…') : tr('Возвращаю прежнее окно…')
+    return { state: app.step === 'verify' || app.step === 'health' ? 'verifying' : app.step === 'stage' ? 'preparing' : 'installing', text, percent: null, artifact: 'app' }
+  }
+  if (u.apply.state === 'applying' && u.apply.progress) return downloadActivity(u.apply.progress)
+  if (!u.continuing && u.staged?.state === 'downloading' && u.staged.to === u.latest?.version) return downloadActivity(u.staged.progress)
+  if (restarting(u)) return { state: 'installing', text: tr('Перезапускаю…'), percent: null, artifact: null }
+  return null
+}
+
+export interface UpdateIndicatorView { state: string; text: string; percent: number | null; warning: boolean }
+export function updateIndicator(u: UpdateStatus | null | undefined, win: string | null, dismissed: readonly string[] = []): UpdateIndicatorView | null {
+  const activity = updateActivity(u)
+  const banner = updateBanner(u, win, dismissed)
+  if (activity) {
+    const transfer = activity.percent === null ? activity.text : `${activity.text} ${activity.percent}%`
+    return { state: banner?.kind === 'waiting' ? 'waiting' : activity.state, text: banner?.kind === 'waiting' ? `${banner.text} · ${transfer}` : transfer, percent: activity.percent, warning: false }
+  }
+  return banner ? { state: banner.kind, text: banner.text, percent: null, warning: ['failed', 'rolledback', 'app-failed'].includes(banner.kind) } : null
+}
+
+/** The signed payload is bounded again at the renderer boundary; bilingual notes show the selected language. */
+export function localizedReleaseNotes(raw: unknown, language = getLanguage()): string | null {
+  if (typeof raw !== 'string' || !raw.trim() || raw.length > 24 * 1024 || new TextEncoder().encode(raw).length > 24 * 1024) return null
+  const headings = [...raw.matchAll(/^##[ \t]+(English|Русский)[ \t]*\r?$/gm)]
+  if (!headings.some((h) => h[1] === 'English') || !headings.some((h) => h[1] === 'Русский')) return raw.trim() // i18n-ignore: fixed document-format headings, never translated
+  const wanted = language === 'ru' ? 'Русский' : 'English' // i18n-ignore: fixed document-format heading
+  const index = headings.findIndex((h) => h[1] === wanted), start = headings[index]!
+  return raw.slice(start.index! + start[0].length, headings[index + 1]?.index ?? raw.length).trim() || null
+}
+
+export function officialReleaseNotesUrl(version: string | undefined): string {
+  return version && /^\d+\.\d+\.\d+$/.test(version)
+    ? `https://github.com/pawellazarew/pult/releases/tag/v${version}` : 'https://github.com/pawellazarew/pult/releases'
+}

@@ -466,7 +466,9 @@ export function FilesStorageSection({ retentionDays, onRetentionChange }: { rete
 
 export type SettingsSection = 'general' | 'appearance' | 'usage' | 'storage' | 'access' | 'sessions' | 'providers' | 'voice' | 'network' | 'rules' | 'keys' | 'updates'
 
-export function SettingsDialog({ settings, catalog, updates, autoCheck = null, netGuard, rules, access, language = 'auto', languageSupported = false, languageOverride = null, onSave, onClose, usage, now = Date.now(), onUsageRefresh, usageRefreshing = false, retentionDays, onRetentionChange, initialSection = 'appearance', disk, onDiskSave }: {
+export function SettingsDialog({ settings, catalog, updates, autoCheck = null, netGuard, rules, access, language = 'auto', languageSupported = false, languageOverride = null, onSave, onClose, usage, now = Date.now(), onUsageRefresh, usageRefreshing = false, retentionDays, onRetentionChange, initialSection = 'appearance', disk, onDiskSave, active = true }: {
+  /** A shared child update dialog can cover settings without losing unsaved preferences. */
+  active?: boolean
   disk?: { settings: DiskPreferences; status: DiskStatus }
   onDiskSave?(value: DiskPreferences): Promise<void>
   initialSection?: SettingsSection
@@ -556,6 +558,7 @@ export function SettingsDialog({ settings, catalog, updates, autoCheck = null, n
   const close = (): void => { if (busy) return; if (dirty) setDiscard(true); else onClose() }
   const actions = useRef({ close, save }); actions.current = { close, save }
   useLayoutEffect(() => {
+    if (!active) return
     const key = (e: KeyboardEvent): void => {
       if (e.key === 'Escape' && (e.target as HTMLInputElement | null)?.id === 'guard-search' && (e.target as HTMLInputElement).value) return
       if (e.key === 'Escape' || ((e.metaKey || e.ctrlKey) && e.code === 'Comma')) { e.preventDefault(); e.stopImmediatePropagation(); actions.current.close() }
@@ -563,7 +566,7 @@ export function SettingsDialog({ settings, catalog, updates, autoCheck = null, n
     }
     window.addEventListener('keydown', key, true)
     return () => window.removeEventListener('keydown', key, true)
-  }, [])
+  }, [active])
   const pages: Array<{ id: SettingsSection; label: string; group: string }> = [
     { id: 'sessions', label: t('Новые чаты'), group: t('Работа') },
     { id: 'providers', label: t('Модели и агенты'), group: t('Работа') },

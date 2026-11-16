@@ -1,5 +1,5 @@
 import { t } from '../lib/i18n.js'
-// Плашка обновления (M8c) — одна тихая строка над окном. Что в ней писать, решает model/update.ts.
+// Update status stays in This Mac; actions open the shared in-app update dialog.
 
 import type { ReactElement } from 'react'
 import { Icon } from './common.js'

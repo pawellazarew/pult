@@ -85,7 +85,10 @@ describe('окно: плашка обновления', () => {
 
   it('«Обновить» запускает настоящий pult update; тарбола нет — «не удалось», демон прежний', async () => {
     const pid = h.daemonPid()
-    await h.win.getByTestId('update-apply').click()
+    await h.win.getByTestId('update-indicator').click()
+    await h.win.getByTestId('update-dialog-apply').click()
+    await h.win.getByTestId('update-dialog-close').click()
+    await h.win.locator('[data-testid="health-menu"] summary').click()
     const c = await h.client()
     assert.ok(await waitFor(async () => ((await c.request('update.status')) as { apply: { state: string } }).apply.state === 'failed', 30_000), 'pult update не завершился провалом')
     const st = (await c.request('update.status')) as { apply: { state: string; error?: string } }
@@ -130,7 +133,10 @@ describe('окно: пока ставится обновление, реплик
     await h.win.locator('[data-testid="agent-row"][data-agent="w"]').click()
     await h.win.locator('[data-testid="conversation"][data-agent="w"]').waitFor({ timeout: 10_000 })
     await h.win.locator('[data-testid="health-menu"] summary').click()
-    await h.win.getByTestId('update-apply').click({ timeout: 20_000 })
+    await h.win.getByTestId('update-indicator').click({ timeout: 20_000 })
+    await h.win.getByTestId('update-dialog-apply').click()
+    await h.win.getByTestId('update-dialog-close').click()
+    await h.win.locator('[data-testid="health-menu"] summary').click()
     const banner = h.win.getByTestId('update-applying')
     await banner.waitFor({ timeout: 10_000 })
     assert.match(await banner.innerText(), /Перезапускаю…/)

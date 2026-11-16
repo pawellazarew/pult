@@ -1,5 +1,18 @@
 /** English translations of application-owned component text. Placeholder values remain untouched. */
 export const componentsEn: Readonly<Record<string, string>> = {
+  "Скачиваю окно Пульта…": "Downloading the Pult desktop app…",
+  "Скачиваю пакет Пульта…": "Downloading the Pult package…",
+  "Скачиваю обновление…": "Downloading the update…",
+  "Подготавливаю окно Пульта…": "Preparing the Pult desktop app…",
+  "Подготавливаю пакет Пульта…": "Preparing the Pult package…",
+  "Проверяю загрузку…": "Verifying the download…",
+  "Закрываю прежнее окно…": "Closing the previous app…",
+  "Устанавливаю окно Пульта…": "Installing the Pult desktop app…",
+  "Запускаю новое окно…": "Launching the new app…",
+  "Проверяю новое окно…": "Checking the new app…",
+  "Возвращаю прежнее окно…": "Restoring the previous app…",
+  "Страница релиза на GitHub": "Release page on GitHub",
+  "Описание изменений не передано каналом обновлений. Открой страницу релиза на GitHub.": "The update channel did not provide release notes. Open the release page on GitHub.",
   "Вписать": "Fit",
   "Обнови desktop-приложение для фиксированного размера страницы и крупного просмотра": "Update the desktop app for fixed page size and expanded preview",
   "Миниатюра · разверни для крупного просмотра и ввода": "Thumbnail · expand for a larger view and input",
