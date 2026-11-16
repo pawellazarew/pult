@@ -125,6 +125,7 @@ pub(super) async fn run(home: &Path, json_output: bool) -> i32 {
         "PULT_MEMORY_TURN_KEY",
         "PULT_ASK_KEY",
         "PULT_RUNTIME_KEY",
+        "PULT_CODEX_MEMORY_KEY",
     ]
     .iter()
     .any(|key| std::env::var_os(key).is_some())

@@ -63,6 +63,7 @@ async fn all_scoped_keys_are_rejected_before_owner_io() {
     for key in [
         "PULT_ASK_KEY",
         "PULT_RUNTIME_KEY",
+        "PULT_CODEX_MEMORY_KEY",
         "PULT_MEMORY_KEY",
         "PULT_MEMORY_TURN_KEY",
     ] {

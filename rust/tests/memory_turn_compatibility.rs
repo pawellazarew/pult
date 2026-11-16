@@ -25,5 +25,5 @@ async fn memory_turn_interoperates_with_real_node_client_and_real_rust_mcp() {
         String::from_utf8_lossy(&output.stderr)
     );
     println!("{}", String::from_utf8_lossy(&output.stdout));
-    assert!(String::from_utf8_lossy(&output.stdout).contains("memory turn interop passed 13"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("memory turn interop passed 15"));
 }

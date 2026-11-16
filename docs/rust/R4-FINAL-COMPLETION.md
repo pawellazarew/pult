@@ -2,6 +2,33 @@
 
 This step carries a qualified final answer through the existing owned Worker/Driver lifecycle and stores it with the durable terminal status. It does not implement `agent.wait`, a WaitHub, CLI waiting, background lifecycle support, or installed-provider qualification.
 
+## Controlled completion source pacing
+
+The zero-delay recorded Codex `simple` turn contains eight routed frames. The
+completion fixture's `multi` transform adds a ninth frame, while the unchanged
+Worker queue holds eight. A controlled actual Worker test blocks its first
+injected redactor factory before the first receive: the nine-frame burst retires
+the host and fails closed with `unsupported_background`. This proves a fixture
+capacity counterexample; the natural trigger of the macOS CI failure remains
+unknown.
+
+For a fresh Rust completion fixture, the producer now emits `turn/started`, then
+waits for the actual `agent.prompt` response's public turn receipt, its matching
+durable working status, and `session.started` for the current native thread in
+the private journal. The remaining eight frames fit the existing bound. The
+source preserves all frames, order, text, outcome assertions and production
+limits; subsequent turns do not reuse the cold receipt as a wait condition.
+The public turn witness is written only after the actual prompt RPC returns.
+
+The controlled Worker test retains both profiles: the original nine-frame burst
+still fails closed; receipt pacing succeeds with one frame emitted while the
+consumer is held, then the remaining eight. It checks all nine routed methods
+in order, releases the gate and joins owners before assertions. Its injected
+EventSink exposes completed fixture receipts, not a Store qualification. The
+paired completion and CLI-wait suites separately exercise the real durable
+journal, Node comparison and Rust→Node→Rust rollback for all 26 cases. These
+fixture receipts grant no native or memory-tool authority.
+
 ## Why message history is insufficient
 
 Qualification uses actual public Node adapters over repository fake peers, and the Rust daemon over the same controlled frames. No account, external network, provider binary or model is involved. Reference Node/Rust production source is the migration baseline `84122675f128891b1ca3d32a7bc8df37f9c621f6`; the independent success→idle change is `ae72f05461d06ebfcec3020a4acb68f3ca5e015d`. Native ZCode event profile remains pinned to upstream `c5904686ea8341826b3affe5d993d06a134fa779` / CLI 0.17.1.

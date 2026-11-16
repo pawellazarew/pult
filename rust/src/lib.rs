@@ -20,6 +20,7 @@ mod history;
 
 /// Lossless JSON object fields for CLI responses with opaque UTF-16 metadata.
 pub use history::Fields as RawFields;
+mod codex_memory;
 /// Encode JavaScript UTF-16 string units losslessly at a CLI JSON boundary.
 pub fn encode_js_string(units: &[u16]) -> String {
     history::encode_string(units)
@@ -757,6 +758,7 @@ async fn connection(
         && hello.get("memoryTurn").is_none()
         && hello.get("token").is_none()
         && hello.get("runtime").is_none()
+        && hello.get("codexMemory").is_none()
     {
         ask_given
             .and_then(Value::as_str)
@@ -771,6 +773,7 @@ async fn connection(
         && hello.get("token").is_none()
         && hello.get("ask").is_none()
         && hello.get("runtime").is_none()
+        && hello.get("codexMemory").is_none()
     {
         memory_turn_given
             .and_then(Value::as_str)
@@ -783,10 +786,22 @@ async fn connection(
         && hello.get("token").is_none()
         && hello.get("ask").is_none()
         && hello.get("runtime").is_none()
+        && hello.get("codexMemory").is_none()
     {
         memory_given
             .and_then(Value::as_str)
             .and_then(|key| state.session_memory.lock().ok()?.lookup(key))
+    } else {
+        None
+    };
+    let codex_memory_lease = if hello.get("codexMemory").is_some()
+        && ["token", "ask", "memory", "memoryTurn", "runtime"]
+            .iter()
+            .all(|field| hello.get(field).is_none())
+    {
+        hello["codexMemory"]
+            .as_str()
+            .and_then(|key| state.memory_turns.get()?.bridge().lookup(key))
     } else {
         None
     };
@@ -798,12 +813,14 @@ async fn connection(
             && memory_turn_given.is_none()
             && hello.get("ask").is_none()
             && hello.get("runtime").is_none()
+            && hello.get("codexMemory").is_none()
             && given.len() == state.token.len()
             && bool::from(given.as_bytes().ct_eq(state.token.as_bytes()));
         if !owner_valid
             && memory_lease.is_none()
             && memory_turn_lease.is_none()
             && ask_lease.is_none()
+            && codex_memory_lease.is_none()
         {
             Some("bad_token")
         } else if hello
@@ -819,7 +836,9 @@ async fn connection(
         write_value(&mut output, &json!({"type":"error","code":code})).await?;
         return Ok(());
     }
-    let supported: &[&str] = if ask_lease.is_some() {
+    let supported: &[&str] = if codex_memory_lease.is_some() {
+        codex_memory::Registry::methods()
+    } else if ask_lease.is_some() {
         &claude_ask::METHODS
     } else if memory_turn_lease.is_some() {
         &memory_turn::METHODS
@@ -828,12 +847,15 @@ async fn connection(
     } else {
         &SUPPORTED
     };
-    let partial: &[&str] =
-        if memory_lease.is_some() || memory_turn_lease.is_some() || ask_lease.is_some() {
-            &[]
-        } else {
-            &PARTIAL
-        };
+    let partial: &[&str] = if memory_lease.is_some()
+        || memory_turn_lease.is_some()
+        || ask_lease.is_some()
+        || codex_memory_lease.is_some()
+    {
+        &[]
+    } else {
+        &PARTIAL
+    };
     let client_kind = if hello["client"].as_str() == Some("shell") {
         host_policy::ClientKind::Shell
     } else {
@@ -868,6 +890,7 @@ async fn connection(
         let line = tokio::select! {
             _ = shutdown.changed() => { daemon_stopping = true; break; },
             _ = writer_closed.changed() => break,
+            _ = async { match &codex_memory_lease {Some(lease)=>lease.closed().await,None=>std::future::pending().await} } => break,
             line = read_line(&mut reader) => line,
         };
         let bytes = match line {
@@ -880,6 +903,46 @@ async fn connection(
                 break;
             }
         };
+        if let Some(lease) = &codex_memory_lease {
+            if bytes.len() > codex_memory::ENVELOPE_BYTES + 1024 {
+                writer.response(&json!({"id":null,"error":{"code":"capacity","message":"Codex memory request exceeds budget"}})).await?;
+                continue;
+            }
+            let mut request: Value = match serde_json::from_slice(&bytes) {
+                Ok(v) => v,
+                Err(_) => break,
+            };
+            let id = request
+                .get("id")
+                .cloned()
+                .filter(|v| v.as_str().is_some_and(|s| s.len() <= 512) || v.is_number())
+                .unwrap_or(Value::Null);
+            while responses.try_join_next().is_some() {}
+            if id.is_null()
+                || request["method"] != "codex.memory.call"
+                || !request["params"].is_object()
+            {
+                writer.response(&json!({"id":id,"error":{"code":"forbidden","message":"Codex memory credential cannot call this method"}})).await?;
+                continue;
+            }
+            if responses.len() >= 16 {
+                writer.response(&json!({"id":id,"error":{"code":"capacity","message":"Codex memory capacity reached"}})).await?;
+                continue;
+            }
+            let params = request["params"].take();
+            let call = lease.clone().call(params);
+            let writer = writer.clone();
+            responses.spawn(async move {
+                let response = match call.await {
+                    Ok(value) => json!({"id":id,"result":value}),
+                    Err(error) => {
+                        json!({"id":id,"error":{"code":error.code,"message":error.message}})
+                    }
+                };
+                let _ = writer.response(&response).await;
+            });
+            continue;
+        }
         if let Some(lease) = &ask_lease {
             // Purpose-specific role: no owner fallback, resolve or subscriptions.
             let request: Value = match serde_json::from_slice(&bytes) {

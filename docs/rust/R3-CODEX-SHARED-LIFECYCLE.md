@@ -1,5 +1,10 @@
 # Daemon-owned permission lifecycle
 
+Persistent Codex MCP lifetime is described in [R3-CODEX-PERSISTENT-MCP.md](R3-CODEX-PERSISTENT-MCP.md).
+Memory-on and memory-off now share the provider pool; each Ticket still revokes
+and drains its own authority before release. Ordinary completion retains the
+healthy provider/thread/helper; explicit runtime shutdown owns their final reap.
+
 `CodexRuntime::new_daemon(..., memory, broker)` is a crate-private trusted-host
 constructor. The injected Broker, Driver and shared NetworkGuard remain daemon
 resources. `permission_broker()` returns a clone for the daemon transition;
@@ -49,3 +54,27 @@ the real pult-worker-holder, as existing Claude vault fixtures do.
 Daemon/controller wiring, shared permission State facade and provider approval
 fixes are separate changes composed by Root. This slice adds no claim of full
 provider/queue/MCP parity or automatic daemon-wide lifecycle completion.
+
+## Controlled native fixture journal snapshots
+
+The synthetic daemon peer reads live journal receipts before native dispatch and
+permission acceptance. It now trims bytes after the last newline before UTF-8
+decoding, then parses complete nonempty JSONL rows. A malformed complete row
+still fails the peer; an unfinished UTF-8 tail cannot kill it. This matches the
+Node complete-row fixture reader and changes no production journal or authority.
+
+The actual-provider regression copies the real daemon journal only after its
+matching native thread has a durable working receipt. It adds an unfinished
+UTF-8 tail or malformed complete row to a fixed private consumer snapshot; the
+daemon's authoritative journal remains untouched. The old reader reproduces an
+actual `agent.prompt` rejection with `internal`, a dead native PID and
+`UnicodeDecodeError`. The new reader succeeds for the unfinished tail while the
+complete-corrupt control still fails closed. Normal 18-check interoperability,
+its six-second predicates, and the cold-site control remain unchanged.
+
+Failure-only check-nine observations distinguish its four RPC phases and emit
+bounded, allowlisted codes/counts and fixture exception classes and last-journal-read context, without raw
+provider text, IDs, paths or credentials. Failed or unconfirmed scratch is
+retained. Last-read context does not locate a later unrelated exception. This source counterexample does not establish the natural trigger of
+the prior Linux CI rejection; a Node minor-version difference is not a cause
+claim.

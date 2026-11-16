@@ -1,8 +1,9 @@
 // Versioned controlled transformer over explicit repository fake peers.
 // Synthetic text variants; no model, account, network or real provider CLI.
 import {spawn} from 'node:child_process'
-import {readFileSync,appendFileSync} from 'node:fs'
-import {join} from 'node:path'
+import {readFileSync,appendFileSync,existsSync,writeFileSync} from 'node:fs'
+import {join,basename} from 'node:path'
+import assert from 'node:assert/strict'
 import {fileURLToPath} from 'node:url'
 import {createInterface} from 'node:readline'
 const root=fileURLToPath(new URL('../../../',import.meta.url))
@@ -12,10 +13,60 @@ export function run(provider){
  const sid=provider==='claude'&&(args.includes('--session-id')?flag('--session-id'):args.includes('--resume')?flag('--resume'):null)
  const bin=join(root,'test/fakes',provider==='codex'?'fake-codex-app-server.mjs':`fake-${provider}.mjs`)
  const child=spawn(process.execPath,[bin,...args],{stdio:['pipe','pipe','inherit']})
- let inputUUID; if(provider==='claude'||provider==='codex'){createInterface({input:process.stdin}).on('line',line=>{let frame;try{frame=JSON.parse(line);inputUUID=frame.uuid}catch{};if(provider==='codex'&&frame?.method==='config/read'){output({jsonrpc:'2.0',id:frame.id,result:{config:{sandbox_workspace_write:{network_access:false,writable_roots:[]}}}});return};child.stdin.write(line+'\n')})}else process.stdin.pipe(child.stdin);child.stdin.on('error',()=>{})
+ // Completion peers attest only the transport inventory profile. Actual MCP
+ // bootstrap, IO, readiness rejection and lifetime use codex_memory.py.
+ const pendingMemory = new Set(), memoryThreads = new Set()
+ let inputUUID
+ if(provider==='claude'||provider==='codex') {
+  createInterface({input:process.stdin}).on('line',line=>{
+   let frame;try{frame=JSON.parse(line);inputUUID=frame.uuid}catch{}
+   if(provider==='codex') {
+    if(['thread/start','thread/resume'].includes(frame?.method)) {
+     const server=frame.params?.config?.mcp_servers?.pult_memory
+     if(server) {
+      assert.equal(basename(server.command),'pult-memory-mcp')
+      assert.equal(server.args.length,3);assert.equal(server.args[0],'--home');assert.equal(server.args[2],'--codex-bridge')
+      assert.deepEqual(Object.keys(server.env),['PULT_CODEX_MEMORY_KEY']);assert.match(server.env.PULT_CODEX_MEMORY_KEY,/^cm_[0-9a-f]{64}$/)
+      pendingMemory.add(frame.id)
+     }
+    }
+    if(frame?.method==='mcpServerStatus/list' && memoryThreads.has(frame.params?.threadId)) {
+     assert.equal(frame.params.serverName,'pult_memory');assert.equal(frame.params.limit,1)
+     output({jsonrpc:'2.0',id:frame.id,result:{data:[{name:'pult_memory',runtimeStatus:'connected',serverInfo:{name:'pult-memory'},toolsError:null,tools:Object.fromEntries(['memory_catalog','memory_list','memory_search','memory_get','memory_propose'].map(name=>[name,{}]))}],nextCursor:null}});return
+    }
+    if(frame?.method==='config/read'){output({jsonrpc:'2.0',id:frame.id,result:{config:{sandbox_workspace_write:{network_access:false,writable_roots:[]}}}});return}
+   }
+   child.stdin.write(line+'\n')
+  })
+ } else process.stdin.pipe(child.stdin)
+ child.stdin.on('error',()=>{})
  const output=e=>{if(Buffer.byteLength(JSON.stringify(e))>1024*1024)throw Error('controlled source frame exceeds native adapter bound');if(cfg.wire)appendFileSync(cfg.wire,JSON.stringify(e)+'\n');process.stdout.write(JSON.stringify(e)+'\n')}
- createInterface({input:child.stdout}).on('line',line=>{
-  let e;try{e=JSON.parse(line)}catch{process.stdout.write(line+'\n');return}
+ // The private controlled test holds the actual consumer before recv. Native
+ // frames retain their original order; RPC replies never wait on this gate.
+ let nativeOutput=Promise.resolve()
+ const pacedThreads=new Set()
+ const waitColdReceipt=async e=>{
+  if(!cfg.completionJournal||pacedThreads.has(e.params.threadId))return
+  pacedThreads.add(e.params.threadId)
+  if(cfg.waitingReceipt)writeFileSync(cfg.waitingReceipt,'waiting')
+  const deadline=Date.now()+10000
+  while(Date.now()<deadline){
+   try{
+    const {turnId}=JSON.parse(readFileSync(cfg.completionTurnReceipt,'utf8'))
+    const lines=readFileSync(cfg.completionJournal,'utf8').split('\n').filter(Boolean).map(JSON.parse)
+    // Current actual prompt response + native thread, in this fresh private
+    // fixture journal. This is readiness only, never an ACK or tool authority.
+    if(typeof turnId==='string'&&lines.some(r=>r.sessionId===cfg.completionSession&&r.kind==='status.changed'&&r.data.status==='working'&&r.data.turnId===turnId)&&lines.some(r=>r.sessionId===cfg.completionSession&&r.kind==='session.started'&&r.data.providerSessionId===e.params.threadId))return
+   }catch{}
+   await new Promise(r=>setTimeout(r,5))
+  }
+  throw Error('controlled completion receipt unavailable')
+ }
+ const emit=async e=>{
+  if(provider==='codex'&&cfg.consumerGate&&e.method){
+   while(!existsSync(cfg.consumerGate))await new Promise(r=>setTimeout(r,5))
+  }
+  if(provider==='codex'&&pendingMemory.delete(e.id)&&e.result?.thread?.id)memoryThreads.add(e.result.thread.id)
   if(sid&&e.session_id)e.session_id=sid
   if(provider==='claude'&&inputUUID&&e.type==='result')e.user_message_uuids=[inputUUID]
   if(provider==='claude'&&inputUUID&&e.type==='system'&&e.subtype==='init'){output(e);output({type:'command_lifecycle',session_id:e.session_id,command_uuid:inputUUID,state:'started'});return}
@@ -52,6 +103,16 @@ export function run(provider){
    }
   }
   output(e)
+  // The original eight-frame turn plus the multi-item transform has nine
+  // routed frames. Let the actual consumer durably publish its cold receipt
+  // after frame one; the remaining eight then fit the unchanged worker bound.
+  if(provider==='codex'&&e.method==='turn/started')await waitColdReceipt(e)
+ }
+ createInterface({input:child.stdout}).on('line',line=>{
+  let e;try{e=JSON.parse(line)}catch{process.stdout.write(line+'\n');return}
+  if(provider==='codex'&&(cfg.consumerGate||cfg.completionJournal)&&e.method){
+   nativeOutput=nativeOutput.then(()=>emit(e));nativeOutput.catch(()=>process.exit(1))
+  }else void emit(e)
  })
  for(const signal of ['SIGTERM','SIGINT'])process.on(signal,()=>child.kill(signal))
  child.on('exit',(code,signal)=>{process.stdin.unpipe(child.stdin);process.stdin.pause();process.exitCode=code??(signal?1:0)})

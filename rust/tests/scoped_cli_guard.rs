@@ -8,11 +8,12 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::process::Command;
 
 const BOUND: Duration = Duration::from_secs(6);
-const KEYS: [&str; 4] = [
+const KEYS: [&str; 5] = [
     "PULT_MEMORY_KEY",
     "PULT_MEMORY_TURN_KEY",
     "PULT_ASK_KEY",
     "PULT_RUNTIME_KEY",
+    "PULT_CODEX_MEMORY_KEY",
 ];
 const DENIED: &str = "permission/runtime credentials cannot use owner CLI commands";
 struct Fake {
@@ -157,6 +158,10 @@ async fn ask_key_never_authenticates_with_the_owner_token() {
     cannot_use_owner("PULT_ASK_KEY").await;
 }
 #[tokio::test]
+async fn codex_memory_key_never_authenticates_with_the_owner_token() {
+    cannot_use_owner("PULT_CODEX_MEMORY_KEY").await;
+}
+#[tokio::test]
 async fn runtime_key_never_authenticates_with_the_owner_token() {
     cannot_use_owner("PULT_RUNTIME_KEY").await;
 }
@@ -173,7 +178,7 @@ const OWNER_COMMANDS: &[&[&str]] = &[
 
 #[tokio::test]
 async fn helper_presence_precedes_invalid_home_and_mixed_memory_purposes() {
-    for helper in ["PULT_ASK_KEY", "PULT_RUNTIME_KEY"] {
+    for helper in ["PULT_ASK_KEY", "PULT_RUNTIME_KEY", "PULT_CODEX_MEMORY_KEY"] {
         for value in ["", "synthetic-helper-credential"] {
             for memory in [
                 None,
@@ -211,7 +216,7 @@ fn poison(fake: &Fake, file: &str) {
 }
 #[tokio::test]
 async fn helper_presence_never_opens_owner_fifo_or_connects_even_when_empty() {
-    for helper in ["PULT_ASK_KEY", "PULT_RUNTIME_KEY"] {
+    for helper in ["PULT_ASK_KEY", "PULT_RUNTIME_KEY", "PULT_CODEX_MEMORY_KEY"] {
         for value in ["", "synthetic-helper-credential"] {
             for file in ["config.json", "run/token", ".rust-core-scratch"] {
                 let fake = Fake::new();

@@ -885,11 +885,18 @@ native exit code сохраняется. [Договор holder](rust/R3-HOLDER-
 реальное наблюдение ядра и отдельный deterministic RED→GREEN. Остальные причины
 intermittent CI продолжают отдельную приёмку до R5.
 
-До cutover также остаются native background/warm/questions и проверка времени
-жизни процессов при включённой памяти. Возможность dynamic tools Codex изучена
-как вариант точной привязки callback к ходу, но ещё не заменяет нынешний dedicated
-процесс и не доказывает background parity. Результаты R5 требуют настоящего
-отката, 24 часов soak и семи дней наблюдения; эти интервалы не заменяются CI.
+Codex с включённой и выключенной памятью использует общий app-server pool.
+Регистрация MCP живёт вместе с native thread; каждый Ticket получает отдельные
+полномочия, которые отзываются с ожиданием admitted IO перед освобождением Driver.
+Обычное завершение сохраняет provider/thread/helper; callback допускается только
+при совпадении trusted native ledger, аргументов, ACK/started и durable Accepted.
+[Договор persistent memory](rust/R3-CODEX-PERSISTENT-MCP.md) описывает ограничения,
+отмену и политику статического каталога пяти tools, включая off/read-only.
+
+До cutover остаются native background/questions, остальные warm-профили и
+квалификация установленного Codex CLI; контролируемые peers этого не доказывают.
+Результаты R5 требуют настоящего отката, 24 часов soak и семи дней наблюдения;
+эти интервалы не заменяются CI.
 
 ### Продолжение R4 от 16 ноября
 
