@@ -19,6 +19,174 @@ use std::sync::{
 use std::time::Duration;
 const WAIT: Duration = Duration::from_secs(20);
 
+// Actual Worker consumer + native completion peer, without changing its eight
+// event slots. The factory is the existing injected redactor boundary, before
+// the first recv; it is released and all owners joined before any assertions.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn nine_frame_completion_requires_receipt_pacing_before_consumer() {
+    pult_core::panic_guard::install();
+    let home = tempfile::tempdir().unwrap();
+    let gate_path = home.path().join("consumer-entered");
+    let waiting = home.path().join("waiting-receipt");
+    let journal = home.path().join("receipt-journal.jsonl");
+    let turn_receipt = home.path().join("turn-receipt.json");
+    let wire = home.path().join("wire.jsonl");
+    let launch_log = home.path().join("native.jsonl");
+    let script = home.path().join("peer.mjs");
+    let peer =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/final_completion_peer.mjs");
+    std::fs::write(
+        &script,
+        format!(
+            "import {{run}} from {}; run('codex');\n",
+            serde_json::to_string(&format!("file://{}", peer.display())).unwrap()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        home.path().join(".pult-fake-codex.json"),
+        serde_json::to_vec(&json!({"scenario":"simple","speed":0,"logOut":launch_log})).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(home.path().join(".wait-text.json"), serde_json::to_vec(&json!({"variant":"multi","wire":wire,"consumerGate":gate_path,"completionJournal":journal,"completionTurnReceipt":turn_receipt,"waitingReceipt":waiting,"completionSession":"one"})).unwrap()).unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+    struct Release(Arc<(Mutex<bool>, std::sync::Condvar)>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            *self.0.0.lock().unwrap_or_else(|e| e.into_inner()) = true;
+            self.0.1.notify_all();
+        }
+    }
+    let release_on_unwind = Release(release.clone());
+    let entered_factory = entered.clone();
+    let barrier = release.clone();
+    let first = AtomicBool::new(true);
+    let sink = Arc::new(MemorySink::default());
+    struct ReceiptSink {
+        inner: Arc<MemorySink>,
+        journal: PathBuf,
+        turn: PathBuf,
+    }
+    impl EventSink for ReceiptSink {
+        fn append(&self, draft: Value) -> Task<Result<Receipt, SinkError>> {
+            let pending = self.inner.append(draft.clone());
+            let journal = self.journal.clone();
+            let turn = self.turn.clone();
+            Box::pin(async move {
+                let receipt = pending.await?;
+                use std::io::Write;
+                let mut file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(journal)
+                    .unwrap();
+                writeln!(file, "{draft}").unwrap();
+                if draft["kind"] == "status.changed" && draft["data"]["status"] == "working" {
+                    std::fs::write(
+                        turn,
+                        serde_json::to_vec(&json!({"turnId":draft["data"]["turnId"]})).unwrap(),
+                    )
+                    .unwrap();
+                }
+                Ok(receipt)
+            })
+        }
+    }
+    let mut selected = config(home.path());
+    let node = std::process::Command::new("node")
+        .args(["-p", "process.execPath"])
+        .output()
+        .unwrap();
+    assert!(node.status.success());
+    selected.launch.program = String::from_utf8(node.stdout).unwrap().trim().into();
+    selected.launch.args = vec![script.into_os_string()];
+    let mut service = services(
+        Arc::new(ReceiptSink {
+            inner: sink,
+            journal,
+            turn: turn_receipt,
+        }),
+        Arc::new(|_: &Ticket, _: &TurnSnapshot| DispatchDecision::Allow),
+        Arc::new(|| {}),
+    );
+    service.redactors = Arc::new(move || {
+        if first.swap(false, Ordering::AcqRel) {
+            std::fs::write(&gate_path, b"entered").unwrap();
+            entered_factory.notify_one();
+            let mut allowed = barrier.0.lock().unwrap();
+            while !*allowed {
+                allowed = barrier.1.wait(allowed).unwrap();
+            }
+        }
+        Box::new(Identity)
+    });
+    let host = CodexHost::start(selected, service).unwrap();
+    let s = snapshot(home.path(), "one", Approval::ReadOnly);
+    let key = ticket(&s);
+    let w = worker(&host, home.path(), &s, None, false);
+    let start_worker = w.clone();
+    let start_key = key.clone();
+    let starting =
+        tokio::spawn(async move { start_worker.start(start_key, s, "normal".into()).await });
+    let entered_result = tokio::time::timeout(WAIT, entered.notified()).await;
+    let observation = tokio::time::timeout(
+        WAIT,
+        until(|| {
+            waiting.is_file()
+                || matches!(
+                    host.status(),
+                    HostStatus::Retiring | HostStatus::Stopped | HostStatus::Unconfirmed
+                )
+        }),
+    )
+    .await;
+    let held_frames = std::fs::read_to_string(&wire)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|v| serde_json::from_str::<Value>(v).ok())
+        .filter(|v| {
+            matches!(
+                v["method"].as_str(),
+                Some(
+                    "turn/started"
+                        | "turn/completed"
+                        | "item/started"
+                        | "item/completed"
+                        | "item/agentMessage/delta"
+                        | "thread/tokenUsage/updated"
+                )
+            )
+        })
+        .count();
+    drop(release_on_unwind);
+    let started = tokio::time::timeout(WAIT, starting).await.unwrap().unwrap();
+    let outcome = match started {
+        Ok(started) => Some(
+            tokio::time::timeout(WAIT, started.done)
+                .await
+                .unwrap()
+                .outcome()
+                .clone(),
+        ),
+        Err(_) => None,
+    };
+    let closed = w.close(key).await;
+    let stopped = tokio::time::timeout(WAIT, host.shutdown()).await;
+    eprintln!(
+        "controlled completion consumer metadata held_routed={held_frames} capacity=8 receipt_wait={} unsupported={}",
+        waiting.is_file(),
+        matches!(&outcome, Some(Outcome::Failure { code, .. }) if code == "unsupported_background")
+    );
+    assert!(entered_result.is_ok());
+    assert!(observation.is_ok());
+    assert!(closed.is_ok());
+    assert!(stopped.unwrap().is_ok());
+    assert_eq!(outcome, Some(Outcome::Success));
+    assert!(waiting.is_file());
+    assert_eq!(held_frames, 1);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn blocked_final_gate_survives_prepare_abort_without_late_send_or_false_cleanup() {
     pult_core::panic_guard::install();
