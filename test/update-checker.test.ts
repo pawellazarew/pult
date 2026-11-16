@@ -25,25 +25,25 @@ const pub = publicOf(privateKey)
 const KEYS = [{ id: pub.keyId, publicKey: pub.raw.toString('base64') }]
 const URL_LATEST = 'https://example.invalid/latest.json'
 
-function latestJson(version: string): Buffer {
+function latestJson(version: string, size = 10): Buffer {
   const m = {
     schema: 1, version, released: '2026-10-19T10:00:00.000Z',
     notes: `https://github.com/pawellazarew/pult/releases/tag/v${version}`,
-    package: { url: `https://example.invalid/pult-${version}.tgz`, sha256: 'c'.repeat(64), size: 10 },
+    package: { url: `https://example.invalid/pult-${version}.tgz`, sha256: 'c'.repeat(64), size },
     app: { version: '0.1.14', minVersion: '0.1.13' },
   }
   return Buffer.from(signEnvelope(Buffer.from(JSON.stringify(m)), privateKey))
 }
 
 /** Подставной канал: отдаёт latest.json нужной версии и считает запросы. */
-function channel(version: () => string): { http: HttpGet; calls: () => number } {
+function channel(version: () => string, size = 10): { http: HttpGet; calls: () => number } {
   let n = 0
   return {
     calls: () => n,
     http: async (url) => {
       n++
       if (url !== URL_LATEST) return { status: 404, header: () => null, body: null }
-      const b = latestJson(version())
+      const b = latestJson(version(), size)
       return { status: 200, header: () => null, body: (async function* () { yield b })() }
     },
   }
@@ -749,6 +749,18 @@ describe('0.3.16: фоновая подготовка и «Перезапуст�
     })
     return { c, stages, applies, launched }
   }
+
+  it('stage IPC accepts an exact 58 percent from 58 bytes of the signed 100-byte artifact', async () => {
+    const home = tempHome()
+    const { c, stages } = staging(home, { http: channel(() => '0.2.28', 100).http })
+    try {
+      await c.check()
+      stages[0]?.emit('message', { type: 'pult.update.progress', version: '0.2.28', progress: { received: 58, total: 100, percent: 58 } })
+      assert.deepEqual(c.status().staged?.progress, { artifact: 'package', received: 58, total: 100, percent: 58 })
+      stages[0]?.emit('exit', 1, null)
+      assert.ok(await waitFor(() => c.status().staged?.state === 'failed', 2000))
+    } finally { c.stop(); home.remove() }
+  })
 
   it('stage IPC accepts only bounded monotonic bytes for the exact signed version and ignores late messages', async () => {
     const home = tempHome()

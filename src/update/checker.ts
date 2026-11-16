@@ -289,7 +289,7 @@ function downloadProgressReader(version: string, expectedSize: number | undefine
     if (typeof received !== 'number' || !Number.isSafeInteger(received) || received < 0 || received > expectedSize || total !== expectedSize
       || typeof percent !== 'number' || !Number.isInteger(percent) || percent < 0 || percent > 100
       || received < lastReceived || percent < lastPercent
-      || (percent === 100 ? received !== total : percent !== Math.min(99, Math.floor(received / expectedSize * 100)))) return null
+      || (percent === 100 ? received !== total : percent !== Math.min(99, Math.floor(received * 100 / expectedSize)))) return null
     lastReceived = received
     lastPercent = percent
     return { artifact: 'package', received, total, percent }

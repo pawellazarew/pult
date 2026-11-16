@@ -249,6 +249,19 @@ describe('сеть канала: https, редиректы, потолки', () 
     assert.deepEqual(readFileSync(file), data)
   })
 
+  it('download progress reports an exact 58 of 100 bytes as 58 percent', async () => {
+    const data = Buffer.alloc(100, 0x61)
+    const file = join(dir, 'progress-exact-percent.tgz')
+    const seen: number[] = []
+    await downloadTo('https://a.example/p.tgz', file, {
+      http: server({ 'https://a.example/p.tgz': () => ok([data.subarray(0, 58), data.subarray(58)]) }).http,
+      size: data.length, sha256: createHash('sha256').update(data).digest('hex'), what: 'p.tgz',
+      onProgress: (p) => { seen.push(p.percent) },
+    })
+    assert.deepEqual(seen, [0, 58, 99, 100])
+    assert.deepEqual(readFileSync(file), data)
+  })
+
   it('download progress counts written bytes and reports 100 only after verified on-disk completion', async () => {
     const data = Buffer.from('abcdef')
     const sha = createHash('sha256').update(data).digest('hex')

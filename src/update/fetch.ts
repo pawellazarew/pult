@@ -232,7 +232,7 @@ export async function downloadTo(url: string, file: string, opts: DownloadOption
   let total = 0
   let lastPercent = -1
   const report = (verified = false): void => {
-    const percent = verified ? 100 : Math.min(99, Math.floor(total / opts.size * 100))
+    const percent = verified ? 100 : Math.min(99, Math.floor(total * 100 / opts.size))
     if (percent === lastPercent) return
     lastPercent = percent
     // A closed UI/IPC channel must not invalidate a signed download.
