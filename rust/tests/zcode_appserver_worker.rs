@@ -1481,6 +1481,14 @@ async fn actual_holder_unknown_exit_quarantines_without_external_cancel_or_repla
     let joined: Value =
         serde_json::from_slice(&std::fs::read(f.home.join("forced-holder-proof.json")).unwrap())
             .unwrap();
+    if joined["real_holder_exit_zero"] != true {
+        eprintln!(
+            "[forced-holder-fixture] real-holder-code={} close-observed={} owner-rebound={}",
+            joined["real_holder_code"],
+            joined["native_close_observed"],
+            joined["internal_owner_rebound"]
+        );
+    }
     assert_eq!(joined["real_holder_exit_zero"], true);
     assert_eq!(joined["native_close_observed"], true);
     assert_eq!(joined["internal_owner_rebound"], true);
@@ -1554,6 +1562,14 @@ async fn before_native_started_unknown_holder_exit_reaches_quarantine_without_st
     let joined: Value =
         serde_json::from_slice(&std::fs::read(f.home.join("forced-holder-proof.json")).unwrap())
             .unwrap();
+    if joined["real_holder_exit_zero"] != true {
+        eprintln!(
+            "[forced-holder-fixture] real-holder-code={} close-observed={} owner-rebound={}",
+            joined["real_holder_code"],
+            joined["native_close_observed"],
+            joined["internal_owner_rebound"]
+        );
+    }
     assert_eq!(joined["real_holder_exit_zero"], true);
     assert_eq!(joined["native_close_observed"], false);
     let pid: u32 = std::fs::read_to_string(f.home.join("provider.pid"))
@@ -1618,6 +1634,14 @@ async fn unknown_cleanup_before_resources_preserves_quarantine_without_drain_ent
     let joined: Value =
         serde_json::from_slice(&std::fs::read(f.home.join("forced-holder-proof.json")).unwrap())
             .unwrap();
+    if joined["real_holder_exit_zero"] != true {
+        eprintln!(
+            "[forced-holder-fixture] real-holder-code={} close-observed={} owner-rebound={}",
+            joined["real_holder_code"],
+            joined["native_close_observed"],
+            joined["internal_owner_rebound"]
+        );
+    }
     assert_eq!(joined["real_holder_exit_zero"], true);
     assert_eq!(joined["native_close_observed"], true);
     assert!(matches!(
