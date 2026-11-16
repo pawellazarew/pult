@@ -12,6 +12,9 @@ use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+#[path = "owner_private_file.rs"]
+mod owner_private_file;
+
 #[derive(Clone, Debug, PartialEq)]
 struct Identity {
     dev: u64,
@@ -320,12 +323,25 @@ impl Registry {
     }
 
     pub(crate) fn configured_language(home: &Path) -> Result<crate::locale::Setting> {
-        let config = read_private(&home.join("config.json"))?;
+        // CLI locale reads have their own config-only bound. Registry/session
+        // storage keeps its existing reader and transaction semantics.
+        let config = owner_private_file::read(
+            home,
+            Path::new("config.json"),
+            1024 * 1024,
+            owner_private_file::Policy {
+                private_config: true,
+            },
+        )?;
         match config {
             None => Ok(crate::locale::Setting::Auto),
             Some(config) => {
-                let raw: Box<RawValue> = serde_json::from_slice(&config.bytes)?;
-                let fields = crate::history::Fields::parse(&raw)?;
+                let fields = serde_json::from_slice::<Box<RawValue>>(&config)
+                    .ok()
+                    .and_then(|raw| crate::history::Fields::parse(&raw).ok());
+                let Some(fields) = fields else {
+                    return Ok(crate::locale::Setting::Auto);
+                };
                 Ok(crate::locale::setting(fields.get("language")))
             }
         }

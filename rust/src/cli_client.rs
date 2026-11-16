@@ -1,12 +1,15 @@
 //! Owner-only read-only event subscription client. No daemon spawn/retry/provider access.
 use serde_json::{Value, json, value::RawValue};
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::os::fd::AsFd;
 use std::path::Path;
 use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+
+#[path = "owner_private_file.rs"]
+mod owner_private_file;
 
 const HANDSHAKE: Duration = Duration::from_secs(10);
 const REPLAY_WAIT: Duration = Duration::from_secs(3);
@@ -265,18 +268,29 @@ async fn owner_connection(home: &Path) -> Result<(BufReader<UnixStream>, &'stati
         message: "event subscription requires a private Rust scratch home",
     })?;
     let locale = pult_core::cli_locale(&home).map_err(|_| io_error())?;
-    Ok((owner_connection_at(&home).await?, locale))
-}
-async fn owner_connection_at(home: &Path) -> Result<BufReader<UnixStream>, Error> {
-    let mut token = String::new();
-    std::fs::File::open(home.join("run/token"))
+    let token = owner_token(&home)
         .map_err(|_| io_error())?
-        .take(65)
-        .read_to_string(&mut token)
-        .map_err(|_| io_error())?;
-    if token.len() != 64 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(io_error());
-    }
+        .ok_or_else(io_error)?;
+    Ok((owner_connection_at(&home, &token).await?, locale))
+}
+fn owner_token(home: &Path) -> Result<Option<String>, owner_private_file::ReadError> {
+    let Some(bytes) = owner_private_file::read(
+        home,
+        Path::new("run/token"),
+        64,
+        owner_private_file::Policy {
+            private_config: false,
+        },
+    )?
+    else {
+        return Ok(None);
+    };
+    Ok(
+        (bytes.len() == 64 && bytes.iter().all(u8::is_ascii_hexdigit))
+            .then(|| String::from_utf8(bytes).expect("ASCII hex token")),
+    )
+}
+async fn owner_connection_at(home: &Path, token: &str) -> Result<BufReader<UnixStream>, Error> {
     let mut socket =
         tokio::time::timeout(HANDSHAKE, UnixStream::connect(home.join("run/pultd.sock")))
             .await
@@ -372,7 +386,18 @@ impl OwnerClient {
         let locale = pult_core::cli_locale(&home).map_err(|_| {
             RpcError::local("invalid_config", "service status locale is unavailable")
         })?;
-        let reply = match owner_connection_at(&home).await {
+        // Only transport failures become an offline observation. Unsafe local
+        // owner files must fail before a socket request or service query.
+        let token = owner_token(&home).map_err(|_| {
+            RpcError::local(
+                "invalid_owner_input",
+                "daemon connection or response failed",
+            )
+        })?;
+        let Some(token) = token else {
+            return Ok((home, locale, None));
+        };
+        let reply = match owner_connection_at(&home, &token).await {
             Ok(reader) => {
                 let mut client = Self {
                     reader,

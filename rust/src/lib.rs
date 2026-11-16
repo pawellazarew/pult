@@ -1481,7 +1481,7 @@ pub fn display_string(raw: &RawValue) -> Result<String> {
 }
 
 pub fn cli_locale(home: &Path) -> Result<&'static str> {
-    let configured = registry::Registry::configured_language(home).unwrap_or(locale::Setting::Auto);
+    let configured = registry::Registry::configured_language(home)?;
     let setting = std::env::var("PULT_LANG")
         .ok()
         .and_then(|s| locale::cli_setting(&s))

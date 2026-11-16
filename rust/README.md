@@ -92,6 +92,10 @@ scratch=$(mktemp -d)
 полем daemon.browser, если демон отвечает. Без установки, запуска браузера и
 создания layout; договор — [R4-BROWSER-STATUS](../docs/rust/R4-BROWSER-STATUS.md).
 
+Общий owner transport читает token без FIFO/symlink зависаний; CLI display config
+ограничен 1 MiB, unsafe IO остаётся ошибкой, обычный malformed JSON — Auto.
+Договор и actual CLI проверка — [R4-CLI-OWNER-IO](../docs/rust/R4-CLI-OWNER-IO.md).
+
 `events tail` теперь повторяет пользовательский потоковый контракт TS CLI: по умолчанию
 следит за новыми событиями; `--no-follow` заканчивает replay, `--limit N` ограничивает
 число показанных событий, `--json` печатает один event на строку. Без `--json` — текст
