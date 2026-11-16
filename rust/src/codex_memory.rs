@@ -49,6 +49,10 @@ pub(crate) struct Registry {
     active_memory: Arc<Semaphore>,
     identity_bytes: Arc<Semaphore>,
     identities: Arc<Semaphore>,
+    #[cfg(test)]
+    waiting_slots: Mutex<std::collections::HashSet<Ticket>>,
+    #[cfg(test)]
+    waiting_changed: Notify,
 }
 pub(crate) struct Registration {
     registry: Weak<Registry>,
@@ -123,6 +127,27 @@ struct Call {
     consumed: bool,
     arguments: Value,
 }
+#[cfg(test)]
+struct WaitingSlot<'a>(&'a Registry, Ticket);
+#[cfg(test)]
+impl<'a> WaitingSlot<'a> {
+    fn new(registry: &'a Registry, ticket: Ticket) -> Self {
+        registry
+            .waiting_slots
+            .lock()
+            .unwrap()
+            .insert(ticket.clone());
+        registry.waiting_changed.notify_waiters();
+        Self(registry, ticket)
+    }
+}
+#[cfg(test)]
+impl Drop for WaitingSlot<'_> {
+    fn drop(&mut self) {
+        self.0.waiting_slots.lock().unwrap().remove(&self.1);
+        self.0.waiting_changed.notify_waiters();
+    }
+}
 impl Registry {
     pub(crate) fn new(backend: Weak<Backend>) -> Arc<Self> {
         Arc::new(Self {
@@ -133,6 +158,10 @@ impl Registry {
             active_memory: Arc::new(Semaphore::new(2)),
             identity_bytes: Arc::new(Semaphore::new(8 * 1024 * 1024)),
             identities: Arc::new(Semaphore::new(8192)),
+            #[cfg(test)]
+            waiting_slots: Mutex::new(std::collections::HashSet::new()),
+            #[cfg(test)]
+            waiting_changed: Notify::new(),
         })
     }
     pub(crate) fn register(
@@ -207,10 +236,14 @@ impl Registry {
             if *cancelled.borrow() {
                 return Err(cancelled_error());
             }
+            #[cfg(test)]
+            let waiting = WaitingSlot::new(self, ticket.clone());
             let slot = tokio::select! {
                 slot=self.active_memory.clone().acquire_owned()=>slot.map_err(|_|cancelled_error())?,
                 _=cancelled.changed()=>return Err(cancelled_error()),
             };
+            #[cfg(test)]
+            drop(waiting);
             if *cancelled.borrow() {
                 return Err(cancelled_error());
             }
@@ -229,6 +262,18 @@ impl Registry {
             }))
         } else {
             Ok(None)
+        }
+    }
+    #[cfg(test)]
+    pub(crate) async fn wait_slot_test(&self, ticket: &Ticket) {
+        loop {
+            let changed = self.waiting_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.waiting_slots.lock().unwrap().contains(ticket) {
+                return;
+            }
+            changed.await;
         }
     }
     pub(crate) fn methods() -> &'static [&'static str] {

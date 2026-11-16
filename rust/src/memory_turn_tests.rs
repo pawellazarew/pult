@@ -2174,3 +2174,235 @@ async fn persistent_bridge_post_prepare_registry_verify_is_owned_and_runtime_sta
     );
     f.close().await;
 }
+
+struct PersistentFixtureProbe;
+impl crate::network_guard::Probe for PersistentFixtureProbe {
+    fn probe<'a>(
+        &'a self,
+        _: &'a str,
+        _: Option<&'a str>,
+        _: Duration,
+    ) -> crate::network_guard::ProbeFuture<'a> {
+        Box::pin(async {
+            crate::network_guard::ProbeResult {
+                status: Some(0),
+                stdout: b"loc=FI\n".to_vec(),
+                stderr_bytes: 0,
+            }
+        })
+    }
+}
+#[tokio::test]
+async fn persistent_bridge_cancel_after_actual_slot_entry_keeps_warm_provider_thread_and_helper() {
+    use crate::{
+        codex_runtime::{CodexRuntime, Dependencies, Network, TrustedCommand},
+        registry::Record,
+        turn_driver::Input,
+    };
+    use std::os::unix::fs::PermissionsExt;
+    let (_home, state, sink) = crate::runtime_journal::tests::fixture();
+    crate::initialize_scratch(&state.home).unwrap();
+    let account = tempfile::tempdir().unwrap();
+    let run = state.home.join("run");
+    std::fs::create_dir(&run).unwrap();
+    std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let listener = tokio::net::UnixListener::bind(run.join("pultd.sock")).unwrap();
+    let (server_stop, mut stopping) = watch::channel(false);
+    let serving = state.clone();
+    let server = tokio::spawn(async move {
+        let mut clients = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {_=stopping.changed()=>break,accepted=listener.accept()=>{let (socket,_)=accepted.unwrap();clients.spawn(crate::connection(socket,serving.clone(),stopping.clone()));}}
+        }
+        while let Some(result) = clients.join_next().await {
+            assert!(result.is_ok());
+        }
+    });
+    let cwd = state.home.join("project");
+    std::fs::create_dir(&cwd).unwrap();
+    *state.memory.lock().unwrap() = Ok(MemoryStore::open(&state.home).unwrap());
+    let keys: Vec<_> = ["warm-a", "peer-p", "peer-q"]
+        .into_iter()
+        .map(|name| SessionKey {
+            name: name.into(),
+            created_at: "2026-11-16T00:00:00Z".into(),
+        })
+        .collect();
+    for key in &keys {
+        let mut record = Record::default();
+        for (name, value) in [
+            ("name", key.name.as_str()),
+            ("createdAt", key.created_at.as_str()),
+            ("provider", "codex"),
+            ("cwd", cwd.to_str().unwrap()),
+            ("scope", "project"),
+            ("approval", "read-only"),
+            ("mode", "turn"),
+            ("status", "cold"),
+        ] {
+            record.set_string(name, value);
+        }
+        record.set_raw(
+            "memory",
+            serde_json::value::to_raw_value(&json!({"read":true,"write":"off"})).unwrap(),
+        );
+        state.registry.lock().unwrap().insert(record).unwrap();
+    }
+    let binary = |name: &str| {
+        std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(name)
+    };
+    let backend = Backend::new(Arc::downgrade(&state), binary("pult-memory-mcp"));
+    state.memory_turns.set(backend.clone()).ok().unwrap();
+    let mut consent = crate::consent_store::ConsentStore::open(&state.home).unwrap();
+    consent
+        .grant(&[Provider::Codex], chrono::Utc::now())
+        .unwrap();
+    let context = Context {
+        project_id: Some(crate::memory_project::resolve(&cwd).unwrap()),
+        session: Some(keys[0].name.clone()),
+    };
+    let note=state.memory.lock().unwrap().as_mut().unwrap().execute("memory.add",&json!({"commandId":"warm-seed","name":"Warm memory","summary":"unchanged","details":"owned fixture data","reason":"Owner test seed"}),&context).unwrap();
+    let runtime = CodexRuntime::new_with_memory(
+        Dependencies {
+            home: state.home.clone(),
+            registry: state.registry.clone(),
+            consent: Arc::new(Mutex::new(consent)),
+            driver: state.driver.get().unwrap().clone(),
+            sink,
+        },
+        Default::default(),
+        TrustedCommand {
+            holder: binary("pult-worker-holder"),
+            program: "/usr/bin/python3".into(),
+            prefix_args: vec![
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/codex_memory_host.py")
+                    .into_os_string(),
+                state.home.clone().into_os_string(),
+            ],
+        },
+        crate::worker_env::Environment::from([
+            ("HOME".into(), account.path().as_os_str().to_os_string()),
+            ("PATH".into(), "/usr/bin:/bin".into()),
+        ]),
+        Network::Shared(Arc::new(crate::network_guard::NetworkGuard::new(Arc::new(
+            PersistentFixtureProbe,
+        )))),
+        Default::default(),
+        Some(backend.clone()),
+    )
+    .unwrap();
+    let input = |run: &str, hold: bool| Input {
+        text: json!({"run":run,"id":note["id"],"mode":if hold{"hold"}else{"complete"}}).to_string(),
+        metadata: Default::default(),
+    };
+    let native_file = account.path().join("native/memory-fixture.jsonl");
+    let evidence = || -> Vec<Value> {
+        std::fs::read_to_string(&native_file)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect()
+    };
+    let body: Result<(bool, bool, bool, bool), String> = async {
+        let mut a = bounded(runtime.execute(keys[0].clone(), input("A-warm", false)))
+            .await
+            .map_err(|e| format!("A warm execute: {e}"))?;
+        bounded(a.accepted())
+            .await
+            .map_err(|e| format!("A warm accepted: {e:?}"))?;
+        bounded(a.wait())
+            .await
+            .map_err(|e| format!("A warm wait: {e:?}"))?;
+        let before = evidence()
+            .into_iter()
+            .find(|row| row["kind"] == "result" && row["run"] == "A-warm")
+            .ok_or("missing actual A MCP result")?;
+        let helper = evidence()
+            .into_iter()
+            .find(|row| row["kind"] == "mcp-started" && row["thread"] == before["thread"])
+            .ok_or("missing actual A MCP helper")?;
+        let mut peers = Vec::new();
+        for (key, run) in keys[1..].iter().zip(["P-hold", "Q-hold"]) {
+            let mut peer = bounded(runtime.execute(key.clone(), input(run, true)))
+                .await
+                .map_err(|e| format!("peer execute: {e}"))?;
+            bounded(peer.accepted())
+                .await
+                .map_err(|e| format!("peer accepted: {e:?}"))?;
+            peers.push(peer);
+        }
+        let mut waiting =
+            bounded(runtime.execute(keys[0].clone(), input("A-cancel-before-dispatch", true)))
+                .await
+                .map_err(|e| format!("A waiting execute: {e}"))?;
+        // Test-only exact Ticket observation proves CodexHost.begin and actual
+        // Registry.prepare reached the exhausted global two-slot boundary.
+        bounded(backend.bridge().wait_slot_test(waiting.ticket())).await;
+        runtime
+            .stop(&keys[0], None)
+            .map_err(|e| format!("stop A: {e}"))?;
+        let cancelled = bounded(waiting.accepted()).await.is_err();
+        let _ = bounded(waiting.wait()).await;
+        for (key, peer) in keys[1..].iter().zip(peers.iter_mut()) {
+            runtime
+                .stop(key, None)
+                .map_err(|e| format!("stop peer: {e}"))?;
+            let _ = bounded(peer.wait()).await;
+        }
+        let mut retry = bounded(runtime.execute(keys[0].clone(), input("A-after-cancel", false)))
+            .await
+            .map_err(|e| format!("A retry execute: {e}"))?;
+        let accepted = bounded(retry.accepted()).await.is_ok();
+        let _ = bounded(retry.wait()).await;
+        let rows = evidence();
+        let after = rows
+            .iter()
+            .find(|row| row["kind"] == "result" && row["run"] == "A-after-cancel");
+        let same = after.is_some_and(|after| {
+            after["pid"] == before["pid"]
+                && after["thread"] == before["thread"]
+                && after["get"]["version"] == 1
+        }) && rows
+            .iter()
+            .filter(|row| row["kind"] == "mcp-started" && row["thread"] == before["thread"])
+            .count()
+            == 1;
+        let helper_alive = helper["mcpPid"].as_i64().is_some_and(|pid| {
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok()
+        });
+        Ok((cancelled, accepted, same, helper_alive))
+    }
+    .await;
+    let cleanup = bounded(runtime.shutdown()).await;
+    server_stop.send_replace(true);
+    bounded(server).await.unwrap();
+    bounded(state.host_jobs.wait()).await;
+    cleanup.unwrap();
+    let (cancelled, retry, same, helper) = body.unwrap();
+    eprintln!(
+        "[warm-slot] cancelled={cancelled} retry-accepted={retry} same-provider-thread-result={same} helper-alive={helper}"
+    );
+    assert!(
+        cancelled,
+        "slot-blocked A was unexpectedly accepted before Stop"
+    );
+    assert!(
+        retry,
+        "cancelled A could not explicitly retry after actual exhausted-slot entry"
+    );
+    assert!(
+        same,
+        "retry changed native provider/thread/helper or lost actual memory result"
+    );
+    assert!(
+        helper,
+        "healthy warm helper was killed by pre-dispatch cancellation"
+    );
+}
