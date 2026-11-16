@@ -23,6 +23,8 @@ export const ENVELOPE_SCHEMA = 1
 export const MANIFEST_SCHEMA = 1
 /** latest.json — пара килобайт; 64 КБ — потолок, после которого это уже не манифест. */
 export const MANIFEST_MAX_BYTES = 64 * 1024
+/** Bounded markdown carried inside the signed payload (old readers ignore it). */
+export const CHANGELOG_MAX_BYTES = 24 * 1024
 /** Тарбол пакета ~1–2 МБ; потолок с запасом, чтобы чужой «манифест» не залил диск. */
 export const PACKAGE_MAX_BYTES = 200 * 1024 * 1024
 /** Потолок поля манифеста; сам архив окна демон качает с потолком APP_ZIP_MAX_BYTES (appUpdate.ts, 0.3.4). */
@@ -53,6 +55,7 @@ export interface Manifest {
   version: string
   released: string
   notes: string
+  changelog?: string
   package: ReleaseAsset
   app?: ReleaseApp
 }
@@ -170,6 +173,12 @@ export function parseManifest(bytes: Buffer): Manifest {
   const notes = httpsUrl(o['notes'], 'notes')
   const pkg = asset(o['package'], 'package', PACKAGE_MAX_BYTES)
   const m: Manifest = { schema: 1, version, released, notes, package: pkg }
+  if (o['changelog'] !== undefined) {
+    if (typeof o['changelog'] !== 'string' || Buffer.byteLength(o['changelog'], 'utf8') > CHANGELOG_MAX_BYTES) {
+      throw new ManifestError(`changelog: не строка до ${CHANGELOG_MAX_BYTES} байт`)
+    }
+    m.changelog = o['changelog']
+  }
   if (o['app'] !== undefined) {
     const a = obj(o['app'])
     if (!a) throw new ManifestError('app: не объект')

@@ -132,6 +132,7 @@ describe('release.mjs: сухой прогон', () => {
     assert.equal(m.package.size, tgz.length)
     assert.equal(m.package.url, `https://github.com/pawellazarew/pult/releases/download/v${VERSION}/pult-${VERSION}.tgz`)
     assert.equal(m.notes, `https://github.com/pawellazarew/pult/releases/tag/v${VERSION}`)
+    assert.equal(m.changelog, readFileSync(join(ROOT, 'docs', 'releases', `${VERSION}.md`), 'utf8'))
     // Окно — тем же номером, что пакет; minVersion заморожен для Пультов старше 0.3.16.
     assert.deepEqual(m.app, { version: VERSION, minVersion: WINDOW_MIN_VERSION })
 

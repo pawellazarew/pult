@@ -7,17 +7,20 @@
 // подпись чужим ключом — отказ. Каждый поднятый демон гасится.
 
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
+import { pathToFileURL } from 'node:url'
 import { createHash, generateKeyPairSync } from 'node:crypto'
 import type { KeyObject } from 'node:crypto'
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir, userInfo } from 'node:os'
 import { join } from 'node:path'
 import { after, before, describe, it } from 'node:test'
 import { layout } from '../dist/core/paths.js'
 import type { PultPaths } from '../dist/core/paths.js'
+import { spawnStageProcess, spawnUpdateProcess } from '../dist/update/checker.js'
 import { publicOf, signEnvelope } from '../dist/update/manifest.js'
 import { FAKE_CLAUDE, FAKE_CODEX, waitFor } from './helpers.js'
-import { CLI, NODE_DIR, packPult, runProc } from './pack-helpers.js'
+import { CLI, NODE_DIR, ROOT, packPult, runProc } from './pack-helpers.js'
 import type { Run } from './pack-helpers.js'
 
 const BASE = 'https://example.invalid/releases/download'
@@ -255,6 +258,124 @@ describe('pult update из канала: --expect, окно, неподписа�
 
 // 0.3.16: фоновая подготовка. `pult update --stage` ставит новую версию в versions/<v> и НЕ переключает; потом голый
 // `pult update` только переключает (без загрузки), а без сети — переключает на подготовленную `--expect`.
+describe('detached update child progress IPC', () => {
+  it('the real update CLI reports verified package bytes through its direct launcher', async () => {
+    const h = makeHome()
+    try {
+      assert.equal((await cli(h, ['update', '--from', tgz.A])).code, 0)
+      publish(h, '0.0.2', tgz.B)
+      const child = spawnUpdateProcess(h.paths, '0.0.2', h.env)
+      const messages: unknown[] = []
+      child.on('message', (m) => { messages.push(m) })
+      const code = await new Promise<number | null>((resolve, reject) => { child.once('error', reject); child.once('exit', resolve) })
+      assert.equal(code, 0, readFileSync(h.paths.updateLog, 'utf8'))
+      const size = statSync(tgz.B).size
+      assert.ok(messages.length >= 3)
+      assert.deepEqual(messages[0], { type: 'pult.update.progress', version: '0.0.2', progress: { received: 0, total: size, percent: 0 } })
+      assert.deepEqual(messages.at(-1), { type: 'pult.update.progress', version: '0.0.2', progress: { received: size, total: size, percent: 100 } })
+      assert.equal(current(h), join('versions', '0.0.2'))
+    } finally { await teardown(h) }
+  })
+
+  it('a partial download leaves current unchanged and the detached child finishes after its parent disconnects', async () => {
+    const h = makeHome()
+    let updaterPid: number | null = null
+    const ack = join(h.dir, 'continue-download')
+    const result = join(h.dir, 'updater-result.json')
+    try {
+      assert.equal((await cli(h, ['update', '--from', tgz.A])).code, 0)
+      publish(h, '0.0.2', tgz.B)
+      const childSource = join(h.dir, 'updater-child.mjs')
+      const channelModule = pathToFileURL(join(ROOT, 'dist', 'update', 'channel.js')).href
+      const fetchModule = pathToFileURL(join(ROOT, 'dist', 'update', 'fetch.js')).href
+      const pathsModule = pathToFileURL(join(ROOT, 'dist', 'core', 'paths.js')).href
+      writeFileSync(childSource, `
+import { readFileSync, existsSync, writeFileSync } from 'node:fs';
+import { updateLatest } from ${JSON.stringify(channelModule)};
+import { dirHttpGet } from ${JSON.stringify(fetchModule)};
+import { layout } from ${JSON.stringify(pathsModule)};
+const base = dirHttpGet(${JSON.stringify(h.rel)});
+const data = readFileSync(${JSON.stringify(join(h.rel, 'pult-0.0.2.tgz'))});
+const http = async (url, signal) => {
+  if (!url.endsWith('.tgz')) return base(url, signal);
+  return { status: 200, header: () => null, body: (async function* () {
+    yield data.subarray(0, Math.floor(data.length / 2));
+    const until = Date.now() + 10000;
+    while (!existsSync(${JSON.stringify(ack)})) {
+      if (Date.now() > until) throw Error('fixture acknowledgement missing');
+      await new Promise(r => setTimeout(r, 10));
+    }
+    yield data.subarray(Math.floor(data.length / 2));
+  })() };
+};
+const code = await updateLatest(layout(${JSON.stringify(h.paths.home)}), { out: () => {}, err: () => {} }, { env: process.env, http, expect: '0.0.2' });
+writeFileSync(${JSON.stringify(result)}, JSON.stringify({code}));
+process.exit(code);
+`)
+      const quote = (value: string): string => `'${value.replace(/'/g, "'\\''")}'`
+      writeFileSync(h.paths.cliLauncher, `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(childSource)} "$@"\n`, { mode: 0o755 })
+      chmodSync(h.paths.cliLauncher, 0o755)
+      const owner = join(h.dir, 'owner.mjs')
+      writeFileSync(owner, `
+import { spawnUpdateProcess } from ${JSON.stringify(pathToFileURL(join(ROOT, 'dist', 'update', 'checker.js')).href)};
+import { layout } from ${JSON.stringify(pathsModule)};
+const child = spawnUpdateProcess(layout(${JSON.stringify(h.paths.home)}), '0.0.2', process.env);
+const timer = setTimeout(() => { child.kill('SIGTERM'); process.exit(2); }, 10000);
+child.on('error', () => process.exit(3));
+child.on('message', m => {
+  if (m.type !== 'pult.update.progress' || !(m.progress.percent > 0 && m.progress.percent < 100)) return;
+  clearTimeout(timer);
+  process.send({ pid: child.pid, progress: m.progress }, () => process.disconnect());
+});
+`)
+      const parent = spawn(process.execPath, [owner], { env: h.env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] })
+      let ownerResult: { pid: number; progress: { received: number; total: number; percent: number } } | null = null
+      parent.on('message', (m) => { ownerResult = m as typeof ownerResult })
+      const code = await new Promise<number | null>((resolve, reject) => { parent.once('error', reject); parent.once('exit', resolve) })
+      assert.equal(code, 0)
+      const partial = ownerResult as { pid: number; progress: { received: number; total: number; percent: number } } | null
+      assert.ok(partial)
+      updaterPid = partial.pid
+      assert.equal(partial.progress.received, Math.floor(statSync(tgz.B).size / 2))
+      assert.equal(partial.progress.percent, Math.floor(partial.progress.received / partial.progress.total * 100))
+      assert.equal(current(h), join('versions', '0.0.1'))
+      assert.doesNotThrow(() => process.kill(updaterPid as number, 0), 'updater died with its IPC parent')
+      writeFileSync(ack, 'continue')
+      assert.ok(await waitFor(() => existsSync(result), 20_000))
+      assert.deepEqual(JSON.parse(readFileSync(result, 'utf8')), { code: 0 })
+      assert.equal(current(h), join('versions', '0.0.2'))
+    } finally {
+      writeFileSync(ack, 'continue')
+      if (updaterPid !== null && !existsSync(result)) { try { process.kill(updaterPid, 'SIGTERM') } catch { /* owned child already exited */ } }
+      await teardown(h)
+    }
+  })
+})
+
+describe('stage child private progress IPC', () => {
+  it('the real spawned CLI sends verified package bytes without switching the installed version', async () => {
+    const h = makeHome()
+    try {
+      assert.equal((await cli(h, ['update', '--from', tgz.A])).code, 0)
+      publish(h, '0.0.2', tgz.B)
+      const child = spawnStageProcess(h.paths, h.env)
+      const messages: unknown[] = []
+      child.on('message', (m) => { messages.push(m) })
+      const code = await new Promise<number | null>((resolve, reject) => {
+        child.once('error', reject)
+        child.once('exit', resolve)
+      })
+      assert.equal(code, 0, readFileSync(h.paths.updateLog, 'utf8'))
+      const size = statSync(tgz.B).size
+      assert.ok(messages.length >= 3)
+      assert.deepEqual(messages[0], { type: 'pult.update.progress', version: '0.0.2', progress: { received: 0, total: size, percent: 0 } })
+      assert.deepEqual(messages.at(-1), { type: 'pult.update.progress', version: '0.0.2', progress: { received: size, total: size, percent: 100 } })
+      assert.equal(current(h), join('versions', '0.0.1'))
+      assert.equal(readFileSync(join(h.paths.versions, '0.0.2', '.channel-sha256'), 'utf8').trim(), sha(tgz.B))
+    } finally { await teardown(h) }
+  })
+})
+
 describe('pult update --stage: подготовить заранее, не переключая', () => {
   let h: Home
   before(async () => {

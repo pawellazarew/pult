@@ -11,7 +11,7 @@ import { after, describe, it } from 'node:test'
 import { RELEASE_KEYS } from '../dist/update/keys.js'
 import type { TrustedKey } from '../dist/update/keys.js'
 import {
-  keyIdOf, MANIFEST_MAX_BYTES, PACKAGE_MAX_BYTES, parseManifest, publicOf, rawPublicKey, signEnvelope, verifyEnvelope,
+  keyIdOf, MANIFEST_MAX_BYTES, CHANGELOG_MAX_BYTES, PACKAGE_MAX_BYTES, parseManifest, publicOf, rawPublicKey, signEnvelope, verifyEnvelope,
 } from '../dist/update/manifest.js'
 import { downloadTo, fetchBytes, writeAll } from '../dist/update/fetch.js'
 import type { HttpGet, HttpResponse } from '../dist/update/fetch.js'
@@ -52,6 +52,19 @@ describe('latest.json: подпись и манифест', () => {
     assert.equal(m.package.size, 1234)
     assert.equal(m.app?.minVersion, '0.1.13')
     assert.equal(m.app?.['darwin-arm64']?.size, 99)
+  })
+
+  it('signed inline changelog is optional, byte-bounded and covered by the same signature', () => {
+    assert.equal(verifyEnvelope(signEnvelope(bytes(manifest()), A.priv), [A.trusted]).changelog, undefined)
+    const changelog = '# Release\n\n- Новая возможность'
+    const text = signEnvelope(bytes(manifest({ changelog })), A.priv)
+    assert.equal(verifyEnvelope(text, [A.trusted]).changelog, changelog)
+    for (const invalid of [42, null, 'я'.repeat(CHANGELOG_MAX_BYTES / 2 + 1)]) {
+      assert.throws(() => signEnvelope(bytes(manifest({ changelog: invalid })), A.priv), /changelog/)
+    }
+    const env = JSON.parse(text) as { payload: string }
+    env.payload = bytes(manifest({ changelog: 'modified' })).toString('base64')
+    assert.throws(() => verifyEnvelope(JSON.stringify(env), [A.trusted]), /подпись latest\.json не сходится/)
   })
 
   it('подменённый payload — отказ с одной строкой причины', () => {
@@ -234,6 +247,47 @@ describe('сеть канала: https, редиректы, потолки', () 
     const file = join(dir, 'ok.tgz')
     await downloadTo('https://a.example/p.tgz', file, { http: server({ 'https://a.example/p.tgz': () => ok(data) }).http, size: data.length, sha256: sha, what: 'p.tgz' })
     assert.deepEqual(readFileSync(file), data)
+  })
+
+  it('download progress counts written bytes and reports 100 only after verified on-disk completion', async () => {
+    const data = Buffer.from('abcdef')
+    const sha = createHash('sha256').update(data).digest('hex')
+    const file = join(dir, 'progress.tgz')
+    const seen: Array<{ received: number; total: number; percent: number }> = []
+    let fileReadableAt100 = false
+    let diskMatchesAt100 = false
+    await downloadTo('https://a.example/p.tgz', file, {
+      http: server({ 'https://a.example/p.tgz': () => ok([data.subarray(0, 2), data.subarray(2, 4), data.subarray(4)]) }).http,
+      size: data.length, sha256: sha, what: 'p.tgz',
+      onProgress: (p) => {
+        seen.push(p)
+        if (p.percent === 100) {
+          fileReadableAt100 = true
+          diskMatchesAt100 = readFileSync(file).equals(data)
+        }
+      },
+    })
+    assert.equal(fileReadableAt100, true)
+    assert.equal(diskMatchesAt100, true)
+    assert.deepEqual(seen, [
+      { received: 0, total: 6, percent: 0 },
+      { received: 2, total: 6, percent: 33 },
+      { received: 4, total: 6, percent: 66 },
+      { received: 6, total: 6, percent: 99 },
+      { received: 6, total: 6, percent: 100 },
+    ])
+    const badFile = join(dir, 'progress-bad.tgz')
+    const bad: number[] = []
+    await assert.rejects(downloadTo('https://a.example/p.tgz', badFile, {
+      http: server({ 'https://a.example/p.tgz': () => ok(data) }).http,
+      size: data.length, sha256: 'b'.repeat(64), what: 'p.tgz', onProgress: (p) => { bad.push(p.percent) },
+    }), /sha256/)
+    assert.deepEqual(bad, [0, 99])
+    assert.equal(existsSync(badFile), false)
+    await downloadTo('https://a.example/p.tgz', join(dir, 'closed-ui.tgz'), {
+      http: server({ 'https://a.example/p.tgz': () => ok(data) }).http,
+      size: data.length, sha256: sha, what: 'p.tgz', onProgress: () => { throw new Error('closed UI') },
+    })
   })
 
   it('загрузка: sha256 не тот, байтов больше или меньше заявленного — файла нет', async () => {

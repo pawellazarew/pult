@@ -27,7 +27,7 @@ import { VERSION } from '../core/version.js'
 import type { Io } from '../service/install.js'
 import { appDirs } from '../cli/ui.js'
 import { downloadTo, fetchBytes, FetchError, httpFor } from './fetch.js'
-import type { HttpGet } from './fetch.js'
+import type { DownloadProgress, HttpGet } from './fetch.js'
 import { RELEASE_KEYS } from './keys.js'
 import type { TrustedKey } from './keys.js'
 import { keyIdOf, MANIFEST_MAX_BYTES, ManifestError, rawPublicKey, verifyEnvelope } from './manifest.js'
@@ -92,6 +92,7 @@ export function releaseOf(m: Manifest): UpdateRelease {
     version: m.version,
     released: m.released,
     notes: m.notes,
+    ...(m.changelog !== undefined ? { changelog: m.changelog } : {}),
     ...(m.app ? { app: { version: m.app.version, minVersion: m.app.minVersion } } : {}),
   }
 }
@@ -235,8 +236,14 @@ function cleanDownloads(paths: PultPaths): void {
   for (const n of names) rmSync(join(paths.downloads, n), { recursive: true, force: true })
 }
 
+/** Best-effort private child→daemon metadata; never carries content, URLs or process arguments. */
+function reportDownload(version: string, progress: DownloadProgress): void {
+  if (!process.send || !process.connected) return
+  try { process.send({ type: 'pult.update.progress', version, progress }, () => { /* parent may have stopped */ }) } catch { /* no longer connected */ }
+}
+
 /** Скачать тарбол релиза в downloads/ (размер и sha256 — из подписанного манифеста). null — не вышло, причина в stderr. */
-async function downloadPackage(paths: PultPaths, io: Io, m: Manifest, env: NodeJS.ProcessEnv, http: HttpGet | undefined): Promise<string | null> {
+async function downloadPackage(paths: PultPaths, io: Io, m: Manifest, env: NodeJS.ProcessEnv, http: HttpGet | undefined, onProgress?: (progress: DownloadProgress) => void): Promise<string | null> {
   const v = m.version
   mkdirSync(paths.downloads, { recursive: true, mode: 0o700 })
   chmodSync(paths.downloads, 0o700)
@@ -248,6 +255,7 @@ async function downloadPackage(paths: PultPaths, io: Io, m: Manifest, env: NodeJ
       size: m.package.size,
       sha256: m.package.sha256,
       what: `pult-${v}.tgz`,
+      ...(onProgress ? { onProgress } : {}),
     })
   } catch (e) {
     if (!(e instanceof FetchError)) throw e
@@ -326,7 +334,7 @@ export async function updateLatest(paths: PultPaths, io: Io, opts: ChannelOption
     // Тестовый шов: «долгая загрузка», чтобы сквозной тест окна застал состояние «ставится». Только под PULT_TEST.
     const hold = Number(env['PULT_TEST'] === '1' ? env['PULT_TEST_UPDATE_HOLD_MS'] : NaN)
     if (Number.isFinite(hold) && hold > 0) await new Promise((res) => setTimeout(res, hold))
-    const tgz = await downloadPackage(paths, io, m, env, opts.http)
+    const tgz = await downloadPackage(paths, io, m, env, opts.http, (progress) => { reportDownload(v, progress) })
     if (tgz === null) { io.err(t('ничего не поставлено: current и работающий демон прежние')); return 1 }
     try {
       return await installTarball(paths, io, tgz, { ...tail, expectVersion: v, channelSha: m.package.sha256 })
@@ -371,7 +379,7 @@ export async function updateStage(paths: PultPaths, io: Io, opts: ChannelOptions
     }
     if (stagedReady(paths, v, m.package.sha256)) { io.out(t`${v} уже подготовлена`); prune(); return 0 }
     io.out(t`готовлю ${v}: скачиваю ${m.package.url}`)
-    const tgz = await downloadPackage(paths, io, m, env, opts.http)
+    const tgz = await downloadPackage(paths, io, m, env, opts.http, (progress) => { reportDownload(v, progress) })
     if (tgz === null) return 1
     try {
       const code = stageTarball(paths, io, tgz, { ...opts, env, expectVersion: v, action: 'channel', channelSha: m.package.sha256 })
