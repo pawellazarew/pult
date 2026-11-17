@@ -23,14 +23,12 @@ function render(text: string, type: 'user' | 'model' = 'user', streaming = false
 }
 
 describe('long message folding', () => {
-  it('keeps exactly 500 characters fully visible and folds the 501st for both authors', () => {
-    for (const type of ['user', 'model'] as const) {
-      assert.doesNotMatch(render('а'.repeat(500), type), /data-testid="message-fold"/)
-      const long = render('а'.repeat(500) + 'END_HIDDEN', type)
-      assert.match(long, /aria-expanded="false"/)
-      assert.match(long, /Развернуть/)
-      assert.doesNotMatch(long, /END_HIDDEN/)
-    }
+  it('keeps exactly 500 user characters visible and folds longer user messages', () => {
+    assert.doesNotMatch(render('а'.repeat(500)), /data-testid="message-fold"/)
+    const long = render('а'.repeat(500) + 'END_HIDDEN')
+    assert.match(long, /aria-expanded="false"/)
+    assert.match(long, /Развернуть/)
+    assert.doesNotMatch(long, /END_HIDDEN/)
   })
 
   it('counts Unicode code points and never cuts an emoji pair in the preview', () => {
@@ -40,17 +38,33 @@ describe('long message folding', () => {
     assert.doesNotMatch(long, /END_HIDDEN|�/)
   })
 
-  it('uses the same accessible folding control while a model answer streams', () => {
+  it('shows a long streaming model answer in full', () => {
     const long = render('б'.repeat(500) + 'STREAM_TAIL', 'model', true)
     assert.match(long, /data-streaming="1"/)
-    assert.match(long, /aria-controls="[^"]+" aria-expanded="false"/)
-    assert.doesNotMatch(long, /STREAM_TAIL/)
+    assert.doesNotMatch(long, /data-testid="message-fold"/)
+    assert.match(long, /STREAM_TAIL/)
   })
 
   it('does not offer code-copy actions for a truncated fenced-code preview', () => {
     const code = '```ts\n' + 'const value = 1;\n'.repeat(60) + '```'
-    const folded = render(code, 'model')
+    const folded = render(code, 'user')
     assert.match(folded, /data-testid="message-fold"/)
     assert.doesNotMatch(folded, /data-testid="md-copy"|data-testid="md-code"/)
+  })
+
+  it('shows complete model Markdown, tables, links and code beyond 500 characters', () => {
+    const text = '**Состояние задач**\n\n| Задача | Статус |\n|---|---|\n'
+      + '| [Задача 42](https://example.test/tasks/42) | **Готово** |\n\n'
+      + '- **Проверка** — `PASS`\n\n' + 'Подробности. '.repeat(100)
+      + '\n\n```ts\nconst result = true;\n```\n\nMODEL_TAIL'
+    const html = render(text, 'model')
+    assert.doesNotMatch(html, /data-testid="message-fold"/)
+    assert.match(html, /<strong>/)
+    assert.match(html, /<table>/)
+    assert.match(html, /<ul>/)
+    assert.match(html, /href="https:\/\/example.test\/tasks\/42"/)
+    assert.match(html, /data-testid="md-copy"/)
+    assert.match(html, /MODEL_TAIL/)
+    assert.doesNotMatch(html, /\*\*|\|---\|/)
   })
 })

@@ -23,37 +23,41 @@ describe('long messages in the conversation', () => {
   })
   after(async () => { await h?.close() })
 
-  it('expands and collapses both authors while copying the original complete text', async () => {
-    for (const [id, text, tail] of [[userId, userText, 'ХВОСТ_РЕПЛИКИ'], [modelId, modelText, 'ХВОСТ_ОТВЕТА']] as const) {
-      const message = h.win.locator(`.it[data-event-id="${id}"]`)
-      const toggle = message.getByTestId('message-fold')
-      await toggle.waitFor()
-      assert.equal(await toggle.getAttribute('aria-expanded'), 'false')
-      assert.doesNotMatch(await message.innerText(), new RegExp(tail))
-      await toggle.click()
-      assert.equal(await toggle.getAttribute('aria-expanded'), 'true')
-      assert.match(await message.innerText(), new RegExp(tail))
-      await message.getByTestId('msg-copy').click()
-      const copied = await h.app.evaluate(() => (globalThis as { __pultTestClipboard?: string }).__pultTestClipboard)
-      assert.equal(copied, text)
-      await toggle.click()
-      assert.equal(await toggle.getAttribute('aria-expanded'), 'false')
-      assert.doesNotMatch(await message.innerText(), new RegExp(tail))
-    }
+  it('folds user messages while model replies stay fully visible', async () => {
+    const message = h.win.locator(`.it[data-event-id="${userId}"]`)
+    const toggle = message.getByTestId('message-fold')
+    await toggle.waitFor()
+    assert.equal(await toggle.getAttribute('aria-expanded'), 'false')
+    assert.doesNotMatch(await message.innerText(), /ХВОСТ_РЕПЛИКИ/)
+    await toggle.click()
+    assert.equal(await toggle.getAttribute('aria-expanded'), 'true')
+    assert.match(await message.innerText(), /ХВОСТ_РЕПЛИКИ/)
+    await message.getByTestId('msg-copy').click()
+    const copied = await h.app.evaluate(() => (globalThis as { __pultTestClipboard?: string }).__pultTestClipboard)
+    assert.equal(copied, userText)
+    await toggle.click()
+    assert.equal(await toggle.getAttribute('aria-expanded'), 'false')
+    assert.doesNotMatch(await message.innerText(), /ХВОСТ_РЕПЛИКИ/)
+    const model = h.win.locator(`.it[data-event-id="${modelId}"]`)
+    assert.equal(await model.getByTestId('message-fold').count(), 0)
+    assert.match(await model.innerText(), /ХВОСТ_ОТВЕТА/)
+    await model.getByTestId('msg-copy').click()
+    assert.equal(await h.app.evaluate(() => (globalThis as { __pultTestClipboard?: string }).__pultTestClipboard), modelText)
     await h.shot('collapsed-messages')
   })
 
-  it('preserves a streaming answer expansion and reveals a hidden search result', async () => {
+  it('shows streaming answers in full and expands a hidden user search result', async () => {
     const client = await h.client()
     await client.request('events.emit', { kind: 'message.user', sessionId: 'fold-chat', provider: 'claude', data: { text: 'Продолжи ответ' } })
     const next = await client.request('events.emit', { kind: 'message.delta', sessionId: 'fold-chat', provider: 'claude', data: { text: modelText } }) as { ids: number[] }
     const message = h.win.locator(`.it[data-event-id="${next.ids[0]}"]`)
-    await message.getByTestId('message-fold').click()
+    assert.ok(await waitFor(async () => (await message.innerText()).includes('ХВОСТ_ОТВЕТА')))
+    assert.equal(await message.getByTestId('message-fold').count(), 0)
     await client.request('events.emit', { kind: 'message.delta', sessionId: 'fold-chat', provider: 'claude', data: { text: '\nНОВАЯ_ДЕЛЬТА' } })
     assert.ok(await waitFor(async () => (await message.innerText()).includes('НОВАЯ_ДЕЛЬТА')))
-    assert.equal(await message.getByTestId('message-fold').getAttribute('aria-expanded'), 'true')
+    assert.equal(await message.getByTestId('message-fold').count(), 0)
     await client.request('events.emit', { kind: 'message.done', sessionId: 'fold-chat', provider: 'claude', data: { text: modelText + '\nНОВАЯ_ДЕЛЬТА' } })
-    await message.getByTestId('message-fold').click()
+    assert.match(await message.innerText(), /ХВОСТ_ОТВЕТА/)
     await h.win.keyboard.press('Meta+Shift+KeyF')
     const search = h.win.getByTestId('search-dialog')
     await search.getByTestId('search-input').fill('ХВОСТ_РЕПЛИКИ')
@@ -69,7 +73,7 @@ describe('long messages in the conversation', () => {
     const code = Array.from({ length: 60 }, (_, i) => `const value${i} = ${i};`).join('\n')
     const client = await h.client()
     await client.request('events.emit', { kind: 'message.user', sessionId: 'fold-chat', provider: 'claude', data: { text: 'Покажи код' } })
-    const result = await client.request('events.emit', { kind: 'message.done', sessionId: 'fold-chat', provider: 'claude', data: { text: '```ts\n' + code + '\n```' } }) as { ids: number[] }
+    const result = await client.request('events.emit', { kind: 'message.user', sessionId: 'fold-chat', provider: 'claude', data: { text: '```ts\n' + code + '\n```' } }) as { ids: number[] }
     const message = h.win.locator(`.it[data-event-id="${result.ids[0]}"]`)
     const toggle = message.getByTestId('message-fold')
     await toggle.waitFor()
@@ -80,5 +84,29 @@ describe('long messages in the conversation', () => {
     assert.equal(copied, code)
     await toggle.click()
     assert.equal(await message.getByTestId('md-copy').count(), 0)
+  })
+
+  it('renders a complete long model report with Markdown and code', async () => {
+    const text = '**Состояние задач**\n\n| Задача | Статус |\n|---|---|\n'
+      + '| [Задача 42](https://example.test/tasks/42) | **Готово** |\n\n'
+      + '- **Проверка** — `PASS`\n\n' + 'Подробности. '.repeat(100)
+      + '\n\n```ts\nconst result = true;\n```\n\nХВОСТ_MARKDOWN'
+    const client = await h.client()
+    const result = await client.request('events.emit', { kind: 'message.done', sessionId: 'fold-chat', provider: 'claude', data: { text } }) as { ids: number[] }
+    const message = h.win.locator(`.it[data-event-id="${result.ids[0]}"]`)
+    await message.locator('table').waitFor()
+    assert.equal(await message.getByTestId('message-fold').count(), 0)
+    assert.equal(await message.locator('strong').first().innerText(), 'Состояние задач')
+    assert.equal(await message.locator('ul').count(), 1)
+    assert.equal(await message.locator('a').first().getAttribute('href'), 'https://example.test/tasks/42')
+    assert.match(await message.innerText(), /ХВОСТ_MARKDOWN/)
+    assert.doesNotMatch(await message.innerText(), /\*\*|\|---\|/)
+    await message.getByTestId('md-copy').click()
+    assert.equal(await h.app.evaluate(() => (globalThis as { __pultTestClipboard?: string }).__pultTestClipboard), 'const result = true;')
+    await h.scheme('dark')
+    await message.evaluate((element) => element.scrollIntoView({ block: 'start' }))
+    await h.shot('model-markdown-dark')
+    await h.scheme('light')
+    await h.shot('model-markdown-light')
   })
 })

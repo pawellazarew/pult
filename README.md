@@ -23,8 +23,8 @@ The **CLI** button in the sidebar footer opens daemon controls, diagnostics, and
 install, update and sign-in actions. Local diagnostics also work while the daemon is stopped.
 See the [controls contract](docs/20-CLI-CONTROLS.md).
 
-Messages longer than 500 characters start collapsed. Use **Expand / Collapse** to read the full
-message. Copy still copies the complete original text, and search opens a matching message.
+Your messages longer than 500 characters start collapsed. Use **Expand / Collapse** to read the full
+message. Model replies show their full Markdown. Copy copies the complete original text, and search opens a matching message.
 
 ## Codex questions and mid-turn updates
 

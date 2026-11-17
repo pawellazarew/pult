@@ -302,7 +302,7 @@ export function Conversation(p: ConversationProps): ReactElement {
     if (!it) return
     // Цель в свёрнутой пачке или истории субагента: её ещё нет в DOM. Раскрываем путь — эффект придёт сюда снова.
     const closed = (foldPath(p.items, it.key) ?? []).filter((key) => !folds.has(key))
-    if ((it.type === 'user' || it.type === 'model') && messagePreview(it.text) !== null && !folds.has(messageBodyKey(it.key))) closed.push(messageBodyKey(it.key))
+    if (it.type === 'user' && messagePreview(it.text) !== null && !folds.has(messageBodyKey(it.key))) closed.push(messageBodyKey(it.key))
     if (closed.length) { setFolds((before) => new Set([...before, ...closed])); return }
     if (reveal(it.id, 'center')) {
       doneJump.current = t.nonce
