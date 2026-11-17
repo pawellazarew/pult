@@ -50,6 +50,30 @@ describe('черновики поля реплики переживают зак
     assert.equal(DRAFT_SAVE_MS, 500)
   })
 
+  it('keeps each draft selection, reads older drafts and clears selection with its text', () => {
+    const store = memStore()
+    const selection = { start: 2, end: 6, direction: 'backward' as const }
+    saveDraft(store, 'a', 'черновик 🙂', T, selection)
+    saveDraft(store, 'b', 'другой', T)
+    assert.deepEqual(readDrafts(store, T)['a']?.selection, selection)
+    assert.equal(readDrafts(store, T)['b']?.selection, undefined)
+    saveDraft(store, 'a', 'новый текст', T + 1)
+    assert.equal(readDrafts(store, T + 1)['a']?.selection, undefined)
+    saveDraft(store, 'a', '', T + 2)
+    assert.equal(readDrafts(store, T + 2)['a'], undefined)
+  })
+
+  it('bounds saved selections and ignores malformed positions without losing draft text', () => {
+    const store = memStore()
+    saveDraft(store, 'big', 'я'.repeat(DRAFT_MAX_CHARS + 10), T, { start: DRAFT_MAX_CHARS + 5, end: DRAFT_MAX_CHARS + 10, direction: 'none' })
+    assert.deepEqual(readDrafts(store, T)['big']?.selection, { start: DRAFT_MAX_CHARS, end: DRAFT_MAX_CHARS, direction: 'none' })
+    for (const selection of [null, { start: -1, end: 2, direction: 'none' }, { start: 3, end: 1, direction: 'backward' }, { start: 0, end: 1, direction: 'invalid' }]) {
+      store.set(DRAFTS_KEY, JSON.stringify({ a: { text: 'текст', at: T, selection } }))
+      assert.equal(peekDraft(store, 'a', T), 'текст')
+      assert.equal(readDrafts(store, T)['a']?.selection, undefined)
+    }
+  })
+
   it('хранилище недоступно — ничего не падает', () => {
     const broken: DraftStore = { get: () => { throw new Error('denied') }, set: () => { throw new Error('denied') } }
     const safe: DraftStore = { get: (k) => { try { return broken.get(k) } catch { return null } }, set: (k, v) => { try { broken.set(k, v) } catch { /* нет */ } } }

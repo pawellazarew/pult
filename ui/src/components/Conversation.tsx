@@ -51,7 +51,7 @@ import type { ProviderCatalog } from '../model/types.js'
 import { copyToClipboard, MdBridgeContext, useFlash } from './Markdown.js'
 import { MessageText as MessageBody, messagePreview } from './MessageText.js'
 import { restoreDraft, sendFromComposer } from '../model/pending.js'
-import { DRAFT_SAVE_MS, peekDraft, saveDraft } from '../model/drafts.js'
+import { DRAFT_SAVE_MS, peekDraft, readDrafts, saveDraft } from '../model/drafts.js'
 import type { DraftStore } from '../model/drafts.js'
 import { expireQueueEdit, queueEditKey, saveQueueEdit, startQueueEdit } from '../model/queueEdit.js'
 import type { QueueEditApi, QueueEditState, QueueEditStep } from '../model/queueEdit.js'
@@ -1075,7 +1075,13 @@ function Composer({ hidden = false, busy, needsYou, permFocused, link, disabled,
   const textRef = useRef(text)
   textRef.current = text
   useEffect(() => {
-    const save = (): void => { saveDraft(draftStore, agentName, textRef.current, Date.now()) }
+    // Keep the element itself: React clears ta.current before the unmount cleanup.
+    const input = ta.current
+    const save = (): void => {
+      saveDraft(draftStore, agentName, textRef.current, Date.now(), input ? {
+        start: input.selectionStart, end: input.selectionEnd, direction: input.selectionDirection,
+      } : undefined)
+    }
     window.addEventListener('pagehide', save)
     window.addEventListener('beforeunload', save)
     return () => {
@@ -1100,7 +1106,14 @@ function Composer({ hidden = false, busy, needsYou, permFocused, link, disabled,
     el.style.height = `${Math.max(84, Math.min(240, el.scrollHeight + 2))}px`
   }, [text])
   // Сессию открыла ссылка pult:// — фокус в поле не ставим: окно всплыло само, а не по воле человека.
-  useLayoutEffect(() => { if (takeAutoFocus(agentName, Date.now())) ta.current?.focus() }, [agentName])
+  useLayoutEffect(() => {
+    const input = ta.current
+    if (!input) return
+    const saved = readDrafts(draftStore, Date.now())[agentName]
+    const selection = saved?.text === input.value ? saved.selection : undefined
+    if (takeAutoFocus(agentName, Date.now())) input.focus()
+    input.setSelectionRange(selection?.start ?? input.value.length, selection?.end ?? input.value.length, selection?.direction ?? 'none')
+  }, [agentName])
 
   // Идёт ход: со старым демоном поле заперто, как раньше; с очередью — открыто.
   const attached = useAttachments({ source: filePaths, box: ta, text, setText, session: agentName })

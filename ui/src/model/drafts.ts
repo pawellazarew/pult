@@ -18,7 +18,21 @@ export interface DraftStore {
   set(k: string, v: string): void
 }
 
-interface Saved { text: string; at: number }
+export interface DraftSelection {
+  start: number
+  end: number
+  direction: 'forward' | 'backward' | 'none'
+}
+interface Saved { text: string; at: number; selection?: DraftSelection }
+
+function readSelection(raw: unknown, length: number): DraftSelection | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const selection = raw as Partial<DraftSelection>
+  if (typeof selection.start !== 'number' || !Number.isSafeInteger(selection.start) || selection.start < 0
+    || typeof selection.end !== 'number' || !Number.isSafeInteger(selection.end) || selection.end < selection.start
+    || (selection.direction !== 'forward' && selection.direction !== 'backward' && selection.direction !== 'none')) return undefined
+  return { start: Math.min(selection.start, length), end: Math.min(selection.end, length), direction: selection.direction }
+}
 
 /** Все живые черновики; мусор и просроченные — мимо. */
 export function readDrafts(store: DraftStore, now: number): Record<string, Saved> {
@@ -27,10 +41,11 @@ export function readDrafts(store: DraftStore, now: number): Record<string, Saved
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
   const out: Record<string, Saved> = {}
   for (const [name, v] of Object.entries(raw as Record<string, unknown>)) {
-    const o = v as { text?: unknown; at?: unknown } | null
+    const o = v as { text?: unknown; at?: unknown; selection?: unknown } | null
     if (!o || typeof o.text !== 'string' || !o.text.trim() || typeof o.at !== 'number') continue
     if (now - o.at > DRAFT_TTL_MS) continue
-    out[name] = { text: o.text, at: o.at }
+    const selection = readSelection(o.selection, o.text.length)
+    out[name] = { text: o.text, at: o.at, ...(selection ? { selection } : {}) }
   }
   return out
 }
@@ -41,14 +56,16 @@ function write(store: DraftStore, all: Record<string, Saved>): void {
 }
 
 /** Записать черновик сессии; пустой (одни пробелы) — убрать запись. */
-export function saveDraft(store: DraftStore, name: string, text: string, now: number): void {
+export function saveDraft(store: DraftStore, name: string, text: string, now: number, position?: DraftSelection): void {
   if (!name) return
   const all = readDrafts(store, now)
   if (!text.trim()) {
     if (!(name in all)) return
     delete all[name]
   } else {
-    all[name] = { text: text.slice(0, DRAFT_MAX_CHARS), at: now }
+    const saved = text.slice(0, DRAFT_MAX_CHARS)
+    const selection = readSelection(position, saved.length)
+    all[name] = { text: saved, at: now, ...(selection ? { selection } : {}) }
   }
   write(store, all)
 }
