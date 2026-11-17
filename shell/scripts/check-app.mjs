@@ -11,18 +11,18 @@
 //                                         запускается). Снимок окна — test-results/packaged-app.png.
 //
 // Приложение ищется в out/mac-arm64/Pult.app (или первым аргументом). В /Applications скрипт
-// ничего не кладёт. Все поднятые процессы (окно, демон) убиваются в конце, временный дом удаляется.
+// ничего не кладёт. Свои процессы убираются в конце; при провале дом с доказательствами сохраняется.
 // Запущенные бандлы (проверенный и временная копия с подменённым app.asar) в конце снимаются с учёта
 // LaunchServices (`lsregister -u`, scripts/lsregister.mjs), иначе они остаются претендентами на pult://.
 // Приложение из /Applications или ~/Applications с учёта не снимается никогда.
 
 import { execFileSync, spawn } from 'node:child_process'
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { FuseV1Options, FuseVersion, getCurrentFuseWire } from '@electron/fuses'
-import { appsToUnregister, unregisterApps } from './lsregister.mjs'
+import { appsToUnregister, isInstalledApp, unregisterApps } from './lsregister.mjs'
 
 const SHELL = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const REPO = path.resolve(SHELL, '..')
@@ -35,7 +35,7 @@ const ok = (msg) => process.stdout.write(`   ок   ${msg}\n`)
 const bad = (msg) => { failed++; process.stdout.write(`   ПРОВАЛ ${msg}\n`) }
 const check = (cond, msg) => (cond ? ok(msg) : bad(msg))
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-// Потолок ожидания первого запуска окна: macOS проверяет свежую подпись до старта Chromium.
+// Предел первого запуска; debug server ещё не означает готовое окно или завершённый boot.
 const FIRST_LAUNCH_MS = 90_000
 async function waitFor(fn, timeoutMs = 15_000, stepMs = 100) {
   const deadline = Date.now() + timeoutMs
@@ -114,6 +114,8 @@ process.exit(failed ? 1 : 0)
 
 async function launchChecks() {
   process.stdout.write('== живой прогон (PULT_TEST=1, временный PULT_HOME)\n')
+  if (isInstalledApp(realpathSync(APP), homedir())) { bad('живой прогон установленного приложения запрещён'); return }
+  const failuresBefore = failed
   const home = mkdtempSync(path.join(tmpdir(), 'pa-'))
   // Собранное приложение PULT_UI_ROOT не слушает (даже при PULT_TEST=1 — обе переменные из одного env),
   // поэтому пакет кладём так, как его ставит install.sh: PULT_HOME/current/lib/node_modules/pult →
@@ -127,8 +129,7 @@ async function launchChecks() {
     mkdirSync(path.dirname(path.join(evil, f)), { recursive: true })
     writeFileSync(path.join(evil, f), f.endsWith('.json') ? '{}\n' : '\n')
   }
-  const env = {
-    ...process.env,
+  const appEnv = {
     PULT_TEST: '1',
     // Assertions below match RU diagnostics; don't inherit the caller/system locale.
     PULT_LANG: 'ru',
@@ -139,10 +140,73 @@ async function launchChecks() {
     PULT_CLAUDE_BIN: path.join(REPO, 'test', 'fakes', 'fake-claude.mjs'),
     PULT_CODEX_BIN: path.join(REPO, 'test', 'fakes', 'fake-codex-app-server.mjs'),
     PULT_SERVICE_DIR: path.join(home, 'svc'),
+    PATH: process.env.PATH ?? '/usr/bin:/bin',
   }
+  const env = { ...process.env, ...appEnv }
   delete env.ELECTRON_RUN_AS_NODE
   delete env.NODE_OPTIONS
   const children = []
+  const ownerTool = path.join(home, 'app-process-owner')
+  const stdoutFile = path.join(home, 'app.stdout')
+  const stderrFile = path.join(home, 'app.stderr')
+  const phaseFile = path.join(home, 'phases.jsonl')
+  const started = performance.now()
+  let owner = null
+  let daemonOwner = null
+  let openChild = null
+  let launched = false
+  let launchedAt = null
+  let browser = null
+  let main = null
+  let launcherError = null
+  const launcher = { stdout: '', stderr: '' }
+  const rawRuns = []
+  let lastStderrBytes = -1
+  const phase = (event, fields = {}) => appendFileSync(phaseFile,
+    JSON.stringify({ event, elapsedMs: Math.round(performance.now() - started), ...fields }) + '\n', { mode: 0o600 })
+  const textFile = (file) => { try { return readFileSync(file, 'utf8') } catch { return '' } }
+  const ownerCall = (...args) => {
+    const reply = JSON.parse(execFileSync(ownerTool, args, { encoding: 'utf8', timeout: 5_000, maxBuffer: 1024 * 1024 }))
+    if (reply.ok !== true) throw new Error('kernel process identity unavailable')
+    return reply
+  }
+  const ownerList = (exe = BIN) => ownerCall('list', exe).matches
+  const sameOwner = (a, b) => a.pid === b.pid && a.startSec === b.startSec && a.startUsec === b.startUsec && a.uid === b.uid
+  const startedByLaunch = (identity) => launchedAt !== null && identity.startSec * 1000 + identity.startUsec / 1000 >= launchedAt
+  const verified = (identity, exe = BIN) => {
+    if (!identity) return false
+    try { return sameOwner(identity, ownerCall('verify', exe, String(identity.pid), String(identity.startSec), String(identity.startUsec)).identity) }
+    catch { return false }
+  }
+  const discover = () => {
+    const matches = ownerList()
+    if (matches.length > 1 || (owner && matches.some((p) => !sameOwner(p, owner)))) throw new Error('неоднозначный PID проверяемого приложения')
+    if (matches.some((p) => !startedByLaunch(p))) throw new Error('PID проверяемого приложения старше запроса запуска')
+    if (!owner && matches.length === 1) { owner = matches[0]; phase('app-owned', owner) }
+    const bytes = Buffer.byteLength(textFile(stderrFile))
+    if (bytes !== lastStderrBytes) { lastStderrBytes = bytes; phase('stderr-growth', { bytes }) }
+  }
+  // Discovery runs independently of DevTools, so even a pre-port failure has an owned PID.
+  const waitPort = async (file) => {
+    const deadline = Date.now() + FIRST_LAUNCH_MS
+    while (Date.now() < deadline) {
+      discover()
+      if (existsSync(file)) return true
+      if (launcherError || (openChild?.exitCode !== null && openChild?.exitCode !== undefined)) {
+        phase('launcher-exited-before-port', { code: openChild.exitCode })
+        return false
+      }
+      await sleep(100)
+    }
+    return false
+  }
+  const signalOwned = (identity, signal, exe = BIN) => {
+    if (!verified(identity, exe)) return false
+    // No await between the last kernel PID/start/path check and the signal.
+    try { process.kill(identity.pid, signal); phase('owned-signal', { pid: identity.pid, signal }); return true }
+    catch (e) { if (e.code === 'ESRCH') return false; throw e }
+  }
+  const appExited = () => !ownerList().some((p) => owner && sameOwner(p, owner))
   // Бандлы, которые этот прогон создал (копии во временном доме): их снимаем с учёта LaunchServices.
   const createdApps = []
   const run = (args, extraEnv = {}) => {
@@ -152,33 +216,66 @@ async function launchChecks() {
     child.stderr.setEncoding('utf8').on('data', (d) => { out.stderr += d })
     child.on('exit', (code, signal) => { out.code = code; out.signal = signal })
     children.push(child)
-    return { child, out }
+    const result = { child, out }
+    rawRuns.push(result)
+    return result
   }
   const exited = (r) => r.out.code !== undefined
   const daemonPid = () => { try { return Number(JSON.parse(readFileSync(path.join(home, 'run', 'pultd.lock'), 'utf8')).pid) || null } catch { return null } }
-  let browser = null
+  const rememberDaemon = () => {
+    const pid = daemonPid()
+    if (!pid || daemonOwner) return
+    daemonOwner = ownerList(process.execPath).find((p) => p.pid === pid && startedByLaunch(p)) ?? null
+    phase('daemon-owner', { identity: daemonOwner })
+  }
   try {
-    // 1. Окно: main из app.asar находит пакет, поднимает демона, рендерер встаёт на app://pult.
-    const main = run(['--remote-debugging-port=0'])
+    phase('prepare')
+    execFileSync('/usr/bin/cc', ['-O2', '-Wall', '-Wextra', '-Werror', path.join(SHELL, 'scripts', 'app-process-owner.c'), '-o', ownerTool], { timeout: 30_000, stdio: 'pipe' })
+    if (ownerList().length !== 0) throw new Error('проверяемый бандл уже запущен — прогон не владеет этим процессом')
+    for (const file of [stdoutFile, stderrFile]) writeFileSync(file, '', { mode: 0o600 })
+    // 1. Как pult ui / updater: LaunchServices, точный путь, отдельный экземпляр.
+    // open -W — лишь wait-процесс; его PID НЕ является PID Pult.
+    const args = ['-n', '-W', '-a', APP, '--stdout', stdoutFile, '--stderr', stderrFile]
+    // Only intentional test variables become argv; never copy ambient credentials into open's args.
+    for (const [key, value] of Object.entries(appEnv)) args.push('--env', `${key}=${value}`)
+    args.push('--args', '--remote-debugging-port=0')
+    launchedAt = Date.now()
+    openChild = spawn('/usr/bin/open', args, { env, stdio: ['ignore', 'pipe', 'pipe'] })
+    launched = true
+    openChild.stdout.setEncoding('utf8').on('data', (data) => { launcher.stdout += data })
+    openChild.stderr.setEncoding('utf8').on('data', (data) => { launcher.stderr += data })
+    openChild.on('error', (e) => { launcherError = String(e.message).slice(0, 500); phase('launcher-error', { error: launcherError }) })
+    openChild.on('exit', (code, signal) => { phase('launcher-exit', { code, signal }); writeFileSync(path.join(home, 'launcher.stderr'), launcher.stderr, { mode: 0o600 }) })
+    main = { out: { get stdout() { return textFile(stdoutFile) }, get stderr() { return textFile(stderrFile) } } }
+    phase('launch-services-requested', { launcherPid: openChild.pid ?? null })
     const portFile = path.join(home, 'shell-data', 'DevToolsActivePort')
-    // Первый запуск свежесобранной (заново подписанной) копии macOS держит до ready десятки секунд
-    // (замерено: >15 с до boot, второй запуск — мгновенно). Chromium пишет DevToolsActivePort прямо
-    // перед ready, а «пакет найден» логирует boot() по whenReady — оба маркера приходят вместе
-    // (замер: 0–53 мс), поэтому долго ждём именно первый из них, иначе он проваливается на 15 с.
-    check(await waitFor(() => existsSync(portFile), FIRST_LAUNCH_MS), 'окно поднялось (DevToolsActivePort)')
+    const portReady = await waitPort(portFile)
+    check(portReady, 'debug server доступен (DevToolsActivePort)')
+    phase('port-result', { portReady, owned: owner !== null, stderrBytes: Buffer.byteLength(main.out.stderr) })
+    if (!portReady || !owner) throw new Error('LaunchServices не подтвердил debug server/PID; см. сохранённые логи')
     const found = await waitFor(() => /пакет найден/.test(main.out.stderr))
     check(found, 'main из app.asar нашёл пакет pult')
+    phase('boot-result', { found, stderrBytes: Buffer.byteLength(main.out.stderr) })
     if (!found) process.stdout.write(`        stderr окна: ${main.out.stderr.trim().split('\n').slice(-5).join(' | ') || '—'}\n`)
     check(/пакет найден .*"via":"installed"/.test(main.out.stderr),
       `PULT_UI_ROOT при PULT_TEST=1 проигнорирован: пакет из PULT_HOME/current (${(/пакет найден (.*)/.exec(main.out.stderr) ?? [])[1] ?? '—'})`)
     const logFile = path.join(home, 'logs', 'pultd.log')
     check(await waitFor(() => /"client":"shell"/.test(readFileSync(logFile, 'utf8'))), 'демон поднят окном и видит клиента shell')
+    rememberDaemon()
     const trayLine = /трей поднят (.*)/.exec(main.out.stderr)?.[1] ?? ''
     check(/"empty":false/.test(trayLine) && /"template":true/.test(trayLine) && /"scales":\[[^\]]*2/.test(trayLine),
       `значок строки меню загружен из app.asar, шаблонный, с @2x (${trayLine || '—'})`)
     const port = readFileSync(portFile, 'utf8').split('\n')[0]
     const { chromium } = await import('playwright-core')
     browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`)
+    const cdp = await browser.newBrowserCDPSession()
+    const processes = await cdp.send('SystemInfo.getProcessInfo')
+    const browserPid = processes.processInfo.find((p) => p.type === 'browser')?.id
+    const ownedBrowser = browserPid === owner.pid && verified(owner)
+    phase('cdp-owner', { browserPid: browserPid ?? null, ownedBrowser })
+    check(ownedBrowser, 'CDP Browser PID совпадает с проверенным kernel PID/start/path')
+    if (!ownedBrowser) { browser = null; throw new Error('CDP не принадлежит процессу этого прогона') }
+    await cdp.detach()
     let page = null
     await waitFor(() => {
       page = browser.contexts().flatMap((c) => c.pages()).find((p) => p.url().startsWith('app://pult/')) ?? null
@@ -225,11 +322,12 @@ async function launchChecks() {
     check(!/Debugger listening/.test(inspect.out.stderr), '--inspect не открывает отладчик')
 
     // 3. Окно закрывается — демон живёт (закрыть окно ≠ остановить агентов).
+    phase('before-termination-check', { owner, stderrBytes: Buffer.byteLength(main.out.stderr) })
     await browser.close().catch(() => {})
     browser = null
     const pid = daemonPid()
-    main.child.kill('SIGTERM')
-    check(await waitFor(() => exited(main), 15_000), 'окно вышло по SIGTERM')
+    check(signalOwned(owner, 'SIGTERM'), 'SIGTERM отправлен только проверенному PID/start/path')
+    check(await waitFor(appExited, 15_000), 'окно вышло по SIGTERM')
     check(pid !== null && (() => { try { process.kill(pid, 0); return true } catch { return false } })(), `демон жив после выхода окна (pid ${pid})`)
 
     // 4. Подменённый app.asar: копия приложения с правкой заголовка той же длины — запуск обязан упасть.
@@ -251,22 +349,68 @@ async function launchChecks() {
       t.stderr.setEncoding('utf8').on('data', (d) => { tErr += d })
       t.on('exit', (code, signal) => { tCode = code ?? signal })
       const died = await waitFor(() => tCode !== undefined, 15_000)
+      writeFileSync(path.join(home, 'tampered.stderr'), tErr, { mode: 0o600 })
       check(died && !/пакет найден/.test(tErr), `подменённый app.asar не запускается (выход ${String(tCode)}${/ntegrity/.test(tErr) ? ', integrity' : ''})`)
     }
+  } catch (e) {
+    bad(`живой прогон: ${String(e.message).slice(0, 500)}`)
+    phase('failure', { error: String(e.message).slice(0, 500) })
   } finally {
+    // Capture evidence BEFORE any close/signal: cleanup must not turn a late boot into readiness.
+    phase('before-cleanup', { owner, ownedAppVerified: verified(owner), daemonOwner,
+      stderrBytes: Buffer.byteLength(textFile(stderrFile)), launcherPid: openChild?.pid ?? null,
+      launcherExitCode: openChild?.exitCode ?? null })
+    for (const [index, result] of rawRuns.entries()) {
+      writeFileSync(path.join(home, `raw-${index}.stdout`), result.out.stdout, { mode: 0o600 })
+      writeFileSync(path.join(home, `raw-${index}.stderr`), result.out.stderr, { mode: 0o600 })
+    }
+    writeFileSync(path.join(home, 'launcher.stdout'), launcher.stdout, { mode: 0o600 })
+    writeFileSync(path.join(home, 'launcher.stderr'), launcher.stderr, { mode: 0o600 })
     if (browser) await browser.close().catch(() => {})
     for (const c of children) if (c.exitCode === null && c.signalCode === null) c.kill('SIGKILL')
+    await waitFor(() => children.every((c) => c.exitCode !== null || c.signalCode !== null), 5_000)
+    if (existsSync(ownerTool) && launched) {
+      try {
+        // Late discovery is still exact path + kernel start; no name/bundle-ID fallback.
+        discover()
+        if (verified(owner)) signalOwned(owner, 'SIGKILL')
+        if (owner && !await waitFor(appExited, 5_000)) bad('проверяемый PID остался после уборки; дом сохранён')
+        rememberDaemon()
+      } catch (e) { bad(`уборка PID: ${String(e.message).slice(0, 500)}`) }
+    }
+    if (openChild && openChild.exitCode === null && openChild.signalCode === null) {
+      phase('stop-open-waiter', { pid: openChild.pid })
+      openChild.kill('SIGTERM') // Only our open -W child, never used as the Pult PID.
+      if (!await waitFor(() => openChild.exitCode !== null || openChild.signalCode !== null, 5_000)) bad('open -W не завершился после уборки; дом сохранён')
+    }
     // Демон, поднятый окном: штатная остановка через собранный CLI того же дома.
     try {
       execFileSync(process.execPath, [path.join(REPO, 'dist', 'cli', 'main.js'), 'daemon', 'stop'], { env, stdio: 'ignore', timeout: 15_000 })
     } catch { /* уже остановлен */ }
-    const pid = daemonPid()
-    if (pid) { try { process.kill(pid, 'SIGKILL') } catch { /* нет процесса */ } }
+    try {
+      const pid = daemonPid()
+      const remaining = pid ? ownerList(process.execPath).find((p) => p.pid === pid) : null
+      if (remaining) {
+        // A daemon can appear during cleanup. Own it only via this home's lock,
+        // pinned Node path, same UID and kernel start after our launch request.
+        if (!daemonOwner && startedByLaunch(remaining)) { daemonOwner = remaining; phase('late-daemon-owned', remaining) }
+        if (!daemonOwner || !sameOwner(daemonOwner, remaining)) bad('уборка демона не подтверждена: PID/start не принадлежит прогону')
+        else {
+          if (!signalOwned(daemonOwner, 'SIGKILL', process.execPath)) bad('уборка демона не подтверждена проверкой kernel identity')
+          if (!await waitFor(() => !ownerList(process.execPath).some((p) => sameOwner(p, daemonOwner)), 5_000)) bad('свой демон остался после уборки; дом сохранён')
+        }
+      }
+    } catch (e) { bad(`уборка демона не подтверждена: ${String(e.message).slice(0, 500)}`) }
     // Снять с учёта LaunchServices всё запущенное и созданное — ДО удаления временного дома.
-    const gone = unregisterApps(appsToUnregister({ app: APP, launched: true, created: createdApps, home: homedir() }))
+    const gone = unregisterApps(appsToUnregister({ app: APP, launched, created: createdApps, home: homedir() }))
     for (const r of gone) process.stdout.write(`   ${r.ok ? 'ок  ' : 'warn'}   lsregister -u ${r.path}${r.ok ? '' : `: ${r.error}`}\n`)
-    // Симлинк на рабочую копию снимаем отдельно ДО удаления дома: rm идёт по дому, а не в REPO.
-    try { unlinkSync(installed) } catch { /* уже нет */ }
-    rmSync(home, { recursive: true, force: true })
+    const retain = failed > failuresBefore || failuresBefore > 0
+    phase('cleanup-complete', { failed: retain })
+    if (retain) process.stdout.write(`   логи сохранены: ${home}\n`)
+    else {
+      // Успешный прогон: симлинк снимается ДО удаления дома; исходная рабочая копия не удаляется.
+      try { unlinkSync(installed) } catch { /* уже нет */ }
+      rmSync(home, { recursive: true, force: true })
+    }
   }
 }
