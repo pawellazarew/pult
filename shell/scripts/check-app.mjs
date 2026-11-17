@@ -23,6 +23,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { FuseV1Options, FuseVersion, getCurrentFuseWire } from '@electron/fuses'
 import { appsToUnregister, isInstalledApp, unregisterApps } from './lsregister.mjs'
+import { waitForAppPort } from './app-startup.mjs'
 
 const SHELL = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const REPO = path.resolve(SHELL, '..')
@@ -35,8 +36,6 @@ const ok = (msg) => process.stdout.write(`   ок   ${msg}\n`)
 const bad = (msg) => { failed++; process.stdout.write(`   ПРОВАЛ ${msg}\n`) }
 const check = (cond, msg) => (cond ? ok(msg) : bad(msg))
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-// Предел первого запуска; debug server ещё не означает готовое окно или завершённый boot.
-const FIRST_LAUNCH_MS = 90_000
 async function waitFor(fn, timeoutMs = 15_000, stepMs = 100) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
@@ -186,20 +185,6 @@ async function launchChecks() {
     const bytes = Buffer.byteLength(textFile(stderrFile))
     if (bytes !== lastStderrBytes) { lastStderrBytes = bytes; phase('stderr-growth', { bytes }) }
   }
-  // Discovery runs independently of DevTools, so even a pre-port failure has an owned PID.
-  const waitPort = async (file) => {
-    const deadline = Date.now() + FIRST_LAUNCH_MS
-    while (Date.now() < deadline) {
-      discover()
-      if (existsSync(file)) return true
-      if (launcherError || (openChild?.exitCode !== null && openChild?.exitCode !== undefined)) {
-        phase('launcher-exited-before-port', { code: openChild.exitCode })
-        return false
-      }
-      await sleep(100)
-    }
-    return false
-  }
   const signalOwned = (identity, signal, exe = BIN) => {
     if (!verified(identity, exe)) return false
     // No await between the last kernel PID/start/path check and the signal.
@@ -249,7 +234,15 @@ async function launchChecks() {
     main = { out: { get stdout() { return textFile(stdoutFile) }, get stderr() { return textFile(stderrFile) } } }
     phase('launch-services-requested', { launcherPid: openChild.pid ?? null })
     const portFile = path.join(home, 'shell-data', 'DevToolsActivePort')
-    const portReady = await waitPort(portFile)
+    const portReady = await waitForAppPort({
+      discover,
+      hasPort: () => existsSync(portFile),
+      launcherExited: () => {
+        if (!launcherError && (openChild?.exitCode === null || openChild?.exitCode === undefined)) return false
+        phase('launcher-exited-before-port', { code: openChild.exitCode })
+        return true
+      },
+    })
     check(portReady, 'debug server доступен (DevToolsActivePort)')
     phase('port-result', { portReady, owned: owner !== null, stderrBytes: Buffer.byteLength(main.out.stderr) })
     if (!portReady || !owner) throw new Error('LaunchServices не подтвердил debug server/PID; см. сохранённые логи')
