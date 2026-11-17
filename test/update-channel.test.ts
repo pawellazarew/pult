@@ -265,6 +265,7 @@ describe('detached update child progress IPC', () => {
       assert.equal((await cli(h, ['update', '--from', tgz.A])).code, 0)
       publish(h, '0.0.2', tgz.B)
       const child = spawnUpdateProcess(h.paths, '0.0.2', h.env)
+      child.ref() // This test explicitly joins its owned child; the factory remains detached.
       const messages: unknown[] = []
       child.on('message', (m) => { messages.push(m) })
       const code = await new Promise<number | null>((resolve, reject) => { child.once('error', reject); child.once('exit', resolve) })
@@ -359,6 +360,7 @@ describe('stage child private progress IPC', () => {
       assert.equal((await cli(h, ['update', '--from', tgz.A])).code, 0)
       publish(h, '0.0.2', tgz.B)
       const child = spawnStageProcess(h.paths, h.env)
+      child.ref() // This test explicitly joins its owned child; the factory remains detached.
       const messages: unknown[] = []
       child.on('message', (m) => { messages.push(m) })
       const code = await new Promise<number | null>((resolve, reject) => {
