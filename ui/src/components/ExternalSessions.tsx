@@ -92,7 +92,7 @@ export function ExternalSessions({ bridge, taken, onImported, onClose }: {
             <div className="external-meta"><strong>{conversation.session.title}</strong><span className="mono mut">{conversation.session.cwd}</span></div>
             {conversation.truncated && <p className="mut">{t("Показана последняя часть разговора. Копия сохранит полный контекст.")}</p>}
             {conversation.messages.map((m, i) => <div key={`${conversation.session.provider}:${conversation.session.id}:${i}`} className={`external-message external-${m.role}`}>
-              <span className="lbl">{m.role === 'user' ? t('ты') : provider}</span><MessageText text={m.text} />
+              <span className="lbl">{m.role === 'user' ? t('ты') : provider}</span><MessageText text={m.text} human={m.role === 'user'} />
             </div>)}
             {!conversation.messages.length && <p className="mut">{t("В этом разговоре нет текстовых сообщений")}</p>}
           </> : <p className="mut">{t("Выбери разговор")}</p>}

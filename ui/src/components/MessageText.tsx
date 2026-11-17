@@ -26,7 +26,7 @@ export function MessageText({ text, human, streaming, expanded, onExpandedChange
 }): ReactElement {
   const contentId = useId()
   const [localExpanded, setLocalExpanded] = useState(false)
-  const preview = useMemo(() => messagePreview(text), [text])
+  const preview = useMemo(() => human ? messagePreview(text) : null, [text, human])
   const open = preview === null || (expanded ?? localExpanded)
   const toggle = (): void => {
     if (expanded === undefined) setLocalExpanded(!open)

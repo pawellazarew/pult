@@ -138,6 +138,20 @@ describe('temporary rendering privacy boundary', () => {
       assert.match(markup, /data-testid="temporary-model" disabled/)
     } finally { if (oldWindow) Object.defineProperty(globalThis, 'window', oldWindow); else Reflect.deleteProperty(globalThis, 'window') }
   })
+  it('folds only the user text in a temporary conversation', () => {
+    const chat = snapshot('', 1, { messages: [
+      { id: 'user', turnId: 't', role: 'user', text: 'а'.repeat(500) + 'USER_HIDDEN', at: '2026-11-05T12:00:00Z', state: 'done' },
+      { id: 'model', turnId: 't', role: 'assistant', text: '**Ответ**\n\n' + 'Подробности. '.repeat(100) + 'MODEL_VISIBLE', at: '2026-11-05T12:00:01Z', state: 'done' },
+    ] })
+    const markup = renderToStaticMarkup(createElement(TemporaryChat, {
+      chat, capabilities: [], online: false,
+      onDraft: async () => chat, onConfigure: async () => chat, onPrompt: async () => chat, onStop: async () => chat, onEnd: () => {},
+    }))
+    assert.equal(markup.match(/data-testid="message-fold"/g)?.length, 1)
+    assert.doesNotMatch(markup, /USER_HIDDEN/)
+    assert.match(markup, /MODEL_VISIBLE/)
+    assert.match(markup, /<strong>/)
+  })
   it('keeps sending unavailable until capabilities are verified and separates Stop from End', () => {
     const chat = snapshot('next question', 1, { status: 'working' })
     const markup = renderToStaticMarkup(createElement(TemporaryChat, {
