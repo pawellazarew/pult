@@ -40,13 +40,14 @@ import { fileURLToPath } from 'node:url'
 import type { PultConfig } from '../core/config.js'
 import type { Logger } from '../core/log.js'
 import type { PultPaths } from '../core/paths.js'
-import type { UpdateApplyState, UpdateFailure, UpdateRelease, UpdateStaged, UpdateStatus } from '../core/rpc.js'
+import type { UpdateApplyState, UpdateDownloadProgress, UpdateFailure, UpdateRelease, UpdateStaged, UpdateStatus } from '../core/rpc.js'
 import { compareVersions } from '../core/semver.js'
 import { daemonSpawnEnv } from '../cli/startOnDemand.js'
 import { atomicWrite } from '../service/fsutil.js'
 import { ChannelError, fetchManifest, installedVersion, releaseOf, trustedKeys, updateUrl } from './channel.js'
-import type { HttpGet } from './fetch.js'
+import type { DownloadProgress, HttpGet } from './fetch.js'
 import type { TrustedKey } from './keys.js'
+import { CHANGELOG_MAX_BYTES, PACKAGE_MAX_BYTES } from './manifest.js'
 import type { Manifest } from './manifest.js'
 import { stagedReady } from './update.js'
 import { PROBE_PENDING, readState } from './versions.js'
@@ -79,6 +80,7 @@ export class ApplyError extends Error {
 export interface ApplyChild {
   on(event: 'exit', fn: (code: number | null, signal: NodeJS.Signals | null) => void): unknown
   on(event: 'error', fn: (e: Error) => void): unknown
+  on(event: 'message', fn: (message: unknown) => void): unknown
 }
 
 export interface CheckerOptions {
@@ -112,7 +114,7 @@ export interface CheckerOptions {
    * 0.3.16: окно в фоновой подготовке. `wanted(v)` — окно `v` можно и нужно ставить (новее стоящего, не bad, есть
    * права); `ready(v)` — уже подготовлено; `stage(m)` — скачать и проверить (ошибка — исключением).
    */
-  app?: { wanted(v: string): boolean; ready(v: string): boolean; stage(m: Manifest): Promise<boolean> }
+  app?: { wanted(v: string): boolean; ready(v: string): boolean; stage(m: Manifest, onProgress?: (progress: DownloadProgress) => void): Promise<boolean> }
   /** Почему «Обновить» пакет сейчас нельзя (идёт обновление окна, 0.3.4); null — можно. */
   blocked?: () => string | null
   /**
@@ -155,6 +157,8 @@ interface Saved {
   checkedAt: string | null
   error: string | null
   latest: UpdateRelease | null
+  /** Size from the same verified manifest, used only to validate private download progress. */
+  packageSize?: number
 }
 
 function readSaved(file: string): Saved {
@@ -167,12 +171,13 @@ function readSaved(file: string): Saved {
   // Файл пишет только демон, но битый файл не должен ронять старт: проверяем ровно то, что покажет окно.
   const latest = l && typeof l === 'object' && typeof l['version'] === 'string' && typeof l['released'] === 'string'
     && typeof l['notes'] === 'string' && /^https:\/\//.test(l['notes'])
-    ? l as unknown as UpdateRelease
+    ? { ...l, ...(typeof l['changelog'] === 'string' && Buffer.byteLength(l['changelog'], 'utf8') <= CHANGELOG_MAX_BYTES ? { changelog: l['changelog'] } : { changelog: undefined }) } as unknown as UpdateRelease
     : null
   return {
     checkedAt: typeof o['checkedAt'] === 'string' ? o['checkedAt'] : null,
     error: typeof o['error'] === 'string' ? o['error'] : null,
     latest,
+    ...(typeof o['packageSize'] === 'number' && Number.isSafeInteger(o['packageSize']) && o['packageSize'] > 0 && o['packageSize'] <= PACKAGE_MAX_BYTES ? { packageSize: o['packageSize'] } : {}),
   }
 }
 
@@ -238,8 +243,9 @@ export function spawnStageProcess(paths: PultPaths, env: NodeJS.ProcessEnv = pro
   })
   const fd = openUpdateLog(paths)
   try {
-    const child = spawn(argv[0] as string, argv.slice(1), { stdio: ['ignore', fd, fd], env: applyEnv(paths, env), cwd: paths.home })
+    const child = spawn(argv[0] as string, argv.slice(1), { stdio: ['ignore', fd, fd, 'ipc'], env: applyEnv(paths, env), cwd: paths.home })
     child.unref()
+    child.channel?.unref() // progress must not keep a stopping daemon alive
     return child
   } finally {
     closeSync(fd)
@@ -258,12 +264,35 @@ export function spawnUpdateProcess(paths: PultPaths, to: string, env: NodeJS.Pro
     expect: to,
   })
   const fd = openUpdateLog(paths)
+  const wrapped = process.platform === 'linux' && env['PULT_SERVICE'] === '1' && argv.includes('--scope')
   try {
-    const child = spawn(argv[0] as string, argv.slice(1), { detached: true, stdio: ['ignore', fd, fd], env: applyEnv(paths, env), cwd: paths.home })
+    const child = spawn(argv[0] as string, argv.slice(1), { detached: true, stdio: wrapped ? ['ignore', fd, fd] : ['ignore', fd, fd, 'ipc'], env: applyEnv(paths, env), cwd: paths.home })
     child.unref()
+    child.channel?.unref() // progress must not keep a stopping daemon alive
     return child
   } finally {
     closeSync(fd)
+  }
+}
+
+/** Only the owned child for the current signed release can advance byte progress. */
+function downloadProgressReader(version: string, expectedSize: number | undefined): (message: unknown) => UpdateDownloadProgress | null {
+  let lastReceived = -1
+  let lastPercent = -1
+  return (message) => {
+    if (!expectedSize || !message || typeof message !== 'object') return null
+    const event = message as Record<string, unknown>
+    if (event['type'] !== 'pult.update.progress' || event['version'] !== version) return null
+    const p = event['progress'] as Record<string, unknown> | null
+    if (!p || typeof p !== 'object') return null
+    const received = p['received'], total = p['total'], percent = p['percent']
+    if (typeof received !== 'number' || !Number.isSafeInteger(received) || received < 0 || received > expectedSize || total !== expectedSize
+      || typeof percent !== 'number' || !Number.isInteger(percent) || percent < 0 || percent > 100
+      || received < lastReceived || percent < lastPercent
+      || (percent === 100 ? received !== total : percent !== Math.min(99, Math.floor(received * 100 / expectedSize)))) return null
+    lastReceived = received
+    lastPercent = percent
+    return { artifact: 'package', received, total, percent }
   }
 }
 
@@ -375,11 +404,19 @@ export function createUpdateChecker(o: CheckerOptions): UpdateChecker {
   }
 
   /** Ребёнок `pult update --stage` как промис: код 0 — подготовлено, иначе — исключение с путём к журналу. */
-  const runStageChild = (): Promise<void> => new Promise<void>((resolve, reject) => {
+  const runStageChild = (to: string, expectedSize: number): Promise<void> => new Promise<void>((resolve, reject) => {
+    let active = true
+    const readProgress = downloadProgressReader(to, expectedSize)
     let k: ApplyChild
     try { k = (o.spawnStage ?? (() => spawnStageProcess(o.paths, env)))() } catch (e) { reject(new Error(`pult update --stage не запустился: ${(e as Error).message}`)); return }
-    k.on('error', (e) => { reject(new Error(`pult update --stage не запустился: ${e.message}`)) })
+    k.on('message', (message) => {
+      if (!active || stopped || staged?.to !== to || staged.state !== 'downloading' || !message || typeof message !== 'object') return
+      const progress = readProgress(message)
+      if (progress) staged = { ...staged, progress }
+    })
+    k.on('error', (e) => { active = false; reject(new Error(`pult update --stage не запустился: ${e.message}`)) })
     k.on('exit', (code, signal) => {
+      active = false
       if (code === 0) resolve()
       else reject(new Error(`подготовка вышла ${code !== null ? `с кодом ${code}` : `по сигналу ${signal ?? '?'}`} — подробности: ${o.paths.updateLog}`))
     })
@@ -404,11 +441,16 @@ export function createUpdateChecker(o: CheckerOptions): UpdateChecker {
     o.logger.info('готовлю обновление в фоне', { to, package: pkg, app })
     stagePromise = (async () => {
       if (pkg) {
-        pkgStagePromise = runStageChild()
+        pkgStagePromise = runStageChild(to, m.package.size)
         try { await pkgStagePromise } finally { pkgStagePromise = null }
       }
       // Окно не подготовилось, но и не сломалось (идёт обновление окна, уже не нужно) — не провал и не «готово».
-      if (app && o.app && !(await o.app.stage(m))) throw new SkipStage()
+      if (app && o.app) {
+        if (staged?.to === to) { const { progress: _previous, ...rest } = staged; staged = rest }
+        if (!(await o.app.stage(m, (progress) => {
+          if (!stopped && staged?.to === to && staged.state === 'downloading') staged = { ...staged, progress: { artifact: 'app', ...progress } }
+        }))) throw new SkipStage()
+      }
     })().then(() => {
       staged = { to, state: 'ready', error: null, at: new Date(now()).toISOString() }
       stageFailures = 0
@@ -436,7 +478,7 @@ export function createUpdateChecker(o: CheckerOptions): UpdateChecker {
       try {
         const url = updateUrl(o.config, env)
         const m = await fetchManifest({ env, url, keys, ...(o.http ? { http: o.http } : {}) })
-        saved = { checkedAt: new Date(now()).toISOString(), error: null, latest: releaseOf(m) }
+        saved = { checkedAt: new Date(now()).toISOString(), error: null, latest: releaseOf(m), packageSize: m.package.size }
         if (!stopped) startStage(m, manualJoined)
         o.logger.info('канал обновлений проверен', { latest: m.version, current: o.current })
         // Удача вне расписания (окно, человек) — плановая сдвигается на полный срок. Во время плановой
@@ -517,6 +559,12 @@ export function createUpdateChecker(o: CheckerOptions): UpdateChecker {
       return
     }
     child = k
+    const readProgress = downloadProgressReader(to, saved.latest?.version === to ? saved.packageSize : undefined)
+    k.on('message', (message) => {
+      if (stopped || child !== k || apply.state !== 'applying' || apply.to !== to) return
+      const progress = readProgress(message)
+      if (progress) apply = { ...apply, progress }
+    })
     k.on('error', (e) => { if (child === k) fail(`pult update не запустился: ${e.message}`) })
     k.on('exit', (code, signal) => {
       if (child !== k) return

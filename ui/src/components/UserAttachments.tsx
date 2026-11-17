@@ -53,18 +53,21 @@ function UserAttachment({ attachment: a }: { attachment: PromptAttachment }): Re
     setOpening(true)
     try {
       if (isImage && imageContext?.bridge.openImage) await imageContext.bridge.openImage(imageContext.sessionId, a.path)
-      else if (a.kind === 'directory' && bridge?.revealPath) await bridge.revealPath(a.path)
+      else if (a.kind === 'file-reference') {
+        if (!bridge?.openFile) throw new Error('unavailable')
+        await bridge.openFile(a.path)
+      } else if (a.kind === 'directory' && bridge?.revealPath) await bridge.revealPath(a.path)
       else if (preview && (a.path === preview.basePath || a.path.startsWith(preview.basePath.replace(/\/$/, '') + '/'))) preview.open(a.path)
       else if (bridge?.openFile) await bridge.openFile(a.path)
       else throw new Error('unavailable')
-    } catch { setError(t('Файл недоступен')) }
+    } catch { setError(a.kind === 'file-reference' ? t('Оригинал файла недоступен: он мог быть перемещён или удалён. Прикрепи файл заново.') : t('Файл недоступен')) }
     finally { setOpening(false) }
   }
-  const canOpen = (isImage && !!imageContext?.bridge.openImage) || !!bridge?.openFile || (a.kind === 'directory' && !!bridge?.revealPath) || (!!preview && a.path.startsWith(preview.basePath.replace(/\/$/, '') + '/'))
-  return <div ref={root} className={`user-attachment${error ? ' user-attachment-unavailable' : ''}`} role="listitem" data-testid="user-attachment">
+  const canOpen = a.kind === 'file-reference' ? !!bridge?.openFile : (isImage && !!imageContext?.bridge.openImage) || !!bridge?.openFile || (a.kind === 'directory' && !!bridge?.revealPath) || (!!preview && a.path.startsWith(preview.basePath.replace(/\/$/, '') + '/'))
+  return <div ref={root} className={`user-attachment${error ? ' user-attachment-unavailable' : ''}`} role="listitem" data-testid="user-attachment" data-kind={a.kind}>
     <button type="button" className="user-attachment-open" onClick={() => void open()} disabled={!canOpen || opening} aria-label={t`Открыть ${a.name}`} title={a.name}>
       <span className="user-attachment-thumb" aria-hidden="true">{image ? <img src={image} alt="" loading="lazy" onError={() => { setImage(null); setError(t('Превью недоступно')) }} /> : a.kind === 'directory' ? '▤' : isImage ? '▧' : a.name.split('.').pop()?.toUpperCase().slice(0, 4) || '↗'}</span>
-      <span className="user-attachment-info"><span className="user-attachment-name">{a.name}</span><span className="user-attachment-size">{attachmentSize(a)}</span></span>
+      <span className="user-attachment-info"><span className="user-attachment-name">{a.name}</span><span className="user-attachment-size">{a.kind === 'file-reference' && <><span className="attachment-link-badge">{t('Ссылка')}</span> · </>}{attachmentSize(a)}</span></span>
     </button>
     {error && <span className="user-attachment-error" role="status">{error}{isImage && read && <button type="button" onClick={() => setAttempt(attempt + 1)}>{t('Повторить')}</button>}</span>}
   </div>

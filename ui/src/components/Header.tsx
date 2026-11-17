@@ -9,10 +9,12 @@ import type { UsageState } from '../model/usage.js'
 import { formatUptime } from '../lib/conn.js'
 import { hhmm, Icon } from './common.js'
 import { ContextMenu } from './ContextMenu.js'
+import type { UpdateIndicatorView } from '../model/update.js'
 
 /** Operational details belong to the sidebar footer; service notices stay inside the overlay. */
 export function Header(p: {
   children?: ReactNode; noticeTone?: Tone
+  update?: UpdateIndicatorView | null; onUpdate?(): void
   conn: ConnState; status: DaemonStatus | null; statusAt: number; now: number; guard: GuardView; usage: UsageState
   providers?: ProviderCatalog | null; providersChecking?: boolean; onProvidersCheck?(): void
   doctorTone: Tone; inboxCount: number; inboxOpen: boolean
@@ -56,13 +58,17 @@ export function Header(p: {
       </div>
     </details>
     {p.onMaintenance && <button type="button" className="footer-icon maintenance-shortcut" title={t('Управление Пультом и CLI')} aria-label={t('Управление Пультом и CLI')} onClick={p.onMaintenance} data-testid="open-maintenance">CLI</button>}
+    {p.update && p.onUpdate && <button type="button" className={`footer-icon update-shortcut${p.update.warning ? ' t-fail' : ''}`} title={p.update.text} aria-label={p.update.text} aria-haspopup="dialog" data-testid="update-indicator" data-state={p.update.state}
+      onClick={() => { if (health.current) health.current.open = false; setHelp(null); p.onUpdate?.() }}>
+      <Icon name="refresh" />{p.update.percent !== null ? <span className="update-shortcut-percent" aria-hidden="true" data-testid="update-indicator-percent">{p.update.percent}%</span> : <span className="update-shortcut-dot" aria-hidden="true" />}
+    </button>}
     <span className="grow" />
     <button type="button" className="footer-icon" aria-label={t('Помощь')} title={t('Помощь')} data-testid="open-help" aria-haspopup="menu" aria-expanded={help !== null} onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); setHelp(help ? null : { x: r.left, y: r.top - 6 }) }}><Icon name="help" /></button>
     <button type="button" className="footer-icon" title={t('Настройки')} aria-label={t('Настройки')} onClick={p.onSettings} data-testid="open-settings"><Icon name="settings" /></button>
     {help && <ContextMenu at={help} above onClose={closeHelp} label={t('Помощь')} testId="help-menu" items={[
       { heading: t('Помощь') },
       { label: t('Сочетания клавиш'), onSelect: () => p.onHelp?.(), testId: 'help-shortcuts' },
-      { label: t('Что нового'), onSelect: () => p.onNews?.(), testId: 'help-news' },
+      { label: t('Что нового'), onSelect: () => { document.querySelector<HTMLButtonElement>('[data-testid="open-help"]')?.focus(); p.onNews?.() }, testId: 'help-news' },
       { label: t('Запустить диагностику'), onSelect: p.onDoctor, testId: 'help-diagnostics' },
       ...(p.onMaintenance ? [{ label: t('Управление Пультом и CLI'), onSelect: p.onMaintenance, testId: 'help-maintenance' }] : []),
       'sep', { note: t`Пульт ${up && p.conn.state === 'up' ? p.conn.daemon.version : '—'}` },

@@ -5,10 +5,11 @@ import { describe, it } from 'node:test'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { UpdateBanner } from '../src/components/UpdateBanner.js'
+import { UpdateDialog, ReleaseNotes } from '../src/components/UpdateDialog.js'
 import { SettingsDialog, UpdatesSection } from '../src/components/Settings.js'
 import type { UpdatesPanel } from '../src/components/Settings.js'
 import {
-  appUpdateView, pendingUpdate,
+  appUpdateView, pendingUpdate, updateActivity, updateIndicator, localizedReleaseNotes, officialReleaseNotesUrl,
   addDismissed, applyErrorText, checkedAgoText, checkErrorText, DISMISSED_MAX, FOCUS_CHECK_STALE_MS, focusCheckWanted, updateBanner, updateSection,
   upToDateNote, windowVersionFromUA,
 } from '../src/model/update.js'
@@ -407,5 +408,86 @@ describe('0.3.16: окно той же кнопкой; строка про ок�
   it('отказ «Обновить окно» словами; старая оболочка — подсказка pult update --app', () => {
     assert.equal(applyErrorText('invalid_params', 'нет прав на запись в /Applications', 'app'), 'Окно не обновилось: нет прав на запись в /Applications')
     assert.match(applyErrorText('method_not_allowed', 'x', 'app'), /pult update --app$/)
+  })
+})
+
+
+describe('in-app update notes and real download progress', () => {
+  const downloading = (progress?: { received: number; total: number; percent: number; artifact: 'package' | 'app' }): UpdateStatus => status({ staged: { to: '1.0.3', state: 'downloading', error: null, at: 'x', ...(progress ? { progress } : {}) } })
+  it('shows actual per-artifact byte percentages in the closed-dialog indicator, without inventing unknown progress', () => {
+    const u = downloading({ received: 40, total: 100, percent: 40, artifact: 'package' })
+    assert.deepEqual(updateActivity(u), { state: 'downloading', text: 'Скачиваю пакет Пульта…', percent: 40, artifact: 'package' })
+    assert.equal(updateIndicator(u, null)?.percent, 40)
+    assert.equal(updateActivity(downloading({ received: 58, total: 100, percent: 58, artifact: 'package' }))?.percent, 58)
+    assert.match(updateIndicator(u, null)?.text ?? '', /40%/)
+    assert.equal(updateActivity(downloading())?.percent, null)
+    for (const bad of [{ received: 40, total: 100, percent: 41 }, { received: 100, total: 0, percent: 0 }, { received: 110, total: 100, percent: 100 }, { received: NaN, total: 100, percent: 0 }]) {
+      assert.equal(updateActivity(downloading({ ...bad, artifact: 'package' }))?.percent, null)
+    }
+    const raw = renderToStaticMarkup(createElement(UpdateDialog, { status: downloading(), windowVersion: null, busy: false, checking: false, error: null, applyError: null, now: Date.now(), onAction: noop, onCheck: noop, onExternal: noop, onClose: noop }))
+    assert.match(raw, /data-testid="update-dialog-progress"/)
+    assert.doesNotMatch(raw, /aria-valuenow|update-dialog-percent/)
+  })
+  it('retains byte progress after apply starts waiting for prefetch, then uses preparation text at verified100', () => {
+    const u = downloading({ received: 40, total: 100, percent: 40, artifact: 'package' })
+    u.apply = { state: 'applying', to: '1.0.3', since: 'x' }
+    assert.equal(updateActivity(u)?.percent, 40)
+    u.staged!.progress = { received: 100, total: 100, percent: 99, artifact: 'package' }
+    assert.equal(updateActivity(u)?.percent, 99)
+    u.staged!.progress.percent = 100
+    assert.deepEqual(updateActivity(u), { state: 'preparing', text: 'Подготавливаю пакет Пульта…', percent: null, artifact: 'package' })
+    u.staged = null
+    u.apply = { state: 'applying', to: '1.0.3', since: 'x', progress: { received: 25, total: 100, percent: 25, artifact: 'package' } }
+    assert.equal(updateActivity(u)?.percent, 25)
+    u.apply = { state: 'waiting', to: '1.0.3', since: 'x', turns: 1 }
+    assert.equal(updateActivity(u), null)
+    assert.equal(updateIndicator(u, null)?.state, 'waiting')
+    u.staged = { to: '1.0.3', state: 'downloading', error: null, at: 'x', progress: { received: 40, total: 100, percent: 40, artifact: 'package' } }
+    assert.equal(updateActivity(u)?.percent, 40)
+    assert.equal(updateIndicator(u, null)?.state, 'waiting')
+    assert.match(updateIndicator(u, null)?.text ?? '', /после окончания ходов.*40%/)
+    const waiting = renderToStaticMarkup(createElement(UpdateDialog, { status: u, windowVersion: null, busy: false, checking: false, error: null, applyError: null, now: Date.now(), onAction: noop, onCheck: noop, onExternal: noop, onClose: noop }))
+    assert.match(waiting, /data-state="waiting"/)
+    assert.match(waiting, /после окончания ходов/)
+    assert.match(waiting, /Скачиваю пакет Пульта/)
+    assert.match(waiting, /data-testid="update-dialog-percent">40%/)
+    assert.match(waiting, />Сейчас<\/button>/)
+
+    u.apply = { state: 'failed', at: 'x', error: 'no network' }
+    assert.equal(updateActivity(u), null)
+    assert.equal(updateIndicator(u, null)?.state, 'failed')
+  })
+  it('does not reuse package progress for app verification, installation or a stale release', () => {
+    const u = downloading({ received: 75, total: 100, percent: 75, artifact: 'package' })
+    u.staged!.to = '1.0.2'
+    assert.equal(updateActivity(u), null)
+    u.app = { unsupported: null, installed: '1.0.2', path: '/Applications/Pult.app', latest: '1.0.3', available: true, bad: false, last: null, applying: { to: '1.0.3', from: '1.0.2', step: 'download', since: 'x', progress: { received: 30, total: 100, percent: 30, artifact: 'app' } } }
+    assert.deepEqual(updateActivity(u), { state: 'downloading', text: 'Скачиваю окно Пульта…', percent: 30, artifact: 'app' })
+    for (const step of ['verify', 'stage', 'swap', 'health'] as const) {
+      u.app.applying!.step = step
+      assert.equal(updateActivity(u)?.percent, null)
+      assert.notEqual(updateActivity(u)?.state, 'downloading')
+    }
+  })
+  it('selects bilingual release notes while preserving generic single-language notes and the24KiBUTF8bound', () => {
+    const both = '# Pult1.0.3\n\n## English\n- English change\n\n## Русский\n- Русская правка'
+    assert.equal(localizedReleaseNotes(both, 'ru'), '- Русская правка')
+    assert.equal(localizedReleaseNotes(both, 'en'), '- English change')
+    assert.equal(localizedReleaseNotes('## English\nA generic note', 'ru'), '## English\nA generic note')
+    assert.equal(localizedReleaseNotes('я'.repeat(13_000)), null)
+    assert.equal(localizedReleaseNotes(undefined), null)
+    assert.equal(officialReleaseNotesUrl('1.0.3'), 'https://github.com/pawellazarew/pult/releases/tag/v1.0.3')
+    assert.equal(officialReleaseNotesUrl('https://elsewhere'), 'https://github.com/pawellazarew/pult/releases')
+  })
+  it('renders release markdown as escaped React content with inert images, local files and executable URLs', () => {
+    const notes = '# Changes\n- **Safer update**\n\n![local image](/tmp/local.png) [local](/tmp/local.txt) [bad](javascript:alert(1))\n\n<script>alert(1)</script>'
+    const rendered = renderToStaticMarkup(createElement(ReleaseNotes, { text: notes, onExternal: noop }))
+    assert.match(rendered, /<strong><span>Safer update<\/span><\/strong>/)
+    assert.doesNotMatch(rendered, /<img|<script|<iframe|file-link|href="javascript:|src=/)
+    assert.match(rendered, /&lt;script&gt;/)
+    const fallback = renderToStaticMarkup(createElement(UpdateDialog, { status: status(), windowVersion: null, busy: false, checking: false, error: null, applyError: null, now: Date.now(), onAction: noop, onCheck: noop, onExternal: noop, onClose: noop }))
+    assert.match(fallback, /update-notes-unavailable/)
+    assert.match(fallback, /Описание изменений не передано/)
+    assert.match(fallback, /data-testid="update-dialog-apply"/)
   })
 })

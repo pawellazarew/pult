@@ -42,8 +42,8 @@ export function parseUserAttachments(raw: unknown): PromptAttachment[] {
     const a = obj(value)
     if (!a || typeof a['path'] !== 'string' || !a['path'].startsWith('/') || /[\0\r\n]/.test(a['path']) || a['path'].length > 16_384
       || typeof a['name'] !== 'string' || !a['name'].trim() || a['name'].length > 512 || /[\0\r\n]/.test(a['name'])
-      || typeof a['bytes'] !== 'number' || !Number.isSafeInteger(a['bytes']) || a['bytes'] < 0 || a['bytes'] > 25 * 1024 * 1024
-      || typeof a['mime'] !== 'string' || !a['mime'] || a['mime'].length > 128 || (a['kind'] !== 'file' && a['kind'] !== 'directory')) continue
+      || typeof a['bytes'] !== 'number' || !Number.isSafeInteger(a['bytes']) || a['bytes'] < 0 || (a['kind'] !== 'file-reference' && a['bytes'] > 25 * 1024 * 1024)
+      || typeof a['mime'] !== 'string' || !a['mime'] || a['mime'].length > 128 || (a['kind'] !== 'file' && a['kind'] !== 'directory' && a['kind'] !== 'file-reference')) continue
     result.push({ path: a['path'], name: a['name'], bytes: a['bytes'], mime: a['mime'], kind: a['kind'] })
   }
   return result

@@ -807,7 +807,7 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
     app: {
       wanted: (v) => appUpdaterRef?.wanted(v) ?? false,
       ready: (v) => appUpdaterRef?.readyFor(v) ?? false,
-      stage: async (m) => (await appUpdaterRef?.stage(m)) ?? false,
+      stage: async (m, onProgress) => (await appUpdaterRef?.stage(m, onProgress)) ?? false,
     },
     ...(opts.testMode && !opts.updates
       ? { schedule: !!process.env['PULT_TEST_UPDATE_DIR'], ...(Number.isFinite(testFirst) && testFirst >= 0 ? { firstDelayMs: testFirst } : {}) }

@@ -13,7 +13,7 @@ import { ClientError } from '../dist/cli/client.js'
 import type { DaemonStatus, UpdateStatus } from '../dist/core/rpc.js'
 import { APPLY_PASS, ApplyError, applyArgv, applyEnv, CHECK_INTERVAL_MS, CHECK_JITTER_MS, createUpdateChecker, FIRST_CHECK_MS, MIN_AUTO_GAP_MS, openUpdateLog } from '../dist/update/checker.js'
 import type { ApplyChild, CheckerOptions } from '../dist/update/checker.js'
-import type { HttpGet } from '../dist/update/fetch.js'
+import type { DownloadProgress, HttpGet } from '../dist/update/fetch.js'
 import { publicOf, signEnvelope } from '../dist/update/manifest.js'
 import { writeState } from '../dist/update/versions.js'
 import { channelDoctorItem } from '../dist/update/doctor.js'
@@ -25,25 +25,25 @@ const pub = publicOf(privateKey)
 const KEYS = [{ id: pub.keyId, publicKey: pub.raw.toString('base64') }]
 const URL_LATEST = 'https://example.invalid/latest.json'
 
-function latestJson(version: string): Buffer {
+function latestJson(version: string, size = 10): Buffer {
   const m = {
     schema: 1, version, released: '2026-10-19T10:00:00.000Z',
     notes: `https://github.com/pawellazarew/pult/releases/tag/v${version}`,
-    package: { url: `https://example.invalid/pult-${version}.tgz`, sha256: 'c'.repeat(64), size: 10 },
+    package: { url: `https://example.invalid/pult-${version}.tgz`, sha256: 'c'.repeat(64), size },
     app: { version: '0.1.14', minVersion: '0.1.13' },
   }
   return Buffer.from(signEnvelope(Buffer.from(JSON.stringify(m)), privateKey))
 }
 
 /** Подставной канал: отдаёт latest.json нужной версии и считает запросы. */
-function channel(version: () => string): { http: HttpGet; calls: () => number } {
+function channel(version: () => string, size = 10): { http: HttpGet; calls: () => number } {
   let n = 0
   return {
     calls: () => n,
     http: async (url) => {
       n++
       if (url !== URL_LATEST) return { status: 404, header: () => null, body: null }
-      const b = latestJson(version())
+      const b = latestJson(version(), size)
       return { status: 200, header: () => null, body: (async function* () { yield b })() }
     },
   }
@@ -750,6 +750,74 @@ describe('0.3.16: фоновая подготовка и «Перезапуст�
     return { c, stages, applies, launched }
   }
 
+  it('stage IPC accepts an exact 58 percent from 58 bytes of the signed 100-byte artifact', async () => {
+    const home = tempHome()
+    const { c, stages } = staging(home, { http: channel(() => '0.2.28', 100).http })
+    try {
+      await c.check()
+      stages[0]?.emit('message', { type: 'pult.update.progress', version: '0.2.28', progress: { received: 58, total: 100, percent: 58 } })
+      assert.deepEqual(c.status().staged?.progress, { artifact: 'package', received: 58, total: 100, percent: 58 })
+      stages[0]?.emit('exit', 1, null)
+      assert.ok(await waitFor(() => c.status().staged?.state === 'failed', 2000))
+    } finally { c.stop(); home.remove() }
+  })
+
+  it('stage IPC accepts only bounded monotonic bytes for the exact signed version and ignores late messages', async () => {
+    const home = tempHome()
+    const { c, stages } = staging(home)
+    try {
+      await c.check()
+      const child = stages[0] as FakeChild
+      const emit = (received: number, total: number, percent: number, version = '0.2.28'): void => {
+        child.emit('message', { type: 'pult.update.progress', version, progress: { received, total, percent } })
+      }
+      emit(3, 10, 30)
+      assert.deepEqual(c.status().staged?.progress, { artifact: 'package', received: 3, total: 10, percent: 30 })
+      for (const args of [[4, 11, 36], [4, 10, 99], [-1, 10, 0], [11, 10, 100], [3.5, 10, 35], [2, 10, 20]] as const) emit(args[0], args[1], args[2])
+      emit(4, 10, 40, '9.9.9')
+      child.emit('message', { type: 'pult.update.progress', version: '0.2.28', progress: null })
+      assert.equal(c.status().staged?.progress?.percent, 30)
+      emit(10, 10, 99)
+      assert.equal(c.status().staged?.progress?.percent, 99)
+      emit(10, 10, 100)
+      assert.equal(c.status().staged?.progress?.percent, 100)
+      assert.equal(c.status().staged?.state, 'downloading', 'download completion is not npm readiness')
+      stageOnDisk(home, '0.2.28')
+      child.emit('exit', 0, null)
+      assert.ok(await waitFor(() => c.status().staged?.state === 'ready', 2000))
+      emit(10, 10, 100)
+      assert.equal(c.status().staged?.progress, undefined)
+    } finally {
+      c.stop()
+      home.remove()
+    }
+  })
+
+  it('direct apply reports signed-size bytes after restart, ignores other versions and late child events', async () => {
+    const home = tempHome()
+    const ch = channel(() => '0.2.28')
+    const first = checker(home, { http: ch.http })
+    await first.check()
+    first.stop()
+    const k = new FakeChild()
+    const c = checker(home, { http: ch.http, spawnApply: () => k })
+    try {
+      await c.apply(false)
+      const emit = (version: string, total: number, percent: number): void => { k.emit('message', { type: 'pult.update.progress', version, progress: { received: 5, total, percent } }) }
+      emit('0.2.29', 10, 50)
+      emit('0.2.28', 11, 45)
+      const pending = c.status().apply
+      assert.equal(pending.state === 'applying' ? pending.progress : null, undefined)
+      emit('0.2.28', 10, 50)
+      const applying = c.status().apply
+      assert.equal(applying.state, 'applying')
+      assert.deepEqual(applying.state === 'applying' ? applying.progress : null, { artifact: 'package', received: 5, total: 10, percent: 50 })
+      k.emit('exit', 1, null)
+      emit('0.2.28', 10, 50)
+      assert.equal(c.status().apply.state, 'failed')
+    } finally { c.stop(); home.remove() }
+  })
+
   it('ручная проверка: «скачиваю в фоне» → ребёнок вышел 0 → «готово» (сверено с диском); повтор не готовит; пропало с диска — готовит снова', async () => {
     const home = tempHome()
     const { c, stages } = staging(home)
@@ -862,7 +930,7 @@ describe('0.3.16: фоновая подготовка и «Перезапуст�
     const app = {
       wanted: (v: string) => v === '0.1.14',
       ready: () => onDisk,
-      stage: async (m: { app?: { version: string } }) => { staged.push(m.app?.version ?? '?'); await new Promise<void>((r) => { release = r }); onDisk = true; return true },
+      stage: async (m: { app?: { version: string } }, onProgress?: (p: DownloadProgress) => void) => { staged.push(m.app?.version ?? '?'); onProgress?.({ received: 4, total: 10, percent: 40 }); await new Promise<void>((r) => { release = r }); onProgress?.({ received: 10, total: 10, percent: 100 }); onDisk = true; return true },
     }
     // В манифесте у окна должен быть архив — иначе готовить нечего.
     const withZip: HttpGet = async (url) => {
@@ -881,6 +949,7 @@ describe('0.3.16: фоновая подготовка и «Перезапуст�
       assert.equal(stages.length, 0, 'пакет 0.2.27 — последний: ребёнка нет')
       assert.ok(await waitFor(() => staged.length === 1, 2000))
       assert.equal(c.status().staged?.state, 'downloading')
+      assert.deepEqual(c.status().staged?.progress, { artifact: 'app', received: 4, total: 10, percent: 40 })
       release()
       assert.ok(await waitFor(() => c.status().staged?.state === 'ready', 2000))
     } finally {

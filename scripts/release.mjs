@@ -240,11 +240,13 @@ try {
     // --- 5. манифест и подпись ---------------------------------------------------------------
     const base = `https://github.com/${opt.repo}/releases/download/v${version}`
     const asset = (file, name) => ({ url: `${base}/${name}`, sha256: sha256(file), size: statSync(file).size })
+    const notesFile = join(ROOT, 'docs', 'releases', `${version}.md`)
     const manifest = {
       schema: 1,
       version,
       released: new Date().toISOString(),
       notes: `https://github.com/${opt.repo}/releases/tag/v${version}`,
+      ...(existsSync(notesFile) ? { changelog: readFileSync(notesFile, 'utf8') } : {}),
       package: asset(tgz, tgzName),
       app: {
         version: appVersion,

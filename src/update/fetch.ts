@@ -207,6 +207,8 @@ async function sha256File(file: string): Promise<{ size: number; sha256: string 
   return { size, sha256: h.digest('hex') }
 }
 
+export interface DownloadProgress { received: number; total: number; percent: number }
+
 export interface DownloadOptions {
   http: HttpGet
   /** Размер из манифеста: больше — обрыв посреди загрузки, меньше — отказ в конце. */
@@ -215,6 +217,7 @@ export interface DownloadOptions {
   timeoutMs?: number
   idleMs?: number
   what: string
+  onProgress?: (progress: DownloadProgress) => void
 }
 
 /**
@@ -227,6 +230,14 @@ export async function downloadTo(url: string, file: string, opts: DownloadOption
   let fd: number | null = null
   let created = false
   let total = 0
+  let lastPercent = -1
+  const report = (verified = false): void => {
+    const percent = verified ? 100 : Math.min(99, Math.floor(total * 100 / opts.size))
+    if (percent === lastPercent) return
+    lastPercent = percent
+    // A closed UI/IPC channel must not invalidate a signed download.
+    try { opts.onProgress?.({ received: total, total: opts.size, percent }) } catch { /* progress is advisory */ }
+  }
   try {
     const { res } = await openFollowing(url, opts.http, d.signal, opts.what)
     const declared = declaredLength(res)
@@ -236,6 +247,7 @@ export async function downloadTo(url: string, file: string, opts: DownloadOption
     }
     fd = openSync(file, 'wx', 0o600)
     created = true
+    report()
     for await (const chunk of res.body ?? []) {
       d.touch()
       total += chunk.length
@@ -245,6 +257,7 @@ export async function downloadTo(url: string, file: string, opts: DownloadOption
       }
       hash.update(chunk)
       writeAll(fd, chunk)
+      report()
     }
     if (total !== opts.size) throw new FetchError(`${opts.what}: пришло ${total} байт, манифест обещал ${opts.size}`)
     const got = hash.digest('hex')
@@ -256,6 +269,7 @@ export async function downloadTo(url: string, file: string, opts: DownloadOption
     // дешевле (тарбол ~2 МБ), чем спорить, что диск записал ровно то же.
     const onDisk = await sha256File(file)
     if (onDisk.size !== opts.size || onDisk.sha256 !== opts.sha256) throw new FetchError(`${opts.what}: на диске не те байты, что пришли (${onDisk.size} байт, sha256 ${onDisk.sha256.slice(0, 12)}…)`)
+    report(true)
   } catch (e) {
     if (fd !== null) { try { closeSync(fd) } catch { /* уже закрыт */ } fd = null }
     if (created) { try { unlinkSync(file) } catch { /* уже нет */ } }

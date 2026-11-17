@@ -20,6 +20,17 @@ describe('окно: рабочие сценарии', () => {
 
   before(async () => {
     h = await launch({ name: 'flows' })
+    // Keep OS keyboard input out of this fixture; Playwright still addresses the DOM through CDP.
+    // Unexpected extra characters were observed locally, but their source was not proved.
+    const focusable = await h.app.evaluate(({ app, BrowserWindow }) => {
+      app.on('browser-window-created', (_event, window) => window.setFocusable(false))
+      const window = BrowserWindow.getAllWindows()[0]!
+      window.setFocusable(false)
+      window.blur() // macOS does not blur an already-focused window when setFocusable(false) is applied.
+      return window.isFocusable()
+    })
+    assert.equal(focusable, false, 'the fixture window must not accept OS focus')
+    assert.ok(await waitFor(async () => !await h.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.isFocused()), 3000), 'the fixture window must release existing OS focus')
     assert.ok(await waitFor(async () => (await h.win.getAttribute('.app', 'data-conn')) === 'up', 20_000), 'окно не подключилось')
     c = await h.client()
     await h.win.getByTestId('toggle-inbox').click()
@@ -519,6 +530,9 @@ describe('окно: рабочие сценарии', () => {
     await input.fill('Округление вниз')
     await h.win.getByTestId('feed').click()
     assert.ok(await waitFor(async () => (await titleOf()) === 'Округление вниз', 5000), 'уход фокуса не сохранил название')
+    // RPC confirms the daemon mutation before renameAgent's follow-up agent.list reaches React.
+    // Exercise Escape against the renamed UI, rather than opening the dialog on its previous snapshot.
+    assert.ok(await waitFor(async () => (await title.textContent()) === 'Округление вниз', 5000), 'окно не показало сохранённое название')
     assert.equal(await h.win.getByTestId('confirm-stop').count(), 0)
 
     // Названия не уникальны — в «Остановить ход?» рядом с названием стоит имя.
@@ -639,6 +653,7 @@ describe('окно: рабочие сценарии', () => {
     const win = await h.reopen(async () => {
       assert.ok(await waitFor(async () => (await statusOf('delta')) === 'idle', 15_000), 'ход не дошёл без окна')
     })
+    assert.deepEqual(await h.app.evaluate(({ BrowserWindow }) => { const window = BrowserWindow.getAllWindows()[0]!; return { focusable: window.isFocusable(), focused: window.isFocused() } }), { focusable: false, focused: false }, 'reopened fixture window must also reject OS focus')
     assert.ok(await waitFor(async () => (await win.getAttribute('.app', 'data-conn')) === 'up', 20_000))
     await win.locator('[data-testid="agent-row"][data-agent="delta"]').click()
     assert.ok(await waitFor(async () => (await feedText(win)).includes('PULT'), 10_000), 'ответ не восстановился после открытия')

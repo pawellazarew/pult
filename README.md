@@ -52,7 +52,10 @@ The sidebar footer contains Inbox, connection status, network guard, diagnostics
 Shortcut reminders are kept in Help. Usage is in **Settings → Usage**; attachment retention is in **Settings → Files and storage**
 (7, 30 or 90 days, or forever). Retention applies to Pult’s copies and leaves original files alone.
 
-Attachments remain named cards in the conversation. Images are passed as native image input to Claude and Codex;
+Attachments remain named cards in the conversation. Local files larger than 25 MiB are attached as **links**
+to their originals, without copying their contents into Pult’s cache. Keep the original in place until the agent
+has finished; a moved, removed or size-changed file must be attached again. Small files remain cached copies.
+Large images use a file path rather than native image input. Smaller images are passed as native image input to Claude and Codex;
 file context is separate from the visible message text. Codex’s lightning menu selects **Normal** or **Fast**;
 availability and usage depend on the model and account.
 
@@ -85,6 +88,8 @@ exceeding a limit returns an error without falling back to disk. See [the develo
 - Skills in new-chat drafts, safer Escape handling and a more compact sidebar.
 - Daemon, diagnostic and provider CLI controls in the window.
 - Foldable long messages, aligned composer icons and more responsive large histories.
+- Large local files attached by reference, without an extra cached copy.
+- An update indicator opens in-app release notes and shows download percentages.
 - ZCode app resource discovery and qualified arm64 packaging.
 
 See the [release notes](docs/releases/0.3.22.md). The desktop uses the Node backend; Rust remains an isolated opt-in experimental core.
@@ -397,16 +402,17 @@ effort and access menus, ⌘⇧O the folder menu and ⌘O the system folder pick
 or use the **＋** button. Cards show names, sizes, remove buttons and PNG/JPEG thumbnails; your text stays in
 the input. You can send an attachment without text. A screenshot without a disk file needs no manual saving.
 
-Pult immediately saves file copies under `~/.pult/attachments/<session>/<date>/`, so deleting the original temporary
-file does not break the attachment. Limits: 20 files per message, 25 MB per file and 1 GB per day. Copies expire
-after 30 days; originals remain unchanged. Removing a card only removes it from the draft, keeping copies used by
+Pult saves copies of files up to 25 MiB under `~/.pult/attachments/<session>/<date>/`, so deleting their original
+temporary file does not break the attachment. Larger local files are explicitly labelled references: their contents
+are not copied and the original must stay available. Limits: 20 attachments per message and 1 GB of cached copies
+per day. Copies expire after 30 days; originals remain unchanged. Removing a card only removes it from the draft, keeping copies used by
 messages. Draft attachments survive reopening; saved files are checked before sending. In a new chat draft you can
-attach files before the chat has a name; sending copies them into the final session's folder. Directories remain
+attach files before the chat has a name; sending moves cached copies into the final session's folder and keeps references pointed at their originals. Directories remain
 explicitly labelled references rather than recursive copies. Dropping a folder outside the input selects the
 chat folder. Pasting text from Office still pastes text.
 
 Older windows retain path insertion. Update the window (Settings → Updates → «Перезапустить и обновить», Restart and
-update) for cards and memory-backed files. Each Claude session receives only its own attachment directory; Codex uses its normal sandbox access rules.
+update) for cards and memory-backed files. Cached attachments are scoped to their session. Linked originals keep the provider’s normal file-access and sandbox rules; a link does not grant access to their parent directory.
 
 | mode (window label) | Claude | Codex |
 |---|---|---|
@@ -450,8 +456,9 @@ composer, or run `pult agent set <name> [--model M] [--effort E] [--approval A] 
 
 ## Updates
 
-**In the window: Settings (⌘,) → Обновления (Updates).** Pult and its window share one version number, and one button
-updates both: «Перезапустить и обновить» (Restart and update) in Settings, «Перезапустить» (Restart) in the banner. The
+**In the window: the update indicator in the sidebar footer, or Settings (⌘,) → Обновления (Updates).**
+The indicator opens **What's new** with the release version, date and changes. Pult and its window share one version number; the update action
+updates both. The Settings
 section shows the installed version («Пульт 0.3.16»; the window's own number only when it differs), the channel status
 and when the channel was last checked; «Проверить сейчас» (Check now) checks right away. The toggle «Проверять
 обновления автоматически» (check automatically) is `updates.check` in `config.json`.
@@ -461,15 +468,16 @@ How an update goes:
 1. A check (every 6 hours, when the window comes back after an hour, or «Проверить сейчас») finds a newer signed
    release, and Pult downloads and verifies it in the background right away: the package into `PULT_HOME/versions/<v>`
    without switching to it, the window (macOS, Apple Silicon) into `PULT_HOME/apps/ready-<v>`. This happens only with
-   automatic checks on or after you pressed «Проверить сейчас». The banner stays empty meanwhile; Settings says
-   «скачиваю в фоне…» (downloading in the background). A failed download stays quiet and is retried later; the button
+   automatic checks on or after you pressed «Проверить сейчас». The indicator and What's new window show download
+   percentages from actual bytes, separately for the package and desktop app. Verification and preparation have their own status;
+   closing the window leaves the download running. A failed download is retried later; the button
    downloads it anyway.
-2. When everything is ready, the banner says «Пульт X готов · Что нового · Перезапустить» (Pult X is ready · What's new ·
-   Restart).
+2. When everything is ready, the update window says that Pult X is ready. Release notes come from the signed update
+   manifest; older channels without inline notes keep a link to the release page.
 3. «Перезапустить» lets running turns finish first: «Обновлю до X после окончания ходов (N идут) · Сейчас» — «Сейчас»
    (Now) means don't wait. New messages wait until the restart («Пульт обновляется — отправь после перезапуска»), the
    text stays in the box. Then the daemon switches to the new version and restarts, and the new daemon closes the
-   window, swaps `Pult.app` and opens the new window. The banner says «Перезапускаю…» (Restarting…). Agents keep their
+   window, swaps `Pult.app` and opens the new window. The update status says «Перезапускаю…» (Restarting…). Agents keep their
    sessions; unsent text in the message box survives.
 4. A failure is shown with «Повторить» (Retry). A daemon that fails its start-up check is rolled back, a window that
    does not come up within 60 seconds is put back, and a window replaced while it was closed can be put back with

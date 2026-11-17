@@ -5,6 +5,7 @@ import { getLanguage, setLanguage } from '../../src/i18n/core.js'
 // В окно уходят только функции ниже; ipcRenderer и сам Electron окну не видны.
 
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
+import { attachmentInputFromFile } from './attachmentInput.js'
 import type { IpcRendererEvent } from 'electron'
 import { BRIDGE_VERSION, IPC } from './contract.js'
 import type { AllowedMethod, CallReply, ClipboardImageResult, ConnState, NavTarget, NotifyKind, NotifyTarget, PultBridge, PultEvent } from './contract.js'
@@ -159,12 +160,8 @@ const bridge: PultBridge = {
         try {
           // Не принимаем произвольные path-строки страницы: настоящий File проверяет Electron.
           const source = webUtils.getPathForFile(file)
-          let item: import('./contract.js').AttachmentInput
-          if (source) item = { name: file.name, path: source }
-          else {
-            if (file.size > 25 * 1024 * 1024) { results.push({ error: tr`${file.name}: файл больше 25 МБ.` }); continue }
-            item = { name: file.name, bytes: new Uint8Array(await file.arrayBuffer()) }
-          }
+          const item = await attachmentInputFromFile(file, source)
+          if ('error' in item) { results.push(item); continue }
           const reply = await ipcRenderer.invoke(IPC.attachmentFiles, session, item) as import('./contract.js').AttachmentResult
           results.push(reply)
         } catch { results.push({ error: tr('Не удалось прочитать перетащенный файл. Перетащи его ещё раз.') }) }

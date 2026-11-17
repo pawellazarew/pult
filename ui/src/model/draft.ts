@@ -86,7 +86,7 @@ export interface DraftChat {
   restored?: boolean
   /** Папка, при которой собран доступ черновика (из `agent.preflight`); на старте демон сверяет её (`folder_changed`). */
   folder?: FolderStamp | null
-  /** Метаданные вложений черновика (сами файлы — в `attachments/draft-…`): черновик с одними вложениями — не пустой. */
+  /** Метаданные вложений черновика (копии — в `attachments/draft-…`, ссылки указывают на оригиналы): черновик с одними вложениями — не пустой. */
   attachments?: SavedAttachment[]
   /** Текст, пришедший по ссылке: пока его не трогали, под полем — счётчик строк и знаков (ревью M5). */
   linkText?: string
@@ -348,7 +348,9 @@ export function draftFromSnapshot(id: string, rev: number, raw: unknown, env: Dr
     d.attachments = (o['attachments'] as unknown[]).flatMap((x): SavedAttachment[] => {
       const a = x && typeof x === 'object' ? x as Record<string, unknown> : null
       if (!a || typeof a['path'] !== 'string' || !a['path'].startsWith('/') || typeof a['name'] !== 'string') return []
-      if (typeof a['bytes'] !== 'number' || typeof a['mime'] !== 'string' || (a['kind'] !== 'file' && a['kind'] !== 'directory')) return []
+      if (typeof a['bytes'] !== 'number' || !Number.isSafeInteger(a['bytes']) || a['bytes'] < 0
+        || (a['kind'] !== 'file-reference' && a['bytes'] > 25 * 1024 * 1024)
+        || typeof a['mime'] !== 'string' || (a['kind'] !== 'file' && a['kind'] !== 'directory' && a['kind'] !== 'file-reference')) return []
       return [{ path: a['path'], name: a['name'], bytes: a['bytes'], mime: a['mime'], kind: a['kind'] }]
     }).slice(0, 20)
   }

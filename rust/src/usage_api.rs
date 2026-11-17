@@ -56,8 +56,10 @@ pub(crate) async fn execute(state: Arc<State>) -> Result<Box<RawValue>, ApiError
         })?;
     let job = state.host_jobs.track();
     tokio::task::spawn_blocking(move || {
-        let _permit = permit;
+        // Locals drop in reverse declaration order: return admission before the
+        // host-job guard notifies a drain waiter that this operation is finished.
         let _job = job;
+        let _permit = permit;
         if *state.stop.borrow() {
             return Err(ApiError {
                 code: "closed",
@@ -261,12 +263,59 @@ mod tests {
         }
         assert_eq!(state.usage_reads.available_permits(), 0);
         assert_eq!(state.host_jobs.active(), 4);
+        // Sample the actual terminal drain notification synchronously, before its
+        // caller can finish dropping any remaining locals on the blocking thread.
+        struct AdmissionAtDrain {
+            jobs: std::sync::Weak<crate::host_jobs::Tracker>,
+            reads: Arc<tokio::sync::Semaphore>,
+            observed: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl std::task::Wake for AdmissionAtDrain {
+            fn wake(self: Arc<Self>) {
+                if self.jobs.upgrade().is_some_and(|jobs| jobs.active() == 0) {
+                    self.observed
+                        .store(self.reads.available_permits(), Ordering::Release);
+                }
+            }
+        }
+        let observed = Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
+        let waker = std::task::Waker::from(Arc::new(AdmissionAtDrain {
+            jobs: Arc::downgrade(&state.host_jobs),
+            reads: state.usage_reads.clone(),
+            observed: observed.clone(),
+        }));
+        let observer = state.host_jobs.wait();
+        tokio::pin!(observer);
+        assert!(
+            std::future::Future::poll(
+                observer.as_mut(),
+                &mut std::task::Context::from_waker(&waker),
+            )
+            .is_pending()
+        );
         release.send(()).unwrap();
         holder.join().unwrap();
+        // Do not repoll the observer with an executor waker before it samples the
+        // last job; that would hide the ordering under a later scheduler turn.
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while observed.load(Ordering::Acquire) == usize::MAX {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         tokio::time::timeout(Duration::from_secs(3), state.host_jobs.wait())
             .await
             .unwrap();
+        let permits_at_drain = observed.load(Ordering::Acquire);
+        eprintln!(
+            "[usage-admission-drain] terminal_jobs={} permits_at_notification={} permits_after_wait={}",
+            state.host_jobs.active(),
+            permits_at_drain,
+            state.usage_reads.available_permits(),
+        );
         assert_eq!(state.usage_reads.available_permits(), 4);
+        assert_eq!(permits_at_drain, 4);
     }
 }
 

@@ -46,7 +46,8 @@ import { ConsentDialog } from './components/Access.js'
 import { CONSENT_DIALOG_PROVIDERS, CONSENT_DIALOG_VERSION, isFullLevel } from './model/access.js'
 import type { ConsentView } from './model/access.js'
 import { UpdateBanner } from './components/UpdateBanner.js'
-import { addDismissed, applyErrorText, checkErrorText, FOCUS_CHECK_STALE_MS, focusCheckWanted, updateBanner, upToDateNote, windowVersionFromUA } from './model/update.js'
+import { UpdateDialog } from './components/UpdateDialog.js'
+import { addDismissed, applyErrorText, checkErrorText, FOCUS_CHECK_STALE_MS, focusCheckWanted, updateBanner, upToDateNote, updateIndicator, windowVersionFromUA } from './model/update.js'
 import type { UpdateAction } from './model/update.js'
 import type { UpdateStatus } from '../../src/core/rpc.js'
 import type { McpListing } from './model/mcp.js'
@@ -105,6 +106,7 @@ declare global {
 }
 
 type Modal = null | { type: 'maintenance' } | { type: 'external' } | { type: 'doctor' } | { type: 'mcp' } | { type: 'stop'; name: string } | { type: 'rm'; name: string } | { type: 'hide'; path: string; sessions: readonly string[]; busy: readonly string[] } | { type: 'rename'; name: string } | { type: 'help' } | { type: 'search' }
+  | { type: 'update'; fromSettings?: true }
   | { type: 'discard-draft'; id: string }
   | { type: 'temporary-end'; identity: TemporaryIdentity }
   | { type: 'settings'; section?: import('./components/Settings.js').SettingsSection } | { type: 'configure'; name: string; pick: SettingsPick; reason: 'misfit'; text?: string }
@@ -336,21 +338,28 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   // Снимок статуса застал проверку канала («Проверяю…») — переспросить через секунду, а не ждать опроса раз в 15 с.
   const refreshStatusRef = useRef<(() => Promise<void>) | null>(null)
   const updChecking = status?.update?.checking === true
-  // 0.3.16: пока новая версия качается в фоне или идёт перезапуск — переспрашивать раз в 2 с: «Пульт X готов» и
-  // «Перезапускаю…» должны появляться и уходить сразу, а не через 15 с опроса.
+  // Poll local progress once a second while moving; closing the dialog keeps the footer current.
   const upd = status?.update
-  const updMoving = upd?.staged?.state === 'downloading' || (upd?.continuing ?? null) !== null || (upd?.app?.applying ?? null) !== null
+  const updMoving = upd?.staged?.state === 'downloading' || upd?.apply.state === 'waiting' || upd?.apply.state === 'applying' || (upd?.continuing ?? null) !== null || (upd?.app?.applying ?? null) !== null
   useEffect(() => {
-    if (!updChecking && !updMoving) return
-    const t = window.setTimeout(() => { void refreshStatusRef.current?.() }, updChecking ? 1_000 : 2_000)
+    if (conn.state !== 'up' || (!updChecking && !updMoving)) return
+    const t = window.setTimeout(() => { void refreshStatusRef.current?.() }, 1_000)
     return () => clearTimeout(t)
-  }, [updChecking, updMoving, status])
-  const refreshStatus = useCallback(async (): Promise<void> => {
-    try {
-      const st = (await bridge.call('daemon.status')) as DaemonStatus
-      setStatus(st)
-      setStatusAt(Date.now())
-    } catch { /* см. выше */ }
+  }, [updChecking, updMoving, status, conn.state])
+  // Download progress and the ordinary status timer share one local request, never parallel polling.
+  const statusInFlight = useRef<Promise<void> | null>(null)
+  const refreshStatus = useCallback((): Promise<void> => {
+    if (statusInFlight.current) return statusInFlight.current
+    const request = (async () => {
+      try {
+        const st = (await bridge.call('daemon.status')) as DaemonStatus
+        setStatus(st)
+        setStatusAt(Date.now())
+      } catch { /* connection state explains an unavailable daemon */ }
+      finally { statusInFlight.current = null }
+    })()
+    statusInFlight.current = request
+    return request
   }, [bridge])
 
   refreshStatusRef.current = refreshStatus
@@ -418,7 +427,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     window.addEventListener('pult:settings', open)
     return () => window.removeEventListener('pult:settings', open)
   }, [])
-  const settingsOpen = modal?.type === 'settings'
+  const settingsOpen = modal?.type === 'settings' || (modal?.type === 'update' && modal.fromSettings === true)
   useEffect(() => { if (settingsOpen) void refreshSettings() }, [settingsOpen, refreshSettings])
 
   const refreshTimer = useRef<number | null>(null)
@@ -1459,6 +1468,12 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     })
   }
   const updateView = updateBanner(status?.update, windowVersion, updDismissed)
+  const updateIcon = updateIndicator(status?.update, windowVersion, updDismissed)
+  const openUpdate = (fromSettings = false): void => {
+    const health = document.querySelector<HTMLDetailsElement>('.health-menu')
+    if (health?.open) { health.open = false; health.querySelector<HTMLElement>('summary')?.focus() }
+    setModal({ type: 'update', ...(fromSettings ? { fromSettings: true as const } : {}) })
+  }
 
   const startDaemon = (): void => {
     setStarting(true)
@@ -1645,7 +1660,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         onDoctor={() => { setModal({ type: 'doctor' }); if (!doctor.loading) void runDoctor() }}
         onAddProject={() => void addProject()} onExternal={() => setModal({ type: 'external' })}
         onHelp={() => setModal({ type: 'help' })} onSettings={() => setModal({ type: 'settings' })}
-        onNews={() => { void followLink(bridge, 'https://github.com/pawellazarew/pult/releases', 'https://github.com/pawellazarew/pult/releases') }}
+        onNews={() => openUpdate()} update={updateIcon} onUpdate={() => openUpdate()}
         onInbox={() => { setMobileNavOpen(false); setFilesOpen(false); setRuntimeOpen(false); setInboxOpen((v) => !v) }}
         onGuardRecheck={() => { setModal({ type: 'doctor' }); void runDoctor() }}
         noticeTone={view.banner || blocked.length || guard.tone === 'fail' || bannerError ? 'fail' : updateView || updNote || settings?.disk?.status.state === 'low' ? 'wait' : undefined}>
@@ -1669,8 +1684,8 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         </div>
       ))}
       {!view.banner && (
-        <UpdateBanner view={updateView} busy={updBusy} onAction={applyUpdate}
-          onNotes={(url) => { void followLink(bridge, url, url) }}
+        <UpdateBanner view={updateView} busy={updBusy} onAction={() => openUpdate()}
+          onNotes={() => openUpdate()}
           onDismiss={(v) => { const next = addDismissed(updDismissed, v); setUpdDismissed(next); store.set('pult.updateDismissed', JSON.stringify(next)) }} />
       )}
       {!view.banner && !updateView && updNote && (
@@ -1809,8 +1824,8 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         text={tr('Разговор и черновик будут удалены из памяти Пульта. Восстановить их не получится.')}
         onOk={() => { const identity = modal.identity; void temporaryChats.remove(identity).then(() => setModal(null), () => setModal(null)) }} onCancel={() => setModal(null)} />}
       {modal?.type === 'help' && <HotkeysHelp onClose={() => setModal(null)} />}
-      {modal?.type === 'settings' && (
-        <SettingsDialog disk={settings?.disk} onDiskSave={async disk => { setSettings(await bridge.call('settings.set', { disk }) as SettingsReply) }} initialSection={modal.section} settings={settings?.newSession ?? null} catalog={providers} onSave={saveSettings} onClose={() => setModal(null)}
+      {(modal?.type === 'settings' || (modal?.type === 'update' && modal.fromSettings)) && (
+        <div hidden={modal.type === 'update'}><SettingsDialog active={modal.type === 'settings'} disk={settings?.disk} onDiskSave={async disk => { setSettings(await bridge.call('settings.set', { disk }) as SettingsReply) }} initialSection={modal.type === 'settings' ? modal.section : 'updates'} settings={settings?.newSession ?? null} catalog={providers} onSave={saveSettings} onClose={() => setModal(null)}
           language={settings?.language ?? 'auto'}
           usage={ui.usage} now={now} usageRefreshing={providersChecking} onUsageRefresh={() => { void checkProviders(); void refreshStatus() }}
           {...(settings?.attachments ? { retentionDays: settings.attachments.retentionDays, onRetentionChange: async (retentionDays: 7|30|90|null) => { setSettings(await bridge.call('settings.set', { attachments: { retentionDays } }) as SettingsReply) } } : {})}
@@ -1839,9 +1854,12 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
           updates={{
             status: status?.update, packageVersion: status?.update?.current ?? (conn.state === 'up' ? conn.daemon.version : null), windowVersion,
             checking: updCheck.checking, error: updCheck.error, applyError: updCheck.applyError, busy: updBusy, now,
-            onCheck: checkUpdates, onApply: applyUpdate, onNotes: (url) => { void followLink(bridge, url, url) },
-          }} />
+            onCheck: checkUpdates, onApply: applyUpdate, onNotes: () => openUpdate(true),
+          }} /></div>
       )}
+      {modal?.type === 'update' && <UpdateDialog status={status?.update} windowVersion={windowVersion} busy={updBusy} checking={updCheck.checking} error={updCheck.error} applyError={updCheck.applyError} now={now}
+        onAction={applyUpdate} onCheck={checkUpdates} onExternal={(url) => { void followLink(bridge, url, url) }}
+        onClose={() => setModal(modal.fromSettings ? { type: 'settings', section: 'updates' } : null)} />}
       {modal?.type === 'configure' && (
         <Confirm testId="confirm-configure" danger
           title={tr('Разговор не влезет в окно модели')}

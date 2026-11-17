@@ -1412,7 +1412,11 @@ describe('0.3.16: окно готовится заранее (apps/ready-<v>)', 
     const u = updaterOf(w, { tools: z.tools })
     try {
       assert.equal(u.wanted('0.1.16'), true)
-      await u.stage(manifestOf(w))
+      const progress: Array<{ received: number; total: number; percent: number }> = []
+      await u.stage(manifestOf(w), (p) => { progress.push(p) })
+      assert.equal(progress[0]?.percent, 0)
+      assert.equal(progress.at(-1)?.percent, 100)
+      assert.equal(progress.at(-1)?.received, progress.at(-1)?.total)
       assert.deepEqual(apps(w), ['ready-0.1.16'])
       assert.equal(versionAt(join(w.home.paths.apps, 'ready-0.1.16', 'Pult.app')), '0.1.16')
       assert.equal(u.readyFor('0.1.16'), true)
@@ -1433,6 +1437,39 @@ describe('0.3.16: окно готовится заранее (apps/ready-<v>)', 
       assert.equal(z.gets(), 1, 'подготовленное окно не качалось второй раз')
       assert.deepEqual(apps(w).filter((n) => n.startsWith('ready-') || n.startsWith('stage-')), [], 'подготовленное израсходовано')
     } finally {
+      w.remove()
+    }
+  })
+
+  it('direct app update exposes actual partial zip bytes before verification and swap', async () => {
+    const w = world({ running: false })
+    const base = w.tools()
+    let release: () => void = () => {}
+    const hold = new Promise<void>((r) => { release = r })
+    const half = Math.floor(w.zip.length / 2)
+    const http: HttpGet = async (url, signal) => {
+      if (!url.endsWith('-arm64.zip')) return (base.http as HttpGet)(url, signal)
+      return { status: 200, header: () => null, body: (async function* () {
+        yield w.zip.subarray(0, half)
+        await hold
+        yield w.zip.subarray(half)
+      })() }
+    }
+    const u = updaterOf(w, { tools: { ...base, http } })
+    try {
+      await u.apply()
+      assert.ok(await waitFor(() => (u.status().applying?.progress?.received ?? 0) === half, 2000))
+      assert.deepEqual(u.status().applying?.progress, {
+        artifact: 'app', received: half, total: w.zip.length, percent: Math.floor(half / w.zip.length * 100),
+      })
+      assert.equal(versionAt(w.app), '0.1.15', 'partial download must not replace the app')
+      release()
+      await u.idle()
+      assert.equal(readAppState(w.home.paths).last?.result, 'done')
+      assert.equal(versionAt(w.app), '0.1.16')
+    } finally {
+      release()
+      await u.stop()
       w.remove()
     }
   })

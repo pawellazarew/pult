@@ -8,13 +8,19 @@
 // закрывает обновление) и запуск НОВОГО процесса окна с тем же userData.
 
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
+import type { ChildProcess } from 'node:child_process'
+import { createRequire } from 'node:module'
+import { pathToFileURL } from 'node:url'
 import { createHash, createPublicKey, generateKeyPairSync, sign } from 'node:crypto'
-import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { after, before, describe, it } from 'node:test'
-import { launch, REPO, waitFor } from './harness.js'
+import { chromium } from 'playwright-core'
+import type { Browser, Page } from 'playwright-core'
+import { launch, REPO, RESULTS, SHELL_DIR, waitFor } from './harness.js'
+import type { Client } from '../../../src/cli/client.js'
 import type { Harness } from './harness.js'
 
 const PKG_VERSION = (JSON.parse(readFileSync(path.join(REPO, 'package.json'), 'utf8')) as { version: string }).version
@@ -154,16 +160,100 @@ describe('окно обновляется само: окно не из банд�
   })
 })
 
+/** The updater terminates an ordinary Electron process, not Playwright's Node-inspected main.
+ * Attach only to renderer CDP: a Node debugger can itself retain the dying process at shutdown. */
+interface PlainShell {
+  home: string
+  win: Page
+  process: ChildProcess
+  client(): Promise<Client>
+  workDir(name: string): string
+  close(): Promise<void>
+}
+async function plainShell(name: string, reuseHome?: string, keepHome = false): Promise<PlainShell> {
+  const home = reuseHome ?? mkdtempSync(path.join(tmpdir(), 'pe-plain-'))
+  const svcDir = path.join(home, 'svc'); mkdirSync(svcDir, { recursive: true })
+  const pathsModule = await import(pathToFileURL(path.join(REPO, 'dist/core/paths.js')).href) as typeof import('../../../src/core/paths.js')
+  const clientModule = await import(pathToFileURL(path.join(REPO, 'dist/cli/client.js')).href) as typeof import('../../../src/cli/client.js')
+  const paths = pathsModule.layout(home)
+  const child = spawn(createRequire(import.meta.url)('electron') as string, [SHELL_DIR, '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', '--use-mock-keychain'], {
+    env: {
+      PATH: process.env['PATH'] ?? '/usr/bin:/bin', HOME: process.env['HOME'] ?? home, TMPDIR: process.env['TMPDIR'] ?? '/tmp',
+      LANG: 'ru_RU.UTF-8', PULT_LANG: 'ru', PULT_TEST: '1', PULT_HOME: home, PULT_UI_ROOT: REPO, PULT_NODE: process.execPath,
+      PULT_CLAUDE_BIN: path.join(REPO, 'test/fakes/fake-claude.mjs'), PULT_CODEX_BIN: path.join(REPO, 'test/fakes/fake-codex-app-server.mjs'),
+      PULT_TEST_NET: 'ok', PULT_SERVICE_DIR: svcDir,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  const output: string[] = [], consoleLines: string[] = [], clients: Client[] = []
+  let browser: Browser | null = null, win: Page | null = null, closed = false
+  let resolveEndpoint: (url: string) => void = () => {}, rejectEndpoint: (error: Error) => void = () => {}
+  const endpoint = new Promise<string>((resolve, reject) => { resolveEndpoint = resolve; rejectEndpoint = reject })
+  const endpointTimer = setTimeout(() => rejectEndpoint(new Error('ordinary Electron did not expose renderer CDP')), 30_000)
+  // A startup error can arrive before connectOverCDP starts awaiting the endpoint.
+  endpoint.catch(() => {})
+  let tail = ''
+  child.stderr.on('data', (chunk: Buffer) => {
+    const text = chunk.toString('utf8'); output.push(text); if (output.length > 400) output.shift()
+    tail = (tail + text).slice(-16_384)
+    const match = /DevTools listening on (ws:\/\/[^\s]+)/.exec(tail)
+    if (match?.[1]) resolveEndpoint(match[1])
+  })
+  child.stdout.on('data', (chunk: Buffer) => { output.push(chunk.toString('utf8')); if (output.length > 400) output.shift() })
+  child.once('error', rejectEndpoint)
+  child.once('exit', (code, signal) => rejectEndpoint(new Error(`ordinary Electron exited before CDP: ${code}/${signal}`)))
+  const exited = (): boolean => child.exitCode !== null || child.signalCode !== null
+  const close = async (): Promise<void> => {
+    if (closed) return
+    closed = true; clearTimeout(endpointTimer)
+    mkdirSync(RESULTS, { recursive: true })
+    if (win && !win.isClosed()) await win.screenshot({ path: path.join(RESULTS, `${name}-at-close.png`), timeout: 5000 }).catch(() => {})
+    writeFileSync(path.join(RESULTS, `${name}-electron.log`), output.join('') + `\nexitCode=${child.exitCode} signalCode=${child.signalCode}\n`)
+    writeFileSync(path.join(RESULTS, `${name}-console.log`), consoleLines.join('\n') + '\n')
+    try { cpSync(paths.logs, path.join(RESULTS, `${name}-logs`), { recursive: true }) } catch { /* startup may fail before logging */ }
+    for (const client of clients) client.close()
+    if (browser) await Promise.race([browser.close().catch(() => {}), new Promise<void>((resolve) => { const timer = setTimeout(resolve, 10_000); timer.unref() })])
+    if (!exited()) {
+      child.kill('SIGTERM')
+      if (!await waitFor(exited, 10_000)) child.kill('SIGKILL')
+      await waitFor(exited, 5000)
+    }
+    try {
+      const { pid } = JSON.parse(readFileSync(paths.lock, 'utf8')) as { pid?: unknown }
+      if (typeof pid === 'number' && Number.isSafeInteger(pid) && pid > 0) {
+        const alive = (): boolean => { try { process.kill(pid, 0); return true } catch { return false } }
+        try { process.kill(pid, 'SIGTERM') } catch { /* already stopped */ }
+        if (!await waitFor(() => !alive(), 5000)) { try { process.kill(pid, 'SIGKILL') } catch { /* already stopped */ } }
+      }
+    } catch { /* no daemon was started */ }
+    if (!keepHome) rmSync(home, { recursive: true, force: true })
+  }
+  try {
+    let url: string
+    try { url = await endpoint } finally { clearTimeout(endpointTimer) }
+    browser = await chromium.connectOverCDP(url, { timeout: 30_000 })
+    assert.ok(await waitFor(() => (browser?.contexts()[0]?.pages().length ?? 0) > 0, 30_000), 'ordinary Electron did not open its window')
+    win = browser.contexts()[0]!.pages()[0]!
+    await win.waitForLoadState('domcontentloaded')
+    win.on('console', (message) => consoleLines.push(`${message.type()} ${message.text()}`))
+    return {
+      home, win, process: child, close,
+      async client() { const client = await clientModule.connectClient(paths, { client: 'cli' }); clients.push(client); return client },
+      workDir(dirName) { const dir = path.join(home, 'w', dirName); mkdirSync(dir, { recursive: true }); writeFileSync(path.join(dir, '.pult-fake.json'), JSON.stringify({ scenario: 'simple', speed: 0 })); return dir },
+    }
+  } catch (error) { await close(); throw error }
+}
+
 describe('черновик поля реплики переживает SIGTERM окна и новый процесс', () => {
-  let h1: Harness | null = null
-  let h2: Harness | null = null
+  let h1: PlainShell | null = null
+  let h2: PlainShell | null = null
   after(async () => {
     await h1?.close()
     await h2?.close()
   })
 
   it('набрал → SIGTERM главному процессу Electron (как при обновлении окна) → новый процесс с тем же userData ставит черновик в поле', async () => {
-    h1 = await launch({ name: 'drafts', keepHome: true })
+    h1 = await plainShell('drafts-plain', undefined, true)
     assert.ok(await waitFor(async () => (await h1!.win.getAttribute('.app', 'data-conn')) === 'up', 20_000), 'окно не подключилось')
     const c = await h1.client()
     await c.request('agent.start', { name: 'dr', kind: 'claude', cwd: h1.workDir('dr') })
@@ -171,7 +261,7 @@ describe('черновик поля реплики переживает SIGTERM 
     await h1.win.locator('[data-testid="conversation"][data-agent="dr"]').waitFor({ timeout: 10_000 })
     await h1.win.getByTestId('composer').fill('черновик до SIGTERM')
     await new Promise((r) => setTimeout(r, 800)) // запись по ходу набора — через полсекунды тишины
-    const proc = h1.app.process()
+    const proc = h1.process
     const exited = new Promise<void>((r) => proc.once('exit', () => r()))
     process.kill(proc.pid as number, 'SIGTERM')
     await Promise.race([exited, new Promise((r) => setTimeout(r, 15_000))])
@@ -179,7 +269,7 @@ describe('черновик поля реплики переживает SIGTERM 
     const home = h1.home
     await h1.close()
     h1 = null
-    h2 = await launch({ name: 'drafts-again', home })
+    h2 = await plainShell('drafts-plain-again', home)
     assert.ok(await waitFor(async () => (await h2!.win.getAttribute('.app', 'data-conn')) === 'up', 20_000), 'новое окно не подключилось')
     await h2.win.locator('[data-testid="agent-row"][data-agent="dr"]').click()
     await h2.win.locator('[data-testid="conversation"][data-agent="dr"]').waitFor({ timeout: 10_000 })

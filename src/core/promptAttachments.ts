@@ -1,6 +1,7 @@
 import { constants, closeSync, fstatSync, lstatSync, openSync, readSync, realpathSync } from 'node:fs'
 import path from 'node:path'
 import { imageMime } from './images.js'
+import { insideAttachmentCache } from './attachments.js'
 import { translator } from '../i18n/core.js'
 const tr = translator({
   'можно прикрепить не больше 20 файлов': 'attach no more than 20 files',
@@ -12,8 +13,8 @@ const tr = translator({
   'формат изображения не совпадает с содержимым': 'image format does not match its contents',
 })
 
-/** Stable metadata persisted with the user message. Native image bytes never enter the journal. */
-export interface PromptAttachment { path: string; name: string; bytes: number; mime: string; kind: 'file' | 'directory' }
+/** Metadata persisted with the message. file is a cached snapshot; file-reference is a mutable external original. */
+export interface PromptAttachment { path: string; name: string; bytes: number; mime: string; kind: 'file' | 'directory' | 'file-reference' }
 export interface PromptAttachmentScope { home: string; sessionId: string }
 export const MAX_PROMPT_ATTACHMENTS = 20
 export const MAX_PROMPT_ATTACHMENT_BYTES = 25 * 1024 * 1024
@@ -36,7 +37,7 @@ export function ownedPromptAttachment(home: string, sessionId: string, source: s
   } catch { return false }
 }
 
-/** Files must be owned copies. Directories remain explicit references, and are never opened/read here. */
+/** Cached files are owned copies. Large originals and directories are stat-only references, never native image bytes. */
 export function validateOwnedPromptAttachments(home: string, sessionId: string, raw: unknown): PromptAttachment[] {
   if (raw === undefined) return []
   if (!Array.isArray(raw) || raw.length > MAX_PROMPT_ATTACHMENTS) throw new Error(tr('можно прикрепить не больше 20 файлов'))
@@ -45,8 +46,9 @@ export function validateOwnedPromptAttachments(home: string, sessionId: string, 
     const v = value as Record<string, unknown>
     if (typeof v['path'] !== 'string' || !path.isAbsolute(v['path']) || /[\0\r\n]/.test(v['path']) || v['path'].length > 16_384
       || typeof v['name'] !== 'string' || !v['name'].trim() || v['name'].length > 512 || /[\0\r\n]/.test(v['name'])
-      || typeof v['bytes'] !== 'number' || !Number.isSafeInteger(v['bytes']) || v['bytes'] < 0 || v['bytes'] > MAX_PROMPT_ATTACHMENT_BYTES
-      || typeof v['mime'] !== 'string' || !v['mime'] || v['mime'].length > 128 || !['file', 'directory'].includes(String(v['kind']))) {
+      || typeof v['bytes'] !== 'number' || !Number.isSafeInteger(v['bytes']) || v['bytes'] < 0
+      || (v['kind'] === 'file-reference' ? v['bytes'] <= MAX_PROMPT_ATTACHMENT_BYTES : v['bytes'] > MAX_PROMPT_ATTACHMENT_BYTES)
+      || typeof v['mime'] !== 'string' || !v['mime'] || v['mime'].length > 128 || !['file', 'directory', 'file-reference'].includes(String(v['kind']))) {
       throw new Error(tr('неверные метаданные вложения'))
     }
     const attachment: PromptAttachment = { path: v['path'], name: v['name'], bytes: v['bytes'], mime: v['mime'], kind: v['kind'] as PromptAttachment['kind'] }
@@ -54,6 +56,9 @@ export function validateOwnedPromptAttachments(home: string, sessionId: string, 
       const st = lstatSync(attachment.path)
       if (attachment.kind === 'directory') {
         if (!st.isDirectory() || st.isSymbolicLink() || attachment.bytes !== 0 || attachment.mime !== 'inode/directory') throw new Error('directory')
+      } else if (attachment.kind === 'file-reference') {
+        // Size is an availability check, not a content/identity snapshot; the provider opens this path later under its usual permissions.
+        if (!st.isFile() || st.isSymbolicLink() || st.size !== attachment.bytes || insideAttachmentCache(home, attachment.path)) throw new Error('reference')
       } else if (!ownedPromptAttachment(home, sessionId, attachment.path) || !st.isFile() || st.size !== attachment.bytes) throw new Error('file')
     } catch { throw new Error(tr`вложение «${attachment.name}» недоступно или изменилось — прикрепи его заново`) }
     return attachment

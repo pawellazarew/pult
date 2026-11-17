@@ -34,11 +34,11 @@ import { acquireLock } from '../core/lock.js'
 import type { LockHandle } from '../core/lock.js'
 import type { Logger } from '../core/log.js'
 import type { PultPaths } from '../core/paths.js'
-import type { AppUpdateAttempt, AppUpdateStatus, AppUpdateStep } from '../core/rpc.js'
+import type { AppUpdateAttempt, AppUpdateStatus, AppUpdateStep, UpdateDownloadProgress } from '../core/rpc.js'
 import { compareVersions, isStableVersion } from '../core/semver.js'
 import { ChannelError, fetchManifest, trustedKeys, updateUrl } from './channel.js'
 import { dirHttpGet, downloadTo, FetchError, httpFor } from './fetch.js'
-import type { HttpGet } from './fetch.js'
+import type { DownloadProgress, HttpGet } from './fetch.js'
 import type { TrustedKey } from './keys.js'
 import type { Manifest, ReleaseAsset } from './manifest.js'
 import { bundleStrings, isBinaryPlist } from './plist.js'
@@ -538,7 +538,7 @@ export interface AppUpdater {
    * 0.3.16: фоновая подготовка окна релиза `m` в `apps/ready-<v>` (шаги 1–4). true — подготовлено (или уже было тем же
    * архивом); false — нечего или нельзя сейчас (идёт обновление окна, окно не нужно). Ошибка — исключением.
    */
-  stage(m: Manifest): Promise<boolean>
+  stage(m: Manifest, onProgress?: (progress: DownloadProgress) => void): Promise<boolean>
   /** 0.3.16: окно `v` стоит ставить (поддерживается, новее стоящего, не bad, права есть). */
   wanted(v: string): boolean
   /** 0.3.16: окно `v` уже подготовлено (`apps/ready-<v>/Pult.app`). */
@@ -607,7 +607,7 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
   const sleep = (ms: number): Promise<void> => new Promise((r) => { setTimeout(r, ms) })
   const journalFile = path.join(o.paths.apps, 'swap.json')
 
-  let job: { to: string; from: string | null; step: AppUpdateStep; since: string; done: Promise<void> } | null = null
+  let job: { to: string; from: string | null; step: AppUpdateStep; since: string; progress?: UpdateDownloadProgress; done: Promise<void> } | null = null
   let preflight: Promise<{ applying: true; to: string; target: 'app' }> | null = null
   let stopped = false
   /** Остановка демона будит ожидания пробы: оборванную пробу доведёт старт по журналу, а не таймер в умирающем процессе. */
@@ -667,7 +667,7 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
       bad,
       ready: latest !== null && readyFor(latest) ? latest : null,
       blocked: why === null && loc ? blockedText(loc) : null,
-      applying: job ? { to: job.to, from: job.from, step: job.step, since: job.since } : null,
+      applying: job ? { to: job.to, from: job.from, step: job.step, since: job.since, ...(job.progress ? { progress: job.progress } : {}) } : null,
       last: st.last,
       firstRun: st.pending ? { to: st.pending.to, from: st.pending.from, state: st.pending.failed ? 'failed' : 'waiting' } : null,
     }
@@ -986,7 +986,7 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
     rmSync(partial, { force: true })
     rmSync(zip, { force: true })
     try {
-      await downloadTo(asset.url, partial, { http: tools.http, size: asset.size, sha256: asset.sha256, what: `Pult-${to}-arm64.zip` })
+      await downloadTo(asset.url, partial, { http: tools.http, size: asset.size, sha256: asset.sha256, what: `Pult-${to}-arm64.zip`, onProgress: (progress) => { if (job?.to === to) job.progress = { artifact: 'app', ...progress } } })
       tools.rename(partial, zip)
     } finally {
       safe('недокачанный zip не убран', () => rmSync(partial, { force: true }))
@@ -1212,7 +1212,7 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
    * Шаги 1–4 заранее: zip в `apps/stage-<v>` (не в downloads/: его чистит `pult update` под своим lock), разбор,
    * распаковка, проверки бандла; удалось — `apps/ready-<v>/Pult.app`, zip удалён. Окно и Pult.app не трогаются.
    */
-  const stage = async (m: Manifest): Promise<boolean> => {
+  const stage = async (m: Manifest, onProgress?: (progress: DownloadProgress) => void): Promise<boolean> => {
     await ready
     const asset = m.app?.['darwin-arm64']
     if (!m.app || !asset || stopped) return false
@@ -1231,7 +1231,7 @@ export function createAppUpdater(o: AppUpdaterOptions): AppUpdater {
       try {
         const out = path.join(dir, 'out')
         const zip = path.join(dir, `Pult-${to}-arm64.zip`)
-        await downloadTo(asset.url, `${zip}.partial`, { http: tools.http, size: asset.size, sha256: asset.sha256, what: `Pult-${to}-arm64.zip` })
+        await downloadTo(asset.url, `${zip}.partial`, { http: tools.http, size: asset.size, sha256: asset.sha256, what: `Pult-${to}-arm64.zip`, ...(onProgress ? { onProgress } : {}) })
         tools.rename(`${zip}.partial`, zip)
         scanZip(zip)
         mkdirSync(out, { mode: 0o700 })

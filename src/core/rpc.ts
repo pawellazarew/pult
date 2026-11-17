@@ -188,6 +188,8 @@ export interface UpdateRelease {
   released: string
   /** Страница релиза на GitHub — «Что нового». */
   notes: string
+  /** Signed release notes, rendered in the update dialog; absent in older channels. */
+  changelog?: string
   /** Окно этого релиза и минимальная версия окна, с которой работает пакет. */
   app?: { version: string; minVersion: string }
 }
@@ -199,7 +201,7 @@ export interface UpdateRelease {
 export type UpdateApplyState =
   | { state: 'idle' }
   | { state: 'waiting'; turns: number; since: string; to: string }
-  | { state: 'applying'; since: string; to: string }
+  | { state: 'applying'; since: string; to: string; progress?: UpdateDownloadProgress }
   | { state: 'failed'; at: string; error: string }
 
 /**
@@ -248,10 +250,20 @@ export interface UpdateStatus {
   continuing?: { to: string } | null
 }
 
+/** Verified download bytes for one artifact, not overall installation progress. */
+export interface UpdateDownloadProgress {
+  artifact: 'package' | 'app'
+  received: number
+  total: number
+  /** 100 is emitted only after size, network hash and on-disk hash verification. */
+  percent: number
+}
+
 /** Фоновая подготовка версии (0.3.16). `failed` — тихо: повтор при следующей проверке, ошибка — для «Настроек». */
 export interface UpdateStaged {
   to: string
   state: 'downloading' | 'ready' | 'failed'
+  progress?: UpdateDownloadProgress
   error: string | null
   at: string
 }
@@ -303,7 +315,7 @@ export interface AppUpdateStatus {
    */
   stale?: boolean | null
   /** Идёт обновление окна. */
-  applying: { to: string; from: string | null; step: AppUpdateStep; since: string } | null
+  applying: { to: string; from: string | null; step: AppUpdateStep; since: string; progress?: UpdateDownloadProgress } | null
   last: AppUpdateAttempt | null
   /**
    * Спрашивающее окно — из поставленного бандла (`path`)? false — другое окно (рабочая копия, вторая копия

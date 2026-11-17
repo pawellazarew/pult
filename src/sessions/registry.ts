@@ -291,8 +291,9 @@ function storedAttachments(raw: unknown): PromptAttachment[] | null {
     const a = value as Record<string, unknown>
     if (typeof a['path'] !== 'string' || !a['path'].startsWith('/') || a['path'].length > 16384
       || typeof a['name'] !== 'string' || !a['name'] || a['name'].length > 512
-      || typeof a['bytes'] !== 'number' || !Number.isSafeInteger(a['bytes']) || a['bytes'] < 0 || a['bytes'] > 25 * 1024 * 1024
-      || typeof a['mime'] !== 'string' || !a['mime'] || a['mime'].length > 128 || (a['kind'] !== 'file' && a['kind'] !== 'directory')) return null
+      || typeof a['bytes'] !== 'number' || !Number.isSafeInteger(a['bytes']) || a['bytes'] < 0
+      || (a['kind'] === 'file-reference' ? a['bytes'] <= 25 * 1024 * 1024 : a['bytes'] > 25 * 1024 * 1024)
+      || typeof a['mime'] !== 'string' || !a['mime'] || a['mime'].length > 128 || (a['kind'] !== 'file' && a['kind'] !== 'directory' && a['kind'] !== 'file-reference')) return null
     out.push({ path: a['path'], name: a['name'], bytes: a['bytes'], mime: a['mime'], kind: a['kind'] })
   }
   return out

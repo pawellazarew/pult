@@ -278,7 +278,8 @@ export const RPC_CATALOG = {
                   "type": "string",
                   "enum": [
                     "file",
-                    "directory"
+                    "directory",
+                    "file-reference"
                   ]
                 }
               },
@@ -427,7 +428,8 @@ export const RPC_CATALOG = {
                         "type": "string",
                         "enum": [
                           "file",
-                          "directory"
+                          "directory",
+                          "file-reference"
                         ]
                       }
                     },
@@ -486,7 +488,8 @@ export const RPC_CATALOG = {
                       "type": "string",
                       "enum": [
                         "file",
-                        "directory"
+                        "directory",
+                        "file-reference"
                       ]
                     }
                   },
@@ -581,7 +584,8 @@ export const RPC_CATALOG = {
                         "type": "string",
                         "enum": [
                           "file",
-                          "directory"
+                          "directory",
+                          "file-reference"
                         ]
                       }
                     },
@@ -676,7 +680,8 @@ export const RPC_CATALOG = {
                         "type": "string",
                         "enum": [
                           "file",
-                          "directory"
+                          "directory",
+                          "file-reference"
                         ]
                       }
                     },
@@ -4249,7 +4254,7 @@ export type RustPartialMethod = "agent.list" | "agent.prompt" | "agent.queue.mov
 
 export interface RustPartialParams {
   "agent.list": Record<string, never>
-  "agent.prompt": { "name": string; "text": string; "attachments"?: Array<{ "path": string; "name": string; "mime": string; "bytes": number; "kind": "file" | "directory" }>; "queue"?: boolean; "interrupt"?: boolean; "steer"?: boolean }
+  "agent.prompt": { "name": string; "text": string; "attachments"?: Array<{ "path": string; "name": string; "mime": string; "bytes": number; "kind": "file" | "directory" | "file-reference" }>; "queue"?: boolean; "interrupt"?: boolean; "steer"?: boolean }
   "agent.queue.move": { "name": string; "id": string; "to"?: number; "hold"?: boolean; "text"?: string }
   "agent.queue.remove": { "name": string; "id": string }
   "agent.queue.resume": { "name": string }
@@ -4265,9 +4270,9 @@ export interface RustPartialParams {
 export interface RustPartialResults {
   "agent.list": { "sessions": Array<{ "name": string; "provider": string; "cwd": string; "mode": string; "createdAt": string; "lastStatus": string; "lastEventId": number; "status": "cold" | "idle" | "working" | "blocked_permission" | "blocked_question" | "limited" | "interrupted" | "failed" | "done"; "pendingPermissions": number; "liveApproval": "read-only" | "ask" | "workspace" | "full" | "inherit" | null; [key: string]: unknown }> }
   "agent.prompt": { "turnId": string } | { "queued": true; "id": string }
-  "agent.queue.move": { "name": string; "queue": Array<{ "id": string; "text": string; "at": string; "attachments"?: Array<{ "path": string; "name": string; "mime": string; "bytes": number; "kind": "file" | "directory" }> }>; "queuePaused": boolean; "edit"?: { "id": string; "text": string; "holdMs": number; "attachments"?: Array<{ "path": string; "name": string; "mime": string; "bytes": number; "kind": "file" | "directory" }> } }
-  "agent.queue.remove": { "name": string; "queue": Array<{ "id": string; "text": string; "at": string; "attachments"?: Array<{ "path": string; "name": string; "mime": string; "bytes": number; "kind": "file" | "directory" }> }>; "queuePaused": boolean }
-  "agent.queue.resume": { "name": string; "queue": Array<{ "id": string; "text": string; "at": string; "attachments"?: Array<{ "path": string; "name": string; "mime": string; "bytes": number; "kind": "file" | "directory" }> }>; "queuePaused": boolean }
+  "agent.queue.move": { "name": string; "queue": Array<{ "id": string; "text": string; "at": string; "attachments"?: Array<{ "path": string; "name": string; "mime": string; "bytes": number; "kind": "file" | "directory" | "file-reference" }> }>; "queuePaused": boolean; "edit"?: { "id": string; "text": string; "holdMs": number; "attachments"?: Array<{ "path": string; "name": string; "mime": string; "bytes": number; "kind": "file" | "directory" | "file-reference" }> } }
+  "agent.queue.remove": { "name": string; "queue": Array<{ "id": string; "text": string; "at": string; "attachments"?: Array<{ "path": string; "name": string; "mime": string; "bytes": number; "kind": "file" | "directory" | "file-reference" }> }>; "queuePaused": boolean }
+  "agent.queue.resume": { "name": string; "queue": Array<{ "id": string; "text": string; "at": string; "attachments"?: Array<{ "path": string; "name": string; "mime": string; "bytes": number; "kind": "file" | "directory" | "file-reference" }> }>; "queuePaused": boolean }
   "agent.queue.send": { "turnId": string }
   "agent.start": { "name": string; "provider": string; "cwd": string; "mode": string; "createdAt": string; "lastStatus": string; "lastEventId": number; "memory"?: { "read": boolean; "write": "off" | "ask" }; [key: string]: unknown }
   "agent.stop": { "stopped": boolean }
