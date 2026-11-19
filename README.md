@@ -63,6 +63,16 @@ Click a subagent card or the subagent counter to open its existing history in a 
 **Open parent** returns to the original conversation and draft. Archiving completed subagents hides them from the list;
 it does not delete their history or stop running work. Provider icons identify chats; the blinking dot marks active work.
 
+## Shared memory in the experimental Rust daemon
+
+Open **Settings → Memory** to search project or global notes, inspect their source and revision history,
+and create, edit, pin or forget a note. Edits require the revision you read and a reason. Conflicting
+changes preserve your draft for an explicit comparison. Closing this dialog keeps its draft in the current window.
+
+The screen requires the Rust daemon's memory APIs. The stable Node daemon shows an unavailable state.
+Forgetting a note removes it from search and new-turn context while retaining its history. Browsing
+deleted notes after a fresh window start and physical purge remain planned. See the [owner UI contract](docs/rust/M3-OWNER-MEMORY-UI.md).
+
 ## Temporary chats
 
 Open the arrow beside **New chat → Temporary chat**. These text-only conversations have their own

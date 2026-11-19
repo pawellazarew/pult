@@ -2280,6 +2280,10 @@ export const RPC_CATALOG = {
           },
           "pinned": {
             "type": "boolean"
+          },
+          "projectId": {
+            "type": "string",
+            "description": "Owner-only exact persisted project identity. Requires scope project and excludes session."
           }
         },
         "required": [
@@ -2770,6 +2774,10 @@ export const RPC_CATALOG = {
           },
           "expectedVersion": {
             "type": "integer"
+          },
+          "projectId": {
+            "type": "string",
+            "description": "Owner-only exact persisted project identity. Requires scope project and excludes session."
           }
         },
         "required": [
@@ -2888,6 +2896,10 @@ export const RPC_CATALOG = {
           },
           "id": {
             "type": "string"
+          },
+          "projectId": {
+            "type": "string",
+            "description": "Owner-only exact persisted project identity. Requires scope project and excludes session."
           }
         },
         "required": [
@@ -3009,6 +3021,10 @@ export const RPC_CATALOG = {
           },
           "id": {
             "type": "string"
+          },
+          "projectId": {
+            "type": "string",
+            "description": "Owner-only exact persisted project identity. Requires scope project and excludes session."
           }
         },
         "required": [
@@ -3143,6 +3159,10 @@ export const RPC_CATALOG = {
           },
           "offset": {
             "type": "integer"
+          },
+          "projectId": {
+            "type": "string",
+            "description": "Owner-only exact persisted project identity. Requires scope project and excludes session."
           }
         },
         "required": [],
@@ -3228,6 +3248,67 @@ export const RPC_CATALOG = {
       }
     },
     {
+      "name": "memory.projects",
+      "node": "extension",
+      "rust": "implemented",
+      "access": "owner",
+      "testOnly": false,
+      "description": "List persisted memory project identities for owner administration, including projects without sessions.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10000
+          }
+        },
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "projects": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "projectId": {
+                  "type": "string"
+                },
+                "count": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "updatedAt": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "projectId",
+                "count",
+                "updatedAt"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "hasMore": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "projects",
+          "hasMore"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "memory.search",
       "node": "extension",
       "rust": "implemented",
@@ -3256,6 +3337,10 @@ export const RPC_CATALOG = {
           },
           "query": {
             "type": "string"
+          },
+          "projectId": {
+            "type": "string",
+            "description": "Owner-only exact persisted project identity. Requires scope project and excludes session."
           }
         },
         "required": [
@@ -3385,6 +3470,10 @@ export const RPC_CATALOG = {
           },
           "pinned": {
             "type": "boolean"
+          },
+          "projectId": {
+            "type": "string",
+            "description": "Owner-only exact persisted project identity. Requires scope project and excludes session."
           }
         },
         "required": [
@@ -4180,7 +4269,7 @@ export const RPC_CATALOG = {
 } as const
 
 export type RpcMethodName = typeof RPC_CATALOG.methods[number]['name']
-export type RustFoundationMethod = "agent.archive" | "agent.read" | "agent.recovery.confirm" | "agent.recovery.get" | "agent.rename" | "agent.seen" | "agent.tree" | "daemon.status" | "daemon.stop" | "events.emit" | "events.get" | "events.history" | "events.snapshot" | "events.subscribe" | "events.tail" | "events.unsubscribe" | "memory.add" | "memory.catalog" | "memory.configure" | "memory.context.bind" | "memory.context.issue" | "memory.context.revoke" | "memory.context.status" | "memory.forget" | "memory.get" | "memory.history" | "memory.list" | "memory.search" | "memory.update" | "protocol.catalog" | "usage.get"
+export type RustFoundationMethod = "agent.archive" | "agent.read" | "agent.recovery.confirm" | "agent.recovery.get" | "agent.rename" | "agent.seen" | "agent.tree" | "daemon.status" | "daemon.stop" | "events.emit" | "events.get" | "events.history" | "events.snapshot" | "events.subscribe" | "events.tail" | "events.unsubscribe" | "memory.add" | "memory.catalog" | "memory.configure" | "memory.context.bind" | "memory.context.issue" | "memory.context.revoke" | "memory.context.status" | "memory.forget" | "memory.get" | "memory.history" | "memory.list" | "memory.projects" | "memory.search" | "memory.update" | "protocol.catalog" | "usage.get"
 
 export interface RustFoundationParams {
   "agent.archive": { "name": string; "archived": boolean; [key: string]: unknown }
@@ -4199,19 +4288,20 @@ export interface RustFoundationParams {
   "events.subscribe": { "since"?: number; "sessionId"?: string; "live"?: boolean; [key: string]: unknown }
   "events.tail": { "since"?: number; "sessionId"?: string; "limit"?: number; [key: string]: unknown }
   "events.unsubscribe": { "sub": number; [key: string]: unknown }
-  "memory.add": { "session"?: string; "scope"?: "project" | "global"; "commandId": string; "reason": string; "name": string; "summary": string; "details": string; "pinned"?: boolean }
+  "memory.add": { "session"?: string; "scope"?: "project" | "global"; "commandId": string; "reason": string; "name": string; "summary": string; "details": string; "pinned"?: boolean; "projectId"?: string }
   "memory.catalog": { "session"?: string }
   "memory.configure": { "session": string; "memory"?: { "read"?: boolean; "write"?: "off" | "ask" } }
   "memory.context.bind": { "session": string; "enabled"?: boolean }
   "memory.context.issue": { "session": string }
   "memory.context.revoke": { "session": string }
   "memory.context.status": { "session"?: string }
-  "memory.forget": { "session"?: string; "scope"?: "project" | "global"; "commandId": string; "reason": string; "id": string; "expectedVersion": number }
-  "memory.get": { "session"?: string; "scope"?: "project" | "global" | "visible"; "id": string }
-  "memory.history": { "session"?: string; "scope"?: "project" | "global" | "visible"; "limit"?: number; "offset"?: number; "id": string }
-  "memory.list": { "session"?: string; "scope"?: "project" | "global" | "visible"; "limit"?: number; "offset"?: number }
-  "memory.search": { "session"?: string; "scope"?: "project" | "global" | "visible"; "limit"?: number; "offset"?: number; "query": string }
-  "memory.update": { "session"?: string; "scope"?: "project" | "global"; "commandId": string; "reason": string; "id": string; "expectedVersion": number; "name"?: string; "summary"?: string; "details"?: string; "pinned"?: boolean }
+  "memory.forget": { "session"?: string; "scope"?: "project" | "global"; "commandId": string; "reason": string; "id": string; "expectedVersion": number; "projectId"?: string }
+  "memory.get": { "session"?: string; "scope"?: "project" | "global" | "visible"; "id": string; "projectId"?: string }
+  "memory.history": { "session"?: string; "scope"?: "project" | "global" | "visible"; "limit"?: number; "offset"?: number; "id": string; "projectId"?: string }
+  "memory.list": { "session"?: string; "scope"?: "project" | "global" | "visible"; "limit"?: number; "offset"?: number; "projectId"?: string }
+  "memory.projects": { "limit"?: number; "offset"?: number }
+  "memory.search": { "session"?: string; "scope"?: "project" | "global" | "visible"; "limit"?: number; "offset"?: number; "query": string; "projectId"?: string }
+  "memory.update": { "session"?: string; "scope"?: "project" | "global"; "commandId": string; "reason": string; "id": string; "expectedVersion": number; "name"?: string; "summary"?: string; "details"?: string; "pinned"?: boolean; "projectId"?: string }
   "protocol.catalog": { [key: string]: unknown }
   "usage.get": { [key: string]: unknown }
 }
@@ -4244,6 +4334,7 @@ export interface RustFoundationResults {
   "memory.get": { "id": string; "scope": "project" | "global"; "projectId"?: string; "name": string; "summary": string; "details": string; "pinned": boolean; "version": number; "createdAt": string; "updatedAt": string; "deleted": boolean; "author": "owner" | "claude" | "codex" | "zcode"; "reason": string; "sourceSession"?: string; "sourceEventId"?: number; "sourceTurnId"?: string; "sourceCreatedAt"?: string }
   "memory.history": { "versions": Array<{ "id": string; "scope": "project" | "global"; "projectId"?: string; "name": string; "summary": string; "details": string; "pinned": boolean; "version": number; "createdAt": string; "updatedAt": string; "deleted": boolean; "author": "owner" | "claude" | "codex" | "zcode"; "reason": string; "sourceSession"?: string; "sourceEventId"?: number; "sourceTurnId"?: string; "sourceCreatedAt"?: string }>; "hasMore": boolean }
   "memory.list": { "memories": Array<{ "id": string; "scope": "project" | "global"; "projectId"?: string; "name": string; "summary": string; "pinned": boolean; "version": number; "createdAt": string; "updatedAt": string; "deleted": boolean; "author": string; "reason": string; "sourceSession"?: string }>; "hasMore": boolean }
+  "memory.projects": { "projects": Array<{ "projectId": string; "count": number; "updatedAt": string }>; "hasMore": boolean }
   "memory.search": { "memories": Array<{ "id": string; "scope": "project" | "global"; "projectId"?: string; "name": string; "summary": string; "pinned": boolean; "version": number; "createdAt": string; "updatedAt": string; "deleted": boolean; "author": string; "reason": string; "sourceSession"?: string }>; "hasMore": boolean }
   "memory.update": { "id": string; "scope": "project" | "global"; "projectId"?: string; "name": string; "summary": string; "details": string; "pinned": boolean; "version": number; "createdAt": string; "updatedAt": string; "deleted": boolean; "author": "owner" | "claude" | "codex" | "zcode"; "reason": string; "sourceSession"?: string; "sourceEventId"?: number; "sourceTurnId"?: string; "sourceCreatedAt"?: string }
   "protocol.catalog": { "catalogVersion": 1; "protocolVersion": 1; "methods": Array<{ "name": string; "node": "implemented" | "reserved" | "extension"; "rust": "implemented" | "partial" | "unported"; "access": "owner" | "ask" | "owner-or-runtime" | "owner-shell" | "owner-or-memory" | "owner-or-turn-memory"; "testOnly": boolean; "description": string; "paramsSchema": { [key: string]: unknown } | null; "resultSchema": { [key: string]: unknown } | null }> }

@@ -2277,6 +2277,10 @@
           },
           "pinned": {
             "type": "boolean"
+          },
+          "projectId": {
+            "type": "string",
+            "description": "Owner-only exact persisted project identity. Requires scope project and excludes session."
           }
         },
         "required": [
@@ -2767,6 +2771,10 @@
           },
           "expectedVersion": {
             "type": "integer"
+          },
+          "projectId": {
+            "type": "string",
+            "description": "Owner-only exact persisted project identity. Requires scope project and excludes session."
           }
         },
         "required": [
@@ -2885,6 +2893,10 @@
           },
           "id": {
             "type": "string"
+          },
+          "projectId": {
+            "type": "string",
+            "description": "Owner-only exact persisted project identity. Requires scope project and excludes session."
           }
         },
         "required": [
@@ -3006,6 +3018,10 @@
           },
           "id": {
             "type": "string"
+          },
+          "projectId": {
+            "type": "string",
+            "description": "Owner-only exact persisted project identity. Requires scope project and excludes session."
           }
         },
         "required": [
@@ -3140,6 +3156,10 @@
           },
           "offset": {
             "type": "integer"
+          },
+          "projectId": {
+            "type": "string",
+            "description": "Owner-only exact persisted project identity. Requires scope project and excludes session."
           }
         },
         "required": [],
@@ -3225,6 +3245,67 @@
       }
     },
     {
+      "name": "memory.projects",
+      "node": "extension",
+      "rust": "implemented",
+      "access": "owner",
+      "testOnly": false,
+      "description": "List persisted memory project identities for owner administration, including projects without sessions.",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10000
+          }
+        },
+        "additionalProperties": false
+      },
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "projects": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "projectId": {
+                  "type": "string"
+                },
+                "count": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "updatedAt": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "projectId",
+                "count",
+                "updatedAt"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "hasMore": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "projects",
+          "hasMore"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "memory.search",
       "node": "extension",
       "rust": "implemented",
@@ -3253,6 +3334,10 @@
           },
           "query": {
             "type": "string"
+          },
+          "projectId": {
+            "type": "string",
+            "description": "Owner-only exact persisted project identity. Requires scope project and excludes session."
           }
         },
         "required": [
@@ -3382,6 +3467,10 @@
           },
           "pinned": {
             "type": "boolean"
+          },
+          "projectId": {
+            "type": "string",
+            "description": "Owner-only exact persisted project identity. Requires scope project and excludes session."
           }
         },
         "required": [

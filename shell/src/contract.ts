@@ -27,6 +27,9 @@ export const ALLOWED_METHODS = [
   'temporary.list', 'temporary.start', 'temporary.read', 'temporary.draft',
   'temporary.configure', 'temporary.prompt', 'temporary.stop', 'temporary.remove',
   'daemon.status',
+  // Owner memory administration. Credential issuance and scoped context controls stay private.
+  'memory.projects', 'memory.list', 'memory.search', 'memory.get', 'memory.history',
+  'memory.add', 'memory.update', 'memory.forget',
   'runtime.discover', 'runtime.perform', 'runtime.takeover', 'runtime.release',
   'runtime.setup.request', 'runtime.setup.resolve', 'runtime.setup.list',
   'doctor.run',

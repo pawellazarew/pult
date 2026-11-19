@@ -464,11 +464,12 @@ export function FilesStorageSection({ retentionDays, onRetentionChange }: { rete
   </section>
 }
 
-export type SettingsSection = 'general' | 'appearance' | 'usage' | 'storage' | 'access' | 'sessions' | 'providers' | 'voice' | 'network' | 'rules' | 'keys' | 'updates'
+export type SettingsSection = 'general' | 'appearance' | 'usage' | 'storage' | 'memory' | 'access' | 'sessions' | 'providers' | 'voice' | 'network' | 'rules' | 'keys' | 'updates'
 
-export function SettingsDialog({ settings, catalog, updates, autoCheck = null, netGuard, rules, access, language = 'auto', languageSupported = false, languageOverride = null, onSave, onClose, usage, now = Date.now(), onUsageRefresh, usageRefreshing = false, retentionDays, onRetentionChange, initialSection = 'appearance', disk, onDiskSave, active = true }: {
+export function SettingsDialog({ settings, catalog, updates, autoCheck = null, netGuard, rules, access, language = 'auto', languageSupported = false, languageOverride = null, onSave, onClose, usage, now = Date.now(), onUsageRefresh, usageRefreshing = false, retentionDays, onRetentionChange, initialSection = 'appearance', disk, onDiskSave, active = true, memory }: {
   /** A shared child update dialog can cover settings without losing unsaved preferences. */
   active?: boolean
+  memory?: { available: boolean; error: string | null; onOpen(): void }
   disk?: { settings: DiskPreferences; status: DiskStatus }
   onDiskSave?(value: DiskPreferences): Promise<void>
   initialSection?: SettingsSection
@@ -573,6 +574,7 @@ export function SettingsDialog({ settings, catalog, updates, autoCheck = null, n
     { id: 'voice', label: t('Диктовка'), group: t('Работа') },
     { id: 'usage', label: t('Использование'), group: t('Работа') },
     { id: 'storage', label: t('Файлы и хранение'), group: t('Работа') },
+    ...(memory ? [{ id: 'memory' as const, label: t('Память'), group: t('Работа') }] : []),
     ...(netGuard ? [{ id: 'network' as const, label: t('Страж сети'), group: t('Безопасность') }] : []),
     ...(access ? [{ id: 'access' as const, label: t('Доступ агентов'), group: t('Безопасность') }] : []),
     ...(rules ? [{ id: 'rules' as const, label: t('Постоянные разрешения'), group: t('Безопасность') }] : []),
@@ -618,6 +620,14 @@ export function SettingsDialog({ settings, catalog, updates, autoCheck = null, n
         <div className="settings-page" hidden={section !== 'appearance'}><AppearanceSection value={appearance} onChange={setAppearance} /></div>
         <div className="settings-page" hidden={section !== 'usage'}><UsageSection usage={usage} now={now} onRefresh={onUsageRefresh} refreshing={usageRefreshing} /></div>
         <div className="settings-page" hidden={section !== 'storage'}><FilesStorageSection retentionDays={retentionDays} onRetentionChange={onRetentionChange} /><DiskSettings disk={disk} onSave={onDiskSave} /></div>
+        {memory && <div className="settings-page" hidden={section !== 'memory'}>
+          <section className="settings-sec" aria-labelledby="settings-memory-h" data-testid="settings-memory">
+            <h3 id="settings-memory-h">{t('Память')}</h3>
+            <p className="settings-intro">{t('Факты и решения, общие для Claude, Codex и ZCode.')}</p>
+            <button type="button" className="btn" disabled={!memory.available} data-testid="settings-memory-open" onClick={memory.onOpen}>{t('Открыть память')}</button>
+            {memory.error && <p className="note" role="status">{memory.error}</p>}
+          </section>
+        </div>}
         <div className="settings-page" hidden={section !== 'general'}><h3>{t('Основные')}</h3><section className="settings-sec">          <label className="field" htmlFor="settings-language">
             <span className="lbl">{t('Язык / Language')}</span>
             <select id="settings-language" data-testid="settings-language" value={languageDraft} disabled={busy || !languageSupported || !!languageOverride}

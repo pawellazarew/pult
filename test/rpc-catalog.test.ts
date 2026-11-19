@@ -59,12 +59,12 @@ describe('RPC catalog generation and source drift', () => {
     })
   })
 
-  it('keeps partial schemas separate from the 31 fully implemented methods', () => {
+  it('keeps partial schemas separate from the fully implemented methods', () => {
     const catalog = JSON.parse(readFileSync(catalogSource, 'utf8')) as Catalog
     const implemented = catalog.methods.filter((method) => method.rust === 'implemented').map((method) => method.name)
     const partial = catalog.methods.filter((method) => method.rust === 'partial')
-    assert.equal(implemented.length, 31)
-    assert.equal(catalog.methods.length, 101)
+    assert.equal(implemented.length, 32)
+    assert.equal(catalog.methods.length, 102)
     assert.equal(catalog.methods.filter((method) => method.node === 'implemented').length, 85)
     assert.deepEqual(partial.map((method) => method.name), ['agent.list', 'agent.prompt', 'agent.queue.move', 'agent.queue.remove', 'agent.queue.resume', 'agent.queue.send', 'agent.start', 'agent.stop', 'agent.wait', 'perm.list', 'perm.request', 'perm.resolve'])
     assert.ok(partial.every((method) => method.paramsSchema && method.resultSchema))
@@ -85,6 +85,9 @@ describe('RPC catalog generation and source drift', () => {
 
   it('validates turn-memory access metadata and includes it in the catalog response enum', () => {
     const catalog = JSON.parse(readFileSync(catalogSource, 'utf8')) as Catalog
+    const projects = catalog.methods.find((method) => method.name === 'memory.projects')
+    assert.equal(projects?.access, 'owner')
+    assert.equal(projects?.node, 'extension')
     const mutations = catalog.methods.filter((method) => method.access === 'owner-or-turn-memory')
     assert.deepEqual(mutations.map((method) => method.name), ['memory.add', 'memory.forget', 'memory.update'])
     const reads = catalog.methods.filter((method) => method.access === 'owner-or-memory')

@@ -225,7 +225,7 @@ try {
   await check('read scopes can narrow visibility but arbitrary session and project selectors cannot redirect it', async () => {
     assert.deepEqual((await read(clientA, 'list', { scope: 'project' })).memories.map((item) => item.id), [noteA.id])
     assert.deepEqual((await read(clientA, 'list', { scope: 'global' })).memories.map((item) => item.id), [globalNote.id])
-    for (const params of [{ session: 'project-b' }, { session: 'claude-a' }, { projectId: noteB.projectId }]) {
+    for (const params of [{ session: 'project-b' }, { session: 'claude-a' }, { projectId: noteB.projectId }, { scope: 'project', projectId: noteB.projectId }]) {
       await denied(clientA, 'memory.list', params, ['invalid_params', 'forbidden'])
     }
     assert.deepEqual(await read(clientA, 'get', { id: noteA.id }), noteA)
@@ -234,7 +234,7 @@ try {
     for (const [method, params] of [
       ['memory.add', add('scope-write')], ['memory.update', { id: noteA.id, expectedVersion: 1, commandId: 'scope-update', reason: 'denied', summary: 'denied' }],
       ['memory.forget', { id: noteA.id, expectedVersion: 1, commandId: 'scope-forget', reason: 'denied' }],
-      ['memory.history', { id: noteA.id }], ['usage.get', {}], ['daemon.status', {}], ['daemon.stop', {}], ['events.tail', {}],
+      ['memory.projects', {}], ['memory.history', { id: noteA.id }], ['usage.get', {}], ['daemon.status', {}], ['daemon.stop', {}], ['events.tail', {}],
       ['protocol.catalog', {}], ['memory.context.issue', { session: 'project-b' }], ['agent.archive', { name: 'project-b', archived: true }],
     ]) await denied(clientA, method, params)
     assert.deepEqual(await read(clientA, 'get', { id: noteA.id }), noteA)

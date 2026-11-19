@@ -18,5 +18,5 @@ async fn memory_rpc_and_cli_preserve_shared_storage_invariants() {
         String::from_utf8_lossy(&result.stdout),
         String::from_utf8_lossy(&result.stderr)
     );
-    assert!(String::from_utf8_lossy(&result.stdout).contains("memory interop passed 17"));
+    assert!(String::from_utf8_lossy(&result.stdout).contains("memory interop passed 18"));
 }

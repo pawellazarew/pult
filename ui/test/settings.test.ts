@@ -199,6 +199,19 @@ describe('M8f: «Настройки» (⌘,)', () => {
     assert.equal(draftError(d), null)
     assert.deepEqual(d, { rememberLast: true, defaults: { provider: 'codex', claude: {}, codex: { approval: 'workspace' }, zcode: {} } })
   })
+  it('shows the memory section and gates owner actions on backend availability', () => {
+    for (const available of [false, true]) {
+      const markup = html(SettingsDialog, {
+        settings: null, catalog: null, initialSection: 'memory', onSave: async () => null, onClose: noop,
+        memory: { available, error: available ? null : 'В этой версии демона общая память пока недоступна.', onOpen: noop },
+      })
+      assert.match(markup, /data-testid="settings-nav-memory"/)
+      const button = markup.match(/<button[^>]*data-testid="settings-memory-open"[^>]*>/)?.[0]
+      assert.ok(button)
+      assert.equal(button.includes('disabled'), !available)
+      assert.match(text(markup), /Факты и решения, общие для Claude, Codex и ZCode/)
+    }
+  })
   it('экран: раздел «Новый чат» с провайдерами и доступом по умолчанию, «Внешний вид» — пустой, с одной строкой', () => {
     const out = html(SettingsDialog, { settings: { rememberLast: false, defaults: { claude: { model: 'opus' }, codex: {} } }, catalog: CATALOG, onSave: async () => null, onClose: noop })
     const t = text(out)

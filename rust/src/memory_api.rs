@@ -5,7 +5,7 @@ use serde_json::Value;
 use serde_json::value::RawValue;
 use std::{path::Path, sync::Arc};
 
-pub(crate) const METHODS: [&str; 13] = [
+pub(crate) const METHODS: [&str; 14] = [
     "memory.add",
     "memory.catalog",
     "memory.configure",
@@ -17,6 +17,7 @@ pub(crate) const METHODS: [&str; 13] = [
     "memory.get",
     "memory.history",
     "memory.list",
+    "memory.projects",
     "memory.search",
     "memory.update",
 ];
@@ -72,7 +73,7 @@ fn error(code: &'static str, message: impl ToString) -> MemoryError {
 pub(crate) async fn execute(
     state: Arc<crate::State>,
     method: String,
-    params: Value,
+    mut params: Value,
 ) -> Result<Value, MemoryError> {
     if method == "memory.configure" {
         return crate::memory_policy::configure(state, params).await;
@@ -86,6 +87,42 @@ pub(crate) async fn execute(
     let host_job = state.host_jobs.track();
     tokio::task::spawn_blocking(move || {
         let _host_job = host_job;
+        // Project IDs select existing durable data only on the owner boundary.
+        // Shared scoped/turn APIs retain their strict parameter allowlists.
+        let selected_project = match params.get("projectId") {
+            None => None,
+            Some(Value::String(id)) if !id.is_empty() => {
+                if params.get("session").is_some()
+                    || params.get("scope").and_then(Value::as_str) != Some("project")
+                {
+                    return Err(error(
+                        "invalid_params",
+                        "projectId requires explicit project scope and cannot accompany session",
+                    ));
+                }
+                Some(id.clone())
+            }
+            _ => {
+                return Err(error(
+                    "invalid_params",
+                    "projectId must be a nonempty string",
+                ));
+            }
+        };
+        if selected_project.is_some() {
+            params.as_object_mut().unwrap().remove("projectId");
+        }
+        if method == "memory.projects"
+            && params.as_object().is_none_or(|p| {
+                p.keys()
+                    .any(|key| !matches!(key.as_str(), "limit" | "offset"))
+            })
+        {
+            return Err(error(
+                "invalid_params",
+                "memory.projects accepts only limit and offset",
+            ));
+        }
         // Copy the trusted session context before filesystem IO and the memory lock.
         // Release registry before acquiring memory; scoped reads use memory -> registry.
         // Never add a registry -> memory nesting here.
@@ -129,19 +166,25 @@ pub(crate) async fn execute(
             .transpose()
             .map_err(|e| error("invalid_params", format!("memory project: {e}")))?;
         let context = Context {
-            project_id,
+            project_id: selected_project.clone().or(project_id),
             session,
         };
         let mut memory = state.memory.lock().map_err(|e| error("internal", e))?;
-        memory
-            .as_mut()
-            .map_err(|e| {
-                error(
-                    "internal",
-                    format!("memory unavailable: {e}; repair the memory database and restart"),
-                )
-            })?
-            .execute(&method, &params, &context)
+        let memory = memory.as_mut().map_err(|e| {
+            error(
+                "internal",
+                format!("memory unavailable: {e}; repair the memory database and restart"),
+            )
+        })?;
+        if method == "memory.projects" {
+            return memory.projects(&params);
+        }
+        if let Some(project_id) = selected_project
+            && !memory.has_project(&project_id)?
+        {
+            return Err(error("not_found", "memory project not found"));
+        }
+        memory.execute(&method, &params, &context)
     })
     .await
     .map_err(|e| error("internal", anyhow!(e)))?

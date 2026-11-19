@@ -135,7 +135,7 @@ pub const PARTIAL: [&str; 12] = [
     "perm.request",
     "perm.resolve",
 ];
-pub const SUPPORTED: [&str; 31] = [
+pub const SUPPORTED: [&str; 32] = [
     "agent.archive",
     "agent.read",
     "agent.recovery.confirm",
@@ -163,6 +163,7 @@ pub const SUPPORTED: [&str; 31] = [
     "memory.get",
     "memory.history",
     "memory.list",
+    "memory.projects",
     "memory.search",
     "memory.update",
     "protocol.catalog",
