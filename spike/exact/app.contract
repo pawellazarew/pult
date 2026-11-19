@@ -29,7 +29,7 @@ component PultExact
   state selected = ""
   state heading = "Разговор"
   resource chats = sessions() as shape Chats
-  resource transcript = conversation(selected) as shape Conversation
+  resource transcript = conversation(selected) as shape Transcript
   action choose(name: string, title: string)
     selected = name
     heading = title

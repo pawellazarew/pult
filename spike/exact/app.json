@@ -3,6 +3,25 @@
   "id": "dev.pult.exact.preview",
   "start_url": "/",
   "display": "standalone",
-  "app": { "id": "dev.pult.exact.preview", "name": "Pult Exact Preview" },
-  "host": { "macos": { "minimumOS": "14.0", "window": { "width": 1100, "height": 760, "minWidth": 720, "minHeight": 480 } } }
+  "app": {
+    "id": "dev.pult.exact.preview",
+    "name": "Pult Exact Preview"
+  },
+  "host": {
+    "macos": {
+      "minimumOS": "14.0",
+      "window": {
+        "width": 1100,
+        "height": 760,
+        "minWidth": 720,
+        "minHeight": 480
+      }
+    }
+  },
+  "rust": {
+    "data": {
+      "crate": "pult-exact-data",
+      "type": "pult_exact_data::Pult"
+    }
+  }
 }
