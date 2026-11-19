@@ -1,3 +1,6 @@
+import { basename } from 'node:path'
+import { presentTranscript } from './presentation.ts'
+import type { PultEvent } from '../../src/core/events.ts'
 import { connectClient } from '../../src/cli/client.ts'
 import { paths } from '../../src/core/paths.ts'
 
@@ -8,15 +11,24 @@ export async function readDaemon(route: string, name: string) {
   try {
     if (route === 'sessions') {
       const result = await client.request('agent.list', {}, { timeoutMs: 5000 }) as { sessions: Array<Record<string, unknown>> }
-      return { sessions: result.sessions.filter(s => !s.archived).map(s => ({
+      return { sessions: result.sessions.filter(s => !s.archived).sort((a, b) => String(b.lastTurnAt || b.createdAt).localeCompare(String(a.lastTurnAt || a.createdAt))).map(s => ({
         name: String(s.name), title: String(s.title || s.name),
-        provider: String(s.provider), status: String(s.lastStatus || 'idle'), cwd: String(s.cwd),
+        project: basename(String(s.cwd)), provider: String(s.provider), status: String(s.lastStatus || 'idle'), cwd: String(s.cwd),
       })) }
     }
     if (route === 'conversation') {
-      if (!name) return { text: 'Выберите разговор слева.' }
-      const result = await client.request('agent.read', { name, format: 'text', since: 0 }, { timeoutMs: 5000 }) as { text?: string; truncated?: boolean }
-      return { text: (result.text || 'В этом разговоре пока нет сообщений.') + (result.truncated ? '\n\n[Показана первая страница истории]' : '') }
+      if (!name) return presentTranscript([])
+      const events: PultEvent[] = []
+      let cursor = 0
+      let truncated = false
+      for (let page = 0; page < 8; page++) {
+        const result = await client.request('agent.read', { name, format: 'json', since: cursor }, { timeoutMs: 5000 }) as { events: PultEvent[]; cursor: number; truncated?: boolean }
+        events.push(...result.events)
+        truncated = !!result.truncated
+        if (!truncated || result.cursor <= cursor) break
+        cursor = result.cursor
+      }
+      return presentTranscript(events, truncated)
     }
     throw new Error('unsupported read')
   } finally { client.close() }

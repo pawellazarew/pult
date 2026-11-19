@@ -1,70 +1,138 @@
+theme
+  page="light-dark(#fafaf9, #191b1d)"
+  sidebar="light-dark(#f1f2ee, #141617)"
+  ink="light-dark(#252924, #e2e5e1)"
+  muted="light-dark(#5a635b, #9ba49e)"
+  accent="light-dark(#3d60be, #93aff3)"
+  selected="light-dark(#e9edf5, #2b343c)"
+  edge="light-dark(#e3e5df, #303537)"
+  bubble="light-dark(#eff1ed, #24292b)"
+  successTint="light-dark(#28734d, #78c49e)"
+
 shape Chat
   name: string
   title: string
   provider: string
   status: string
+  project: string
   cwd: string
 
 shape Chats
   sessions: Chat[]
 
+shape Message
+  id: string
+  role: string
+  label: string
+  text: string
+  time: string
+
 shape Transcript
-  text: string
+  messages: Message[]
+  total: number
+  tools: number
+  truncated: bool
 
-// HTTP sources and their ephemeral capability are prepended by run.ts.
-shape Session
-  name: string
-  title: string
-  provider: string
-  status: string
-  cwd: string
-
-shape Sessions
-  sessions: Session[]
-
-shape Conversation
-  text: string
+fn status(s: string): string = s == "working" ? "Работает" : s == "failed" ? "Ошибка" : "Готово"
+fn provider(s: string): string = s == "claude" ? "Claude" : s == "codex" ? "Codex" : "ZCode"
 
 component PultExact
   state selected = ""
-  state heading = "Разговор"
+  state heading = "Разговоры"
+  state project = ""
+  state agent = ""
+  state query = ""
+  state dark = true
   resource chats = sessions() as shape Chats
   resource transcript = conversation(selected) as shape Transcript
-  action choose(name: string, title: string)
+  derive visible = chats.sessions.filter(c => c.title.toLowerCase().includes(query.toLowerCase()) or c.project.toLowerCase().includes(query.toLowerCase()))
+  action choose(name: string, title: string, folder: string, kind: string)
     selected = name
     heading = title
+    project = folder
+    agent = kind
+  action search(v: string)
+    query = v
   action again
     refresh chats
     refresh transcript
+  action initial
+    setScheme("dark")
+  action themeToggle
+    dark = not dark
+    setScheme(dark ? "light" : "dark")
+  task appearance mount
+    after(1, initial)
   view
-    row height="100vh" background-color="#faf9f6" color="#242421"
-      column width=280 padding=20 gap=16 background-color="#eeede8"
-        text "Пульт" font-size=28 font-weight=700
-        text "EXACT · ПРЕДПРОСМОТР" font-size=11 color="#66665f"
-        button press=again testId="refresh"
-          text "Обновить" color="#242421"
+    row height="100vh" min-height=0 background-color="page" color="ink" font-size=13
+      column width=264 flex-shrink=0 min-height=0 background-color="sidebar" border-right="1px solid light-dark(#e3e5df, #303537)"
+        row padding="20px 18px 16px" gap=9 align-items="center"
+          text "п" font-size=14 font-weight=700 color="sidebar" background-color="accent" border-radius=5 padding="1px 6px"
+          text "Пульт" font-size=16 font-weight=600 flex=1
+          button appearance="none" press=themeToggle aria-label="Переключить тему" testId="theme" padding=4
+            text "◐" font-size=18 color="muted"
+        column padding="0 14px 14px"
+          input type="search" value=query input=search placeholder="Найти разговор" aria-label="Поиск разговоров" testId="search" font-size=12
+        row padding="6px 18px 10px" align-items="center"
+          text "РАЗГОВОРЫ" font-size=10 font-weight=600 letter-spacing="1px" color="muted" flex=1
+          text `${chats.sessions.length}` font-size=10 color="muted" font-variant-numeric="tabular-nums"
         if failed(chats)
-          text "Демон недоступен. Запустите Пульт и обновите." testId="error"
+          text "Демон недоступен. Откройте Пульт и обновите список." padding=18 color="muted" font-size=12 testId="error"
         else if not current(chats)
           progress aria-label="Загрузка разговоров"
         else
-          scroll flex=1
-            column gap=8
-              for chat in chats.sessions key=chat.name
-                button press=choose(chat.name, chat.title) testId=`chat-${chat.name}`
-                  text-align="start" padding=12
-                  column gap=4
-                    text chat.title font-weight=600
-                    text `${chat.provider} · ${chat.status}` font-size=12 color="#66665f"
-              if chats.sessions.length == 0
-                text "Разговоров пока нет." testId="empty"
-      column flex=1 min-width=0 padding=32 gap=20
-        text heading font-size=24 font-weight=600 testId="heading"
-        text "Чтение разговоров · обновление по кнопке" color="#66665f" font-size=12
-        scroll flex=1
-          if failed(transcript)
-            text "Не удалось загрузить историю. Нажмите «Обновить»." testId="history-error"
-          else if not current(transcript)
-            progress aria-label="Загрузка истории"
-          else
-            text transcript.text white-space="pre-wrap" testId="transcript"
+          scroll flex=1 min-height=0
+            column gap=3 padding="0 8px 12px"
+              for chat in visible key=chat.name
+                button appearance="none" press=choose(chat.name, chat.title, chat.project, chat.provider) testId=`chat-${chat.name}`
+                  text-align="start" padding="9px 10px" border-radius=7 background-color=(selected == chat.name ? "selected" : "sidebar")
+                  column gap=5 min-width=0 flex=1
+                    row gap=7 align-items="center"
+                      text "●" font-size=7 color=(chat.status == "working" ? "successTint" : "muted")
+                      text chat.title font-size=12 font-weight=(selected == chat.name ? 600 : 400) color="ink" line-clamp=1 flex=1 min-width=0
+                    row gap=6 padding-left=14
+                      text chat.project font-size=10 color="muted" line-clamp=1 flex=1
+                      text provider(chat.provider) font-size=10 color="muted"
+              if visible.length == 0
+                text "Ничего не найдено" padding=10 font-size=12 color="muted" testId="empty"
+        row padding="12px 18px" border-top="1px solid light-dark(#e3e5df, #303537)" align-items="center"
+          text "Просмотр истории" font-size=11 color="muted" flex=1
+          button appearance="none" press=again aria-label="Обновить историю" testId="refresh" padding=3
+            text "↻" font-size=19 color="muted"
+      column flex=1 min-width=0 min-height=0
+        row padding="17px 28px" gap=12 border-bottom="1px solid light-dark(#e3e5df, #303537)" align-items="center"
+          column gap=4 flex=1 min-width=0
+            text heading font-size=13 font-weight=600 line-clamp=1 color="ink" testId="heading"
+            if selected != ""
+              text project font-size=11 color="muted"
+          if selected != ""
+            text provider(agent) font-size=11 color="accent" background-color="selected" padding="4px 9px" border-radius=12
+        if selected == ""
+          column flex=1 align-items="center" justify-content="center" gap=12 padding=40
+            text "п" font-size=30 font-weight=600 color="accent" background-color="selected" padding="10px 20px" border-radius=14
+            text "Всё начинается с разговора" font-size=23 font-weight=500 color="ink"
+            text "Выберите чат слева, чтобы вернуться к работе." font-size=13 color="muted"
+            text "Ваши агенты и история — в одном месте." font-size=12 color="muted"
+        else
+          scroll flex=1 min-height=0 testId="history-scroll"
+            column align-items="center" padding="30px 28px 48px"
+              column width="100%" max-width=680 gap=26
+                if failed(transcript)
+                  text "Не удалось загрузить историю. Обновите её кнопкой слева." color="muted" font-size=13 testId="history-error"
+                else if not current(transcript)
+                  progress aria-label="Загрузка истории"
+                else
+                  if transcript.total > 20
+                    text `Последние 20 сообщений из ${transcript.total}` font-size=11 color="muted"
+                  for message in transcript.messages key=message.id
+                    column gap=8 padding=(message.role == "user" ? "14px 18px" : "0") border-radius=12 background-color=(message.role == "user" ? "bubble" : "page")
+                      row gap=8 align-items="center"
+                        text message.label font-size=11 font-weight=600 color=(message.role == "user" ? "muted" : "accent")
+                        text message.time font-size=10 color="muted" font-variant-numeric="tabular-nums"
+                      text message.text markup="markdown" font-size=14 line-height=1.6 color="ink" testId=`message-${message.id}`
+                  if transcript.messages.length == 0
+                    text "В этом разговоре пока нет сообщений." font-size=13 color="muted"
+                  if transcript.tools > 0
+                    text `Действий с инструментами: ${transcript.tools}` font-size=11 color="muted"
+                  if transcript.truncated
+                    text "История загружена частично." font-size=11 color="muted"

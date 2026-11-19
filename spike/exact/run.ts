@@ -3,6 +3,12 @@ import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { startBridge } from './bridge.ts'
 
+async function writeChanged(file: string, content: string | Buffer, mode?: number) {
+  const bytes = Buffer.from(content)
+  try { if ((await readFile(file)).equals(bytes)) return } catch {}
+  await writeFile(file, bytes, mode ? { mode } : undefined)
+}
+
 const here = dirname(fileURLToPath(import.meta.url))
 const runtime = resolve(here, '.runtime')
 await mkdir(runtime, { recursive: true, mode: 0o700 })
@@ -12,8 +18,8 @@ const actual = Bun.spawnSync(['git', '-C', upstream, 'rev-parse', 'HEAD']).stdou
 if (actual !== expected) throw new Error('Exact checkout differs from upstream-revision; see README.md')
 
 await mkdir(resolve(runtime, 'data/src'), { recursive: true })
-await writeFile(resolve(runtime, 'data/src/lib.rs'), await readFile(resolve(here, 'data/lib.rs')))
-await writeFile(resolve(runtime, 'data/Cargo.toml'), `[package]
+await writeChanged(resolve(runtime, 'data/src/lib.rs'), await readFile(resolve(here, 'data/lib.rs')))
+await writeChanged(resolve(runtime, 'data/Cargo.toml'), `[package]
 name = "pult-exact-data"
 version = "0.1.0"
 edition = "2021"
@@ -24,15 +30,15 @@ exact-runner = { path = ${JSON.stringify(resolve(upstream, 'runner'))} }
 `)
 const bridge = startBridge()
 try {
-const app = resolve(here, '.runtime')
-await mkdir(app, { recursive: true, mode: 0o700 })
-const header = `source sessions() as shape Chats\n  url "${bridge.origin}/sessions"\n  header "Authorization" "Bearer ${bridge.capability}"\n\nsource conversation(name: string) as shape Transcript\n  url "${bridge.origin}/conversation?name={name}"\n  header "Authorization" "Bearer ${bridge.capability}"\n\n`
-await writeFile(resolve(app, 'app.contract'), header + await readFile(resolve(here, 'app.contract'), 'utf8'), { mode: 0o600 })
-await writeFile(resolve(app, 'app.json'), await readFile(resolve(here, 'app.json')), { mode: 0o600 })
-console.log('Building Pult Exact Preview. Close the window or press Ctrl+C to stop the local read bridge.')
-const child = Bun.spawn(['bun', 'host/apple/build.mjs', runtime, '--run'], { cwd: upstream, stdout: 'inherit', stderr: 'inherit', env: { ...process.env, PATH: `${process.env.HOME}/.cargo/bin:${process.env.PATH}` } })
-const stop = () => { child.kill(); bridge.server.stop(true) }
-process.on('SIGINT', stop)
-process.on('SIGTERM', stop)
-process.exitCode = await child.exited
+  const app = resolve(here, '.runtime')
+  await mkdir(app, { recursive: true, mode: 0o700 })
+  const header = `source sessions() as shape Chats\n  url "${bridge.origin}/sessions"\n  header "Authorization" "Bearer ${bridge.capability}"\n\nsource conversation(name: string) as shape Transcript\n  url "${bridge.origin}/conversation?name={name}"\n  header "Authorization" "Bearer ${bridge.capability}"\n\n`
+  await writeChanged(resolve(app, 'app.contract'), header + await readFile(resolve(here, 'app.contract'), 'utf8'), 0o600)
+  await writeChanged(resolve(app, 'app.json'), await readFile(resolve(here, 'app.json')), 0o600)
+  console.log('Building Pult Exact Preview. Close the window or press Ctrl+C to stop the local read bridge.')
+  const child = Bun.spawn(['bun', 'host/apple/build.mjs', runtime, '--run'], { cwd: upstream, stdout: 'inherit', stderr: 'inherit', env: { ...process.env, PATH: `${process.env.HOME}/.cargo/bin:${process.env.PATH}` } })
+  const stop = () => { child.kill(); bridge.server.stop(true) }
+  process.on('SIGINT', stop)
+  process.on('SIGTERM', stop)
+  process.exitCode = await child.exited
 } finally { bridge.server.stop(true) }
