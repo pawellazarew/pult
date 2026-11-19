@@ -230,6 +230,26 @@ fn path_resolution_ignores_relative_and_empty_entries_and_canonicalizes_aliases(
     assert_eq!(f.load().err(), Some(StaticError::ExecutableUnavailable));
 }
 #[test]
+fn normal_codex_bootstrap_uses_doctor_local_fallback_but_fixture_mode_does_not() {
+    let mut f = Fixture::new();
+    fs::remove_file(f.bin.join("codex")).unwrap();
+    let local = f.home.join(".local/bin");
+    fs::create_dir_all(&local).unwrap();
+    let selected = local.join("codex");
+    executable(&selected);
+    // An explicit test host cannot silently fall through to any installation.
+    assert_eq!(f.load().err(), Some(StaticError::ExecutableUnavailable));
+    f.parent.remove(OsStr::new("PULT_TEST"));
+    // The ordinary host uses the same fixed local candidate as doctor, without
+    // executing it or reading account/native configuration.
+    assert_eq!(f.load().unwrap().codex, selected.canonicalize().unwrap());
+    f.parent.insert(
+        "PULT_CODEX_BIN".into(),
+        f.bin.join("missing").into_os_string(),
+    );
+    assert_eq!(f.load().err(), Some(StaticError::ExecutableUnavailable));
+}
+#[test]
 fn explicit_codex_override_is_trusted_absolute_and_does_not_fallback_on_error() {
     let mut f = Fixture::new();
     let selected = f.bin.join("selected");

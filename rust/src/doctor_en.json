@@ -1,4 +1,5 @@
 {
+  "Если CLI обновился, переподключи его из Inbox или панели CLI Пульта. Если после этого есть ошибки протокола, обнови Пульт. Редактировать исходники и принимать новую схему вручную не нужно.": "If the CLI was updated, reconnect it from Pult's Inbox or CLI panel. If protocol errors persist, update Pult. You do not need to edit source code or manually accept the new schema.",
   "Node демона": "Daemon Node",
   "node демона {0} ({1}) удалён или заменён обновлением (brew upgrade?) — macOS не пустит ": "Daemon node {0} ({1}) was removed or replaced by an update (brew upgrade?) — macOS will deny ",
   "агентов в ~/Desktop, ходы claude там падают с «An unknown error occurred (Unexpected)». Перезапусти демона": "agents access to ~/Desktop, causing Claude turns there to fail with “An unknown error occurred (Unexpected)”. Restart the daemon",

@@ -10,7 +10,7 @@ import { agentLabel, ago } from '../model/agents.js'
 import type { DoctorGroup } from '../model/health.js'
 import { attentionKeys, searchKeys } from '../model/hotkeys.js'
 import { ATTENTION_LABEL, INBOX_FILTERS } from '../model/inbox.js'
-import type { InboxFilter, InboxItem, SessionCard } from '../model/inbox.js'
+import type { InboxFilter, InboxItem, InboxSystemCard, SessionCard } from '../model/inbox.js'
 import type { DoctorReport } from '../model/types.js'
 import { mcpRows, toggleServer } from '../model/mcp.js'
 import type { McpListing } from '../model/mcp.js'
@@ -23,10 +23,12 @@ import { explainFailure, exitCodeIn } from '../model/errors.js'
 // О2 (docs/14): почтовый ящик всего, что требует человека. Фильтр «Все» — запросы и непрочитанные
 // ошибки, «Непрочитанные» — все непрочитанные сессии, «Ошибки» — только ошибки.
 
-export function Inbox({ items, cards = [], filter = 'all', counts, agents, focused, busy, retrying, now, waitingCount = 0, onFocus, onApprove, onAnswer, onDeny, onClose, onFilter, onOpen, onRetry, onStop, onWait, onNextWaiting, onJumpPerm }: {
+export function Inbox({ items, cards = [], systemCards = [], filter = 'all', counts, agents, focused, busy, retrying, now, waitingCount = 0, onFocus, onApprove, onAnswer, onDeny, onClose, onFilter, onOpen, onRetry, onStop, onWait, onNextWaiting, onJumpPerm, onSystemAction, onSystemDetails }: {
   items: readonly InboxItem[]
   /** Карточки сессий (ошибки или непрочитанное) — model/inbox.ts `inboxView`. */
   cards?: readonly SessionCard[]
+  /** Системные действия не входят в очередь разрешений или внимания сессий. */
+  systemCards?: readonly InboxSystemCard[]
   filter?: InboxFilter
   counts?: Record<InboxFilter, number>
   agents: readonly AgentView[]
@@ -54,13 +56,15 @@ export function Inbox({ items, cards = [], filter = 'all', counts, agents, focus
   onNextWaiting?(): void
   /** «в ленту» карточки запроса: открыть разговор и показать запрос (нет события — просто открыть). */
   onJumpPerm?(sessionId: string, eventId?: number): void
+  onSystemAction?(id: string): void
+  onSystemDetails?(): void
 }): ReactElement {
   // `name` карточки — подпись (название), `key` — имя сессии: два агента с одним названием различимы по подсказке.
   const who = (name: string): { name: string; provider: string; key: string } => {
     const a = agents.find((x) => x.name === name)
     return { name: a ? agentLabel(a) : name, provider: a?.provider ?? 'pult', key: name }
   }
-  const shown = items.length + cards.length
+  const shown = items.length + cards.length + systemCards.length
   return (
     <aside className="inbox" aria-label="Inbox" data-testid="inbox" data-filter={filter}>
       <div className="pane-h">
@@ -72,7 +76,7 @@ export function Inbox({ items, cards = [], filter = 'all', counts, agents, focus
                 onClick={() => onFilter(f)}>{label}{counts?.[f] ? <span className="n">{counts[f]}</span> : null}</button>
             ))}
           </div>
-        ) : <span className="count">{items.length ? t`${items.length} ждут` : ''}</span>}
+        ) : <span className="count">{shown ? t`${shown} ждут` : ''}</span>}
         <span className="grow" />
         {onNextWaiting && waitingCount > 0 && (
           <button type="button" className="btn btn-ghost btn-sm inbox-next" data-testid="inbox-next-waiting"
@@ -94,6 +98,16 @@ export function Inbox({ items, cards = [], filter = 'all', counts, agents, focus
         ) : <>
           {cards.filter((c) => c.error).map((c) => <SessionCardView key={`s:${c.name}`} c={c} agent={who(c.name)} now={now}
             retrying={retrying?.has(c.name) ?? false} onOpen={onOpen} onRetry={onRetry} onStop={onStop} onWait={onWait} />)}
+          {systemCards.map(card => <article key={`system:${card.id}`} className="perm inbox-system" data-testid="inbox-provider-update"
+            data-provider={card.provider} data-notice-id={card.id} data-error={card.error ? '1' : '0'} aria-busy={card.busy || undefined}>
+            <div className="perm-h"><span className="lbl">{t('Обновление CLI')}</span>{card.provider && <ProviderTag provider={card.provider} />}</div>
+            <div className="perm-reason" role={card.error ? 'alert' : undefined}><strong>{card.title}</strong><p>{card.detail}</p></div>
+            <div className="perm-actions">
+              <button type="button" className="btn btn-sm" disabled={card.busy || card.actionDisabled || !onSystemAction}
+                data-testid="inbox-provider-action" data-action={card.action} onClick={() => onSystemAction?.(card.id)}><Icon name="refresh" />{card.actionLabel}</button>
+              {onSystemDetails && <button type="button" className="btn btn-sm btn-ghost" data-testid="inbox-provider-details" onClick={onSystemDetails}>{t('Подробнее')}</button>}
+            </div>
+          </article>)}
           {items.map((p) => (
             <PermCard key={p.id} permId={p.id} toolName={p.toolName} input={p.input} state="pending"
               agent={who(p.sessionId)} createdAt={p.createdAt} now={now}

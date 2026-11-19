@@ -658,6 +658,10 @@ button { font: inherit; color: inherit; }
 .inbox-session[data-error="0"] { border-color: var(--hair); border-left-color: var(--accent); }
 .inbox-session[data-error="0"] .perm-h .lbl { color: var(--accent); }
 .inbox-session .perm-reason { overflow-wrap: anywhere; }
+.inbox-system[data-error="1"] { border-color: var(--fail-edge); border-left-color: var(--fail); }
+.inbox-system[data-error="0"] { border-color: var(--hair); border-left-color: var(--accent); }
+.inbox-system .perm-reason { overflow-wrap: anywhere; }
+.inbox-system .perm-reason p { margin-bottom: 0; white-space: pre-wrap; }
 
 /* --- диалоги ---------------------------------------------------------------------- */
 .scrim { position: fixed; inset: 0; background: var(--scrim); display: flex; align-items: flex-start; justify-content: center; padding-top: 7vh; z-index: 100; }

@@ -210,7 +210,7 @@ pub(super) async fn check(root: &Path, bin: PathBuf, exec: &Executor, t: Text) -
         data["retainedReason"] = json!(reason);
     }
     if state == "drift" {
-        item=item.fix(format!("{}{}",t.t("сверь изменения для адаптера (node scripts/diff-codex-schema.mjs <старая> <новая> по spike/codex/schema/) ",&[]),t.t("и обнови CODEX_SCHEMA_SHA256 в src/adapters/codex/schema.ts на {0}",&[actual.as_deref().unwrap_or("")])))
+        item = item.fix(t.t("Если CLI обновился, переподключи его из Inbox или панели CLI Пульта. Если после этого есть ошибки протокола, обнови Пульт. Редактировать исходники и принимать новую схему вручную не нужно.", &[]));
     }
     Ok(item)
 }

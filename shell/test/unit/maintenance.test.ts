@@ -8,6 +8,7 @@ import { Maintenance, installation, providerPlan } from '../../src/maintenance.j
 import type { ProviderInventory } from '../../src/maintenance.js'
 import type { LocatedTool } from '../../../src/env/locate.js'
 import { execAsync } from '../../../src/env/exec.js'
+import { captureProviderIdentity } from '../../../src/env/providerIdentity.js'
 
 const tool = (name: LocatedTool['name'], file: string | null, real = file): LocatedTool => ({ name, path: file, realpath: real, version: '1.0', versionExitCode: 0, viaPath: false, triedCount: 1 })
 function fixture() {
@@ -23,6 +24,34 @@ function fixture() {
 const unusedRun = async () => ({ status: 0, stdout: '', stderr: '' })
 
 describe('local provider maintenance', () => {
+  it('shares concurrent inventory reads, preserves observed identities and never opens Terminal to discover updates', async () => {
+    const f = fixture()
+    try {
+      writeFileSync(f.inventory.claude.path!, '#!/bin/sh\nexit 0\n', { mode: 0o700 })
+      const identity = captureProviderIdentity(f.inventory.claude.path!)
+      assert.ok(identity)
+      f.inventory.claude = { ...f.inventory.claude, installation: identity, changedDuringCheck: false }
+      f.inventory.codex = { ...f.inventory.codex, version: null, installation: null, changedDuringCheck: true }
+      let release!: () => void
+      const gate = new Promise<void>(resolve => { release = resolve })
+      let inventories = 0, launches = 0
+      const controller = new Maintenance({ info: f.info, env: f.env,
+        inventory: async () => { inventories++; await gate; return f.inventory },
+        run: async () => { throw new Error('inventory must not run installers or doctor') }, launch: async () => { launches++ } })
+      const first = controller.providers(), second = controller.providers()
+      assert.equal(first, second)
+      assert.equal(inventories, 1)
+      release()
+      const [one, two] = await Promise.all([first, second])
+      assert.deepEqual(one, two)
+      assert.deepEqual(one[0]?.installation, identity)
+      assert.equal(one[1]?.changedDuringCheck, true)
+      assert.equal(one[1]?.version, null)
+      await controller.providers()
+      assert.equal(inventories, 2)
+      assert.equal(launches, 0)
+    } finally { f.close() }
+  })
   it('targets the active Homebrew prefix, formula/cask and npm prefix', () => {
     const f = fixture()
     try {

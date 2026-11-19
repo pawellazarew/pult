@@ -116,7 +116,8 @@ it('memory dialog preserves dirty edits, rejects stale reads and retries the exa
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true)
     await page.getByTestId('memory-close').click()
     await dialog.waitFor({ state: 'detached' })
-    assert.equal(await page.getByTestId('fixture-memory-open').evaluate(element => element === document.activeElement), true)
+    // Dialog detachment precedes its owned requestAnimationFrame focus restoration.
+    assert.ok(await waitFor(async () => page.getByTestId('fixture-memory-open').evaluate(element => element === document.activeElement)), 'focus did not return to the opener after closing the dialog')
     await page.evaluate(() => window.__memoryDialog.openAtLayout())
     assert.ok(await waitFor(async () => !(await snapshot()).active))
     assert.equal((await snapshot()).globalEscapes, 0, 'layout-boundary Escape reached the underlying window')

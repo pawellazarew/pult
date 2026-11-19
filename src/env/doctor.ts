@@ -411,8 +411,7 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
       detail: schema.detail,
       ...(schema.status === 'drift'
         ? {
-            fix: t`сверь изменения для адаптера (node scripts/diff-codex-schema.mjs <старая> <новая> по spike/codex/schema/) `
-              + t`и обнови CODEX_SCHEMA_SHA256 в src/adapters/codex/schema.ts на ${schema.actual}`,
+            fix: t('Если CLI обновился, переподключи его из Inbox или панели CLI Пульта. Если после этого есть ошибки протокола, обнови Пульт. Редактировать исходники и принимать новую схему вручную не нужно.'),
           }
         : {}),
       data: { expected: schema.expected, actual: schema.actual, files: schema.files, state: schema.status },

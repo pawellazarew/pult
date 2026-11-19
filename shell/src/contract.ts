@@ -1,5 +1,6 @@
 import type { RuntimeBounds, RuntimeResult } from '../../src/runtimes/types.js'
 import type { FileListing, FilePreview } from '../../src/core/fileBrowserTypes.js'
+import type { ProviderFileIdentity } from '../../src/env/providerIdentity.js'
 export type { FileListing, FilePreview, FileEntry } from '../../src/core/fileBrowserTypes.js'
 // Контракт моста `window.pult` (docs/12 §2): то, что видит интерфейс, и белый список методов демона,
 // которые main пропускает из окна. Один файл на обе стороны: main и preload реализуют его, ui/
@@ -217,7 +218,7 @@ export interface SpeechBridge {
 
 export interface MaintenanceInfo { home: string; packageRoot: string; node: string | null; logs: string; serviceLog: string; operations?: ProviderOperation[] }
 export type ProviderAction = 'install' | 'update' | 'login'
-export interface ProviderTool { provider: 'claude' | 'codex'; path: string | null; realpath: string | null; version: string | null; source: 'missing' | 'application' | 'homebrew' | 'npm' | 'native' | 'unknown' }
+export interface ProviderTool { provider: 'claude' | 'codex'; path: string | null; realpath: string | null; version: string | null; source: 'missing' | 'application' | 'homebrew' | 'npm' | 'native' | 'unknown'; installation?: ProviderFileIdentity | null; changedDuringCheck?: boolean }
 export interface ProviderOperation { id: string; provider: 'claude' | 'codex'; action: ProviderAction; state: 'running' | 'succeeded' | 'failed' | 'handoff' | 'unknown'; command: string; application?: string; exitCode?: number; message?: string }
 
 export interface PultBridge {

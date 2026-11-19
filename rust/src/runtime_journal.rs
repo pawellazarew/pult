@@ -270,6 +270,7 @@ pub(crate) mod tests {
             session_commands: Arc::default(),
             session_waits: Default::default(),
             native_runtime: OnceLock::new(),
+            native_installation: OnceLock::new(),
             memory_turns: OnceLock::new(),
             claude_asks: OnceLock::new(),
             permissions: OnceLock::new(),

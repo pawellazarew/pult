@@ -46,7 +46,7 @@ scenarios.push(
 )
 
 const run=(args,env)=>new Promise((resolve,reject)=>{const c=spawn(binary,args,{env,stdio:['ignore','pipe','pipe']});let out='',err='';c.stdout.on('data',b=>out+=b);c.stderr.on('data',b=>err+=b);c.on('error',reject);c.on('close',code=>resolve({code,out,err}))})
-let cases=0
+let cases=0,complete=false,currentCase=null
 try{for(const [index,s]of scenarios.entries())for(const language of ['ru','en']){
  const home=join(root,`c${index}-${language}`),user=join(root,`u${index}-${language}`),bin=join(home,'fakebin');for(const p of [home,user,bin,join(home,'run'),join(home,'logs'),join(home,'events'),join(home,'service')])await fs.mkdir(p,{mode:0o700})
  await fs.writeFile(join(home,'.rust-core-scratch'),'pult-rust-scratch-v1\n',{mode:0o600})
@@ -67,8 +67,9 @@ try{for(const [index,s]of scenarios.entries())for(const language of ['ru','en'])
  if(s.current){await fs.mkdir(join(home,'versions'),{mode:0o700});await fs.symlink('versions/1.2.3',join(home,'current'));if(s.current==='dev'){await fs.mkdir(join(home,'versions/1.2.3'),{mode:0o700});await fs.writeFile(join(home,'versions/1.2.3/package.json'),'{{"name":"pult","version":"1.2.3"}}'.slice(1,-1),{mode:0o600});await fs.writeFile(join(home,'update.json'),JSON.stringify({current:'1.2.3',previous:'1.0.0',bad:['0.1.0'],last:s.interrupted?{result:'failed',version:'1.2.3',message:'проба идёт (прервана?)',at:'fixture-time'}:null}),{mode:0o600})}}
  let server
  if(s.daemon){await fs.writeFile(join(home,'run/token'),'a'.repeat(64),{mode:0o600});server=net.createServer(socket=>{let data='';socket.on('data',chunk=>{data+=chunk;let i;while((i=data.indexOf('\n'))>=0){const line=data.slice(0,i);data=data.slice(i+1);const request=JSON.parse(line);if(request.type==='hello')socket.write(JSON.stringify({type:'hello_ok',protocol:1})+'\n');else {assert.equal(request.method,'daemon.status');socket.write(JSON.stringify({id:request.id,result:s.daemon})+'\n')}}})});await new Promise(r=>server.listen(join(home,'run/pultd.sock'),r));await fs.chmod(join(home,'run/pultd.sock'),0o600)}
+ currentCase={index,language,phase:'rust-json'}
  const actual=await run(['--home',home,'doctor','--json',...s.net?[]:['--no-net']],env)
- assert.notEqual(actual.code,130,actual.err);assert(actual.out,actual.err)
+ assert.notEqual(actual.code,130,`case ${index}/${language}: ${actual.err}`);assert(actual.out,`case ${index}/${language}: ${actual.err}`)
  const got=JSON.parse(actual.out)
  Object.assign(process.env,env);setLanguage(language);const paths=layout(home),loaded=loadConfig(paths.config),config=loaded.config
  const native=(file,args,timeoutMs)=>execAsync(file,args,{timeoutMs,env:{HOME:user,USER:'fixture',PATH:bin,LANG:'en_US.UTF-8'}})
@@ -84,5 +85,6 @@ try{for(const [index,s]of scenarios.entries())for(const language of ['ru','en'])
  if(s.profileDynamic==='update'){const i=report.items.find(i=>i.id==='update.channel');i.detail=Buffer.from(i.detail).toString();i.data.checkedAt=Buffer.from(i.data.checkedAt).toString()}
  if(s.profileDynamic==='proxy'){const i=report.items.find(i=>i.id==='net.claude');i.detail=Buffer.from(i.detail).toString()}
  try{assert.deepEqual(normalize(got),normalize(report))}catch(e){await fs.writeFile(join(root,'actual.json'),JSON.stringify(got,null,2));await fs.writeFile(join(root,'expected.json'),JSON.stringify(report,null,2));throw new Error(`case ${index}/${language}: ${e.message}\n${root}`,{cause:e})}
+ currentCase={index,language,phase:'rust-text'}
  const text=await run(['--home',home,'doctor',...s.net?[]:['--no-net']],env);assert.equal(text.code,actual.code);if(!s.net){let expected=Buffer.from(formatDoctor(report)+'\n').toString();if(s.missing)expected=expected.replace(/^\[FAIL\] Node:.*$/m,`[FAIL] Node: ${got.items[0].detail}`);assert.equal(text.out,expected)}if(server)await new Promise(r=>server.close(r));cases++
-}console.log(JSON.stringify({scope:'actual Rust CLI bindings vs actual Node engine; isolated Node FS/schema/service bindings, injected locate/daemon/network probe',cases}))}finally{if(process.env.KEEP_DOCTOR_ORACLE!=='1')await fs.rm(root,{recursive:true,force:true})}
+}complete=true;console.log(JSON.stringify({scope:'actual Rust CLI bindings vs actual Node engine; isolated Node FS/schema/service bindings, injected locate/daemon/network probe',cases}))}catch(error){await fs.writeFile(join(root,'failed-case.json'),JSON.stringify(currentCase));throw error}finally{if(complete&&process.env.KEEP_DOCTOR_ORACLE!=='1')await fs.rm(root,{recursive:true,force:true});else console.error(`doctor oracle diagnostic scratch retained: ${root}`)}

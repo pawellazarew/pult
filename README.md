@@ -23,6 +23,11 @@ The **CLI** button in the sidebar footer opens daemon controls, diagnostics, and
 install, update and sign-in actions. Local diagnostics also work while the daemon is stopped.
 See the [controls contract](docs/20-CLI-CONTROLS.md).
 
+Pult automatically checks for changed Claude Code / Codex installations while its window is visible and
+when you return to it. An Inbox card offers **Connect update**; **Reconnect CLIs** is also available in the
+CLI panel. Both use a confirmed daemon restart, without Terminal commands. Detection never interrupts
+active turns. An executable change is not treated as proof of native protocol or shared-memory compatibility.
+
 Your messages longer than 500 characters start collapsed. Use **Expand / Collapse** to read the full
 message. Model replies show their full Markdown. Copy copies the complete original text, and search opens a matching message.
 

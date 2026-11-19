@@ -197,7 +197,7 @@ describe('доктор', () => {
     }
   })
 
-  it('схема протокола codex: совпадение — ok, расхождение — warn с командой починки', async () => {
+  it('схема протокола codex: расхождение остаётся warn с действием из окна', async () => {
     const home = tempHome()
     try {
       // Сверка подменена целиком: настоящий `codex` не спавнится, на диск ничего не пишется.
@@ -210,7 +210,8 @@ describe('доктор', () => {
       const item = find(report.items, 'codex.schema')
       assert.equal(item.status, 'warn', 'расхождение схемы — предупреждение, а не отказ работать')
       assert.match(item.detail, /РАЗОШЛАСЬ/)
-      assert.match(item.fix ?? '', /CODEX_SCHEMA_SHA256/)
+      assert.match(item.fix ?? '', /Inbox|CLI Пульта/)
+      assert.doesNotMatch(item.fix ?? '', /CODEX_SCHEMA_SHA256|node scripts\/diff-codex-schema/)
       assert.equal(report.ok, true, 'дрейф протокола не имеет права валить весь отчёт')
     } finally {
       home.remove()
