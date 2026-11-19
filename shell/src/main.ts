@@ -22,6 +22,7 @@ import { readScopedImage } from '../../src/core/images.js'
 import { LocalSpeech } from './speech.js'
 import { Maintenance } from './maintenance.js'
 import { execAsync } from '../../src/env/exec.js'
+import { observeProviderTool } from '../../src/env/providerIdentity.js'
 import { buildChildEnv } from '../../src/env/allowlist.js'
 import { redactString } from '../../src/core/log.js'
 import { HtmlPreviews, HTML_PREVIEW_SCHEME } from './htmlPreview.js'
@@ -834,17 +835,15 @@ async function boot(): Promise<void> {
       env: buildChildEnv(process.env, { extra: { PULT_HOME: paths.home, PULT_LANG: getLanguage(), ...(TEST_MODE ? { PULT_TEST: '1', PULT_SERVICE_DIR: process.env['PULT_SERVICE_DIR'] ?? path.join(paths.home, 'svc') } : {}) } }) }),
     inventory: async () => {
       const pathEntries = TEST_MODE ? (process.env['PATH'] ?? '').split(':') : await login.loginShellPath(paths.envCache)
-      const tools = await (TEST_MODE ? locate.testLocate : locate.locateAllAsync)({ pathEntries })
-      for (const provider of ['claude', 'codex'] as const) {
+      const providers = await Promise.all((['claude', 'codex'] as const).map(async provider => {
         const override = process.env[provider === 'claude' ? 'PULT_CLAUDE_BIN' : 'PULT_CODEX_BIN']
-        if (override) {
-          const selected = path.resolve(override)
-          const version = await execAsync(selected, ['--version'], { timeoutMs: 5_000, env: buildChildEnv(process.env, { path: pathEntries.join(':') }) })
-          tools[provider] = { ...tools[provider], path: selected, realpath: realFs.isFile(selected) ? realpathSync(selected) : null,
-            version: version.status === 0 ? redactString(version.stdout.trim().split('\n')[0] ?? '') || null : null, versionExitCode: version.status }
-        }
-      }
-      return { claude: tools.claude, codex: tools.codex, npm: tools.npm, pathEntries, home: process.env['HOME'] ?? app.getPath('home') }
+        const at = override ? { name: provider, path: path.resolve(override), viaPath: false, triedCount: 1 }
+          : TEST_MODE ? { name: provider, path: null, viaPath: false, triedCount: 0 } : locate.locateToolPath(provider, { pathEntries })
+        return observeProviderTool({ ...at, realpath: null, version: null, versionExitCode: null },
+          (file, args) => execAsync(file, args, { timeoutMs: 5_000, maxBuffer: 64 * 1024, env: buildChildEnv(process.env, { path: pathEntries.join(':') }) }))
+      }))
+      const npm = await locate.locateToolAsync('npm', { pathEntries })
+      return { claude: providers[0]!, codex: providers[1]!, npm, pathEntries, home: process.env['HOME'] ?? app.getPath('home') }
     },
     network: async (provider) => {
       const configModule = await load<typeof import('../../src/core/config.js')>('core/config.js')

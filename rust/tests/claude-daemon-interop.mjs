@@ -1,7 +1,7 @@
 import { readCompleteJsonl } from './support/complete-jsonl.mjs'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdtempSync, mkdirSync, chmodSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs'
+import { realpathSync, renameSync, copyFileSync, statSync, mkdtempSync, mkdirSync, chmodSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import net from 'node:net'
@@ -16,7 +16,16 @@ const home = join(temp, 'home'), account = join(temp, 'account'), native = join(
 for (const path of [home, account, native, project]) { mkdirSync(path); chmodSync(path, 0o700) }
 writeFileSync(join(home, '.rust-core-scratch'), 'pult-rust-scratch-v1\n', { mode: 0o600 })
 writeFileSync(join(home, 'config.json'), JSON.stringify({ network: { claude: { mode: 'off' }, guard: { mode: 'allow', countries: ['FI'] } } }), { mode: 0o600 })
-const env = { ...process.env, HOME: account, PULT_TEST: '1', PULT_CLAUDE_BIN: join(root, 'rust/tests/fixtures/claude_daemon.py'), PULT_CODEX_BIN: join(temp, 'deliberately-missing-codex'), PULT_CURL_BIN: join(root, 'rust/tests/fixtures/curl_loc_fi.sh'), ANTHROPIC_API_KEY: 'synthetic-ambient-must-not-leak' }
+const installed = join(temp, 'installed-cli')
+mkdirSync(installed); chmodSync(installed, 0o700)
+const selectedProvider = join(installed, 'claude')
+copyFileSync(join(root, 'rust/tests/fixtures/claude_daemon.py'), selectedProvider)
+chmodSync(selectedProvider, 0o700)
+const identity = file => {
+  const actual = realpathSync(file), metadata = statSync(actual, { bigint: true })
+  return { path: actual, realpath: actual, dev: String(metadata.dev), ino: String(metadata.ino), size: String(metadata.size), mtimeNs: String(metadata.mtimeNs), ctimeNs: String(metadata.ctimeNs) }
+}
+const env = { ...process.env, HOME: account, PULT_TEST: '1', PULT_CLAUDE_BIN: selectedProvider, PULT_CODEX_BIN: join(temp, 'deliberately-missing-codex'), PULT_CURL_BIN: join(root, 'rust/tests/fixtures/curl_loc_fi.sh'), ANTHROPIC_API_KEY: 'synthetic-ambient-must-not-leak' }
 for (const key of ['PULT_MEMORY_KEY', 'PULT_MEMORY_TURN_KEY', 'PULT_WORKER_HOLDER_BIN', 'PULT_HOLDER_BIN', 'PULT_ASK_KEY', 'PULT_ASK_SESSION']) delete env[key]
 const paths = layout(home)
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -127,6 +136,13 @@ try {
     const status = await client.request('daemon.status')
     assert.equal(status.nativeRuntime.providers.codex.initialized, false)
     assert.equal(status.nativeRuntime.providers.claude.initialized, true)
+    const retained = status.providerInstallations.claude
+    assert.deepEqual(retained, { initialized: true, installation: identity(selectedProvider) })
+    const updated = selectedProvider + '.new'
+    writeFileSync(updated, readFileSync(selectedProvider, 'utf8') + '\n# synthetic installed CLI update\n', { mode: 0o700 })
+    renameSync(updated, selectedProvider)
+    assert.notDeepEqual(identity(selectedProvider), retained.installation)
+    assert.deepEqual((await client.request('daemon.status')).providerInstallations.claude, retained, 'status must retain the selected runtime snapshot after a same-path update')
   })
   await check('explicit next input resumes the confirmed native identity with a new scoped process', async () => {
     await client.request('agent.prompt', { name: 'plain', text: 'explicit second input' })

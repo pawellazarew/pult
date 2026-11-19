@@ -249,7 +249,15 @@ fn executable(path: &Path) -> Result<PathBuf, StaticError> {
     Ok(path)
 }
 fn codex(parent: &Environment, filtered: &Environment) -> Result<PathBuf, StaticError> {
-    if let Some(path) = parent.get(OsStr::new("PULT_CODEX_BIN")) {
+    provider(parent, filtered, "codex", "PULT_CODEX_BIN")
+}
+fn provider(
+    parent: &Environment,
+    filtered: &Environment,
+    name: &str,
+    override_name: &str,
+) -> Result<PathBuf, StaticError> {
+    if let Some(path) = parent.get(OsStr::new(override_name)) {
         return executable(Path::new(path));
     }
     let paths = filtered
@@ -259,9 +267,24 @@ fn codex(parent: &Environment, filtered: &Environment) -> Result<PathBuf, Static
         if !path.is_absolute() {
             continue;
         }
-        let candidate = path.join("codex");
+        let candidate = path.join(name);
         if let Ok(path) = executable(&candidate) {
             return Ok(path);
+        }
+    }
+    // Finder/launchd can supply a short PATH. Reuse the doctor's fixed path-only
+    // candidates without a login shell, version probe or account/config read.
+    // Fixture mode must never escape to an installed real provider.
+    if !parent
+        .get(OsStr::new("PULT_TEST"))
+        .is_some_and(|v| v == "1")
+        && let Some(home) = filtered.get(OsStr::new("HOME")).map(PathBuf::from)
+        && home.is_absolute()
+    {
+        for candidate in crate::provider_paths::candidates(&home, name) {
+            if let Ok(path) = executable(&candidate) {
+                return Ok(path);
+            }
         }
     }
     Err(StaticError::ExecutableUnavailable)
@@ -387,17 +410,7 @@ pub fn load_claude(
     .unwrap_or_else(|| PathBuf::from("/usr/bin/curl"));
     let holder = executable(&holder)?;
     let curl = executable(&curl)?;
-    let claude = if let Some(path) = parent.get(OsStr::new("PULT_CLAUDE_BIN")) {
-        executable(Path::new(path))?
-    } else {
-        let paths = filtered
-            .get(OsStr::new("PATH"))
-            .ok_or(StaticError::Environment)?;
-        std::env::split_paths(paths)
-            .filter(|path| path.is_absolute())
-            .find_map(|path| executable(&path.join("claude")).ok())
-            .ok_or(StaticError::ExecutableUnavailable)?
-    };
+    let claude = provider(parent, &filtered, "claude", "PULT_CLAUDE_BIN")?;
     let after = home_metadata(&home)?;
     if (before.dev(), before.ino()) != (after.dev(), after.ino()) {
         return Err(StaticError::UnsafeHome);

@@ -59,6 +59,7 @@ try {
     const status = await client.request('daemon.status')
     assert.equal(status.protocol, 1)
     assert.equal(status.pid, daemon.child.pid)
+    assert.deepEqual(status.providerInstallations, { claude: { initialized: false, installation: null }, codex: { initialized: false, installation: null } })
     assert.equal(status.home, realpathSync(home))
     assert.deepEqual(status.capabilities.supportedMethods, ['agent.archive', 'agent.read', 'agent.recovery.confirm', 'agent.recovery.get', 'agent.rename', 'agent.seen', 'agent.tree', 'daemon.status', 'daemon.stop', 'events.emit', 'events.get', 'events.history', 'events.snapshot', 'events.subscribe', 'events.tail', 'events.unsubscribe', 'memory.add', 'memory.catalog', 'memory.configure', 'memory.context.bind', 'memory.context.issue', 'memory.context.revoke', 'memory.context.status', 'memory.forget', 'memory.get', 'memory.history', 'memory.list', 'memory.projects', 'memory.search', 'memory.update', 'protocol.catalog', 'usage.get'])
     assert.deepEqual([...status.capabilities.partialMethods].sort(), partialMethods)

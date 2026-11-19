@@ -32,6 +32,23 @@ export interface InboxItem {
   eventId?: number
 }
 
+/** Owner maintenance actions, separate from model permissions and session attention. */
+export interface InboxSystemCard {
+  id: string
+  provider?: 'claude' | 'codex'
+  title: string
+  detail: string
+  error: boolean
+  action: 'reconnect' | 'check'
+  actionLabel: string
+  actionDisabled?: boolean
+  busy?: boolean
+}
+
+export function inboxSystemView(filter: InboxFilter, cards: readonly InboxSystemCard[]): InboxSystemCard[] {
+  return filter === 'unread' ? [] : cards.filter(card => filter === 'all' || card.error)
+}
+
 export type InboxState = Readonly<Record<string, InboxItem>>
 
 export const EMPTY_INBOX: InboxState = {}
@@ -217,9 +234,9 @@ export function inboxView(filter: InboxFilter, perms: readonly InboxItem[], agen
 }
 
 /** Сколько карточек у каждого фильтра — числа на кнопках фильтра. */
-export function inboxCounts(perms: readonly InboxItem[], agents: readonly AgentView[]): Record<InboxFilter, number> {
+export function inboxCounts(perms: readonly InboxItem[], agents: readonly AgentView[], system: readonly InboxSystemCard[] = []): Record<InboxFilter, number> {
   const live = agents.filter((a) => a.unread && !a.archived)
   const unread = live.length
   const errors = live.filter((a) => isErrorKind(a.attention)).length
-  return { all: perms.length + errors, unread, errors }
+  return { all: perms.length + errors + system.length, unread, errors: errors + system.filter(card => card.error).length }
 }

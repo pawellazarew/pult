@@ -57,6 +57,7 @@ import { versionDoctorItems } from '../update/doctor.js'
 import { checkNetwork, clearNetCache, lastNetExits, netGeneration, recordNetCheck } from '../env/net.js'
 import type { NetCheck } from '../env/net.js'
 import { locateToolPath, testLocate } from '../env/locate.js'
+import { captureProviderIdentity } from '../env/providerIdentity.js'
 import { buildChildEnv } from '../env/allowlist.js'
 import { daemonNodeInfo, fileId } from '../env/nodeBin.js'
 import { execAsync } from '../env/exec.js'
@@ -341,6 +342,7 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
     ?? process.env['PULT_CLAUDE_BIN']
     ?? locateToolPath('claude').path
     ?? 'claude'
+  const claudeInstallation = captureProviderIdentity(claudeBin)
   /**
    * ГЕРМЕТИЧНОСТЬ СКВОЗНЫХ ТЕСТОВ. Демон сквозные тесты поднимают ОТДЕЛЬНЫМ процессом, и
    * инъекцию туда не передать никак, кроме окружения. Поэтому: только при `PULT_TEST=1` и
@@ -625,6 +627,7 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
     ?? process.env['PULT_CODEX_BIN']
     ?? locateToolPath('codex').path
     ?? 'codex'
+  const codexInstallation = captureProviderIdentity(codexBin)
   // ZCode: node-скрипт с shebang внутри ZCode.app — путь плывёт за обновлениями приложения
   // (грабля codex/ChatGPT.app), поиск кандидатов в env/locate.ts.
   const zcodeBin = opts.zcodeBin
@@ -990,6 +993,10 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
     subscriptions: [...connections.values()].reduce((n, c) => n + c.subs.count(), 0),
     lastEventId: store.lastId,
     mode: process.env['PULT_SERVICE'] === '1' ? 'service' : 'on-demand',
+    providerInstallations: {
+      claude: { initialized: true, installation: claudeInstallation },
+      codex: { initialized: true, installation: codexInstallation },
+    },
     // Остановлен ли провайдер целиком (`provider.blocked`). Окну (Ф2) нужен ответ «сейчас», а не
     // догадка по журналу: `provider.reset` события не пишет, и старое `provider.blocked` в
     // истории иначе рисовало бы красную плашку до конца жизни окна.

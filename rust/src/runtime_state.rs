@@ -80,6 +80,7 @@ pub(crate) async fn instance(state: &Arc<State>) -> Result<Arc<codex_runtime::Co
         let current =
             std::env::current_exe().map_err(|_| anyhow!("daemon executable unavailable"))?;
         let bootstrap = runtime_bootstrap::load(&state.home, &current, &parent)?;
+        let installation = crate::provider_installations::FileIdentity::capture(&bootstrap.codex);
         let curl = Arc::new(
             crate::network_guard::CurlProbe::with_program(&bootstrap.curl, &bootstrap.parent)
                 .map_err(|_| anyhow!("network probe unavailable"))?,
@@ -121,6 +122,12 @@ pub(crate) async fn instance(state: &Arc<State>) -> Result<Arc<codex_runtime::Co
             Some(memory),
             broker,
         )?;
+        // Publish the retained observation before the initialized runtime under
+        // runtime_init. Status never reads the filesystem or initializes it.
+        state
+            .native_installation
+            .set(installation)
+            .map_err(|_| anyhow!("runtime installation already initialized"))?;
         state
             .native_runtime
             .set(runtime.clone())
@@ -237,6 +244,7 @@ pub(crate) fn unavailable(state: &State) -> bool {
 /// its selected probe together with the controller before releasing ownership.
 pub(crate) struct Claude {
     pub(crate) runtime: Arc<crate::claude_runtime::ClaudeRuntime>,
+    installation: Option<crate::provider_installations::FileIdentity>,
     curl: Arc<crate::network_guard::CurlProbe>,
 }
 pub(crate) async fn claude_instance(
@@ -269,6 +277,7 @@ pub(crate) async fn claude_instance(
         let current =
             std::env::current_exe().map_err(|_| anyhow!("daemon executable unavailable"))?;
         let bootstrap = runtime_bootstrap::load_claude(&state.home, &current, &parent)?;
+        let installation = crate::provider_installations::FileIdentity::capture(&bootstrap.claude);
         let curl = Arc::new(
             crate::network_guard::CurlProbe::with_program(&bootstrap.curl, &bootstrap.parent)
                 .map_err(|_| anyhow!("network probe unavailable"))?,
@@ -332,6 +341,7 @@ pub(crate) async fn claude_instance(
             .claude_runtime
             .set(Arc::new(Claude {
                 runtime: runtime.clone(),
+                installation,
                 curl,
             }))
             .map_err(|_| anyhow!("Claude runtime already initialized"))?;
@@ -343,6 +353,23 @@ pub(crate) async fn claude_instance(
     })
     .await
     .map_err(|_| anyhow!("Claude runtime initialization failed"))?
+}
+/// Read-only projection of the command selected by lazy bootstrap. The snapshot
+/// describes a retained runtime configuration, not a fresh executable probe or
+/// a claim that an installed version has completed a native model turn.
+pub(crate) fn provider_installations(state: &State) -> Value {
+    let codex = state.native_runtime.get();
+    let claude = state.claude_runtime.get();
+    serde_json::json!({
+        "codex": {
+            "initialized": codex.is_some(),
+            "installation": codex.and_then(|_| state.native_installation.get()).and_then(Option::as_ref),
+        },
+        "claude": {
+            "initialized": claude.is_some(),
+            "installation": claude.and_then(|slot| slot.installation.as_ref()),
+        },
+    })
 }
 /// ZCode keeps its selected probe alive through every preparation and process
 /// join. Initializing it never discovers a different provider or account.

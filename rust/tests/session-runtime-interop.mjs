@@ -1,7 +1,7 @@
 import { readCompleteJsonl } from './support/complete-jsonl.mjs'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdtempSync, mkdirSync, chmodSync, writeFileSync, readFileSync, existsSync, rmSync, realpathSync } from 'node:fs'
+import { renameSync, copyFileSync, statSync, mkdtempSync, mkdirSync, chmodSync, writeFileSync, readFileSync, existsSync, rmSync, realpathSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import net from 'node:net'
@@ -15,7 +15,17 @@ const home = join(temp, 'home'), account = join(temp, 'account'), native = join(
 for (const path of [home, account, native, project]) { mkdirSync(path); chmodSync(path, 0o700) }
 writeFileSync(join(home, '.rust-core-scratch'), 'pult-rust-scratch-v1\n', { mode: 0o600 })
 writeFileSync(join(home, 'config.json'), JSON.stringify({ network: { codex: { mode: 'off' }, guard: { mode: 'allow', countries: ['FI'] } } }), { mode: 0o600 })
-const env = { ...process.env, HOME: account, PULT_TEST: '1', PULT_CODEX_BIN: join(root, 'rust/tests/fixtures/codex_daemon.py'), PULT_CURL_BIN: join(root, 'rust/tests/fixtures/curl_loc_fi.sh'), OPENAI_API_KEY: 'fixture-only' }
+const installed = join(temp, 'installed-cli')
+mkdirSync(installed); chmodSync(installed, 0o700)
+const selectedProvider = join(installed, 'codex')
+copyFileSync(join(root, 'rust/tests/fixtures/codex_daemon.py'), selectedProvider)
+chmodSync(selectedProvider, 0o700)
+copyFileSync(join(root, 'rust/tests/fixtures/codex_worker.py'), join(installed, 'codex_worker.py'))
+const identity = file => {
+  const actual = realpathSync(file), metadata = statSync(actual, { bigint: true })
+  return { path: actual, realpath: actual, dev: String(metadata.dev), ino: String(metadata.ino), size: String(metadata.size), mtimeNs: String(metadata.mtimeNs), ctimeNs: String(metadata.ctimeNs) }
+}
+const env = { ...process.env, HOME: account, PULT_TEST: '1', PULT_CODEX_BIN: selectedProvider, PULT_CURL_BIN: join(root, 'rust/tests/fixtures/curl_loc_fi.sh'), OPENAI_API_KEY: 'fixture-only' }
 for (const key of ['PULT_MEMORY_KEY', 'PULT_HOLDER_BIN']) delete env[key]
 const paths = layout(home)
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -85,7 +95,15 @@ try {
     assert.ok(events.some(row => row.kind === 'message.done'))
     const records = JSON.parse(readFileSync(join(home, 'sessions.json'), 'utf8')).sessions
     assert.ok(records.find(row => row.name === 'one').providerSessionId)
-    assert.equal((await client.request('daemon.status')).nativeRuntime.hosts, 1)
+    const status = await client.request('daemon.status')
+    assert.equal(status.nativeRuntime.hosts, 1)
+    const retained = status.providerInstallations.codex
+    assert.deepEqual(retained, { initialized: true, installation: identity(selectedProvider) })
+    const updated = selectedProvider + '.new'
+    writeFileSync(updated, readFileSync(selectedProvider, 'utf8') + '\n# synthetic installed CLI update\n', { mode: 0o700 })
+    renameSync(updated, selectedProvider)
+    assert.notDeepEqual(identity(selectedProvider), retained.installation)
+    assert.deepEqual((await client.request('daemon.status')).providerInstallations.codex, retained, 'status must retain the selected runtime snapshot after a same-path update')
   })
   await check('permission resolution is durable and rejects input rewriting', async () => {
     await client.request('agent.prompt', { name: 'ask', text: 'permit' })

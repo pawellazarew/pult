@@ -5,12 +5,13 @@ import { randomBytes } from 'node:crypto'
 import { homedir } from 'node:os'
 import { buildChildEnv } from '../../src/env/allowlist.js'
 import type { LocatedTool } from '../../src/env/locate.js'
+import type { ObservedProviderTool } from '../../src/env/providerIdentity.js'
 import type { DoctorReport } from '../../src/env/doctor.js'
 import type { ExecResult } from '../../src/env/exec.js'
 import type { MaintenanceInfo, ProviderAction, ProviderOperation, ProviderTool } from './contract.js'
 
 const quote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`
-export interface ProviderInventory { claude: LocatedTool; codex: LocatedTool; npm: LocatedTool; pathEntries: string[]; home: string }
+export interface ProviderInventory { claude: LocatedTool & Partial<ObservedProviderTool>; codex: LocatedTool & Partial<ObservedProviderTool>; npm: LocatedTool; pathEntries: string[]; home: string }
 interface Plan { command: string; handoff?: string }
 
 export function installation(tool: LocatedTool): ProviderTool['source'] {
@@ -58,6 +59,7 @@ export function providerPlan(provider: 'claude' | 'codex', action: ProviderActio
 
 export class Maintenance {
   private doctorRun: Promise<DoctorReport> | null = null
+  private providersRun: Promise<ProviderTool[]> | null = null
   private jobs = new Map<string, { value: ProviderOperation; file: string; expires: number }>()
   constructor(private deps: {
     info: MaintenanceInfo
@@ -85,12 +87,17 @@ export class Maintenance {
     return this.doctorRun
   }
 
-  async providers(): Promise<ProviderTool[]> {
-    const inventory = await this.deps.inventory()
-    return (['claude', 'codex'] as const).map(provider => {
-      const tool = inventory[provider]
-      return { provider, path: tool.path, realpath: tool.realpath, version: tool.version, source: installation(tool) }
-    })
+  providers(): Promise<ProviderTool[]> {
+    if (this.providersRun) return this.providersRun
+    this.providersRun = (async () => {
+      const inventory = await this.deps.inventory()
+      return (['claude', 'codex'] as const).map(provider => {
+        const tool = inventory[provider]
+        return { provider, path: tool.path, realpath: tool.realpath, version: tool.version, source: installation(tool),
+          installation: tool.installation ?? null, changedDuringCheck: tool.changedDuringCheck ?? false }
+      })
+    })().finally(() => { this.providersRun = null })
+    return this.providersRun
   }
 
   async prepare(provider: 'claude' | 'codex', action: ProviderAction): Promise<{ plan: Plan; inventory: ProviderInventory; uncertain: boolean; network: Record<string, string> }> {

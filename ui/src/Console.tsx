@@ -18,6 +18,9 @@ import type { SendMode } from './components/Conversation.js'
 import { Header } from './components/Header.js'
 import { MaintenancePanel } from './components/Maintenance.js'
 import { useAppearance } from './useAppearance.js'
+import { useProviderUpdates } from './useProviderUpdates.js'
+import { providerUpdateCards } from './model/providerUpdates.js'
+import { inboxSystemView } from './model/inbox.js'
 import { useTemporaryChats } from './useTemporaryChats.js'
 import { TemporaryChat } from './components/TemporaryChat.js'
 import { temporaryErrorMessage } from './model/temporary.js'
@@ -367,6 +370,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   }, [bridge])
 
   refreshStatusRef.current = refreshStatus
+  const providerUpdates = useProviderUpdates(bridge, status, conn.state === 'up', refreshStatus)
   const runDoctor = useCallback(async (): Promise<void> => {
     setDoctor((d) => ({ ...d, loading: true, error: null }))
     try {
@@ -800,13 +804,18 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   )
   /** Проект текущей сессии: ⌘N заводит новую сессию в нём же. */
   const inbox = useMemo(() => inboxList(ui.inbox), [ui.inbox])
+  const providerSystemCards = useMemo(() => providerUpdateCards(status, providerUpdates.observation, {
+    online: conn.state === 'up', canReconnect: !!bridge.restartDaemon, checking: providerUpdates.checking,
+    reconnecting: providerUpdates.reconnecting, error: providerUpdates.error,
+  }), [status, providerUpdates.observation, providerUpdates.checking, providerUpdates.reconnecting, providerUpdates.error, conn.state, bridge])
+  const systemShown = useMemo(() => inboxSystemView(inboxFilter, providerSystemCards), [inboxFilter, providerSystemCards])
   // Inbox по фильтру (О2): запросы, ошибки, непрочитанное — model/inbox.ts.
   const inboxShown = useMemo(() => inboxView(inboxFilter, inbox, agents), [inboxFilter, inbox, agents])
   // ⌘↵ разрешает только видимую карточку: закрытый Inbox чужих запросов не показывает.
   const focused = focusedRequest(inbox, focusChosen, current?.name ?? null, inboxOpen ? inboxShown.perms : [], historyShown && hiddenParent !== current?.name)
   // Поле реплики знает только запрос СВОЕЙ сессии: ⌘↵ в нём не разрешает карточку другой сессии из Inbox.
   const ownFocused = composerApproves(focused, current?.name ?? null)
-  const inboxNums = useMemo(() => inboxCounts(inbox, agents), [inbox, agents])
+  const inboxNums = useMemo(() => inboxCounts(inbox, agents, providerSystemCards), [inbox, agents, providerSystemCards])
   /** Очередь внимания (⌘⌥L): сколько сессий ждут — кнопка и подсказка в Inbox. */
   const waitingTotal = useMemo(() => waitingQueue(agents, snoozed).length, [agents, snoozed])
   const guard = useMemo(() => guardView([...guardFromDoctor(doctor.report), ...ui.guard]), [doctor.report, ui.guard])
@@ -1794,7 +1803,13 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
           onExpand={() => setFilesExpanded((v) => window.innerWidth < 1200 ? true : !v)} />}
         {current && runtimeOpen && <RuntimePanel key={current.name} bridge={bridge} sessionId={current.name} obstructed={modal !== null} onClose={() => setRuntimeOpen(false)} />}
         {inboxOpen && (
-          <Inbox items={inboxShown.perms} cards={inboxShown.sessions} filter={inboxFilter} counts={inboxNums} onFilter={setInboxFilter}
+          <Inbox items={inboxShown.perms} cards={inboxShown.sessions} systemCards={systemShown} filter={inboxFilter} counts={inboxNums} onFilter={setInboxFilter}
+            onSystemAction={(id) => {
+              const card = providerSystemCards.find(item => item.id === id)
+              if (card?.action === 'reconnect') void providerUpdates.reconnect()
+              else if (card) { void refreshStatus(); void providerUpdates.refresh(true) }
+            }}
+            onSystemDetails={() => setModal({ type: 'maintenance' })}
             agents={agents} focused={focused?.id ?? null} busy={permBusy} retrying={retrying} now={now}
             waitingCount={waitingTotal} onNextWaiting={goNextWaiting} onJumpPerm={jumpToPerm}
             onFocus={setFocusChosen} onApprove={approve} onDeny={deny} onAnswer={answer} onClose={() => setInboxOpen(false)}
@@ -1811,7 +1826,11 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
       {modal?.type === 'external' && <ExternalSessions bridge={bridge} taken={records.map((r) => r.name)} onClose={() => setModal(null)}
         onImported={(name) => { select(name); setModal(null); void refreshAgents() }} />}
       {modal?.type === 'maintenance' && <MaintenancePanel bridge={bridge} conn={conn} status={status} doctor={doctor} starting={starting}
-        onStart={startDaemon} onDoctor={() => setModal({ type: 'doctor' })} onRunDoctor={runDoctor} onCopy={copy}
+        onStart={startDaemon} onDoctor={() => setModal({ type: 'doctor' })}
+        onRunDoctor={async () => { await runDoctor(); await providerUpdates.refresh(true); await refreshStatus() }} onCopy={copy}
+        onReconnectProviders={() => void providerUpdates.reconnect()} reconnectingProviders={providerUpdates.reconnecting}
+        onRefreshProviders={() => providerUpdates.refresh(true)}
+        providerUpdateCount={providerSystemCards.filter(card => card.action === 'reconnect').length} providerConnectionError={providerUpdates.error}
         onUpdates={() => setModal({ type: 'settings', section: 'updates' })} onClose={() => setModal(null)} />}
       {modal?.type === 'doctor' && (
         <DoctorPanel report={doctor.report} groups={doctorGroupsList} loading={doctor.loading} error={doctor.error} copied={copied}

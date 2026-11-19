@@ -2,6 +2,7 @@
 // эффектом: этот файл в Ф2 импортирует интерфейс, и тащить за ним рантайм не нужно.
 
 import type { PultEvent } from './events.js'
+import type { ProviderFileIdentity } from '../env/providerIdentity.js'
 
 // M8c добавил методы `update.*` и необязательное `daemon.status.update` — версия протокола та же:
 // рукопожатие сверяет её строгим равенством, и смена отрезала бы прежние окна и CLI от демона ради
@@ -129,6 +130,8 @@ export const ERROR_CODES = {
 } as const
 
 export interface DaemonStatus {
+  /** Captured when the runtime selected its CLI; status reads never adopt a replacement file. */
+  providerInstallations?: Record<'claude' | 'codex', { initialized: boolean; installation: ProviderFileIdentity | null }>
   /** Rust advertises implemented methods explicitly; a catalog entry alone is insufficient. */
   capabilities?: { experimental?: boolean; supportedMethods: string[]; partialMethods?: string[] }
   memory?: { available: true } | { available: false; error: string } | { busy: true }

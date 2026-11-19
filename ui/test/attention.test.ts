@@ -14,7 +14,7 @@ import { buildAgents } from '../src/model/agents.js'
 import type { AgentView } from '../src/model/agents.js'
 import { attentionKeys, hotkeyAction } from '../src/model/hotkeys.js'
 import { inboxCounts, inboxView, isInboxFilter } from '../src/model/inbox.js'
-import type { InboxItem } from '../src/model/inbox.js'
+import type { InboxItem, InboxSystemCard } from '../src/model/inbox.js'
 import { groupByProject } from '../src/model/projects.js'
 import { isSnoozed, nextWaiting, pruneSnoozed, snooze, unsnooze, waitingQueue } from '../src/model/queue.js'
 import { refreshesAgents } from '../src/model/state.js'
@@ -206,6 +206,28 @@ describe('Inbox: ошибки и фильтры', () => {
     assert.match(empty('all'), /Никто ничего не ждёт/)
     assert.match(empty('unread'), /Непрочитанного нет/)
     assert.match(empty('errors'), /Ошибок нет/)
+  })
+
+  it('обновление CLI — системная карточка с действием, а не запрос разрешения или сессия', () => {
+    const notice: InboxSystemCard = { id: 'codex:file-v2', provider: 'codex', title: 'Codex обновился', detail: 'Найдена версия 2.0. Подключи её из окна.', error: false, action: 'reconnect', actionLabel: 'Подключить обновление' }
+    const out = html(Inbox, props('all', { items: [], cards: [], systemCards: [notice], onSystemAction: noop, onSystemDetails: noop }))
+    assert.match(out, /data-testid="inbox-provider-update" data-provider="codex" data-notice-id="codex:file-v2" data-error="0"/)
+    assert.match(text(out), /Обновление CLI codex Codex обновился Найдена версия 2.0. Подключи её из окна. Подключить обновление Подробнее/)
+    assert.match(out, /data-testid="inbox-provider-action" data-action="reconnect"/)
+    assert.match(out, /data-testid="inbox-provider-details"/)
+    assert.doesNotMatch(out, /inbox-empty|data-perm-id|data-agent=|inbox-retry|inbox-unread|role="alert"/)
+  })
+
+  it('ошибка проверки CLI доступна без выдачи разрешений; занятое действие отключено', () => {
+    const notice: InboxSystemCard = { id: 'check', title: 'Проверка CLI не завершена', detail: '<unsafe>\nПопробуй ещё раз.', error: true, action: 'check', actionLabel: 'Перепроверить', busy: true }
+    const out = html(Inbox, props('errors', { items: [], cards: [], systemCards: [notice], onSystemAction: noop }))
+    assert.match(out, /data-error="1" aria-busy="true"/)
+    assert.match(out, /role="alert"/)
+    assert.match(out, /&lt;unsafe&gt;/)
+    assert.match(out, /disabled="" data-testid="inbox-provider-action" data-action="check"/)
+    assert.doesNotMatch(out, /data-testid="inbox-provider-details"|data-perm-id|data-agent=/)
+    const withoutHandler = html(Inbox, props('all', { items: [], cards: [], systemCards: [{ ...notice, busy: false }] }))
+    assert.match(withoutHandler, /disabled="" data-testid="inbox-provider-action"/)
   })
 
   it('стили карточек и точек — на токенах темы', () => {

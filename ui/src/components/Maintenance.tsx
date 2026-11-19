@@ -12,7 +12,16 @@ const sourceLabel = (source: ProviderTool['source']): string => ({ missing: t('�
 const reportText = (report: DoctorReport): string => JSON.stringify({ generatedAt: report.generatedAt, home: report.home, counts: report.counts,
   items: report.items.map(({ id, title, status, detail, fix, fixCmd }) => ({ id, title, status, detail, fix, fixCmd })) }, null, 2)
 
-export function MaintenancePanel({ bridge, conn, status, doctor, starting, onStart, onDoctor, onRunDoctor, onCopy, onUpdates, onClose }: {
+export function ProviderAuthState({ tool, report }: { tool: ProviderTool; report: DoctorReport | null }): ReactElement {
+  const checked = report?.items.find(item => item.id === `cli.${tool.provider}`)?.data
+  const samePath = tool.realpath && typeof checked?.realpath === 'string' ? checked.realpath === tool.realpath : checked?.path === tool.path
+  const sameInstallation = !!tool.path && !tool.changedDuringCheck && !!tool.version && checked?.version === tool.version
+    && samePath
+  const auth = sameInstallation ? report?.items.find(item => item.id === `login.${tool.provider}`) : undefined
+  return <p className="mut small" data-testid={`maintenance-auth-${tool.provider}`}>{auth ? auth.status === 'ok' ? t('Вход подтверждён') : t('Проверка входа требует внимания') : t('Вход ещё не проверен')}{auth ? ` · ${auth.detail}` : ''}</p>
+}
+
+export function MaintenancePanel({ bridge, conn, status, doctor, starting, onStart, onDoctor, onRunDoctor, onCopy, onUpdates, onClose, onReconnectProviders, onRefreshProviders, reconnectingProviders = false, providerUpdateCount = 0, providerConnectionError = null }: {
   bridge: PultBridge
   conn: ConnState
   status: DaemonStatus | null
@@ -24,6 +33,11 @@ export function MaintenancePanel({ bridge, conn, status, doctor, starting, onSta
   onCopy(text: string): void
   onUpdates(): void
   onClose(): void
+  onReconnectProviders?(): void
+  onRefreshProviders?(): Promise<void>
+  reconnectingProviders?: boolean
+  providerUpdateCount?: number
+  providerConnectionError?: string | null
 }): ReactElement {
   const [info, setInfo] = useState<MaintenanceInfo | null>(null)
   const [tools, setTools] = useState<ProviderTool[] | null>(null)
@@ -34,7 +48,12 @@ export function MaintenancePanel({ bridge, conn, status, doctor, starting, onSta
   const previousFocus = useRef<HTMLElement | null>(null)
   const up = conn.state === 'up'
   const native = !!bridge.maintenanceInfo && !!bridge.providerTools && !!bridge.providerAction
-  const refreshTools = async (): Promise<void> => { if (bridge.providerTools) setTools(await bridge.providerTools()) }
+  const refreshTools = async (): Promise<void> => {
+    await Promise.all([
+      bridge.providerTools ? bridge.providerTools().then(setTools) : Promise.resolve(),
+      onRefreshProviders?.() ?? Promise.resolve(),
+    ])
+  }
   useEffect(() => {
     previousFocus.current = document.activeElement as HTMLElement | null
     first.current?.focus()
@@ -92,7 +111,7 @@ export function MaintenancePanel({ bridge, conn, status, doctor, starting, onSta
     catch (e) { setError(errorText(e)) }
     finally { setBusy(null) }
   }
-  const blocked = busy !== null || starting
+  const blocked = busy !== null || starting || reconnectingProviders
   const operationText = operation?.state === 'running' ? t('Выполняется в Терминале. Заверши действие в открытом окне.')
     : operation?.state === 'succeeded' ? t('Команда завершилась успешно. Статус CLI обновлён.')
     : operation?.state === 'handoff' ? t('Приложение открыто. Проверь обновления в его меню, затем перепроверь CLI.')
@@ -114,22 +133,23 @@ export function MaintenancePanel({ bridge, conn, status, doctor, starting, onSta
       </section>
       <section className="maintenance-section" aria-labelledby="maintenance-cli-h">
         <div className="maintenance-heading"><h3 id="maintenance-cli-h">{t('CLI Claude и Codex')}</h3><button type="button" className="btn btn-sm" disabled={!native || blocked} onClick={() => { void refreshTools().then(() => onRunDoctor(), e => setError(errorText(e))) }}>{t('Перепроверить')}</button></div>
+        <div className="maintenance-actions"><button type="button" className="btn btn-sm" disabled={blocked || !up || !onReconnectProviders}
+          data-testid="maintenance-reconnect-providers" onClick={onReconnectProviders}><Icon name="refresh" />{reconnectingProviders ? t('Переподключаю CLI…') : t('Переподключить CLI')}{providerUpdateCount > 0 && <span className="count">{providerUpdateCount}</span>}</button></div>
+        <p className="mut small">{t('Найденные CLI подключаются через перезапуск демона. Если есть активные ходы, они прервутся только после твоего подтверждения.')}</p>
+        {providerConnectionError && <p className="err small" role="alert" data-testid="maintenance-provider-connection-error">{providerConnectionError}</p>}
         <p className="mut small">{t('Установка, обновление и вход выполняются на этом Mac в отдельном окне Терминала. Вход подтверждается в браузере провайдера.')}</p>
         <p className="mut small">{t('CLI использует сетевой профиль Пульта. Страница входа использует сеть твоего браузера.')}</p>
         {(busy === 'claude' || busy === 'codex') && <p role="status" className="mut small">{t('Проверяю сеть и готовлю действие…')}</p>}
         {!native && <p className="mut">{t('Для управления CLI обнови окно Пульта.')}</p>}
         {native && !tools && <p className="mut">{t('Ищу установленные CLI…')}</p>}
         {tools?.map(tool => {
-          const checked = doctor.report?.items.find(item => item.id === `cli.${tool.provider}`)?.data
-          const sameInstallation = !!tool.path && (checked?.path === tool.path || (!!tool.realpath && checked?.realpath === tool.realpath))
-          const auth = sameInstallation ? doctor.report?.items.find(item => item.id === `login.${tool.provider}`) : undefined
           const jobBusy = operation?.state === 'running' && operation.provider === tool.provider
           return <article key={tool.provider} className="maintenance-cli" data-testid={`maintenance-cli-${tool.provider}`}>
             <div className="maintenance-heading"><strong>{tool.provider === 'claude' ? 'Claude Code' : 'Codex'}</strong><span className="mut small">{sourceLabel(tool.source)}</span></div>
             <div className="mono small">{tool.version ?? t('версия неизвестна')}</div>
             <p className="maintenance-path mono" data-testid={`maintenance-path-${tool.provider}`}>{tool.path ?? t('CLI не найден')}</p>
             {tool.realpath && tool.realpath !== tool.path && <p className="maintenance-path mono mut">→ {tool.realpath}</p>}
-            <p className="mut small">{auth ? auth.status === 'ok' ? t('Вход подтверждён') : t('Проверка входа требует внимания') : t('Вход ещё не проверен')}{auth ? ` · ${auth.detail}` : ''}</p>
+            <ProviderAuthState tool={tool} report={doctor.report} />
             <div className="maintenance-actions">
               <button type="button" className="btn btn-sm" disabled={blocked || jobBusy || !!tool.path} onClick={() => void providerAction(tool.provider, 'install')} data-testid={`maintenance-install-${tool.provider}`}>{t('Установить')}</button>
               <button type="button" className="btn btn-sm" disabled={blocked || jobBusy || !tool.path || tool.source === 'unknown'} onClick={() => void providerAction(tool.provider, 'update')} data-testid={`maintenance-update-${tool.provider}`}>{tool.source === 'application' ? t('Открыть приложение') : t('Обновить')}</button>

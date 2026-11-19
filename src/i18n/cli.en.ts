@@ -1,4 +1,5 @@
 export const cliEn: Readonly<Record<string, string>> = {
+  "Если CLI обновился, переподключи его из Inbox или панели CLI Пульта. Если после этого есть ошибки протокола, обнови Пульт. Редактировать исходники и принимать новую схему вручную не нужно.": "If the CLI was updated, reconnect it from Pult's Inbox or CLI panel. If protocol errors persist, update Pult. You do not need to edit source code or manually accept the new schema.",
   "нет файла токена {0} — демон не запущен": "No token file {0} — daemon is not running",
   "сокет {0} не отвечает ({1})": "Socket {0} is not responding ({1})",
   "соединение с демоном закрыто": "Connection to daemon closed",
