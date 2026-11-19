@@ -1,0 +1,14 @@
+name: Exact UI spike
+on:
+  pull_request:
+    paths: ['spike/exact/**', 'src/cli/client.ts', 'src/core/**', '.github/workflows/exact-spike.yml']
+  workflow_dispatch:
+jobs:
+  bridge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.4'
+      - run: bun test spike/exact/bridge.test.ts

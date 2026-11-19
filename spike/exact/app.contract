@@ -1,0 +1,70 @@
+shape Chat
+  name: string
+  title: string
+  provider: string
+  status: string
+  cwd: string
+
+shape Chats
+  sessions: Chat[]
+
+shape Transcript
+  text: string
+
+// HTTP sources and their ephemeral capability are prepended by run.ts.
+shape Session
+  name: string
+  title: string
+  provider: string
+  status: string
+  cwd: string
+
+shape Sessions
+  sessions: Session[]
+
+shape Conversation
+  text: string
+
+component PultExact
+  state selected = ""
+  state heading = "Разговор"
+  resource chats = sessions() as shape Chats
+  resource transcript = conversation(selected) as shape Conversation
+  action choose(name: string, title: string)
+    selected = name
+    heading = title
+  action again
+    refresh chats
+    refresh transcript
+  view
+    row height="100vh" background-color="#faf9f6" color="#242421"
+      column width=280 padding=20 gap=16 background-color="#eeede8"
+        text "Пульт" font-size=28 font-weight=700
+        text "EXACT · ПРЕДПРОСМОТР" font-size=11 color="#66665f"
+        button press=again testId="refresh"
+          text "Обновить"
+        if failed(chats)
+          text "Демон недоступен. Запустите Пульт и обновите." testId="error"
+        else if not current(chats)
+          progress aria-label="Загрузка разговоров"
+        else
+          scroll flex=1
+            column gap=8
+              for chat in chats.sessions key=chat.name
+                button press=choose(chat.name, chat.title) testId=`chat-${chat.name}`
+                  text-align="start" padding=12
+                  column gap=4
+                    text chat.title font-weight=600
+                    text `${chat.provider} · ${chat.status}` font-size=12 color="#66665f"
+              if chats.sessions.length == 0
+                text "Разговоров пока нет." testId="empty"
+      column flex=1 min-width=0 padding=32 gap=20
+        text heading font-size=24 font-weight=600 testId="heading"
+        text "Чтение разговоров · обновление по кнопке" color="#66665f" font-size=12
+        scroll flex=1
+          if failed(transcript)
+            text "Не удалось загрузить историю. Нажмите «Обновить»." testId="history-error"
+          else if not current(transcript)
+            progress aria-label="Загрузка истории"
+          else
+            text transcript.text white-space="pre-wrap" testId="transcript"
