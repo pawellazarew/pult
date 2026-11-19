@@ -42,7 +42,7 @@ component PultExact
         text "Пульт" font-size=28 font-weight=700
         text "EXACT · ПРЕДПРОСМОТР" font-size=11 color="#66665f"
         button press=again testId="refresh"
-          text "Обновить"
+          text "Обновить" color="#242421"
         if failed(chats)
           text "Демон недоступен. Запустите Пульт и обновите." testId="error"
         else if not current(chats)
