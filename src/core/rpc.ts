@@ -129,6 +129,9 @@ export const ERROR_CODES = {
 } as const
 
 export interface DaemonStatus {
+  /** Rust advertises implemented methods explicitly; a catalog entry alone is insufficient. */
+  capabilities?: { experimental?: boolean; supportedMethods: string[]; partialMethods?: string[] }
+  memory?: { available: true } | { available: false; error: string } | { busy: true }
   version: string
   protocol: number
   pid: number

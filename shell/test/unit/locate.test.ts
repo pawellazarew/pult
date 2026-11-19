@@ -75,7 +75,9 @@ describe('белый список моста', () => {
       'agent.archive', 'agent.browser', 'agent.commands', 'agent.configure', 'agent.export', 'agent.import', 'agent.list', 'agent.preflight', 'agent.prompt', 'agent.question.answer', 'agent.queue.move', 'agent.queue.remove', 'agent.queue.resume', 'agent.queue.send', 'agent.read', 'agent.rename', 'agent.retry', 'agent.rm', 'agent.seen', 'agent.start', 'agent.startStatus', 'agent.stop', 'agent.tree', 'agent.wait',
       'daemon.status', 'doctor.run', 'draft.claim', 'draft.get', 'draft.list', 'draft.put', 'draft.remove', 'draft.touch', 'events.get', 'events.history', 'events.search', 'events.snapshot', 'events.subscribe', 'events.tail', 'events.unsubscribe',
       'folders.clearHistory', 'folders.forget', 'folders.list', 'folders.recent',
-      'mcp.list', 'mcp.select', 'perm.list', 'perm.resolve', 'project.add', 'project.list', 'project.remove', 'provider.reset', 'providers.check',
+      'mcp.list', 'mcp.select',
+      'memory.add', 'memory.forget', 'memory.get', 'memory.history', 'memory.list', 'memory.projects', 'memory.search', 'memory.update',
+      'perm.list', 'perm.resolve', 'project.add', 'project.list', 'project.remove', 'provider.reset', 'providers.check',
       'runtime.discover', 'runtime.perform', 'runtime.release', 'runtime.setup.list', 'runtime.setup.request', 'runtime.setup.resolve', 'runtime.takeover',
       'sessions.external.list', 'sessions.external.read', 'settings.get', 'settings.set',
       'temporary.configure', 'temporary.draft', 'temporary.list', 'temporary.prompt', 'temporary.read', 'temporary.remove', 'temporary.start', 'temporary.stop',
@@ -83,7 +85,7 @@ describe('белый список моста', () => {
     ])
   })
   it('perm.request, events.emit, daemon.stop — нельзя', () => {
-    for (const m of ['perm.request', 'events.emit', 'daemon.stop', 'hello', '', null, 42, 'daemon.status ']) {
+    for (const m of ['perm.request', 'events.emit', 'daemon.stop', 'memory.configure', 'memory.context.issue', 'memory.context.bind', 'memory.context.revoke', 'hello', '', null, 42, 'daemon.status ']) {
       assert.equal(isAllowedMethod(m), false, String(m))
     }
   })

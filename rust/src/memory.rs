@@ -468,6 +468,52 @@ impl MemoryStore {
         result
     }
 
+    /// Owner administration can discover persisted projects after their session
+    /// or working directory disappears. Scoped callers never route here.
+    pub(crate) fn projects(&self, params: &Value) -> MemoryResult<Value> {
+        self.check_paths().map_err(internal)?;
+        let params = params
+            .as_object()
+            .ok_or_else(|| invalid("memory params must be an object"))?;
+        keys(params, &["limit", "offset"])?;
+        let (limit, offset) = page(params)?;
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT project_id, SUM(CASE WHEN deleted=0 THEN 1 ELSE 0 END), MAX(updated_at)
+             FROM memories WHERE scope='project' GROUP BY project_id
+             ORDER BY MAX(updated_at) DESC, project_id LIMIT ?1 OFFSET ?2",
+            )
+            .map_err(internal)?;
+        let projects = statement
+            .query_map(params![(limit + 1) as i64, offset as i64], |row| {
+                Ok(json!({
+                    "projectId": row.get::<_, String>(0)?,
+                    "count": row.get::<_, i64>(1)?,
+                    "updatedAt": row.get::<_, String>(2)?,
+                }))
+            })
+            .map_err(internal)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(internal)?;
+        self.check_paths().map_err(internal)?;
+        bounded_page("projects", projects, limit)
+    }
+
+    pub(crate) fn has_project(&self, project_id: &str) -> MemoryResult<bool> {
+        self.check_paths().map_err(internal)?;
+        let exists = self
+            .connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM memories WHERE scope='project' AND project_id=?1)",
+                params![project_id],
+                |row| row.get(0),
+            )
+            .map_err(internal)?;
+        self.check_paths().map_err(internal)?;
+        Ok(exists)
+    }
+
     pub(crate) fn execute_as_checked(
         &mut self,
         method: &str,

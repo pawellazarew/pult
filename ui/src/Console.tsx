@@ -47,6 +47,8 @@ import { CONSENT_DIALOG_PROVIDERS, CONSENT_DIALOG_VERSION, isFullLevel } from '.
 import type { ConsentView } from './model/access.js'
 import { UpdateBanner } from './components/UpdateBanner.js'
 import { UpdateDialog } from './components/UpdateDialog.js'
+import { MemoryDialog } from './components/MemoryDialog.js'
+import { memoryAvailability } from './model/memory.js'
 import { addDismissed, applyErrorText, checkErrorText, FOCUS_CHECK_STALE_MS, focusCheckWanted, updateBanner, upToDateNote, updateIndicator, windowVersionFromUA } from './model/update.js'
 import type { UpdateAction } from './model/update.js'
 import type { UpdateStatus } from '../../src/core/rpc.js'
@@ -107,6 +109,7 @@ declare global {
 
 type Modal = null | { type: 'maintenance' } | { type: 'external' } | { type: 'doctor' } | { type: 'mcp' } | { type: 'stop'; name: string } | { type: 'rm'; name: string } | { type: 'hide'; path: string; sessions: readonly string[]; busy: readonly string[] } | { type: 'rename'; name: string } | { type: 'help' } | { type: 'search' }
   | { type: 'update'; fromSettings?: true }
+  | { type: 'memory'; fromSettings?: true }
   | { type: 'discard-draft'; id: string }
   | { type: 'temporary-end'; identity: TemporaryIdentity }
   | { type: 'settings'; section?: import('./components/Settings.js').SettingsSection } | { type: 'configure'; name: string; pick: SettingsPick; reason: 'misfit'; text?: string }
@@ -200,6 +203,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   // Окно перед глазами: видно и в фокусе. Только тогда показ сессии считается «прочитал».
   const [windowActive, setWindowActive] = useState(() => document.visibilityState === 'visible' && document.hasFocus())
   const [modal, setModal] = useState<Modal>(null)
+  const [memoryOpened, setMemoryOpened] = useState(false)
   // --- шаг B: черновики нового чата (design/2026-11-02-quick-start §3.1–§3.3) ------------------------------------
   // Черновик открывается вместо разговора: ⌘N, «Новый чат», «+» у проекта, ссылка `pult://new`. Пустой при уходе
   // исчезает; с текстом — живёт у демона (`draft.*`, файл на черновик, compare-and-set по `rev`, владелец — это окно).
@@ -427,7 +431,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     window.addEventListener('pult:settings', open)
     return () => window.removeEventListener('pult:settings', open)
   }, [])
-  const settingsOpen = modal?.type === 'settings' || (modal?.type === 'update' && modal.fromSettings === true)
+  const settingsOpen = modal?.type === 'settings' || ((modal?.type === 'update' || modal?.type === 'memory') && modal.fromSettings === true)
   useEffect(() => { if (settingsOpen) void refreshSettings() }, [settingsOpen, refreshSettings])
 
   const refreshTimer = useRef<number | null>(null)
@@ -1474,6 +1478,11 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
     if (health?.open) { health.open = false; health.querySelector<HTMLElement>('summary')?.focus() }
     setModal({ type: 'update', ...(fromSettings ? { fromSettings: true as const } : {}) })
   }
+  const memorySupport = memoryAvailability(status, conn.state === 'up')
+  const openMemory = (): void => {
+    setMemoryOpened(true)
+    setModal({ type: 'memory', fromSettings: true })
+  }
 
   const startDaemon = (): void => {
     setStarting(true)
@@ -1824,8 +1833,9 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
         text={tr('Разговор и черновик будут удалены из памяти Пульта. Восстановить их не получится.')}
         onOk={() => { const identity = modal.identity; void temporaryChats.remove(identity).then(() => setModal(null), () => setModal(null)) }} onCancel={() => setModal(null)} />}
       {modal?.type === 'help' && <HotkeysHelp onClose={() => setModal(null)} />}
-      {(modal?.type === 'settings' || (modal?.type === 'update' && modal.fromSettings)) && (
-        <div hidden={modal.type === 'update'}><SettingsDialog active={modal.type === 'settings'} disk={settings?.disk} onDiskSave={async disk => { setSettings(await bridge.call('settings.set', { disk }) as SettingsReply) }} initialSection={modal.type === 'settings' ? modal.section : 'updates'} settings={settings?.newSession ?? null} catalog={providers} onSave={saveSettings} onClose={() => setModal(null)}
+      {(modal?.type === 'settings' || ((modal?.type === 'update' || modal?.type === 'memory') && modal.fromSettings)) && (
+        <div hidden={modal.type !== 'settings'}><SettingsDialog active={modal.type === 'settings'} disk={settings?.disk} onDiskSave={async disk => { setSettings(await bridge.call('settings.set', { disk }) as SettingsReply) }} initialSection={modal.type === 'settings' ? modal.section : modal.type === 'memory' ? 'memory' : 'updates'} settings={settings?.newSession ?? null} catalog={providers} onSave={saveSettings} onClose={() => setModal(null)}
+          memory={{ ...memorySupport, onOpen: openMemory }}
           language={settings?.language ?? 'auto'}
           usage={ui.usage} now={now} usageRefreshing={providersChecking} onUsageRefresh={() => { void checkProviders(); void refreshStatus() }}
           {...(settings?.attachments ? { retentionDays: settings.attachments.retentionDays, onRetentionChange: async (retentionDays: 7|30|90|null) => { setSettings(await bridge.call('settings.set', { attachments: { retentionDays } }) as SettingsReply) } } : {})}
@@ -1860,6 +1870,9 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
       {modal?.type === 'update' && <UpdateDialog status={status?.update} windowVersion={windowVersion} busy={updBusy} checking={updCheck.checking} error={updCheck.error} applyError={updCheck.applyError} now={now}
         onAction={applyUpdate} onCheck={checkUpdates} onExternal={(url) => { void followLink(bridge, url, url) }}
         onClose={() => setModal(modal.fromSettings ? { type: 'settings', section: 'updates' } : null)} />}
+      {memoryOpened && <MemoryDialog bridge={bridge} active={modal?.type === 'memory'} available={memorySupport.available} availabilityError={memorySupport.error}
+        initialSession={current?.scope === 'general' ? undefined : current?.name} online={conn.state === 'up'}
+        onClose={() => setModal(modal?.type === 'memory' && modal.fromSettings ? { type: 'settings', section: 'memory' } : null)} />}
       {modal?.type === 'configure' && (
         <Confirm testId="confirm-configure" danger
           title={tr('Разговор не влезет в окно модели')}
