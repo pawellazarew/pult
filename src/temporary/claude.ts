@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { buildChildEnv } from '../env/allowlist.js'
+import { buildClaudeEnv } from '../env/allowlist.js'
 import { TemporaryChatError } from './types.js'
 import type { TemporarySettings, TemporaryTransport } from './types.js'
 
@@ -68,13 +68,10 @@ interface ActiveTurn {
 
 export async function createTemporaryClaudeTransport(options: TemporaryClaudeOptions): Promise<TemporaryTransport> {
   const args = temporaryClaudeArgv(options.settings)
-  const env = buildChildEnv(options.parentEnv ?? process.env, {
-    ...(options.networkEnv ? { network: options.networkEnv } : {}),
-    extra: {
-      CLAUDE_CODE_SAFE_MODE: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
-      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1',
-      CLAUDE_CODE_SKIP_PROMPT_HISTORY: '1', DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1',
-    },
+  const env = buildClaudeEnv(options.parentEnv ?? process.env, options.networkEnv, {
+    CLAUDE_CODE_SAFE_MODE: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
+    CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1', CLAUDE_CODE_SKIP_PROMPT_HISTORY: '1',
+    DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1',
   })
   let child: ChildProcessWithoutNullStreams
   try { child = spawn(options.bin, args, { cwd: options.cwd, env, stdio: ['pipe', 'pipe', 'pipe'], detached: true }) }

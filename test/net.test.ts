@@ -10,7 +10,7 @@ import { claudeNetworkEnv } from '../dist/adapters/claude/adapter.js'
 import { codexNetworkEnv } from '../dist/adapters/codex/adapter.js'
 import type { ProbeFn } from '../dist/env/net.js'
 
-const trace = (loc: string): string => `fl=1f2\nh=api.anthropic.com\nloc=${loc}\ntls=TLSv1.3\n`
+const trace = (loc: string): string => `fl=1f2\nh=cloudflare.com\nloc=${loc}\ntls=TLSv1.3\n`
 
 interface FakeProbe {
   fn: ProbeFn
@@ -63,7 +63,7 @@ describe('страж', () => {
     assert.equal(c.ok, false)
     assert.equal(c.reason, 'unknown_location')
     assert.equal(c.loc, null)
-    assert.equal(probe.calls.length, 2, 'оба адреса-запаски должны быть опробованы')
+    assert.deepEqual(probe.calls, [{ url: 'https://cloudflare.com/cdn-cgi/trace', proxy: null }])
   })
 
   it('required + мёртвый прокси = блок, прямого пути не пробуем', async () => {

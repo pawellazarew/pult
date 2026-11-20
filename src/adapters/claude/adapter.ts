@@ -45,7 +45,7 @@ import { redactString } from '../../core/log.js'
 import { createLineSplitter } from '../../core/ndjson.js'
 import type { PultPaths } from '../../core/paths.js'
 import { sessionAttachmentsDirs } from '../../core/attachments.js'
-import { buildChildEnv } from '../../env/allowlist.js'
+import { buildClaudeEnv } from '../../env/allowlist.js'
 import { checkNetwork, netGeneration, netRefusal, noProxyValue } from '../../env/net.js'
 import { readSavedNode, resolveChildNode } from '../../env/nodeBin.js'
 import type { NetCheck } from '../../env/net.js'
@@ -783,7 +783,7 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): ProviderAdapter
         clearBgExpected(l)
         child = spawn(opts.bin, argv, {
           cwd: l.spec.cwd,
-          env: buildChildEnv(process.env, { network: netEnv, extra: {} }),
+          env: buildClaudeEnv(process.env, netEnv),
           stdio: ['pipe', 'pipe', 'pipe'],
         })
       } catch (e) {

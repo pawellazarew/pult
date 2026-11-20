@@ -9,6 +9,7 @@ pub type Environment = BTreeMap<OsString, OsString>;
 const BASE: &[&str] = &["HOME", "USER", "PATH", "LANG", "TERM", "TMPDIR"];
 const EXPLICIT: &[&str] = &[
     "ALL_PROXY",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
     "HTTPS_PROXY",
     "NO_PROXY",
     "PULT_MEMORY_KEY",
@@ -88,6 +89,7 @@ mod tests {
             ("ANTHROPIC_API_KEY", "SECRET"),
             ("ANTHROPIC_BASE_URL", "https://other"),
             ("CLAUDE_CODE_MESSAGING_SOCKET", "other"),
+            ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "0"),
             ("PULT_MEMORY_KEY", "mem_ambient"),
             ("NODE_OPTIONS", "--require=other"),
             ("DYLD_INSERT_LIBRARIES", "other"),

@@ -18,7 +18,6 @@ import type { GuardMode, GuardRule } from '../core/guard.js'
 import { buildChildEnv } from './allowlist.js'
 
 export const EGRESS_URLS = [
-  'https://api.anthropic.com/cdn-cgi/trace',
   'https://cloudflare.com/cdn-cgi/trace',
 ] as const
 
