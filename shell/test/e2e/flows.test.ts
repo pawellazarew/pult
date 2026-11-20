@@ -498,7 +498,7 @@ describe('окно: рабочие сценарии', () => {
     const title = h.win.getByTestId('conv-title')
     const input = h.win.getByTestId('rename-input')
     const titleOf = async (): Promise<string | undefined> => (await list()).find((r) => r.name === 'eps')?.title
-    assert.equal(await title.textContent(), 'Долгая задача')
+    await title.filter({ hasText: 'Долгая задача' }).waitFor()
 
     await title.dblclick()
     assert.equal(await input.inputValue(), 'Долгая задача', 'правка начинается с того, что написано в шапке')

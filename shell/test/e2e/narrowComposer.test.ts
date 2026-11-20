@@ -111,6 +111,7 @@ it('desktop Files panel wraps every preference inside the 320px chat, keeping te
 it('the same narrow desktop chat keeps working-turn actions inside the composer', async () => {
   await client.request('agent.prompt', { name: 'narrow', text: 'Проверь пример интерфейса' })
   await h.win.getByTestId('stop-turn').waitFor()
+  await h.win.getByTestId('conv-title').filter({ hasText: 'Проверь пример интерфейса' }).waitFor()
   await h.win.getByTestId('composer').fill(DRAFT)
   await settle()
   await h.screen('narrow-composer-files-working')
