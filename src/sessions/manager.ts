@@ -25,6 +25,7 @@ import type { PultPaths } from '../core/paths.js'
 import type { EventStore } from '../core/store.js'
 import type { AppliedInfo, ApprovalMode, ProviderAdapter, SessionSettingsPatch, TurnOutcome, TurnSettings } from '../adapters/types.js'
 import type { PermBroker } from '../perm/broker.js'
+import { localSessionTitle } from './autotitle.js'
 import { mergeContext, parseContextData } from './context.js'
 import type { SessionContext } from './context.js'
 import { promptAttachmentContext, validateOwnedPromptAttachments } from '../core/promptAttachments.js'
@@ -371,11 +372,6 @@ export interface ManagerOptions {
    * СЧИТАЕТ записи на диск: без счётчика усиление записи (fsync на каждую дельту) невидимо.
    */
   registry?: SessionRegistry
-  /**
-   * Автоназвание по первой реплике (sessions/autotitle.ts). Нет — сессии без названия так и
-   * остаются под своим именем.
-   */
-  titler?: (text: string) => Promise<string | null>
   /**
    * Родительское окружение для git (`--worktree`): из него белый список берёт HOME и PATH.
    * В бою — окружение демона; тест подставляет временный HOME, чтобы глобальный ~/.gitconfig
@@ -732,24 +728,15 @@ export function createManager(opts: ManagerOptions): SessionManager {
   }
 
 
-  // Автоназвание: один раз на сессию (флаг в реестре), в фоне — реплику не задерживает. Название,
-  // заданное человеком за это время, не перетирается.
-  const titling = new Set<string>()
   function maybeAutoTitle(name: string, text: string): void {
-    const titler = opts.titler
     const rec = registry.get(name)
-    if (!titler || !rec || rec.title || rec.autoTitled || titling.has(name)) return
-    titling.add(name)
-    registry.update(name, { autoTitled: true })
-    titler(redactString(text)).then((t) => {
-      const cur = registry.get(name)
-      const title = t ? cleanTitle(t) : null
-      if (!title || !cur || cur.title) return
-      registry.update(name, { title })
-      opts.logger.info('сессия названа по первой реплике', { session: name, title })
-    }, (e: unknown) => {
-      opts.logger.warn('автоназвание не вышло', { session: name, error: (e as Error).message })
-    }).finally(() => { titling.delete(name) })
+    if (!opts.config.autoTitle || !rec || rec.title || rec.autoTitled) return
+    const title = localSessionTitle(redactString(text))
+    try {
+      registry.update(name, { autoTitled: true, ...(title ? { title } : {}) })
+    } catch (e) {
+      opts.logger.warn('не удалось сохранить автоназвание', { session: name, error: (e as Error).message })
+    }
   }
 
   // --- О2: очередь реплик во время хода -------------------------------------------------------

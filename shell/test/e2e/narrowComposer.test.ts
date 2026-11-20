@@ -34,7 +34,7 @@ const settle = async (): Promise<void> => {
   await h.win.evaluate(async () => { await document.fonts.ready; await new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))) })
 }
 
-const geometry = async (): Promise<void> => {
+const geometry = async (expectedTitle = 'narrow'): Promise<void> => {
   const result = await h.win.locator('.composer .box').evaluate((box) => {
     const rect = (el: Element) => { const r = el.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height } }
     return {
@@ -78,7 +78,7 @@ const geometry = async (): Promise<void> => {
     assert.ok(Math.min(a.right, b.right) - Math.max(a.left, b.left) <= 1 || Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) <= 1,
       `header items overlap: ${JSON.stringify({ a, b })}`)
   }
-  assert.equal(header.elements.find((el) => el.id === 'conv-title')?.text, 'narrow')
+  assert.equal(header.elements.find((el) => el.id === 'conv-title')?.text, expectedTitle)
   assert.ok(header.elements.find((el) => el.id === 'conv-access-pill')?.text)
   assert.ok(header.elements.find((el) => el.id === 'conv-status')?.text)
 }
@@ -111,9 +111,10 @@ it('desktop Files panel wraps every preference inside the 320px chat, keeping te
 it('the same narrow desktop chat keeps working-turn actions inside the composer', async () => {
   await client.request('agent.prompt', { name: 'narrow', text: 'Проверь пример интерфейса' })
   await h.win.getByTestId('stop-turn').waitFor()
+  await h.win.getByTestId('conv-title').filter({ hasText: 'Проверь пример интерфейса' }).waitFor()
   await h.win.getByTestId('composer').fill(DRAFT)
   await settle()
   await h.screen('narrow-composer-files-working')
-  await geometry()
+  await geometry('Проверь пример интерфейса')
   for (const id of ['steer', 'stop-turn', 'send']) await h.win.getByTestId(id).click({ trial: true })
 })

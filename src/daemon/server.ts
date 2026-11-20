@@ -58,10 +58,8 @@ import { checkNetwork, clearNetCache, lastNetExits, netGeneration, recordNetChec
 import type { NetCheck } from '../env/net.js'
 import { locateToolPath, testLocate } from '../env/locate.js'
 import { captureProviderIdentity } from '../env/providerIdentity.js'
-import { buildChildEnv } from '../env/allowlist.js'
+import { buildChildEnv, buildClaudeEnv } from '../env/allowlist.js'
 import { daemonNodeInfo, fileId } from '../env/nodeBin.js'
-import { execAsync } from '../env/exec.js'
-import { createAutoTitler } from '../sessions/autotitle.js'
 import { codexCommandsFromSkills, createCommandCatalog } from '../commands/catalog.js'
 import { probeClaudeCommands } from '../commands/claudeProbe.js'
 import { createProviderCatalog, codexMetadataRequest, fetchCodexModels } from '../env/providers.js'
@@ -168,8 +166,6 @@ export interface DaemonOptions {
    * не останавливает демона: им нужны МЕДЛЕННЫЕ фальшивые CLI, а тестовый режим CLI не ищет вовсе.
    */
   doctor?: Pick<DoctorDeps, 'locate' | 'pathEntries' | 'run' | 'codexSchema'>
-  /** Генератор названия сессии (тест подставляет свой; в тестовом режиме по умолчанию выключен). */
-  titler?: (text: string) => Promise<string | null>
   /** О3: подмена установки Playwright MCP (тест не зовёт npm). */
   browserInstall?: (paths: PultPaths) => Promise<InstallResult>
   /** О3: подмена поиска Chrome (тест не смотрит на диск машины). */
@@ -591,7 +587,7 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
     rec.browser ? { ...rec, browserDownloads: browserDirs(paths, rec.name).downloads } : rec
 
   // «/» в поле ввода (docs/19): скиллы и команды папки сессии. Claude — отдельный короткий процесс с `initialize`
-  // (через страж сети, как автоназвание); Codex — `skills/list` общего app-server; ZCode списка не даёт.
+  // (через страж сети); Codex — `skills/list` общего app-server; ZCode списка не даёт.
   const slashCatalog = createCommandCatalog({
     probe: async (key, force) => {
       if (key.provider === 'codex') {
@@ -603,7 +599,7 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
       if (!check.ok) throw new Error('страж сети не пустил claude — список команд не снят')
       return await probeClaudeCommands({
         bin: claudeBin, cwd: key.cwd,
-        env: buildChildEnv(process.env, { network: claudeNetworkEnv(check), extra: {} }),
+        env: buildClaudeEnv(process.env, claudeNetworkEnv(check)),
         ...(key.settingSources ? { settingSources: key.settingSources } : {}),
       })
     },
@@ -700,17 +696,6 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
     askPermission: (req) => broker.request(req),
     ...(netCheck ? { netCheck } : {}),
   })
-  // Автоназвание: одноразовый `claude -p` к haiku через тот же страж сети, что и ходы.
-  const titler = opts.titler ?? (!opts.testMode && config.autoTitle ? createAutoTitler({
-    bin: claudeBin,
-    cwd: paths.home,
-    env: async () => {
-      const check = await (netCheck ?? ((p: 'claude') => checkNetwork(p, config.network[p], config.guard, {})))('claude')
-      return check.ok ? buildChildEnv(process.env, { network: claudeNetworkEnv(check), extra: {} }) : null
-    },
-    run: (bin, args, o) => execAsync(bin, args, { env: o.env, cwd: o.cwd, timeoutMs: o.timeoutMs }),
-    onError: (e) => logger.warn('автоназвание: claude -p не ответил — название из первых слов', { error: e }),
-  }) : undefined)
   // О2: своя команда на событие внимания — работает и без окна (src/daemon/notifyCommand.ts).
   const notifyRunner = config.notifyCommand ? createNotifyRunner({ command: config.notifyCommand, logger }) : null
   // Канал обновлений заводится после менеджера (ему нужен список ходов), а менеджеру нужен ответ «ставится
@@ -731,7 +716,6 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
     fullAllowed: (rec) => fullAllowed(rec.provider, rec.grant),
     modelChoices: (provider) => (provider === 'codex' ? codexChoices() : Promise.resolve(null)),
     ...(opts.queueEditHoldMs !== undefined ? { queueEditHoldMs: opts.queueEditHoldMs } : {}),
-    ...(titler ? { titler } : {}),
     ...(notifyRunner ? {
       onAttention: (ev: PultEvent, att, title: string) => {
         const job = notifyJobFor(ev, att, title, config.notify.minTurnSeconds)

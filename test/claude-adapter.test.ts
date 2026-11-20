@@ -271,12 +271,14 @@ describe('адаптер claude: контракт запуска', () => {
     process.env['ANTHROPIC_BASE_URL'] = 'https://подменённый.example.com'
     process.env['CLAUDE_CODE_MESSAGING_SOCKET'] = '/tmp/чужая.sock'
     process.env['CLAUDE_CODE_OAUTH_SCOPES'] = 'всё'
+    process.env['CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'] = '0'
     try {
       await r.adapter.startSession(spec(r))
       await (await r.adapter.send('w', 'привет')).done
       const env = r.runs()[0]!.env
       const leaked = Object.keys(env).filter((k) => /^(ANTHROPIC|CLAUDE)/i.test(k))
-      assert.deepEqual(leaked, [], `утекли: ${leaked.join(', ')}`)
+      assert.deepEqual(leaked, ['CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'])
+      assert.equal(env['CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'], '1')
       assert.ok(env['PATH'], 'PATH обязан быть')
       assert.ok(env['HOME'], 'HOME обязан быть')
     } finally {

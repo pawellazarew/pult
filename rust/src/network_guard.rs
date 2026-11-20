@@ -23,10 +23,7 @@ use tokio::{
     sync::{Notify, Semaphore, oneshot, watch},
 };
 
-pub const EGRESS_URLS: [&str; 2] = [
-    "https://api.anthropic.com/cdn-cgi/trace",
-    "https://cloudflare.com/cdn-cgi/trace",
-];
+pub const EGRESS_URLS: [&str; 1] = ["https://cloudflare.com/cdn-cgi/trace"];
 pub const BASE_NO_PROXY: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 pub const CACHE_TTL: Duration = Duration::from_secs(60);
@@ -423,6 +420,12 @@ impl NetworkGuard {
             NetPath::None => return Err(GuardError::NetworkDenied),
         }
         adjusted.insert("NO_PROXY".into(), no_proxy_value(&check.no_proxy).into());
+        if check.provider == Provider::Claude {
+            adjusted.insert(
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(),
+                "1".into(),
+            );
+        }
         let env = worker_env::from_parent(parent, &adjusted)
             .map_err(|_| GuardError::InvalidEnvironment)?;
         // Keep the generation lock through construction and the final check.

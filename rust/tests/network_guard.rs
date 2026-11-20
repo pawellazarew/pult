@@ -176,7 +176,7 @@ async fn required_without_proxy_never_probes_or_goes_direct() {
 }
 #[tokio::test]
 async fn required_dead_proxy_ignores_partial_loc_and_never_falls_back() {
-    let probe = FakeProbe::new(vec![result(28, "loc=DE\n"), result(56, "loc=DE\n")]);
+    let probe = FakeProbe::new(vec![result(28, "loc=DE\n")]);
     let guard = NetworkGuard::new(probe.clone());
     let check = guard
         .check(
@@ -190,7 +190,11 @@ async fn required_dead_proxy_ignores_partial_loc_and_never_falls_back() {
     assert_eq!(check.reason, Reason::ProxyDead);
     assert!(!check.fell_back);
     assert_eq!(check.path, NetPath::None);
-    assert_eq!(check.attempts.len(), 2);
+    assert_eq!(check.attempts.len(), 1);
+    assert_eq!(
+        check.attempts[0].url,
+        "https://cloudflare.com/cdn-cgi/trace"
+    );
     assert!(
         check
             .attempts
@@ -208,11 +212,7 @@ async fn required_dead_proxy_ignores_partial_loc_and_never_falls_back() {
 }
 #[tokio::test]
 async fn auto_fallback_is_still_country_guarded_and_uses_real_route_probes() {
-    let probe = FakeProbe::new(vec![
-        result(7, ""),
-        result(28, "loc=DE"),
-        result(0, "loc=RU"),
-    ]);
+    let probe = FakeProbe::new(vec![result(7, ""), result(0, "loc=RU")]);
     let guard = NetworkGuard::new(probe.clone());
     let check = guard
         .check(
@@ -227,9 +227,9 @@ async fn auto_fallback_is_still_country_guarded_and_uses_real_route_probes() {
     assert!(check.fell_back);
     assert_eq!(check.path, NetPath::None);
     assert!(check.proxy.is_none());
-    assert_eq!(check.attempts.len(), 3);
-    assert_eq!(check.attempts[2].path, NetPath::Direct);
-    assert!(probe.calls.lock().unwrap()[2].1.is_none());
+    assert_eq!(check.attempts.len(), 2);
+    assert_eq!(check.attempts[1].path, NetPath::Direct);
+    assert!(probe.calls.lock().unwrap()[1].1.is_none());
 }
 #[tokio::test]
 async fn healthy_proxy_and_direct_modes_choose_only_the_checked_route() {
@@ -645,6 +645,14 @@ async fn worker_environment_uses_checked_proxy_and_deduplicated_no_proxy() {
         "localhost,127.0.0.1,::1,project.test"
     );
     assert!(!actual.contains_key(std::ffi::OsStr::new("ANTHROPIC_API_KEY")));
+    assert_eq!(
+        actual
+            .get(std::ffi::OsStr::new(
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
+            ))
+            .unwrap(),
+        "1"
+    );
     assert_eq!(
         explicit.get(std::ffi::OsStr::new("HTTPS_PROXY")).unwrap(),
         "http://stale"

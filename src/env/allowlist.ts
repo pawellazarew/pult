@@ -37,3 +37,15 @@ export function buildChildEnv(
   for (const [k, v] of Object.entries(opts.extra ?? {})) env[k] = v
   return env
 }
+
+/** Окружение Claude Code для запусков из Пульта. Настройки внешнего терминала не наследуются. */
+export function buildClaudeEnv(
+  parent: NodeJS.ProcessEnv,
+  network?: Record<string, string>,
+  extra?: Record<string, string>,
+): Record<string, string> {
+  return buildChildEnv(parent, {
+    ...(network ? { network } : {}),
+    extra: { ...extra, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' },
+  })
+}

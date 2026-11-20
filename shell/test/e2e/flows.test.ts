@@ -282,7 +282,7 @@ describe('окно: рабочие сценарии', () => {
     assert.ok(await waitFor(async () => (await inboxCount()) === '1', 15_000), 'запрос не дошёл до Inbox')
     const card = h.win.getByTestId('inbox').getByTestId('perm-card')
     await card.waitFor({ timeout: 5000 })
-    assert.match((await card.textContent()) ?? '', /Правка файла.*beta/)
+    assert.match((await card.textContent()) ?? '', /Правка файла.*Поправь округление/)
     assert.match((await card.textContent()) ?? '', /Math\.floor/, 'дифф правки виден в карточке')
     // Строка ждущей сессии подсвечена (в своём проекте она первая). Ждём: карточка приходит событием
     // сразу, а строку окно берёт из `agent.list` с задержкой 150 мс.
@@ -498,15 +498,15 @@ describe('окно: рабочие сценарии', () => {
     const title = h.win.getByTestId('conv-title')
     const input = h.win.getByTestId('rename-input')
     const titleOf = async (): Promise<string | undefined> => (await list()).find((r) => r.name === 'eps')?.title
-    assert.equal(await title.textContent(), 'eps')
+    await title.filter({ hasText: 'Долгая задача' }).waitFor()
 
     await title.dblclick()
-    assert.equal(await input.inputValue(), 'eps', 'правка начинается с того, что написано в шапке')
+    assert.equal(await input.inputValue(), 'Долгая задача', 'правка начинается с того, что написано в шапке')
     await input.fill('Починить округление')
     // ⌘Enter — горячая клавиша окна, не «сохранить название»: правка остаётся открытой.
     await input.press('Meta+Enter')
     assert.equal(await input.count(), 1)
-    assert.equal(await titleOf(), undefined)
+    assert.equal(await titleOf(), 'Долгая задача')
     await input.press('Enter')
     assert.ok(await waitFor(async () => (await title.count()) === 1 && (await title.textContent()) === 'Починить округление', 5000), 'название не сменилось')
     assert.ok(await waitFor(async () => h.win.evaluate(() => document.activeElement?.getAttribute('data-testid') === 'composer'), 2000), 'после Enter фокус не вернулся в поле реплики')

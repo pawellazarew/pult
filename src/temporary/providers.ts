@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { buildChildEnv } from '../env/allowlist.js'
+import { buildClaudeEnv } from '../env/allowlist.js'
 import { createTemporaryClaudeTransport, TEMPORARY_CLAUDE_FLAGS, TEMPORARY_CLAUDE_VERSION } from './claude.js'
 import { TemporaryChatError } from './types.js'
 import type { TemporaryCapability, TemporaryTransportFactory } from './types.js'
@@ -23,7 +23,7 @@ export interface TemporaryProviderOptions {
 export async function readTemporaryProviderCapabilities(options: Pick<TemporaryProviderOptions, 'claudeBin' | 'parentEnv' | 'capabilityTimeoutMs'>): Promise<TemporaryCapability[]> {
   const codex: TemporaryCapability = { provider: 'codex', available: false, reason: 'privacy_unverified' }
   if (!options.claudeBin) return [{ provider: 'claude', available: false, reason: 'not_installed' }, codex]
-  const env = buildChildEnv(options.parentEnv ?? process.env, { extra: { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' } })
+  const env = buildClaudeEnv(options.parentEnv ?? process.env)
   try {
     const { stdout: version } = await exec(options.claudeBin, ['--version'], { env, timeout: options.capabilityTimeoutMs ?? 5000, maxBuffer: 64 * 1024 })
     if (version.trim().split(/\s+/, 1)[0] !== TEMPORARY_CLAUDE_VERSION) return [{ provider: 'claude', available: false, reason: 'unsupported_version' }, codex]

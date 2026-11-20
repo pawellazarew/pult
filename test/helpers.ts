@@ -71,7 +71,6 @@ export async function startTestDaemon(
   opts: {
     testMode?: boolean; writeBacklogLimit?: number; claudeBin?: string; codexBin?: string; zcodeBin?: string; cliEntry?: string
     doctor?: DaemonOptions['doctor']
-    titler?: DaemonOptions['titler']
     browserInstall?: DaemonOptions['browserInstall']
     findChrome?: DaemonOptions['findChrome']
     updates?: DaemonOptions['updates']
@@ -100,7 +99,6 @@ export async function startTestDaemon(
     cliEntry: opts.cliEntry ?? CLI_ENTRY,
     ...(opts.writeBacklogLimit !== undefined ? { writeBacklogLimit: opts.writeBacklogLimit } : {}),
     ...(opts.doctor !== undefined ? { doctor: opts.doctor } : {}),
-    ...(opts.titler !== undefined ? { titler: opts.titler } : {}),
     ...(opts.browserInstall !== undefined ? { browserInstall: opts.browserInstall } : {}),
     ...(opts.findChrome !== undefined ? { findChrome: opts.findChrome } : {}),
     ...(opts.updates !== undefined ? { updates: opts.updates } : {}),

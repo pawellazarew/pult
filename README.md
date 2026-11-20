@@ -542,16 +542,18 @@ pult update --app --rollback   # put the previous window back if the new one fai
 
 ## Network & privacy
 
-Pult has no telemetry. Besides your agents' own traffic, it makes these requests:
+Pult has no telemetry. Pult starts Claude Code sessions with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` to turn
+off Claude Code telemetry, error reporting and automatic updates. The Provider settings still offer manual updates.
+Pult generates session titles locally from the first words of your message. Set `"autoTitle": false` in
+`config.json` to turn off automatic titles.
+
+Besides your agents' own traffic, Pult makes these requests:
 
 - **Exit-country check.** Providers don't serve some regions, and a request from there can put your account at risk.
   So before an agent's first turn, and before any turn after more than 60 s of idle time, Pult checks the exit country
-  along the same path the agent will use (`https://api.anthropic.com/cdn-cgi/trace`, fallback
-  `https://cloudflare.com/cdn-cgi/trace`). If the country is unknown or in the guard list (`RU, BY, CN, IR, KP, SY, CU`
+  using the configured route via `https://cloudflare.com/cdn-cgi/trace`. Cloudflare sees the exit IP. If the country is unknown or in the guard list (`RU, BY, CN, IR, KP, SY, CU`
   — Pult's own conservative list, not an official one), it refuses to start the turn (exit code 4) rather than risk
   your account. See [Network guard](#network-guard) to change the list or allow only chosen countries.
-- **Session titles.** An untitled session names itself from your first message with one cheap `haiku` request on your
-  Claude subscription. Turn it off with `"autoTitle": false` in `config.json`.
 - **Update check.** One `GET` of `latest.json` from github.com every 6 hours (and when the window returns after an hour
   or more, at most once per 10 minutes), with the header `user-agent: pult/<version>` and no identifiers. Turn it off in
   Settings (⌘,) → Обновления or with `{ "updates": { "check": false } }`; «Проверить сейчас» still works. A newer
@@ -602,7 +604,8 @@ proxy, set `network.<provider>.proxy` (the address below is only an example):
 ```
 
 - `auto` tries the proxy with a real request and goes direct if it is dead (the country check still applies);
-  `required` never goes direct — a dead proxy, or no `proxy` at all, blocks the turn; `off` (the default) is direct only.
+  `required` blocks the turn if the proxy is unavailable or missing. Pult checks and configures the route before a turn.
+  Blocking direct connections from the agent and its tools requires an OS or VPN rule. `off` (the default) uses a direct route.
 - The agent gets the proxy as `HTTPS_PROXY` (Codex also `ALL_PROXY`), with `NO_PROXY` for localhost.
 - Services that must bypass the proxy (say, a work tracker behind a company VPN) go to `network.<provider>.noProxy`:
   `"noProxy": [".corp.example", "10.0.0.0/8"]`. Write domains as `.domain`.
