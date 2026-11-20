@@ -59,9 +59,9 @@ describe('строка меню', () => {
     const [perm] = await pending()
     assert.ok(perm, 'запроса нет у демона')
     const m = await tray()
-    assert.deepEqual(labelsOf(m, 'perm:'), ['zeta — Edit'])
+    assert.deepEqual(labelsOf(m, 'perm:'), ['Поправь округление — Edit'])
     assert.ok(m?.items.some((i) => i.kind === 'header' && i.label === 'Ждут тебя'))
-    assert.equal(labelsOf(m, 'session:')[0], '● zeta · ждёт тебя', 'ждущая сессия — первой')
+    assert.equal(labelsOf(m, 'session:')[0], '● Поправь округление · ждёт тебя', 'ждущая сессия — первой')
     assert.match(m?.tooltip ?? '', /^Пульт · 1 ждёт тебя/)
 
     // Окно смотрит на другую сессию, Inbox спрятан: клик в меню обязан привести к запросу.
