@@ -486,6 +486,32 @@ describe('реплика модели: Markdown', () => {
     assert.match(out, /data-testid="msg-model"[\s\S]*<table>[\s\S]*<a href="https:\/\/a.io\/"/)
   })
 
+  const browserTitle = 'Подтвердил запуск сборки SwiftPM'
+  const browserMarker = `::browser-complete{title="${browserTitle}"}`
+  const modelReply = (text: string, streaming = false, provider: AgentView['provider'] = 'codex'): string =>
+    html(Conversation, convProps(agent({ provider }), { items: [
+      { type: 'model', key: 'm1', id: 1, ts: '2026-09-28T09:59:00Z', text, streaming },
+    ] }))
+
+  it('лента Codex показывает заголовок завершённого действия без служебной разметки', () => {
+    const out = modelReply(browserMarker)
+    assert.match(out, new RegExp(browserTitle))
+    assert.doesNotMatch(out, /::browser-complete/)
+  })
+
+  it('лента Codex скрывает служебную разметку, пока она приходит по частям', () => {
+    for (let length = 1; length <= browserMarker.length; length++) {
+      assert.doesNotMatch(modelReply(browserMarker.slice(0, length), true), /data-testid="msg-model"/)
+    }
+  })
+
+  it('лента сохраняет примеры, неполные маркеры и сообщения других провайдеров', () => {
+    assert.match(modelReply('Пример: ' + browserMarker), /::browser-complete/)
+    assert.match(modelReply('```\n' + browserMarker + '\n```'), /::browser-complete/)
+    assert.match(modelReply(browserMarker.slice(0, -1)), /::browser-complete/)
+    assert.match(modelReply(browserMarker, false, 'claude'), /::browser-complete/)
+  })
+
   it('стили: таблица листается, текст реплики выделяется, ссылки и шапка кода оформлены', () => {
     const css = readFileSync(new URL('../ui/src/styles.css', import.meta.url), 'utf8')
     assert.match(css, /\.md-table \{[^}]*overflow-x: auto/)
