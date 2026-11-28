@@ -1,5 +1,25 @@
 # Native ZCode cleanup uncertainty must wake both Driver waiters
 
+## Ordinary ZCode worker (Route A)
+
+The ordinary worker's start and completion receivers waited for the supervisor,
+which could report `Closed::Unconfirmed` and wait for an explicit retry. Before
+native acceptance, the independent Driver deadline could eventually enter
+quarantine. After acceptance, the Driver could stay in Running until cancelled.
+
+Both receivers now observe the cleanup watch. An unconfirmed cleanup takes
+precedence over a ready result and wakes the Driver's existing close path.
+Confirmed cleanup still requires the native result. The supervisor keeps
+ownership of the process and pending IO throughout.
+
+Two tests use the real Rust holder to verify both sides of acceptance. With
+the original worker, the Driver still holds its slot after five seconds
+without entering quarantine. With the fix, both tests reach Quarantined
+without cancellation, retain the slot and publish no completion. All 24
+`zcode_worker` integration tests passed on macOS against current main with
+this patch. The controlled failure does not establish the cause of the
+intermittent macOS failure tracked in [#162](https://github.com/pawellazarew/pult/issues/162).
+
 ## Proven counterexample; CI cause remains unknown
 
 The controlled actual-holder test makes an owned wrapper return125 only after
