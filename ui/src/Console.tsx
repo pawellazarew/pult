@@ -140,6 +140,9 @@ const store = {
 /** Переход из поиска, который за это время не дошёл до ленты (история не грузится, элемента нет), — брошен. */
 const JUMP_TIMEOUT_MS = 30_000
 
+// При открытии чата строим только свежий участок ленты. Ранние страницы сохраняют обычный бюджет.
+const INITIAL_HISTORY_BYTES = 256 * 1024
+
 /** Лента сессии с ранними страницами истории впереди (model/state.ts finishEarlier). */
 function withEarlier(ui: UiState, name: string): readonly ConvItem[] {
   return joinEarlier(ui.sessions[name]?.conv.items ?? [], ui.earlier[name]?.items)
@@ -720,7 +723,7 @@ export function Console({ bridge }: { bridge: PultBridge }): ReactElement {
   useEffect(() => {
     if (!currentName || conn.state !== 'up' || !needsHydrate(uiRef.current, currentName)) return
     setUi((s) => beginHydrate(s, currentName))
-    bridge.call('events.history', { sessionId: currentName }).then(
+    bridge.call('events.history', { sessionId: currentName, budget: INITIAL_HISTORY_BYTES }).then(
       (r) => setUi((s) => finishHydrate(s, currentName, r as HistoryPageReply)),
       (e: unknown) => {
         setUi((s) => failHydrate(s, currentName))

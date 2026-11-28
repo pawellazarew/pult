@@ -327,7 +327,6 @@ export function Conversation(p: ConversationProps): ReactElement {
 
   // Шаг A: метки доступа строятся по действующему режиму (`access` демона), а не только по выбранному.
   const pill = headerPill(agent)
-  const chip = accessChip(agent)
   const limited = agent.status === 'limited'
   const resetsAt = p.usage?.resetsAt ?? lastLimitReset(p.items)
   const holds = limitHolds(agent.status, resetsAt, p.now)
@@ -422,7 +421,7 @@ export function Conversation(p: ConversationProps): ReactElement {
       ) : null}
       <Composer hidden={activeChild !== null} busy={sv.busy} needsYou={sv.needsYou} permFocused={p.focusedPerm !== null} link={p.link ?? 'up'} disabled={holds} sending={p.sending} error={p.sendError} onSend={p.onSend} agentName={agent.name} label={agentLabel(agent)} filePaths={p.filePaths ?? null}
         commands={slashLoad} commandScope={`${agent.name}\0${agent.provider}\0${agent.cwd}`}
-        accessRed={chip.red} accessNote={pendingStrip(agent)}
+        accessNote={pendingStrip(agent)}
         onStop={p.onStop} steerable={agent.provider === 'codex'} queueable={!!p.onQueueRemove} inject={qe.inject} footer={<ChatFooter agent={agent} usage={p.usage} now={p.now} onReveal={p.onReveal} {...(p.onHelp ? { onHelp: p.onHelp } : {})}
         {...(p.onConfigure ? { onConfigure: p.onConfigure } : {})} catalog={p.catalog ?? null} windows={p.windows ?? EMPTY_WINDOWS} consent={p.consent ?? null} />} />
     </section>
@@ -1057,14 +1056,13 @@ const draftStore: DraftStore = {
   set(k, v) { try { window.localStorage.setItem(k, v) } catch { /* хранилище недоступно */ } },
 }
 
-function Composer({ hidden = false, busy, needsYou, permFocused, link, disabled, sending, error, onSend, onStop, agentName, label, filePaths, queueable, steerable = false, inject, footer, accessRed = false, accessNote = null, commands = null, commandScope = agentName }: {
+function Composer({ hidden = false, busy, needsYou, permFocused, link, disabled, sending, error, onSend, onStop, agentName, label, filePaths, queueable, steerable = false, inject, footer, accessNote = null, commands = null, commandScope = agentName }: {
   hidden?: boolean
   /** «/» в поле (docs/19): список скиллов и команд чата; `null` — старая оболочка, меню нет. */
   commands?: SlashLoader | null
   /** Чат, папка и провайдер одной строкой: сменились — список заново. */
   commandScope?: string
   /** Шаг A: красная рамка поля — чат с полным доступом (выбран или ещё жив процесс с полными правами). */
-  accessRed?: boolean
   /** Шаг A: строка под полем при понижении во время хода с полными правами (кадр 11). */
   accessNote?: string | null
   /** В Inbox есть выделенный запрос (любой сессии): ⌘Enter — его «разрешить», а не «прервать и сказать». */
@@ -1216,7 +1214,7 @@ function Composer({ hidden = false, busy, needsYou, permFocused, link, disabled,
   }
   return (
     <ResizableComposer hidden={hidden}>
-      <div className={`box${attached.over ? ' attachment-over' : ''}${accessRed ? ' access-full' : ''}`} data-access-full={accessRed ? '1' : undefined}>
+      <div className={`box${attached.over ? ' attachment-over' : ''}`}>
         {slash.menu && <div className="slash-anchor">{slash.menu}</div>}
         <AttachmentStrip items={attached.items} previews={attached.previews} pending={attached.pending} onRemove={attached.remove} />
         <textarea ref={ta} rows={3} value={text} onChange={(e) => setText(e.target.value)} onKeyDown={onKey}

@@ -29,6 +29,7 @@
 // отдаётся с конца кусками до HISTORY_PAGE_BYTES, по границе хода (`message.user`).
 
 import type { PultEvent } from './events.js'
+import type { EventStore } from './store.js'
 
 export const TOOL_INPUT_CHARS = 300
 export const OTHER_CHARS = 2000
@@ -178,4 +179,26 @@ export function pageHistory(all: readonly PultEvent[], before: number | null, bu
   }
   const events = all.slice(start, upto)
   return { events, more: start > 0, oldest: events[0]?.id ?? null }
+}
+
+/** Первая страница из конца файла или null, если для неё нужен полный журнал. */
+export function readLatestHistoryPage(store: Pick<EventStore, 'readSessionTail'>, sessionId: string, budget: number): HistoryPage | null {
+  // Сырые события содержат дельты и полные выводы, поэтому берём с запасом к бюджету ответа.
+  const tail = store.readSessionTail(sessionId, 4 * HISTORY_PAGE_BYTES)
+  if (!tail) return null
+  if (!tail.hasPrefix) return pageHistory(compactHistory(tail.events), null, budget)
+
+  const start = tail.events.findIndex((ev) => ev.kind === 'message.user')
+  if (start < 0) return null
+  const events = tail.events.slice(start)
+  const agents = new Set<string>()
+  // Граница хода закрывает серии дельт. Субагент, запущенный до границы, всё ещё может
+  // присылать дельты. Для такого хвоста нужен полный журнал, чтобы сохранить их область.
+  for (const ev of events) {
+    if (ev.kind === 'agent.spawned' && typeof ev.data['toolUseId'] === 'string') agents.add(ev.data['toolUseId'])
+    if ((ev.kind === 'message.delta' || ev.kind === 'message.done') && ev.parentId !== undefined && !agents.has(ev.parentId)) return null
+  }
+  const page = pageHistory(compactHistory(events), null, budget)
+  // Если страница забрала весь хвост, она могла бы вместить ещё более ранние события.
+  return page.more ? page : null
 }

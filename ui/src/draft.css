@@ -16,8 +16,6 @@
 .draft-compose { margin-top: auto; padding-top: 28px; }
 .draft-box { border: 1px solid var(--line); border-radius: 20px; background: var(--panel); padding: 13px; display: flex; flex-direction: column; gap: 10px; }
 .draft-box:focus-within { border-color: var(--mut); }
-.draft-box.full { border-color: var(--fail-edge); }
-.draft-box.full:focus-within { border-color: var(--fail); }
 .draft-box textarea { width: 100%; min-height: 78px; max-height: 240px; resize: none; border: 0; outline: 0; background: transparent; color: var(--ink); font: var(--ui-font-size, 14px)/1.6 var(--body); padding: 3px 5px; }
 .draft-box textarea:focus { border: 0; background: transparent; }
 .draft-box textarea::placeholder { color: var(--faint); }

@@ -1,7 +1,7 @@
 // e2e быстрого старта, шаги A и B: доступ (design/2026-11-02-quick-start/DESIGN-REVIEW.md §3.6–§3.9).
 //   * черновик (⌘N) → «Полный доступ» без согласия — диалог согласия; фокус на «Оставить как было», Enter и Esc —
 //     оставить; «Разрешить» — согласие в PULT_HOME/consent.json (0600), черновик живёт дальше;
-//   * чат с полным доступом: плашка в шапке, щит в сайдбаре, красный чип и рамка поля, «Стоп» во время хода;
+//   * чат с полным доступом: плашка в шапке, щит в сайдбаре, красный чип доступа, «Стоп» во время хода;
 //     действующий режим — из system/init (bypassPermissions);
 //   * понижение во время хода: «Спрашивать · после хода», «полный доступ · до конца хода», строка под полем;
 //   * «Настройки → Доступ» → «Отозвать»: следующий ход идёт в явном «Спрашивать» (manual), в ленте — почему;
@@ -96,7 +96,8 @@ describe('окно: доступ — согласие один раз и мет�
     await h.win.getByTestId('consent-grant').click()
     assert.ok(await waitFor(async () => (await consent.count()) === 0, 5000))
     assert.equal(await accessChip().getAttribute('data-approval'), 'full')
-    assert.equal(await draft().locator('.draft-box').getAttribute('data-access-full'), '1', 'красная рамка поля')
+    assert.match((await accessChip().getAttribute('class')) ?? '', /danger/)
+    assert.equal(await draft().locator('.draft-box').getAttribute('data-access-full'), null)
     const file = JSON.parse(readFileSync(h.paths.consent, 'utf8')) as { version: number; rev: number; providers: string[] }
     assert.deepEqual([file.version, file.rev, file.providers], [1, 1, ['claude', 'codex', 'zcode']])
     assert.equal(statSync(h.paths.consent).mode & 0o777, 0o600)
@@ -109,7 +110,7 @@ describe('окно: доступ — согласие один раз и мет�
     assert.equal(await memory(dir), 'full', 'явный выбор при отправке — в память папки')
   })
 
-  it('чат с полным доступом: плашка, щит в сайдбаре, красный чип и рамка; режим подтверждён init-ом; «Стоп» виден', async () => {
+  it('чат с полным доступом: плашка, щит в сайдбаре, красный чип; режим подтверждён init-ом; «Стоп» виден', async () => {
     assert.ok(await waitFor(async () => (await rec('full'))?.access?.applied?.reported === 'bypassPermissions', 15_000), 'действующий режим не пришёл из system/init')
     assert.equal(flag(lastArgv(argvOut()), '--permission-mode'), 'bypassPermissions')
     const r = await rec('full')
@@ -118,7 +119,7 @@ describe('окно: доступ — согласие один раз и мет�
     assert.equal(await h.win.getByTestId('conv-access-pill').getAttribute('data-state'), 'full')
     await h.win.locator('[data-testid="agent-row"][data-agent="full"] [data-testid="row-access-full"]').waitFor({ timeout: 5000 })
     assert.match((await h.win.getByTestId('conv-approval').getAttribute('class')) ?? '', /t-fail/)
-    assert.equal(await h.win.locator('.composer .box').getAttribute('data-access-full'), '1')
+    assert.equal(await h.win.locator('.composer .box').getAttribute('data-access-full'), null)
     await h.win.getByTestId('stop-turn').waitFor({ timeout: 10_000 })
     // Окно узнаёт действующий режим со следующим `agent.list` (раз в 4 с): до него чип честно пишет «ожидается».
     assert.ok(await waitFor(async () => (await h.win.getByTestId('conv-approval').getAttribute('data-access-state')) === 'full', 8000), 'чип не подтвердил режим')

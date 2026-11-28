@@ -17,10 +17,14 @@ it('та же отметка файла — без повторного чтен
   const stamps: Record<string, string | null> = { a: '1', b: '1', gone: null }
   const loads: string[] = []
   const cache = createHistoryCache({ stamp: (id) => stamps[id] ?? null, load: (id) => { loads.push(id); return [ev(loads.length)] } })
+  assert.equal(cache.getCached('a'), undefined)
+  assert.deepEqual(loads, [])
   const first = cache.get('a')
+  assert.equal(cache.getCached('a'), first)
   assert.equal(cache.get('a'), first)
   assert.deepEqual(loads, ['a'])
   stamps['a'] = '2'
+  assert.equal(cache.getCached('a'), undefined)
   assert.notEqual(cache.get('a'), first)
   assert.deepEqual(loads, ['a', 'a'])
   cache.get('gone'); cache.get('gone')

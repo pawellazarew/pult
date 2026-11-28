@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { appendFileSync } from 'node:fs'
 import { describe, it } from 'node:test'
 import type { PultEvent } from '../dist/core/events.js'
-import { compactHistory, OTHER_CHARS, TOOL_INPUT_CHARS } from '../dist/core/history.js'
+import { compactHistory, HISTORY_PAGE_BYTES, OTHER_CHARS, pageHistory, readLatestHistoryPage, TOOL_INPUT_CHARS } from '../dist/core/history.js'
 import { createStore, GET_LIMIT } from '../dist/core/store.js'
 import { PROTOCOL_VERSION } from '../dist/core/rpc.js'
 import { readToken } from '../dist/core/token.js'
@@ -152,6 +152,39 @@ describe('хранилище: снимок, файл сессии, номера'
       home.remove()
     }
   })
+})
+
+describe('readLatestHistoryPage', () => {
+  for (const inheritedAgent of [false, true]) {
+    it(inheritedAgent ? 'восстанавливает область дельт субагента из начала журнала' : 'читает первую страницу с конца и сохраняет её границы', () => {
+      const home = tempHome()
+      const store = createStore(home.paths)
+      try {
+        const append = (kind: PultEvent['kind'], data: PultEvent['data'], parentId?: string): void => {
+          store.append({ sessionId: 's', provider: 'claude', kind, data, ...(parentId ? { parentId } : {}) })
+        }
+        append('agent.spawned', { toolUseId: 'worker' })
+        append('tool.finished', { toolUseId: 'big', content: 'я'.repeat(3 * HISTORY_PAGE_BYTES) })
+        for (let i = 0; i < 8; i++) {
+          append('message.user', { text: `ход ${i}` })
+          append('message.delta', { text: 'основной текст' })
+          if (inheritedAgent) append('message.delta', { text: 'текст субагента' }, 'worker')
+          append('message.done', { text: 'готово '.repeat(90) })
+        }
+        const all = compactHistory(store.readSession('s'))
+        const budget = 1024
+        const expected = pageHistory(all, null, budget)
+        assert.ok(expected.more)
+        const { bytesRead } = store.stats()
+        const actual = readLatestHistoryPage(store, 's', budget)
+        assert.deepEqual(actual, inheritedAgent ? null : expected)
+        assert.equal(store.stats().bytesRead - bytesRead, 4 * HISTORY_PAGE_BYTES)
+      } finally {
+        store.close()
+        home.remove()
+      }
+    })
+  }
 })
 
 describe('RPC окна: events.snapshot | history | get', () => {

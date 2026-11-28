@@ -12,6 +12,8 @@
 import type { PultEvent } from './events.js'
 
 export interface HistoryCache {
+  /** Готовая история свежего файла, если уже загружена. */
+  getCached(sessionId: string): readonly PultEvent[] | undefined
   /** Сжатая история сессии: из кэша, если файл не менялся, иначе — прочитанная заново. */
   get(sessionId: string): readonly PultEvent[]
 }
@@ -27,16 +29,20 @@ export function createHistoryCache(opts: {
   const size = Math.max(1, opts.size ?? 4)
   // Map помнит порядок вставки: первая запись — самая давняя по использованию.
   const entries = new Map<string, { stamp: string; events: readonly PultEvent[] }>()
+  const getCached = (sessionId: string, stamp = opts.stamp(sessionId)): readonly PultEvent[] | undefined => {
+    const hit = entries.get(sessionId)
+    if (!hit) return undefined
+    entries.delete(sessionId)
+    if (stamp === null || hit.stamp !== stamp) return undefined
+    entries.set(sessionId, hit)
+    return hit.events
+  }
   return {
+    getCached: (sessionId) => getCached(sessionId),
     get(sessionId) {
       const stamp = opts.stamp(sessionId)
-      const hit = entries.get(sessionId)
-      if (hit && stamp !== null && hit.stamp === stamp) {
-        entries.delete(sessionId)
-        entries.set(sessionId, hit)
-        return hit.events
-      }
-      entries.delete(sessionId)
+      const hit = getCached(sessionId, stamp)
+      if (hit) return hit
       const events = opts.load(sessionId)
       if (stamp === null) return events
       entries.set(sessionId, { stamp, events })
