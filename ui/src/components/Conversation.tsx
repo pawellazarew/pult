@@ -748,6 +748,9 @@ function ActivityItems({ items, props }: { items: readonly ConvItem[]; props: Co
   })}</>
 }
 
+const browserCompletionPrefix = '::browser-complete{title="'
+const browserCompletion = /^::browser-complete\{title="([^"\r\n]+)"\}$/
+
 function Item({ it, ...p }: { it: ConvItem } & ConversationProps): ReactElement | null {
   const prov = p.agent.provider
   const src = messageSource(it)
@@ -760,13 +763,26 @@ function Item({ it, ...p }: { it: ConvItem } & ConversationProps): ReactElement 
           <div className="body"><UserAttachments items={it.attachments ?? []} /><MessageText text={it.text} foldKey={messageBodyKey(it.key)} human /></div>
         </div>
       )
-    case 'model':
+    case 'model': {
+      const marker = prov === 'codex' && !it.error && !it.questions?.length ? it.text.trimEnd() : ''
+      // Wait for the complete standalone directive before showing its title.
+      if (it.streaming && marker && (
+        browserCompletionPrefix.startsWith(marker) || (marker.startsWith(browserCompletionPrefix) && !/[\r\n]/.test(marker))
+      )) return null
+      const browserTitle = browserCompletion.exec(marker)?.[1]?.trim()
       return (
         <div className="it it-model" data-testid="msg-model" data-streaming={it.streaming ? '1' : '0'} data-event-id={it.id}>
           <Gutter who={prov} cls={`who-${prov}`} ts={it.ts} {...(src !== null ? { copy: { text: src, what: t('ответ') } } : {})} />
-          <div className={`body${it.error ? ' err' : ''}`}>{it.questions?.length && !p.readOnly ? <AsyncQuestion item={it} session={p.agent.name} now={p.now} {...(p.onAsyncAnswer ? { onAnswer: p.onAsyncAnswer } : {})} /> : <MessageText text={it.text} foldKey={messageBodyKey(it.key)} streaming={it.streaming} />}</div>
+          <div className={`body${it.error ? ' err' : ''}`}>
+            {it.questions?.length && !p.readOnly
+              ? <AsyncQuestion item={it} session={p.agent.name} now={p.now} {...(p.onAsyncAnswer ? { onAnswer: p.onAsyncAnswer } : {})} />
+              : browserTitle
+                ? <span className="mut">{browserTitle}</span>
+                : <MessageText text={it.text} foldKey={messageBodyKey(it.key)} streaming={it.streaming} />}
+          </div>
         </div>
       )
+    }
     case 'tool':
       return <ToolRow key={JSON.stringify([p.agent.name, p.agent.createdAt, it.key, it.id, it.ts, it.toolUseId])} it={it} {...(p.loadEvents ? { loadEvents: p.loadEvents } : {})} />
     case 'agent':
