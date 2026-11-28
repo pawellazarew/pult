@@ -596,7 +596,7 @@ export function DraftView(p: DraftViewProps): ReactElement {
             <p className="draft-sub">{general ? t('Вопрос, идея или черновик — можно начать без проекта.') : noFolder ? t('Папку можно выбрать в заголовке.') : t('Напиши задачу ниже.')}</p>
           </div>
           <div className="draft-compose">
-            <div className={`draft-box${full ? ' full' : ''}${files.over ? ' attachment-over' : ''}`} data-access-full={full ? '1' : undefined}>
+            <div className={`draft-box${files.over ? ' attachment-over' : ''}`}>
               {slash.menu && <div className="slash-anchor">{slash.menu}</div>}
               <AttachmentStrip items={files.items} previews={files.previews} pending={files.pending} onRemove={files.remove} />
               <textarea ref={box} rows={3} value={d.text} data-testid="draft-input" aria-label={t('Первая реплика нового чата')}

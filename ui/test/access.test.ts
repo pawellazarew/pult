@@ -1,5 +1,5 @@
 // Быстрый старт, шаг A, окно: согласие на полный доступ один раз, метки по действующему режиму (чип, плашка, щит,
-// рамка, строка под полем), меню доступа с «Как в настройках Claude», «Настройки → Доступ».
+// строка под полем), меню доступа с «Как в настройках Claude», «Настройки → Доступ».
 
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
@@ -106,7 +106,7 @@ describe('шаг A: метки по действующему режиму', () =
     const inh = accessChip({ provider: 'claude', approval: 'inherit', access: view({ desired: 'inherit', inheritMode: 'auto', applied: { approval: 'inherit', reported: 'auto', confirmed: true, full: false, at: 'x' } }) })
     assert.equal(inh.label, 'Как в настройках Claude: auto')
   })
-  it('чат: плашка в шапке, красный чип со щитом, красная рамка поля, строка под полем при понижении', () => {
+  it('чат: плашка в шапке, красный чип со щитом, строка под полем при понижении', () => {
     const [a] = buildAgents([{ name: 'w', provider: 'claude', cwd: '/w', mode: 'turn', createdAt: 'x', lastStatus: 'working', lastEventId: 0, pendingPermissions: 0,
       access: view({ desired: 'ask', applied: BYPASS, live: true, pending: true, red: true }) } as never], {})
     const props = {
@@ -116,7 +116,7 @@ describe('шаг A: метки по действующему режиму', () =
     const out = html(Conversation, props)
     assert.match(out, /data-testid="conv-access-pill" data-state="until-turn-end"|data-state="until-turn-end"[^>]*data-testid="conv-access-pill"/)
     assert.match(out, /class="approval t-fail" data-testid="conv-approval" data-approval="ask" data-access-state="pending"/)
-    assert.match(out, /class="box access-full" data-access-full="1"/)
+    assert.match(out, /class="box"/)
     assert.match(out, /data-testid="access-pending-strip"/)
     assert.match(out, /data-testid="stop-turn"/, '«Стоп» виден, пока идёт ход')
   })

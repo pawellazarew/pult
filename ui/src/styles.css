@@ -1132,8 +1132,6 @@ button { font: inherit; color: inherit; }
 .composer .approval > .ic { width: 12px; height: 12px; }
 .composer .approval .access-suffix { font-weight: 400; color: var(--mut); }
 .composer .approval.t-wait { color: var(--wait); }
-.composer .box.access-full { border-color: var(--fail-edge); }
-.composer .box.access-full:focus-within { border-color: var(--fail); box-shadow: 0 0 0 2px var(--fail-soft); }
 .access-strip { max-width: 764px; margin: 6px auto 0; display: flex; align-items: center; gap: 7px; padding: 6px 10px; border-radius: 8px;
   background: var(--sunk); color: var(--mut); font: 12px/1.45 var(--body); }
 .access-strip .ic { width: 13px; height: 13px; flex: none; color: var(--wait); }

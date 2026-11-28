@@ -164,9 +164,9 @@ describe('шаг B: вид черновика (кадры 01, 08, 12)', () => {
     const rejected = html(DraftView, draftProps({ draft: createDraft({ cwd: null, origin: { kind: 'link', pathRejected: true } }, env()) }))
     assert.match(rejected, /data-testid="draft-link-path-rejected"/)
   })
-  it('полный доступ — красная рамка и чип; вход не выполнен — отправка выключена с причиной и «Проверить»', () => {
+  it('полный доступ — красный чип; вход не выполнен — отправка выключена с причиной и «Проверить»', () => {
     const full = html(DraftView, draftProps({ draft: { ...pickApproval(draft(), 'full', 4), text: 'x' }, env: env({ consent: CONSENT }) }))
-    assert.match(full, /class="draft-box full"/)
+    assert.match(full, /class="draft-box"/)
     assert.match(full, /class="dchip danger"[^>]*data-testid="draft-chip-access"/)
     const codex = { ...pickModel(draft(), 'codex', null, env(), null), text: 'x' }
     const login = html(DraftView, draftProps({ draft: codex, catalog: catalog({ state: 'login_required', fixCmd: 'codex login' }) }))

@@ -32,7 +32,7 @@
 // журнала бессмысленно: выкинутые смещения пришлось бы искать заново тем же проходом по
 // файлу. Поэтому компактизация появится вместе с ротацией журнала, а не раньше.
 
-import { closeSync, existsSync, openSync, readFileSync, readSync, statSync, truncateSync, writeSync } from 'node:fs'
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, statSync, truncateSync, writeSync } from 'node:fs'
 import { join } from 'node:path'
 import type { EventDraft, PultEvent } from './events.js'
 import type { PultPaths } from './paths.js'
@@ -60,6 +60,8 @@ export interface EventStore {
   snapshot(): StoreSnapshot
   /** Все события одной сессии из её файла `events/<session>.jsonl` — без прохода по общему журналу. */
   readSession(sessionId: string): PultEvent[]
+  /** Конец файла сессии без первой неполной строки. null — чтение не удалось. */
+  readSessionTail(sessionId: string, maxBytes: number): { events: PultEvent[]; hasPrefix: boolean } | null
   /** События по номерам (не больше GET_LIMIT), через индекс смещений. Неизвестные номера пропускаются. */
   readIds(ids: readonly number[]): PultEvent[]
   /**
@@ -322,6 +324,50 @@ export function createStore(paths: PultPaths, deps: StoreDeps = {}): EventStore 
     }
   }
 
+  function readSessionFile(sessionId: string, maxBytes?: number): { events: PultEvent[]; hasPrefix: boolean } | null {
+    const file = join(paths.events, sessionFileName(sessionId))
+    let buf: Buffer
+    let hasPrefix = false
+    try {
+      if (maxBytes === undefined) {
+        buf = readFileSync(file)
+      } else {
+        const fd = openSync(file, 'r')
+        try {
+          const size = fstatSync(fd).size
+          const start = Math.max(0, size - maxBytes)
+          hasPrefix = start > 0
+          buf = Buffer.alloc(size - start)
+          let got = 0
+          while (got < buf.length) {
+            const n = readSync(fd, buf, got, buf.length - got, start + got)
+            if (n === 0) return null
+            got += n
+          }
+        } finally {
+          closeSync(fd)
+        }
+      }
+    } catch {
+      return null
+    }
+    reads += 1
+    bytesRead += buf.length
+    // Начало могло попасть в середину UTF-8 символа или строки. Отбрасываем её до декодирования.
+    const newline = hasPrefix ? buf.indexOf(10) : -1
+    if (hasPrefix && newline < 0) return { events: [], hasPrefix }
+    const events: PultEvent[] = []
+    let last = 0
+    for (const line of buf.toString('utf8', newline + 1).split('\n')) {
+      if (!line.trim()) continue
+      const ev = parseEventLine(line)
+      if (!ev || ev.sessionId !== sessionId || ev.id <= last) continue
+      events.push(ev)
+      last = ev.id
+    }
+    return { events, hasPrefix }
+  }
+
   return {
     get lastId(): number {
       return nextId - 1
@@ -378,25 +424,11 @@ export function createStore(paths: PultPaths, deps: StoreDeps = {}): EventStore 
       // Файл сессии — срез, который пишется ПОСЛЕ общего журнала в том же синхронном append:
       // всё, что в нём есть, уже имеет номер. Чужие строки (`_other.jsonl` общий для «опасных»
       // имён) отсеиваются по sessionId.
-      let buf: string
-      try {
-        buf = readFileSync(join(paths.events, sessionFileName(sessionId)), 'utf8')
-      } catch {
-        return []
-      }
-      reads += 1
-      bytesRead += Buffer.byteLength(buf)
-      const out: PultEvent[] = []
-      let last = 0
-      for (const line of buf.split('\n')) {
-        if (!line.trim()) continue
-        const ev = parseEventLine(line)
-        // Порядок — строго по номеру: склейка и чужая рука не должны перемешать ленту.
-        if (!ev || ev.sessionId !== sessionId || ev.id <= last) continue
-        out.push(ev)
-        last = ev.id
-      }
-      return out
+      return readSessionFile(sessionId)?.events ?? []
+    },
+
+    readSessionTail(sessionId, maxBytes) {
+      return readSessionFile(sessionId, maxBytes)
     },
 
     readIds(ids: readonly number[]): PultEvent[] {

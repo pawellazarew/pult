@@ -29,7 +29,7 @@ import type { DaemonStatus, RpcRequest } from '../core/rpc.js'
 import { ERROR_CODES, PROTOCOL_VERSION } from '../core/rpc.js'
 import { createStore, GET_LIMIT, sessionFileName } from '../core/store.js'
 import { createHistoryCache } from '../core/historyCache.js'
-import { clipEvent, compactHistory, fitEvent, HISTORY_PAGE_BYTES, LIVE_LINE_BYTES, pageHistory } from '../core/history.js'
+import { clipEvent, compactHistory, fitEvent, HISTORY_PAGE_BYTES, LIVE_LINE_BYTES, pageHistory, readLatestHistoryPage } from '../core/history.js'
 import { normalizeQuery, QUERY_MAX_CHARS, SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX, searchEvents } from '../core/search.js'
 import { exportSession } from '../core/exportMd.js'
 import type { PromptAttachment } from '../core/promptAttachments.js'
@@ -2162,10 +2162,12 @@ async function startDaemonInContext(opts: DaemonOptions): Promise<StartResult> {
         const sessionId = params['sessionId']
         if (typeof sessionId !== 'string' || !sessionId) { fail(ERROR_CODES.invalidParams, 'events.history: нужен sessionId'); return }
         const before = Number.isSafeInteger(params['before']) ? (params['before'] as number) : null
-        // Бюджет страницы можно только уменьшить (тесты): больше — ответ перерастёт строку клиента.
+        // Окно может запросить меньше. Верхний предел защищает строку ответа клиента.
         const budget = Number.isSafeInteger(params['budget']) ? Math.max(1024, Math.min(params['budget'] as number, HISTORY_PAGE_BYTES)) : HISTORY_PAGE_BYTES
         // Чтение файла и курсор — в одном синхронном куске: append между ними не вклинится.
-        const page = pageHistory(history.get(sessionId), before, budget)
+        const cached = history.getCached(sessionId)
+        const recent = !cached && before === null ? readLatestHistoryPage(store, sessionId, budget) : null
+        const page = recent ?? pageHistory(cached ?? history.get(sessionId), before, budget)
         send({ id: req.id, result: { ...page, cursor: store.lastId } })
         return
       }
